@@ -68,7 +68,7 @@ tools/instrumented-test.sh <adb-serial>   # instrumented tests (codec, UI, telec
 ## Run against the openMCX servers
 
 Build the server images in `../../openmcx-server` first (`tools/build-images`, see its `docs/BUILD.md`; the lab uses the
-images `openmcx:0.1`, Kamailio and the user database named by its compose file, or pass `--server-image`). For a
+images `openmcx-all:0.1`, Kamailio and the user database named by its compose file, or pass `--server-image`). For a
 reference client (`--reference-client`), build the client image with `../linux/tools/build-image --server ../../openmcx-server`
 and pass it with `--client-image`.
 

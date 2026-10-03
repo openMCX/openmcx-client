@@ -44,6 +44,7 @@ class Lab:
         self.devices = {c: Device(name, c) for c in sorted(clients)}
         self.results: list[dict] = []
         self.scenario = ""
+        self.skipped: list[str] = []
 
     def cmd(self, client: str, *args: str, ok: bool = True, timeout: float = 60):
         r = self.devices[client].control(*args, timeout=timeout)
@@ -272,6 +273,21 @@ class Lab:
 
     # Lab-side controls (root adb shell on the redroid clients).
 
+    def leave_clean(self) -> None:
+        """Hang up what a scenario that stopped half-way left, for the next scenario."""
+        for c in self.devices:
+            try:
+                if self.call(c):
+                    self.cmd(c, "hangup", ok=False)
+            except Exception:
+                pass
+
+    def kill_app(self, client: str, pid: int) -> None:
+        """End the app's process as a crash would: the app kills itself (debug control die, SIGKILL), so that a phone
+        needs no root; as root for an app built before that command."""
+        if not self.cmd(client, "die", ok=False).get("ok"):
+            self.root_shell(client, f"kill -9 {pid}")
+
     def root_shell(self, client: str, command: str) -> str:
         device = self.devices[client]
         if device.adb("shell", "id", "-u").strip() != "0":
@@ -371,7 +387,7 @@ class Lab:
             self.root_shell(B, "dumpsys deviceidle unforce")
         # Process death: Android restarts the sticky foreground service, which starts over.
         pid = self.status(C)["pid"]
-        self.root_shell(C, f"kill -9 {pid}")
+        self.kill_app(C, pid)
         killed = time.monotonic()
         s = self.wait("client-c restarted", lambda: (s := self.status_or_none(C)) and s.get("pid") != pid and s["phase"] == "ready" and s,
                       timeout=120)
@@ -458,9 +474,10 @@ class Lab:
             # the instrumented TelecomTest on an AVD.
             listed = self.telecom_call_listed(telecom)
             print(f"  [INFO] {c}'s call in telecom: {'ACTIVE' if listed else 'not active (redroid Telecom)'}")
-            types = self.fgs_types(self.devices[c].adb("shell", "dumpsys", "activity", "services", "org.openmcx.client", check=False))
+            types = self.fgs_types(c)
             self.check(f"{c}'s service declares phoneCall and microphone during the call",
-                       types & FGS_PHONE_CALL and types & FGS_MICROPHONE and types & FGS_SPECIAL_USE, types=hex(types))
+                       types & FGS_PHONE_CALL and types & FGS_MICROPHONE and types & self.special_use(c) == self.special_use(c),
+                       types=hex(types))
         time.sleep(2)
         self.devices[A].adb("shell", "am", "broadcast", "-a", "android.intent.action.PTT.up", "-p", "org.openmcx.client")
         self.wait("alice releases with the key", lambda: self.call(A).get("floor") == "NO_PERMISSION", timeout=5)
@@ -470,8 +487,8 @@ class Lab:
                    sent=sent["frames"], received=got and got["frames"])
         self.hangup(A)
         self.idle_everywhere([A, B, C])
-        types = self.fgs_types(self.devices[A].adb("shell", "dumpsys", "activity", "services", "org.openmcx.client", check=False))
-        self.check("alice's service is back to special use only after the call", types == FGS_SPECIAL_USE, types=hex(types))
+        types = self.fgs_types(A)
+        self.check("alice's service is back to special use only after the call", types == self.special_use(A), types=hex(types))
         # A message notification, and history that outlives the process.
         text = f"Notify me {time.strftime('%H%M%S')}"
         self.cmd(A, "sds", MCDATA[B], text)
@@ -479,7 +496,7 @@ class Lab:
         notes = self.devices[B].adb("shell", "dumpsys", "notification", "--noredact", check=False)
         self.check("bob gets a notification for the message", text in notes)
         pid = self.status(B)["pid"]
-        self.root_shell(B, f"kill -9 {pid}")
+        self.kill_app(B, pid)
         self.wait("bob restarted", lambda: (s := self.status_or_none(B)) and s.get("pid") != pid and s, timeout=120)
         history = self.cmd(B, "history", "50")
         self.check("bob's history keeps the message after a restart", any(h["summary"] == text for h in history))
@@ -491,14 +508,21 @@ class Lab:
         calls = dump.split("mCalls:", 1)[1].split("mCallAudioManager", 1)[0] if "mCalls:" in dump else ""
         return any("org.openmcx.client" in l and "state=ACTIVE" in l and "self_mng" in l for l in calls.splitlines())
 
-    @staticmethod
-    def fgs_types(dump: str) -> int:
-        """The foreground service types of the app's own notification-bearing service record."""
+    def special_use(self, client: str) -> int:
+        """The special use type, which the idle service holds: from Android 14 (API 34); before, Android drops it and
+        the idle service has no type."""
+        sdk = int(self.devices[client].adb("shell", "getprop", "ro.build.version.sdk").strip() or 0)
+        return FGS_SPECIAL_USE if sdk >= 34 else 0
+
+    def fgs_types(self, client: str) -> int:
+        """The foreground service types of the app's notification-bearing service: as Android reports them, or, where
+        dumpsys does not print them (Android 13), as the app reports them (status fgs_types)."""
+        dump = self.devices[client].adb("shell", "dumpsys", "activity", "services", "org.openmcx.client", check=False)
         for line in dump.splitlines():
             m = re.search(r"isForeground=true foregroundId=1 types=(0x[0-9A-Fa-f]+)", line)
             if m:
                 return int(m.group(1), 16)
-        return 0
+        return self.status(client).get("fgs_types") or 0
 
     def s12_private_no_floor(self) -> None:
         """TS 24.379 §11.1.2: a private call without floor control; both parties speak at once, no floor message."""
@@ -743,16 +767,20 @@ def main() -> None:
         print(f"{key} {fn.__name__}")
         try:
             fn(lab)
+        except KeyError as e:
+            if not (e.args and e.args[0] in (A, B, C) and e.args[0] not in lab.devices):
+                raise
+            # A phones-only lab has no third client: create the lab without --phones-only, so that redroid
+            # client-c joins the phones (the C++ reference client does not take the debug control commands).
+            print(f"  [SKIP] {key} needs {e.args[0]}, which this lab does not have (create it without --phones-only)")
+            lab.skipped.append(key)
+            lab.results = [r for r in lab.results if r["scenario"] != key]
+            lab.leave_clean()
         except Failed as e:
             lab.check(f"{key} completed", False, error=str(e))
-            for c in lab.devices:  # leave the lab clean for the next scenario
-                try:
-                    if lab.call(c):
-                        lab.cmd(c, "hangup", ok=False)
-                except Exception:
-                    pass
+            lab.leave_clean()
     passed = sum(r["ok"] for r in lab.results)
-    print(f"\n{passed}/{len(lab.results)} checks passed")
+    print(f"\n{passed}/{len(lab.results)} checks passed" + (f"; skipped {' '.join(lab.skipped)} (no client-c)" if lab.skipped else ""))
     out = Path(__file__).resolve().parents[1] / "lab" / "run" / lab.name / "android-scenarios.json"
     out.write_text(json.dumps(lab.results, indent=2) + "\n")
     sys.exit(0 if passed == len(lab.results) else 1)

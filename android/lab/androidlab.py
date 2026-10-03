@@ -705,7 +705,8 @@ def main() -> None:
     c.add_argument("--openmcx", default=str(ROOT.parents[1] / "openmcx-server"), help="the openmcx-server checkout (default: ../openmcx-server)")
     c.add_argument("--name", default="a1")
     c.add_argument("--debug-sip", action="store_true", help="clear SIP over TCP for capture-based checks")
-    c.add_argument("--server-image", default="openmcx:0.1", help="the openMCX application image of the lab (openmcx-server docs/BUILD.md)")
+    c.add_argument("--server-image", default="openmcx-all:0.1",
+                   help="the openMCX application image of the lab, with every program (openmcx-server tools/build-images, docs/BUILD.md)")
     c.add_argument("--redroid", default=REDROID)
     c.add_argument("--phone", metavar="ROLE", help="a real phone takes this client's role (client-a, client-b or client-c)")
     c.add_argument("--phone-ip", help="the phone's address on the LAN")

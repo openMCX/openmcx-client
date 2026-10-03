@@ -6,6 +6,8 @@ android/*/build/
 android/local.properties
 android/lab/run/
 *.apk
+# The one published Android build (android/apk/openmcx-client-v<N>.apk), replaced at every rebuild.
+!android/apk/openmcx-client-v*.apk
 *.keystore
 *.jks
 google-services.json

@@ -84,3 +84,32 @@ map. bob and client-c were redroid containers.
 The SIP core must reuse the client's flow for requests to it; see [SIP_CORE_FLOW_REUSE.md](SIP_CORE_FLOW_REUSE.md).
 Media and NAT: the MCPTT server does not latch RTP to the source address, so the lab puts every Android client directly
 on the lab network (no NAT).
+
+## Real phones (2026-10-03)
+
+Two phones on one Wi-Fi network with the host, against the `openmcx-server` images: a Xiaomi 2109119DI (Android 13)
+as alice and a moto g67 (Android 16) as bob, redroid 15 as client-c (`androidlab.py create --phone-device
+client-a:SERIAL:IP --phone-device client-b:SERIAL:IP`, without `--phones-only` so that client-c joins).
+
+| Run | Result |
+|---|---|
+| S1-S6, S10, S12 | 90 of 94. The four: one Wi-Fi frame lost in S2; S11's two service-type checks and its process kill (below, since fixed in the tests) |
+| S1, S4, S8, S11 after the test fixes | S8 and S11 pass in full; S4 lost bursts of 5-10 frames at bob, not repeated on the re-run (35 of 35 for S2, S4, S11) |
+| MCX Admin lab: activation from MCX Admin codes, private, group and SDS | 16 of 16 |
+| MCX Admin lab: MCVideo calls both ways | 13 of 13, every picture received identical to the one sent |
+| Tutorial 1 (`openmcx-server` `tutorial/01-mcx-over-wlan-android`): users from the console's `phone-user` template, activation, private, group, SDS, video | 28 of 28 |
+
+Fixed in the tests for phones:
+
+- **S11, foreground service types**: Android 13's `dumpsys activity services` does not print `types=`; the app reports
+  its own (`status` `fgs_types`). The idle "special use" type exists from Android 14 only, so on Android 13 the idle
+  service has no type and a call adds phoneCall and microphone.
+- **S8 and S11, process death without root**: the app ends its own process on the debug control's `die` (SIGKILL).
+  `run-as ... kill` is not enough: MIUI's `run-as` does not see the app's process.
+- **A lab without client-c** (`--phones-only`): the scenarios that need a third client (S4 onwards) are skipped with
+  a message instead of failing with `KeyError`.
+
+Open: at the end of a burst a listener phone sometimes misses the last 1-6 frames (S2, three times in about ten
+bursts), although the talker sends its Floor Release 40 ms after its last frame. Whether the server stops relaying
+early or the frames are lost on the Wi-Fi needs a capture on the server; it is part of the floor loss item of the load
+plan.
