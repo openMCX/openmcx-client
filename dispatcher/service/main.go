@@ -1,0 +1,85 @@
+// Command dispatcher is the openMCX dispatcher position: a web service that runs the MCX
+// client engine (mcx-client) as a child process and gives a browser its calls, push to
+// talk with live voice, short data (SDS) and file distribution (FD). It reuses what the
+// openMCX servers implement; nothing on the servers is specific to it.
+//
+// Two modes:
+//   - lab mode (--config): the engine runs for good with a full configuration, as a lab client;
+//   - position mode (--device, --data): accounts are activated on the position from MCX Admin
+//     activation links, an operator signs in with an activated account, and the engine runs
+//     only while someone is signed in (see position.go).
+//
+// The browser talks to this service only: HTTP for commands and uploads, server-sent
+// events for the engine's state, and a WebSocket for audio (16 kHz 16-bit mono PCM both
+// ways, bridged to the engine's media.live UDP ports). It listens on localhost by default:
+// the browser must reach it from a secure context (https or localhost) to use the microphone.
+package main
+
+import (
+	"embed"
+	"flag"
+	"io/fs"
+	"log"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+)
+
+//go:embed static
+var static embed.FS
+
+func main() {
+	listen := flag.String("listen", "127.0.0.1:8080", "address of the web UI (localhost: a secure context for the microphone)")
+	path := flag.String("engine", "/usr/local/bin/mcx-client", "the MCX client engine")
+	config := flag.String("config", "", "lab mode: the engine's full configuration (with media.live)")
+	device := flag.String("device", "", "position mode: the position's device settings, no identity (with media.live)")
+	data := flag.String("data", "", "position mode: where activated accounts are kept")
+	engineArgs := flag.String("engine-args", "", "further engine arguments, space-separated (e.g. --disable-tls)")
+	outbox := flag.String("outbox", "/data/outbox", "where files to send are kept")
+	idle := flag.Duration("idle-signout", 2*time.Minute, "position mode: sign out when no operator page has been open this long")
+	flag.Parse()
+
+	base := *config
+	if (*config == "") == (*device == "") || (*device != "") != (*data != "") {
+		log.Fatal("give --config (lab mode), or --device and --data (position mode)")
+	}
+	if base == "" {
+		base = *device
+	}
+	e, err := newEngine(*path, base, strings.Fields(*engineArgs))
+	if err != nil {
+		log.Fatal(err)
+	}
+	var pos *position
+	if *device != "" {
+		if pos, err = newPosition(e, *device, *data, *idle); err != nil {
+			log.Fatal(err)
+		}
+	} else {
+		go e.supervise()
+	}
+	audio, err := newAudioBridge(e.liveIn, e.liveOut)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if err := os.MkdirAll(*outbox, 0o700); err != nil {
+		log.Fatal(err)
+	}
+	api := &api{engine: e, audio: audio, outbox: *outbox, pos: pos}
+	files, _ := fs.Sub(static, "static")
+	mux := http.NewServeMux()
+	mux.Handle("GET /", pageHeaders(http.FileServer(http.FS(files))))
+	api.routes(mux)
+	server := &http.Server{Addr: *listen, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	log.Printf("dispatcher on %s, engine %s %s", *listen, *path, base)
+	log.Fatal(server.ListenAndServe())
+}
+
+func pageHeaders(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data:; frame-ancestors 'none'")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		h.ServeHTTP(w, r)
+	})
+}

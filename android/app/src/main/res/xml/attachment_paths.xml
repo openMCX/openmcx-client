@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only completed downloads and files staged for sending; never records, partial downloads or credentials. -->
+<paths>
+    <files-path name="received" path="attachments/fd/files/" />
+    <files-path name="staged" path="attachments/staging/" />
+</paths>

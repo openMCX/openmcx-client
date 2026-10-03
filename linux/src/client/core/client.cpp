@@ -1,0 +1,465 @@
+// The MC client: construction, start-up (profiles, group document, keys, SIP registration), the run loop, the
+// periodic tick (timers, speech transmission, status) and the MCVideo user profile.
+//
+// Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.380 V19.2.0 (Rel-19), TS 24.281 V19.6.0 (Rel-19),
+// TS 24.282 V19.7.0 (Rel-19), TS 24.481 V19.3.0 (Rel-19), TS 24.482 V19.1.0 (Rel-19), TS 24.484 V19.6.0 (Rel-19),
+// TS 33.180 V19.4.0 (Rel-19).
+
+#include "client.hpp"
+
+namespace mcx {
+
+//------------------------------------------------------------------------------
+// Helper: stop the message store poll thread; it ends with its next poll and the process does not wait for it.
+Client::~Client() {
+  if (store_channel_.running) *store_channel_.running = false;
+  if (store_channel_.poller.joinable()) store_channel_.poller.detach();
+}
+
+//------------------------------------------------------------------------------
+// Helper: the periodic work of the run loop: location, MCData and MCVideo ticks, key refresh, key and authorisation
+// expiry, the floor participant's timers (TS 24.380 clause 11.1.1), speech transmission in 20 ms AMR-WB frames and
+// the status file.
+void Client::tick() {
+  auto now = monotonic_ms();
+  location_tick(now);
+  mcdata_location_tick(now);
+  mcvideo_location_tick(now);
+  seal_tick(now);
+  store_tick();
+  if (mcdata_enabled()) mcdata_tick();
+  if (mcvideo_enabled()) mcvideo_tick(now);
+  if (keys_ && next_key_refresh_ && now >= next_key_refresh_) subscribe_keys();
+  if (mcvideo_keys_ && mcvideo_next_key_refresh_ && now >= mcvideo_next_key_refresh_) mcvideo_subscribe_keys();
+  status_["protected_media"] = protected_media();
+  status_["protected_floor"] = protected_floor();
+  status_["protected_ready"] =
+      (!protected_media() || media_key_ready()) && (!protected_floor() || protection_.floor_ready());
+  if (remote_ && !status_["protected_ready"].get<bool>()) {
+    stop_protected_call("protected call key expired or unavailable");
+    return;
+  }
+  if (subscription_expires_ && std::time(nullptr) >= subscription_expires_) {
+    subscription_expires_ = 0;
+    affiliated_ = false;
+    release();
+    if (!dialog_.empty()) sip_.bye(dialog_);
+    schedule([this] { authorize(); });
+  }
+  if (authorized_ && std::time(nullptr) >= expires_) {
+    authorized_ = affiliated_ = false;
+    release();
+    if (!dialog_.empty()) sip_.bye(dialog_);
+    failure("service authorization expired");
+  }
+  if (remote_ && !no_floor()) floor_participant_tick(now);
+  if (talking_ && remote_ && now >= next_audio_) {
+    if (live_talk_)
+      live_speech_tick(now);
+    else
+      speech_tick(now);
+  }
+  if (now - last_save_ >= 200) save_status(now);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 11.1.1 and clause 6.2.4: the floor participant's timers, their retransmissions and failures, the
+// end of received media, and the end of this user's transmission once the floor is lost.
+void Client::floor_participant_tick(std::uint64_t now) {
+  const bool receiving = floor_timers_.remote_media_active();
+  for (const auto &packet : floor_timers_.tick(now)) transmit_floor(packet);
+  for (const auto type : floor_timers_.take_failed())
+    failure("floor procedure timeout for type " + std::to_string(static_cast<unsigned>(type)));
+  if (receiving && !floor_timers_.remote_media_active()) {
+    receive_ssrc_ = 0;
+    status_["floor_owner"] = "";
+  }
+  const auto state = floor_timers_.state();
+  if (state == FloorParticipantState::NoPermission || state == FloorParticipantState::PendingRelease) {
+    // TS 24.380 clause 6.2.4: the floor ended without this user releasing it. Reported, so that no talk burst
+    // ends silently.
+    if (talking_) {
+      const Json loss{{"state", state == FloorParticipantState::NoPermission ? "NoPermission" : "PendingRelease"},
+                      {"last_message", last_floor_message_}};
+      status_["last_floor_loss"] = loss;
+      event("floor_lost", loss);
+    }
+    talking_ = requesting_ = false;
+    transmit_.clear();
+  }
+}
+
+//------------------------------------------------------------------------------
+// Helper: the next 20 ms AMR-WB frame of this user's speech (SRTP-protected in a protected call, TS 33.180
+// clause 7.5), or the end of the transmission when the file is exhausted.
+void Client::speech_tick(std::uint64_t now) {
+  if (transmit_offset_ >= transmit_.size()) {
+    if (ambient_hidden() && !transmit_.empty())
+      transmit_offset_ = 0; // keeps transmitting
+    else
+      release();
+  } else {
+    std::array<std::int16_t, 320> frame{};
+    auto count = std::min<size_t>(320, transmit_.size() - transmit_offset_);
+    std::copy_n(transmit_.begin() + transmit_offset_, count, frame.begin());
+    transmit_offset_ += count;
+    send_speech_frame(frame, transmit_offset_ <= 320, now);
+  }
+}
+
+//------------------------------------------------------------------------------
+// Helper: one 20 ms frame of this user's speech as AMR-WB (RFC 4867) in RTP to the call's media address,
+// SRTP-protected in a protected call (TS 33.180 clause 7.5); the next frame is due 20 ms later.
+void Client::send_speech_frame(const std::array<std::int16_t, 320> &frame, bool marker, std::uint64_t now) {
+  RtpPacket rtp;
+  rtp.payload_type = remote_->payload_type;
+  rtp.sequence = sequence_++;
+  rtp.timestamp = timestamp_;
+  timestamp_ += 320;
+  rtp.ssrc = audio_ssrc_;
+  rtp.marker = marker;
+  rtp.payload = pack_amr_wb(codec_.encode(frame, cfg_.at("media").value("mode", 0)), remote_->octet_aligned);
+  auto bytes = encode_rtp(rtp);
+  if (protected_media()) bytes = protection_.protect_media(bytes, user());
+  audio_.send(bytes, remote_->address, remote_->audio_port);
+  status_["sent_packets"] = status_["sent_packets"].get<unsigned>() + 1;
+  next_audio_ += 20;
+  if (next_audio_ + 200 < now) next_audio_ = now + 20;
+}
+
+//------------------------------------------------------------------------------
+// Helper: the status file (every 200 ms): the floor state, priorities, call, services, registration and
+// authorisation, then the MCData and MCVideo parts; the received audio is saved with it.
+void Client::save_status(std::uint64_t now) {
+  floor_and_priority_status();
+  // A listened-to client shows no call (TS 24.379 clause 11.1.6.2.0); the "ambient" entry is
+  // test instrumentation, not a user indication.
+  const bool hidden = ambient_hidden();
+  status_["call_type"] = hidden ? "" : call_type_;
+  status_["call_group"] = call_group_;
+  status_["private_peer"] = hidden ? "" : private_peer_;
+  status_["ambient"] = !ambient_ ? Json(nullptr)
+                                 : Json{{"type", ambient_->type},
+                                        {"role", ambient_->role},
+                                        {"peer", ambient_->peer},
+                                        {"release_allowed", ambient_->release_allowed},
+                                        {"null_alert", ambient_->null_alert},
+                                        {"attached", !dialog_.empty() && dialog_ == ambient_->dialog},
+                                        {"transmitting", hidden && talking_},
+                                        {"connected", hidden && remote_.has_value()}};
+  status_["last_ambient"] = last_ambient_;
+  status_["first_to_answer"] = first_to_answer_;
+  status_["private_emergency_state"] = mepc_name(mepc_);
+  status_["private_priority_state"] = mepp_name(mepp_);
+  status_["private_alert_state"] = mpea_name(mpea_);
+  status_["private_alerts"] = private_alerts_;
+  status_["adhoc_priority"] = adhoc_priority_;
+  status_["functional_alias"] = functional_alias_;
+  status_["adhoc_alert_state"] = ah_mea_ == 3   ? "AH-MEA 3: adhoc-emergency-alert-initiated"
+                                 : ah_mea_ == 2 ? "AH-MEA 2: adhoc-emergency-alert-confirm-pending"
+                                                : "AH-MEA 1: no-adhoc-alert";
+  status_["adhoc_alert_group"] = own_alert_group_;
+  status_["received_adhoc_alerts"] = received_adhoc_alerts_;
+  status_["callback_requests_sent"] = pccb_requesting_;
+  status_["callback_requests_received"] = pccb_target_;
+  status_["service_outcomes"] = service_outcomes_;
+  status_["profile_actions"] = profile_actions_;
+  status_["enforce_profile_ruleset"] = cfg_.at("mcptt").value("enforce_profile_ruleset", true);
+  status_["requested_functional_aliases"] = requested_aliases_;
+  status_["audio_ssrc"] = audio_ssrc_;
+  status_["floor_control"] = !no_floor();
+  status_["pending_floor_confirmation"] = floor_timers_.awaiting_user_confirmation();
+  status_["queued"] = floor_timers_.state() == FloorParticipantState::Queued;
+  status_["registered"] = registered_;
+  status_["authorized"] = authorized_;
+  status_["token_expires_at"] = expires_;
+  status_["token_renewals"] = token_renewals_;
+  status_["token_refreshes"] = token_refreshes_;
+  status_["token_refresh_refusals"] = refresh_refusals_;
+  status_["password_logins"] = password_logins_;
+  status_["location"] = location_status();
+  status_["group_documents"] = group_documents_;
+  if (mcdata_enabled()) status_["mcdata_location"] = mcdata_location_status();
+  if (mcdata_enabled()) status_["msgstore"] = store_status_;
+  status_["affiliated"] = affiliated_;
+  status_["desired_affiliation"] = desired_affiliation_;
+  status_["media_ready"] = remote_.has_value();
+  status_["conference_subscription"] = conference_subscription_;
+  status_["talking"] = talking_ && !hidden;
+  status_["requesting_floor"] = requesting_;
+  status_["received_samples"] = received_.size();
+  if (mcdata_enabled()) mcdata_status();
+  if (mcvideo_enabled()) mcvideo_status();
+  write_status(cfg_, status_);
+  save_audio();
+  last_save_ = now;
+}
+
+//------------------------------------------------------------------------------
+// Helper: the floor participant state (TS 24.380 clause 6.2.4) and the priority state of the status file.
+void Client::floor_and_priority_status() {
+  switch (floor_timers_.state()) {
+  case FloorParticipantState::NoPermission: status_["floor_state"] = "NoPermission"; break;
+  case FloorParticipantState::PendingRequest: status_["floor_state"] = "PendingRequest"; break;
+  case FloorParticipantState::HasPermission: status_["floor_state"] = "HasPermission"; break;
+  case FloorParticipantState::PendingRelease: status_["floor_state"] = "PendingRelease"; break;
+  case FloorParticipantState::Queued: status_["floor_state"] = "Queued"; break;
+  }
+  status_["priority"] = emergency_ ? "emergency" : imminent_ ? "imminent" : "normal";
+  status_["alerts"] = alerts_;
+  status_["alert_pending"] = alert_pending_;
+  status_["priority_pending"] = priority_pending_;
+  status_["negotiated_floor_priority"] =
+      remote_ && remote_->floor_priority ? Json(*remote_->floor_priority) : Json(nullptr);
+  status_["answer_mode"] = cfg_.at("mcptt").value("answer_mode", "auto");
+  status_["group_id"] = group();
+}
+
+//------------------------------------------------------------------------------
+// Helper: build the client from its configuration: the SIP engine with its callbacks (incoming requests, call
+// states, negotiated media checked per TS 24.379 clause 6.2.1), the media sockets and the initial status.
+Client::Client(Json cfg, bool disable_tls)
+    : cfg_(std::move(cfg)),
+      // http.connect_timeout_ms and http.timeout_ms (defaults 2 s and 15 s): a burst of activations and sign-ins
+      // takes IdMS longer than the library's 5 s.
+      http_(cfg_.at("tls").at("ca_file"),
+            HttpTimeouts{cfg_.value("http", Json::object()).value("connect_timeout_ms", 2000L),
+                         cfg_.value("http", Json::object()).value("timeout_ms", 15000L)}),
+      control_(cfg_.at("control_fifo")),
+      sip_(client_sip_config(cfg_, disable_tls),
+           {[this](const SipMessage &message) { return incoming(message); },
+            [this](std::string_view id, SipCallState state, int code) {
+              if (mcvideo_call_state(id, state)) return;
+              call_state(id, state, code);
+            },
+            [this](std::string_view dialog, const MediaDescription &media) {
+              try {
+                if (mcvideo_media(dialog, media)) return;
+                check_remote(media, private_media());
+                if (media.floor_priority && (!local_.floor_priority || *media.floor_priority > *local_.floor_priority))
+                  throw std::runtime_error("invalid negotiated floor priority");
+                if (awaiting_answer_key_ && !answer_private_key(media)) return;
+                remote_ = media;
+                schedule([this] { subscribe_conference(); });
+              } catch (const std::exception &error) {
+                failure(error.what());
+                if (!dialog_.empty()) schedule([this] { sip_.bye(dialog_); });
+              }
+            },
+            {},
+            [this](std::string_view error) { failure(std::string(error)); },
+            {}}), // no ACK callback
+      local_(local_media(cfg_)), audio_(cfg_.at("media").at("bind"), local_.audio_port),
+      floor_(cfg_.at("media").at("bind"), local_.floor_port) {
+  local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
+  local_.protected_media = protected_media();
+  open_live_audio();
+  floor_timers_ = participant_timers();
+  status_ = {{"sip_transport", disable_tls ? "tcp" : "tls"},
+             {"instance_id", random_id()},
+             {"role", "client"},
+             {"user_id", user()},
+             {"call_state", "idle"},
+             {"sent_packets", 0},
+             {"received_packets", 0},
+             {"floor_denials", 0},
+             {"floor_queue_info_received", 0}};
+}
+
+//------------------------------------------------------------------------------
+// TS 24.484 clause 9.3.1A: the MCVideo client reads its MCVideo user profile, of the
+// profile index in use.
+void Client::read_mcvideo_profile() {
+  const auto index = profile_index_;
+  const auto path = "/xcap-root/org.3gpp.mcvideo.user-profile/users/" + url_encode(mcvideo_user()) +
+                    "/mcvideo-user-profile-" + std::to_string(index) + ".xml";
+  auto response = http_.request("GET", cfg_.at("endpoints").at("cms").get<std::string>() + path, {},
+                                {{"Authorization", "Bearer " + token_}});
+  if (response.status != 200 || !response.headers.contains("etag"))
+    throw std::runtime_error("MCVideo user profile retrieval failed: " + std::to_string(response.status));
+  const auto profile = parse_mcvideo_profile(response.body);
+  if (profile.user_id != mcvideo_user() || profile.profile_index != index)
+    throw std::runtime_error("MCVideo user profile of another user or index");
+  mcvideo_profile_ = {{"user_id", profile.user_id}, {"profile_index", profile.profile_index},
+                      {"groups", profile.groups},   {"private_call_targets", profile.private_call_targets},
+                      {"actions", profile.actions}, {"etag", response.headers.at("etag")}};
+  status_["mcvideo_profile"] = mcvideo_profile_;
+  event("document_retrieved", {{"resource", path}, {"bytes", response.body.size()}});
+  event("mcvideo_profile_read", {{"groups", profile.groups.size()}, {"actions", profile.actions.size()}});
+}
+
+//------------------------------------------------------------------------------
+// Helper: whether the MCVideo user profile read at start-up grants an action (an element of <actions> set to true,
+// TS 24.484 clause 9.3.2).
+bool Client::mcvideo_profile_allows(const std::string &action) const {
+  const auto actions = mcvideo_profile_.find("actions");
+  return actions != mcvideo_profile_.end() && actions->is_array() &&
+         std::find(actions->begin(), actions->end(), action) != actions->end();
+}
+
+//------------------------------------------------------------------------------
+// The client's life: user authentication (login(), TS 24.482 clause 6.2.1), the MCPTT user profile (TS 24.484
+// clause 8.3.1A) and group document (TS 24.481 clause 6.3.3.2.2), key provisioning and the CSKs (TS 33.180
+// clause 5.3.3 and clause 5.4), the XML protection filters, SIP registration and then service authorisation
+// (TS 24.379 clause 7.2.2); then the run loop until quit.
+void Client::run() {
+  login();
+  event("oidc_authenticated", {{"user_id", user()}});
+  schedule_token_renewal();
+  load_user_documents();
+  if (mcvideo_enabled()) read_mcvideo_profile();
+  if (protected_media() || protected_floor()) {
+    provision_keys();
+  }
+  sip_.set_body_filters(
+      [this](const SipTransmission &transmission, std::vector<BodyPart> parts) {
+        return protect_outgoing(transmission, std::move(parts));
+      },
+      [this](const SipTransmission &transmission, std::vector<BodyPart> parts) {
+        return protect_incoming(transmission, std::move(parts));
+      });
+  sip_.start();
+  sip_.register_account(register_expires(), [this](const SipResponse &response) {
+    if (response.status_code < 200) return;
+    if (response.status_code != 200) {
+      failure("SIP registration: " + std::to_string(response.status_code));
+      return;
+    }
+    registered_ = true;
+    event("sip_registered");
+    schedule([this] { authorize(); });
+  });
+  while (!stopping) run_once();
+  release();
+  if (!dialog_.empty()) sip_.bye(dialog_);
+  for (int index = 0; index < 20; index++) sip_.poll(std::chrono::milliseconds(10));
+  save_audio();
+  sip_.stop();
+}
+
+//------------------------------------------------------------------------------
+// TS 24.484 clause 8.3.1A and TS 24.481 clause 6.3.3.2.2: retrieve the MCPTT user profile and then the group
+// document at start-up, keeping the profile's actions, groups, ETag and index.
+void Client::load_user_documents() {
+  const auto &endpoints = cfg_.at("endpoints");
+  const auto retrieve = [this](const std::string &base, const std::string &resource) {
+    auto response = http_.request("GET", base + resource, {}, {{"Authorization", "Bearer " + token_}});
+    if (response.status != 200 || response.body.empty() || !response.headers.contains("etag"))
+      throw std::runtime_error("MCPTT profile or group retrieval failed");
+    event("document_retrieved", {{"resource", resource}, {"bytes", response.body.size()}});
+    return response;
+  };
+  const auto profile = retrieve(endpoints.at("cms").get<std::string>(),
+                                "/xcap-root/3gpp.mcptt.user-profile/users/" + url_encode(user()) + "/index");
+  profile_actions_ = parse_profile_actions(profile.body);
+  take_profile_groups(profile.body);
+  status_["configuration"]["etag"] = profile.headers.at("etag");
+  profile_loaded_ = true;
+  profile_index_ = parse_profile_index(profile.body);
+  group_from_profile();
+  // A user may belong to no group (an account activated without one): then there
+  // is no group document to read and nothing to affiliate to.
+  if (!group().empty())
+    retrieve(endpoints.at("gms").get<std::string>(),
+             "/xcap-root/org.openmobilealliance.groups/global/byGroupID/" + url_encode(group()));
+}
+
+//------------------------------------------------------------------------------
+// Helper: mcptt.group_from_profile (a dispatcher position, off unless configured): a configured group the user
+// profile does not list among its groups (TS 24.484 clause 8.3.2) gives way to the profile's first group, or to
+// none.
+void Client::group_from_profile() {
+  if (!cfg_.at("mcptt").value("group_from_profile", false) ||
+      std::find(profile_groups_.begin(), profile_groups_.end(), group()) != profile_groups_.end())
+    return;
+  const auto chosen = profile_groups_.empty() ? std::string{} : profile_groups_.front();
+  event("group_from_profile", {{"configured", group()}, {"group", chosen}});
+  cfg_["mcptt"]["group_id"] = chosen;
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clause 5.3.3 and clause 5.4: key provisioning from the KMS (MCPTT, MCData and MCVideo identities) and
+// the CSKs this client uploads at service authorisation.
+void Client::provision_keys() {
+  keys_ = std::make_unique<KeyClient>(http_, cfg_.at("security"), user());
+  keys_->provision(token_);
+  status_["key_management"] = {{"kms_uri", cfg_.at("security").at("kms_uri")},
+                               {"home_kms_uri", cfg_.at("security").value("home_kms_uri", "")},
+                               {"own_kms", keys_->kms_uri_of(user())}};
+  // TS 24.282 clause 6.6: the MCData client signs and receives PCKs as its MCData ID.
+  if (mcdata_protected() || mcdata_protects_signalling() || mcdata_authenticates()) {
+    mcdata_keys_ = std::make_unique<KeyClient>(http_, cfg_.at("security"), mcdata_user(), user());
+    mcdata_keys_->provision(token_);
+  }
+  if (mcdata_protects_signalling()) {
+    auto [csk, upload] = mcdata_keys_->make_csk(mcdata_service());
+    mcdata_csk_ = csk;
+    mcdata_csk_upload_ = std::move(upload);
+  }
+  // TS 24.281 clause 4.7 with TS 33.180 clause 9.4: the MCVideo client keys as its MCVideo ID, and
+  // uploads its own CSK for transmission control at MCVideo service authorisation.
+  if (mcvideo_enabled()) {
+    mcvideo_keys_ = std::make_unique<KeyClient>(http_, cfg_.at("security"), mcvideo_user(), user());
+    mcvideo_keys_->provision(token_);
+    auto [video_csk, video_upload] = mcvideo_keys_->make_csk(mcvideo_service_uri());
+    mcvideo_protection_.set_floor(video_csk);
+    mcvideo_csk_upload_ = std::move(video_upload);
+    mcvideo_csk_ = video_csk;
+    status_["mcvideo_csk_id"] = video_csk.csb_id;
+  }
+  auto [csk, upload] = keys_->make_csk(service());
+  protection_.set_floor(csk);
+  csk_upload_ = std::move(upload);
+  csk_ = csk;
+  status_["csk_id"] = csk.csb_id;
+}
+
+//------------------------------------------------------------------------------
+// Helper: one pass of the run loop: SIP events, due and scheduled tasks, control commands, floor and media packets,
+// the MCVideo media and the periodic tick.
+void Client::run_once() {
+  sip_.poll(std::chrono::milliseconds(5));
+  for (auto due = timed_.begin(); due != timed_.end() && due->first <= monotonic_ms(); due = timed_.erase(due))
+    pending_.push_back(std::move(due->second));
+  auto tasks = std::move(pending_);
+  pending_.clear();
+  for (auto &fn : tasks) try {
+      fn();
+    } catch (const std::exception &error) {
+      failure(error.what());
+    }
+  for (auto &line : control_.read()) try {
+      command(line);
+    } catch (const std::exception &error) {
+      failure(error.what());
+    }
+  for (int index = 0; index < 32; index++) {
+    auto datagram = floor_.receive();
+    if (!datagram) break;
+    try {
+      floor_packet(*datagram);
+    } catch (const std::exception &error) {
+      status_["floor_rejected_packets"] = status_.value("floor_rejected_packets", 0ULL) + 1;
+      event("floor_rejected", {{"reason", error.what()}});
+    }
+  }
+  receive_live_audio();
+  for (int index = 0; index < 32; index++) {
+    auto datagram = audio_.receive();
+    if (!datagram) break;
+    try {
+      audio_packet(*datagram);
+    } catch (const std::exception &error) {
+      status_["media_rejected_packets"] = status_.value("media_rejected_packets", 0ULL) + 1;
+      event("media_rejected", {{"reason", error.what()}});
+    }
+  }
+  if (mcvideo_enabled()) mcvideo_poll();
+  try {
+    tick();
+  } catch (const std::exception &error) {
+    stop_protected_call(error.what());
+  }
+}
+
+} // namespace mcx

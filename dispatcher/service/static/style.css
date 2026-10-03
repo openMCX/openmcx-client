@@ -1,0 +1,60 @@
+:root {
+  --bg: #f4f6f8; --panel: #fff; --text: #1b2430; --muted: #66707c; --line: #d7dde3;
+  --accent: #1f5fa8; --go: #2a8a4a; --stop: #c0392b; --warn: #c77d12;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #11161c; --panel: #1a2129; --text: #e6ebf0; --muted: #98a2ad; --line: #2c3540;
+          --accent: #5a9ae0; --go: #3fae65; --stop: #e0574a; --warn: #e0a03a; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.4 system-ui, sans-serif; }
+header { display: flex; align-items: center; gap: 16px; padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+h1 { font-size: 18px; margin: 0; }
+h2 { font-size: 16px; margin: 0 0 10px; }
+h3 { font-size: 14px; margin: 16px 0 6px; color: var(--muted); }
+#identity { color: var(--muted); flex: 1; }
+main { display: grid; grid-template-columns: 2fr 1fr; grid-template-areas: "voice voice" "data soon"; gap: 16px; padding: 16px; }
+#voice { grid-area: voice; } #data { grid-area: data; } #soon { grid-area: soon; }
+.band { display: grid; grid-template-columns: 1.2fr 1fr 1.3fr 1fr; gap: 24px; align-items: start; }
+.band.two { grid-template-columns: 1fr 1fr; }
+.band > div { min-width: 0; }
+.talk { display: flex; flex-direction: column; align-items: stretch; }
+button.wide { width: 100%; padding: 12px; }
+@media (max-width: 1100px) { .band { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 760px) {
+  main { grid-template-columns: 1fr; grid-template-areas: "voice" "data" "soon"; }
+  .band, .band.two { grid-template-columns: 1fr; }
+}
+section { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 16px; min-width: 0; }
+.row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+input[type=text], input:not([type]) { flex: 1; min-width: 140px; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); }
+button { padding: 7px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; font: inherit; }
+button.go { background: var(--go); } button.stop { background: var(--stop); } button.warn { background: var(--warn); }
+button:disabled { background: var(--line); color: var(--muted); cursor: not-allowed; }
+#soon button { display: block; width: 100%; margin: 6px 0; text-align: left; }
+.ptt { display: block; width: 100%; height: 150px; margin: 4px 0 8px; font-size: 20px; border-radius: 12px; user-select: none; touch-action: none; }
+.ptt.talking { background: var(--go); }
+.state { display: grid; grid-template-columns: auto 1fr auto 1fr; gap: 4px 10px; }
+.state span { color: var(--muted); }
+.pill { padding: 3px 10px; border-radius: 12px; font-size: 13px; background: var(--go); color: #fff; }
+.pill.off { background: var(--stop); }
+.banner { display: flex; gap: 12px; align-items: center; padding: 12px 16px; background: var(--warn); color: #fff; font-weight: 600; }
+.banner[hidden] { display: none; }
+.error { color: var(--stop); min-height: 1.2em; }
+.note { color: var(--muted); font-size: 13px; }
+.list { margin-top: 8px; max-height: 260px; overflow: auto; }
+.item { border-top: 1px solid var(--line); padding: 6px 0; overflow-wrap: anywhere; }
+.item small { color: var(--muted); display: block; }
+.check { color: var(--muted); }
+#log { font: 12px/1.4 ui-monospace, monospace; color: var(--muted); padding-left: 18px; max-height: 200px; overflow: auto; }
+.gate { position: fixed; inset: 0; background: var(--bg); display: flex; align-items: flex-start; justify-content: center; padding: 48px 16px; overflow: auto; z-index: 10; }
+.gate[hidden] { display: none; }
+.gate section { width: 100%; max-width: 440px; }
+.gate label { display: block; margin: 8px 0; color: var(--muted); }
+.gate label input { display: block; width: 100%; margin-top: 4px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+.gate form button { margin-top: 8px; width: 100%; padding: 10px; }
+.gate details { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
+.gate summary { cursor: pointer; color: var(--accent); }
+select { padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; max-width: 100%; }
+button.plain { background: transparent; color: var(--accent); border-color: var(--line); }
+.gate .error:empty { display: none; }

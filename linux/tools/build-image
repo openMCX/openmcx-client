@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Build the mcx-client image from this repository and an openmcx-server checkout.
+#
+#   tools/build-image [-t openmcx-client:0.1] [--server ../../openmcx-server]
+#
+# The legacy Docker builder takes one context, so the client sources and the
+# openmcx-server files the build needs (CMakeLists.txt, include, src, the lab
+# healthcheck) are staged together in a temporary directory.
+set -euo pipefail
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+TAG=openmcx-client:0.1
+SERVER="$ROOT/../../openmcx-server"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t|--tag) TAG=$2; shift 2 ;;
+    --server) SERVER=$2; shift 2 ;;
+    *) echo "usage: tools/build-image [-t TAG] [--server PATH]" >&2; exit 2 ;;
+  esac
+done
+SERVER=$(cd -- "$SERVER" && pwd)
+test -f "$SERVER/src/sip/sip_engine.cpp" || { echo "no openmcx-server checkout at $SERVER" >&2; exit 1; }
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+mkdir -p "$STAGE/openmcx-server/tools" "$STAGE/client"
+cp -r "$SERVER/CMakeLists.txt" "$SERVER/include" "$SERVER/src" "$STAGE/openmcx-server/"
+cp "$SERVER/tools/healthcheck.py" "$STAGE/openmcx-server/tools/"
+cp -r "$ROOT/CMakeLists.txt" "$ROOT/src" "$ROOT/tests" "$STAGE/client/"
+echo "openmcx-server $(git -C "$SERVER" rev-parse --short HEAD 2>/dev/null || echo unknown), client $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+docker build -t "$TAG" -f "$ROOT/docker/Dockerfile" "$STAGE"

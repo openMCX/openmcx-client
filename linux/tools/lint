@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Check the code against the openMCX coding style (docs/CODING_STYLE.md) in the openmcx-lint
+# image: clang-tidy (C++, configured against the sibling openmcx-server checkout whose libraries the
+# client links), ruff and tools/check-names.py (Python). Prints the findings and a count per check.
+#   tools/lint [--strict] [cpp|py] [--server PATH]
+set -euo pipefail
+cd "$(dirname "$0")/.."
+strict=0; only=all; server=../../openmcx-server
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --strict) strict=1 ;;
+    cpp|py) only=$1 ;;
+    --server) server=$2; shift ;;
+    *) echo "usage: tools/lint [--strict] [cpp|py] [--server PATH]" >&2; exit 2 ;;
+  esac
+  shift
+done
+server=$(cd "$server" && pwd)
+mkdir -p artifacts/lint
+git ls-files 'src/*.cpp' > artifacts/lint/tidy.list
+git ls-files '*.py' > artifacts/lint/py.list
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src" -v "$server:/openmcx-server:ro" -w /src \
+  openmcx-lint:0.1 bash -c '
+set -uo pipefail
+only=$1
+out=artifacts/lint
+if [ "$only" = all ] || [ "$only" = cpp ]; then
+  cmake -S . -B /tmp/lint-build -DOPENMCX_SERVER_DIR=/openmcx-server -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DCMAKE_BUILD_TYPE=Debug >/dev/null
+  run-clang-tidy -quiet -p /tmp/lint-build $(cat $out/tidy.list) > $out/cpp.txt 2>/dev/null
+  echo "C++ (clang-tidy): $(grep -c "warning:" $out/cpp.txt) findings"
+  grep -o "\[[a-z-]*\]$" $out/cpp.txt | sort | uniq -c | sort -rn | head -12
+fi
+if [ "$only" = all ] || [ "$only" = py ]; then
+  py=$(cat $out/py.list)
+  ruff check --quiet --output-format concise $py > $out/py.txt 2>&1
+  echo "Python (ruff): $(grep -c ":[0-9]*:[0-9]*:" $out/py.txt) findings"
+  python3 tools/check-names.py $py > $out/py-names.txt; tail -1 $out/py-names.txt | sed "s/^/Python: /"
+fi
+' lint "$only"
+echo "details: artifacts/lint/"
+if [ "$strict" = 1 ]; then
+  ! grep -qs "warning:" artifacts/lint/cpp.txt && ! grep -qs ":[0-9]*:[0-9]*:" artifacts/lint/py.txt \
+    && ! grep -qs "^[^0].* single-letter names" artifacts/lint/py-names.txt
+fi

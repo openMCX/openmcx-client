@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>openMCX Dispatcher</title>
+<link rel="stylesheet" href="style.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<header>
+  <h1>openMCX Dispatcher</h1>
+  <div id="identity">connecting…</div>
+  <div id="registration" class="pill off">offline</div>
+  <button id="signout" class="plain" hidden>Sign out</button>
+</header>
+<div id="signin" class="gate" hidden>
+  <section>
+    <h2>Sign in to this position</h2>
+    <p id="signin-reason" class="error"></p>
+    <p id="signin-error" class="error" role="alert"></p>
+    <form id="login">
+      <label>Login <input name="username" autocomplete="username" required></label>
+      <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+      <button>Sign in</button>
+    </form>
+    <p class="note">Accounts activated here: <span id="accounts">none</span></p>
+    <details id="activation">
+      <summary>Activate an account on this position</summary>
+      <p class="note">Use the activation link MCX Admin issued for the dispatcher account, and the account's password.
+        The position gets its own device key and certificate for that account.</p>
+      <form id="activate">
+        <label>Activation link <input name="url" placeholder="https://…/activate/…" required></label>
+        <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+        <button>Activate and sign in</button>
+      </form>
+    </details>
+    <p id="signin-busy" class="note"></p>
+  </section>
+</div>
+<div id="incoming" class="banner" hidden>
+  <span id="incoming-text">Incoming call</span>
+  <button id="answer" class="go">Answer</button>
+  <button id="reject" class="stop">Reject</button>
+</div>
+<main>
+  <section id="voice">
+    <h2>Voice</h2>
+    <div class="band">
+      <div>
+        <div class="state"><span>Call</span><b id="call-state">idle</b><span>Floor</span><b id="floor-state">–</b></div>
+        <div id="call-failure" class="error"></div>
+        <h3>Group</h3>
+        <div class="row"><select id="group-select" aria-label="Group"></select></div>
+        <div class="row">
+          <button data-action="call" data-kind="normal">Group call</button>
+          <button data-action="call" data-kind="imminent" class="warn">Imminent peril</button>
+          <button data-action="call" data-kind="emergency" class="stop">Emergency call</button>
+        </div>
+      </div>
+      <div>
+        <h3>Private call</h3>
+        <form id="private">
+          <div class="row"><input name="target" placeholder="MCPTT ID, e.g. sip:bob@example.org" required></div>
+          <div class="row"><label><input type="checkbox" name="emergency"> emergency</label><button>Call</button></div>
+        </form>
+      </div>
+      <div class="talk">
+        <button id="ptt" class="ptt" disabled>Hold to talk</button>
+        <label class="check"><input type="checkbox" id="speaker" checked> play received audio</label>
+      </div>
+      <div>
+        <div class="row"><button data-action="hangup" class="stop wide">Hang up</button></div>
+        <h3>Emergency alert</h3>
+        <div class="row">
+          <button data-action="alert" data-on="true" class="stop">Send alert</button>
+          <button data-action="alert" data-on="false">Cancel alert</button>
+        </div>
+        <div id="alerts" class="list"></div>
+      </div>
+    </div>
+  </section>
+  <section id="data">
+    <div class="band two">
+      <div>
+        <h2>Messages (SDS)</h2>
+        <form id="sds">
+          <div class="row">
+            <input name="target" placeholder="MCData ID or group ID" required>
+            <label><input type="checkbox" name="group"> group</label>
+          </div>
+          <div class="row"><input name="text" placeholder="Message" maxlength="1000" required><button>Send</button></div>
+        </form>
+        <div id="inbox" class="list"></div>
+      </div>
+      <div>
+        <h2>Files (FD)</h2>
+        <form id="fd">
+          <div class="row">
+            <input name="target" placeholder="MCData ID or group ID" required>
+            <label><input type="checkbox" name="group"> group</label>
+            <label><input type="checkbox" name="mandatory"> mandatory</label>
+          </div>
+          <div class="row"><input type="file" name="file" required><button>Send file</button></div>
+        </form>
+        <div id="files" class="list"></div>
+      </div>
+    </div>
+  </section>
+  <section id="soon">
+    <h2>Coming soon</h2>
+    <p class="note">Not in this version. The dispatcher uses only what the openMCX servers already offer.</p>
+    <button disabled title="Coming soon">Monitor several groups</button>
+    <button disabled title="Coming soon">Remote affiliation</button>
+    <button disabled title="Coming soon">Video</button>
+    <button disabled title="Coming soon">Call recording</button>
+    <button disabled title="Coming soon">Map and location</button>
+    <button disabled title="Coming soon">Operator handoff</button>
+    <button disabled title="Coming soon">Dynamic regrouping</button>
+    <h2>Log</h2>
+    <ol id="log"></ol>
+  </section>
+</main>
+</body>
+</html>

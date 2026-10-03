@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Format the code the way the openMCX coding style says (docs/CODING_STYLE.md), in the
+# openmcx-lint image (nothing on the host): clang-format (C++), ruff format (Python).
+#   tools/format           rewrite the files
+#   tools/format --check   change nothing; list what is not formatted and fail if anything is
+set -euo pipefail
+cd "$(dirname "$0")/.."
+mode=${1:-write}
+mkdir -p artifacts/lint
+git ls-files 'src/*.cpp' 'src/*.hpp' > artifacts/lint/cpp.list
+git ls-files '*.py' > artifacts/lint/py.list
+docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD:/src" -w /src openmcx-lint:0.1 bash -c '
+set -euo pipefail
+cpp=$(cat artifacts/lint/cpp.list); py=$(cat artifacts/lint/py.list)
+if [ "$1" = --check ]; then
+  status=0
+  clang-format --dry-run --Werror $cpp 2>/tmp/cpp || { echo "C++ not formatted:"; grep "clang-format-violations" /tmp/cpp | cut -d: -f1 | sort -u; status=1; }
+  ruff format --check --quiet $py || status=1
+  exit $status
+fi
+clang-format -i $cpp
+ruff format --quiet $py
+' format "$mode"

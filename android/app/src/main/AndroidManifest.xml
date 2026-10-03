@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-feature android:name="android.software.telecom" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <uses-permission android:name="android.permission.MANAGE_OWN_CALLS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_PHONE_CALL" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+    <application
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- An MC UE comes up with the device: the client stays registered (TS 23.280 §10.2). -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".CallActionReceiver"
+            android:exported="false" />
+
+        <!-- The keepalive alarm that still runs in Doze (KeepaliveAlarm). -->
+        <receiver
+            android:name=".KeepaliveReceiver"
+            android:exported="false" />
+
+        <!-- Hardware PTT keys on rugged handsets, which vendors deliver as broadcasts. -->
+        <receiver
+            android:name=".input.PttKeyReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.PTT.down" />
+                <action android:name="android.intent.action.PTT.up" />
+                <action android:name="com.sonim.intent.action.PTT_KEY_DOWN" />
+                <action android:name="com.sonim.intent.action.PTT_KEY_UP" />
+                <action android:name="org.openmcx.client.action.PTT_DOWN" />
+                <action android:name="org.openmcx.client.action.PTT_UP" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Opens completed attachments in other apps, one file per temporary read grant. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.attachments"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/attachment_paths" />
+        </provider>
+
+        <!--
+            The protocol engine. Idle it holds the signalling flow as a special-use service (a
+            mission-critical PTT client must stay reachable); during a call it also declares phoneCall
+            and microphone.
+        -->
+        <service
+            android:name=".McxService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse|phoneCall|microphone|camera">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Mission-critical push-to-talk: a persistent SIP flow so that group and private calls reach the user at any time (3GPP TS 23.379)" />
+        </service>
+    </application>
+</manifest>

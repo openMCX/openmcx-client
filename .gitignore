@@ -1,0 +1,13 @@
+# Android build and lab outputs
+android/.gradle/
+android/.kotlin/
+android/build/
+android/*/build/
+android/local.properties
+android/lab/run/
+*.apk
+*.keystore
+*.jks
+google-services.json
+__pycache__/
+*.pyc

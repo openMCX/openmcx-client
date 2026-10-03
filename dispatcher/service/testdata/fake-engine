@@ -1,0 +1,37 @@
+#!/bin/sh
+# A stand-in for mcx-client in the position tests: IdMS accepts the password "right";
+# activation writes the account "d1" into the configuration; the control FIFO line
+# "refuse" makes it report what it reports when IdMS refuses a token renewal.
+config= activate= secret=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --config) config=$2; shift 2 ;;
+    --activate) activate=$2; shift 2 ;;
+    --password-file) secret=$2; shift 2 ;;
+    *) shift ;;
+  esac
+done
+field() { python3 -c "import json,sys; c=json.load(open(sys.argv[1])); print($2)" "$config"; }
+if [ -n "$activate" ]; then
+  [ "$(head -n1 "$secret")" = right ] || { echo "mcx-client: activation: IdMS user authentication failed" >&2; exit 1; }
+  python3 - "$config" "$(head -n1 "$secret")" <<'EOF'
+import json, sys
+c = json.load(open(sys.argv[1]))
+c["oauth"] = {"issuer": "https://idms", "username": "d1", "password": sys.argv[2]}
+c["mcptt"] = {"user_id": "sip:d1.mcptt@example.org", "group_id": "sip:ops@example.org"}
+c["activated"] = True
+json.dump(c, open(sys.argv[1], "w"))
+EOF
+  echo '{"event":"activated"}'
+fi
+[ "$(field "$config" 'c["oauth"].get("password","")')" = right ] || { echo "mcx-client: IdMS user authentication failed" >&2; exit 1; }
+fifo=$(field "$config" 'c["control_fifo"]')
+status=$(field "$config" 'c["status_file"]')
+rm -f "$fifo"; mkfifo "$fifo"
+echo '{"authorized":true,"registered":true,"call_state":"idle","group_id":"sip:ops@example.org","profile_groups":["sip:ops@example.org"]}' > "$status"
+trap 'echo "{\"event\":\"stopped\"}"; exit 0' TERM
+while :; do
+  if read -r line < "$fifo"; then
+    [ "$line" = refuse ] && echo '{"event":"client_error","reason":"token renewal: IdMS user authentication failed"}'
+  fi
+done

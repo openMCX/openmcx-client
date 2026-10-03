@@ -1,0 +1,18 @@
+<resources>
+    <string name="app_name">MCX Client</string>
+    <string name="channel_service">Connection</string>
+    <string name="notification_service">MC service client running</string>
+    <string name="notification_in_call">In a call</string>
+    <string name="channel_calls">Calls</string>
+    <string name="channel_messages">Messages</string>
+    <string name="incoming_call">Incoming MCPTT call</string>
+    <string name="incoming_video_call">Incoming video call</string>
+    <string name="video_alert">Emergency alert</string>
+    <string name="call_started">Call started · tap to open</string>
+    <string name="call_in_progress">In the call · tap to open</string>
+    <string name="hang_up">Hang up</string>
+    <string name="call_with">Call with %1$s</string>
+    <string name="group_call_on">Group call · %1$s</string>
+    <string name="video_call_with">Video call with %1$s</string>
+    <string name="video_group_call_on">Group video call · %1$s</string>
+</resources>
