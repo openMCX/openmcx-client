@@ -97,6 +97,16 @@ bool has_device_certificate(const nlohmann::json &cfg) {
 } // namespace
 
 //------------------------------------------------------------------------------
+// The configuration's address map ("address_map", from the activation package): "host:port" -> "address:port".
+HttpAddressMap address_map(const nlohmann::json &cfg) {
+  HttpAddressMap map;
+  // A named copy: items() of the temporary value() would outlive it in the loop.
+  const auto entries = cfg.value("address_map", nlohmann::json::object());
+  for (const auto &[named, reached] : entries.items()) map.emplace(named, reached.get<std::string>());
+  return map;
+}
+
+//------------------------------------------------------------------------------
 // Helper: whether the configuration has been activated already.
 bool activated(const nlohmann::json &cfg) { return cfg.value("activated", false); }
 
@@ -110,14 +120,39 @@ bool activated(const nlohmann::json &cfg) { return cfg.value("activated", false)
 nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::string &password_file,
                         const std::string &dir) {
   require(link.rfind("https://", 0) == 0, "the activation URL must be https");
-  // The #pin= fragment is for devices without the system CA; this client has its CA file.
-  const std::string url = link.substr(0, link.find('#'));
-  HttpClient http(cfg.at("tls").at("ca_file").get<std::string>());
-  const auto fetched = http.request("GET", url);
+  // The link's #pin= names MCX Admin's certificate, so a device that does not trust the system CA yet (a dispatcher
+  // or a client on another machine, reaching MCX Admin at an address its certificate does not name) fetches the
+  // package from that server and no other; a link without a pin is checked against the configured CA.
+  const auto hash = link.find('#');
+  const std::string url = link.substr(0, hash);
+  std::string pin;
+  if (hash != std::string::npos) {
+    const std::string fragment = link.substr(hash + 1);
+    for (std::size_t at = 0; at <= fragment.size();) {
+      const auto end = std::min(fragment.find('&', at), fragment.size());
+      if (fragment.compare(at, 4, "pin=") == 0) pin = fragment.substr(at + 4, end - at - 4);
+      at = end + 1;
+    }
+  }
+  const auto configured_ca = cfg.value("tls", nlohmann::json::object()).value("ca_file", std::string());
+  require(!pin.empty() || !configured_ca.empty(), "the link has no #pin= and no CA file is configured");
+  const auto fetched = pin.empty() ? HttpClient(configured_ca).request("GET", url) : http_get_pinned(url, pin);
   require(fetched.status == 200,
           "the activation URL was refused (" + std::to_string(fetched.status) + "): used, expired or unknown");
   const auto boot = fetched.json();
   require(boot.value("format", "") == "openmcx-activation-1", "unknown bootstrap format");
+  // The system's trust root from the package: the client then needs no CA file of its own.
+  if (boot.contains("trust_root") && !dir.empty()) {
+    const auto root = std::filesystem::path(dir) / "trust-root.pem";
+    write_private(root, boot.at("trust_root").get<std::string>(), false);
+    cfg["tls"]["ca_file"] = root.string();
+  }
+  require(!cfg.value("tls", nlohmann::json::object()).value("ca_file", std::string()).empty(),
+          "the package has no trust root and no CA file is configured");
+  // The package's address map: where this client reaches each server the package names (through a host's published
+  // ports); every HTTPS request of the client applies it.
+  if (boot.contains("address_map")) cfg["address_map"] = boot.at("address_map");
+  HttpClient http(cfg.at("tls").at("ca_file").get<std::string>(), {}, address_map(cfg));
   // Identity and system settings from the bootstrap; local settings stay.
   const auto &idms = boot.at("idms");
   cfg["oauth"] = {{"issuer", idms.at("issuer")},

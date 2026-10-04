@@ -81,6 +81,10 @@ inline SipConfig client_sip_config(const Json &cfg, bool disable_tls) {
   }
   // TS 24.281 clause 7.2.1AA: a client that also uses MCVideo registers its tag and ICSI.
   if (cfg.contains("mcvideo")) config.other_services.push_back(&mcvideo_service);
+  // sip.outbound: RFC 5626, the SIP core reaches this client over its registration's connection, its instance being
+  // the MC client ID (TS 24.379 clause 4.10), as the Android client does (a client behind NAT, or on the server's
+  // computer). Off by default: a plain Contact the core connects to.
+  if (cfg.at("sip").value("outbound", false)) config.outbound_instance = cfg.at("mcptt").at("client_id");
   return config;
 }
 
@@ -1624,6 +1628,13 @@ private:
 
   void save_audio();
 
+  // Whether a media or floor control packet comes from the server's SDP address and port (media.server_source).
+  bool sent_by_server(const sockaddr_in &source, const std::string &address, std::uint16_t port) const;
+  // Where to send to the server's SDP address and port: with media.server_source "port", the address the server's
+  // packets on that port came from, once one has (so that replies follow the server's flow through a NAT).
+  std::string server_target(const std::string &address, std::uint16_t port) const;
+  // media.server_source "port": the address each server port's packets came from.
+  mutable std::map<std::uint16_t, std::string> server_sources_;
   void floor_packet(const Datagram &datagram);
 
   void audio_packet(const Datagram &datagram);

@@ -1,0 +1,37 @@
+openMCX clients: the Linux client (linux/), the dispatcher (dispatcher/) and the Android app (android/)
+Copyright (C) 2026 the openMCX authors
+
+This program is free software: you can redistribute it and/or modify it under the terms of the GNU Affero General
+Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any
+later version. See LICENSE.
+
+The source code of each published version, and of the APK and images built from it, is at
+https://github.com/openMCX/openmcx-client.
+
+Third-party software
+--------------------
+Linux client (linux/), built with the openmcx-server sources and their libraries (see openmcx-server NOTICE):
+
+  wolfSSL 5.8.2            GPL-3.0-or-later         https://github.com/wolfSSL/wolfssl
+  pjproject (PJSIP) 2.17   GPL-2.0-or-later         https://github.com/pjsip/pjproject
+  libsrtp2                 BSD-3-Clause             https://github.com/cisco/libsrtp
+  OpenH264                 BSD-2-Clause             https://github.com/cisco/openh264
+  opencore-amr, vo-amrwbenc  Apache-2.0             https://sourceforge.net/projects/opencore-amr/
+  nlohmann/json, libxml2   MIT                      https://github.com/nlohmann/json, https://gitlab.gnome.org/GNOME/libxml2
+  OpenSSL 3                Apache-2.0               https://www.openssl.org
+
+Dispatcher (dispatcher/):
+
+  Go standard library      BSD-3-Clause             https://go.dev
+  golang.org/x/net         BSD-3-Clause             https://go.googlesource.com/net
+  and the Linux client above, as its engine
+
+Android app (android/), libraries pinned in android/gradle/libs.versions.toml:
+
+  Kotlin standard library, kotlinx.coroutines, kotlinx.serialization
+                           Apache-2.0               https://github.com/JetBrains
+  AndroidX (core, core-telecom, lifecycle, activity, browser, Compose, Material 3)
+                           Apache-2.0               https://developer.android.com/jetpack/androidx
+  zxing-android-embedded and ZXing
+                           Apache-2.0               https://github.com/journeyapps/zxing-android-embedded
+  The app uses Android's own AMR-WB and H.264 codecs (MediaCodec); it bundles no codec.

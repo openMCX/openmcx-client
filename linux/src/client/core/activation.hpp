@@ -3,11 +3,16 @@
 //
 // Specifications: TS 24.482 V19.1.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).
 #pragma once
+#include "mcx/http.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <string>
 
 namespace mcx {
+// The configuration's address map ("address_map", from the activation package): "host:port" as the package names a
+// server -> "address:port" where this client reaches it; empty without one.
+HttpAddressMap address_map(const nlohmann::json &cfg);
 // Whether a configuration was written by an activation.
 bool activated(const nlohmann::json &cfg);
 // The configuration completed from the activation URL's bootstrap package, the

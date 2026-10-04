@@ -11,4 +11,7 @@ RUN go vet ./... && go test ./... && CGO_ENABLED=0 go build -trimpath -o /instal
 
 FROM ${CLIENT_IMAGE}
 COPY --from=build /install/dispatcher /usr/local/bin/dispatcher
+LABEL org.opencontainers.image.title="openmcx-dispatcher" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.source="https://github.com/openMCX/openmcx-client"
 ENTRYPOINT ["dispatcher"]

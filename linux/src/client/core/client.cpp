@@ -121,7 +121,7 @@ void Client::send_speech_frame(const std::array<std::int16_t, 320> &frame, bool 
   rtp.payload = pack_amr_wb(codec_.encode(frame, cfg_.at("media").value("mode", 0)), remote_->octet_aligned);
   auto bytes = encode_rtp(rtp);
   if (protected_media()) bytes = protection_.protect_media(bytes, user());
-  audio_.send(bytes, remote_->address, remote_->audio_port);
+  audio_.send(bytes, server_target(remote_->address, remote_->audio_port), remote_->audio_port);
   status_["sent_packets"] = status_["sent_packets"].get<unsigned>() + 1;
   next_audio_ += 20;
   if (next_audio_ + 200 < now) next_audio_ = now + 20;
@@ -224,7 +224,8 @@ Client::Client(Json cfg, bool disable_tls)
       // takes IdMS longer than the library's 5 s.
       http_(cfg_.at("tls").at("ca_file"),
             HttpTimeouts{cfg_.value("http", Json::object()).value("connect_timeout_ms", 2000L),
-                         cfg_.value("http", Json::object()).value("timeout_ms", 15000L)}),
+                         cfg_.value("http", Json::object()).value("timeout_ms", 15000L)},
+            address_map(cfg_)),
       control_(cfg_.at("control_fifo")),
       sip_(client_sip_config(cfg_, disable_tls),
            {[this](const SipMessage &message) { return incoming(message); },

@@ -25,5 +25,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /build/mcx-client.stripped /usr/local/bin/mcx-client
 COPY openmcx-server/tools/healthcheck.py /healthcheck.py
+COPY LICENSE NOTICE /usr/share/doc/openmcx-client/
+LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.source="https://github.com/openMCX/openmcx-client"
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/mcx-client"]

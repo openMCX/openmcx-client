@@ -127,7 +127,7 @@ void Client::transmit_floor(const FloorPacket &packet) {
       throw;
     }
   }
-  floor_.send(bytes, remote_->floor_address, remote_->floor_port);
+  floor_.send(bytes, server_target(remote_->floor_address, remote_->floor_port), remote_->floor_port);
 }
 
 //------------------------------------------------------------------------------

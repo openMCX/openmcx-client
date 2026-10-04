@@ -32,3 +32,8 @@ tests, the settings and the lab scenarios.
 - [Dispatcher: scope, limits, API and labs](dispatcher/README.md)
 - [Coding style](linux/docs/CODING_STYLE.md)
 - [Android client: features, build, labs and tests](android/README.md); [wire contracts](android/docs/wire), [conformance](android/docs/CONFORMANCE.md), [test report](android/docs/TEST_REPORT.md)
+
+## Licence
+
+The openMCX clients are licensed under the [GNU Affero General Public License v3.0 or later](LICENSE); a commercial
+licence is available from the openMCX authors. Third-party software and its licences: [NOTICE](NOTICE).

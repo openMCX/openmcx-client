@@ -527,7 +527,7 @@ void Client::mcvideo_send_control(transmission::Type type, std::vector<FloorFiel
   auto bytes = transmission::encode(packet);
   // TS 24.281 clause 4.7.1: transmission control is SRTCP under this client's CSK (CS-ID 8, TS 33.180 table E.1.3-1).
   if (protected_floor()) bytes = mcvideo_protection_.protect_floor(bytes);
-  call.control->send(bytes, call.remote->floor_address, call.remote->floor_port);
+  call.control->send(bytes, server_target(call.remote->floor_address, call.remote->floor_port), call.remote->floor_port);
 }
 
 //------------------------------------------------------------------------------
@@ -573,7 +573,7 @@ void Client::mcvideo_control_packet(const Datagram &datagram) {
     if (call.early_control.size() < 8) call.early_control.push_back(datagram);
     return;
   }
-  if (!UdpSocket::matches(datagram.source, call.remote->floor_address, call.remote->floor_port)) return;
+  if (!sent_by_server(datagram.source, call.remote->floor_address, call.remote->floor_port)) return;
   const auto packet =
       transmission::decode(protected_floor() ? mcvideo_protection_.unprotect_floor(datagram.bytes) : datagram.bytes);
   if (!transmission::from_server(packet.type) || packet.ssrc != call.local.floor_ssrc) return;
@@ -670,7 +670,7 @@ void Client::mcvideo_control_packet(const Datagram &datagram) {
 void Client::mcvideo_video_packet(const Datagram &datagram) {
   auto &call = *mcvideo_call_;
   if (!call.remote || !call.remote->video ||
-      !UdpSocket::matches(datagram.source, call.remote->address, call.remote->video->port))
+      !sent_by_server(datagram.source, call.remote->address, call.remote->video->port))
     return;
   // TS 24.281 clause 4.7.1: SRTP under the GMK, keyed per sender: the user the server names as transmitting.
   // A private call's PCK needs no sender; a group call's GMK is keyed by the sender.
@@ -723,7 +723,7 @@ void Client::mcvideo_tick(std::uint64_t now) {
         call.remote->video->payload_type, payload.marker, call.sequence++, timestamp, call.video_ssrc, payload.bytes};
     const auto bytes = encode_rtp(rtp);
     call.video->send(call.local.protected_media ? mcvideo_protection_.protect_media(bytes, mcvideo_user()) : bytes,
-                     call.remote->address, call.remote->video->port);
+                     server_target(call.remote->address, call.remote->video->port), call.remote->video->port);
   }
   ++call.sent;
   // The sender's own reconstruction: what a receiver must show for this timestamp.

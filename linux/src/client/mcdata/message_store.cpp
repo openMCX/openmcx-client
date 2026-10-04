@@ -133,8 +133,9 @@ void Client::store_subscribe() {
   store_status_["channel"] = channel;
   store_channel_.running = std::make_shared<std::atomic<bool>>(true);
   store_channel_.poller = std::thread([this, running = store_channel_.running, url = store_channel_.channel_url,
-                                       token = token_, ca = cfg_.at("tls").at("ca_file").get<std::string>()] {
-    HttpClient client(ca);
+                                       token = token_, ca = cfg_.at("tls").at("ca_file").get<std::string>(),
+                                       map = address_map(cfg_)] {
+    HttpClient client(ca, {}, map);
     while (*running) {
       try {
         const auto response =

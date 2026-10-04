@@ -5,6 +5,8 @@
 
 #include "client.hpp"
 
+#include <arpa/inet.h>
+
 namespace mcx {
 
 //------------------------------------------------------------------------------
@@ -215,12 +217,34 @@ void Client::save_audio() {
 }
 
 //------------------------------------------------------------------------------
+// Helper: whether a media or floor control packet comes from the server's address and port of the negotiated SDP.
+// With media.server_source "port", only the port is checked: the server's packets may reach this client from another
+// address when a NAT between them rewrites it (a client on the server's own computer, reached from the server's
+// container at its internal address); the default checks both.
+bool Client::sent_by_server(const sockaddr_in &source, const std::string &address, std::uint16_t port) const {
+  if (cfg_.at("media").value("server_source", std::string("address")) != "port")
+    return UdpSocket::matches(source, address, port);
+  if (ntohs(source.sin_port) != port) return false;
+  char text[INET_ADDRSTRLEN] = {};
+  if (inet_ntop(AF_INET, &source.sin_addr, text, sizeof text)) server_sources_[port] = text;
+  return true;
+}
+
+//------------------------------------------------------------------------------
+// Helper: the server's address for a port: the SDP address, or with media.server_source "port" the address its
+// packets on that port came from.
+std::string Client::server_target(const std::string &address, std::uint16_t port) const {
+  const auto source = server_sources_.find(port);
+  return source == server_sources_.end() ? address : source->second;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.380 clause 6.2.4: the floor participant receives a floor control message: acknowledge it when asked (Floor
 // Ack), then Floor Granted (clause 6.2.4.4.2), Floor Queue Position Info (clause 6.2.4.4.9), Floor Deny
 // (clause 6.2.4.4.4), Floor Revoke (clause 6.2.4.5.4), Floor Idle (clause 6.2.4.3.2) or Floor Taken
 // (clause 6.2.4.3.3).
 void Client::floor_packet(const Datagram &datagram) {
-  if (!remote_ || !UdpSocket::matches(datagram.source, remote_->floor_address, remote_->floor_port)) return;
+  if (!remote_ || !sent_by_server(datagram.source, remote_->floor_address, remote_->floor_port)) return;
   if (wire_ssrc(datagram.bytes, true) != local_.floor_ssrc) return;
   auto bytes = protected_floor() ? protection_.unprotect_floor(datagram.bytes) : datagram.bytes;
   auto packet = decode_floor(bytes);
@@ -300,7 +324,7 @@ void Client::floor_packet(const Datagram &datagram) {
 // TS 24.380 clause 6.2.4.3.4: receive RTP media from the floor owner (or, without floor control, TS 24.379
 // clause 11.1.2, from the first sender) and keep the decoded audio, or with media.live pass it on.
 void Client::audio_packet(const Datagram &datagram) {
-  if (!remote_ || !UdpSocket::matches(datagram.source, remote_->address, remote_->audio_port) ||
+  if (!remote_ || !sent_by_server(datagram.source, remote_->address, remote_->audio_port) ||
       status_.value("call_state", "") != "active")
     return;
   // Without floor control no Floor Taken names the sender's SSRC: the first one
