@@ -48,16 +48,18 @@ std::string Client::group_document_xml(const std::string &group, const std::vect
 
 //------------------------------------------------------------------------------
 // TS 24.484 clauses 6.3.3.2.2 and 6.3.4.2: the configuration management client retrieves a user's profile document
-// and updates it. "profile-revoke <MCPTT ID> <action>": an administrator removes an action from a user's profile
-// document and replaces it.
+// and updates it. "profile-revoke <MCPTT ID> <action> [<profile index>]": an administrator removes an action from a
+// user's profile document, mcptt-user-profile-<index>.xml (clause 8.3.1A; index 1 by default), and replaces it.
 void Client::profile_command(const std::string &cmd) {
   std::istringstream words(cmd);
   std::string verb, id, action;
+  unsigned index = 1;
   words >> verb >> id >> action;
-  if (verb != "profile-revoke" || id.empty() || action.empty())
-    throw std::runtime_error("profile-revoke <MCPTT ID> <action>");
-  const auto url = cfg_.at("endpoints").at("cms").get<std::string>() + "/xcap-root/3gpp.mcptt.user-profile/users/" +
-                   url_encode(id) + "/index";
+  if (!(words >> index)) index = 1;
+  if (verb != "profile-revoke" || id.empty() || action.empty() || index < 1 || index > 255)
+    throw std::runtime_error("profile-revoke <MCPTT ID> <action> [<profile index>]");
+  const auto url = cfg_.at("endpoints").at("cms").get<std::string>() + "/xcap-root/org.3gpp.mcptt.user-profile/users/" +
+                   url_encode(id) + "/mcptt-user-profile-" + std::to_string(index) + ".xml";
   const auto current = http_.request("GET", url, {}, {{"Authorization", "Bearer " + token_}});
   if (current.status != 200) {
     status_["xcap_last"] = {{"method", "GET"},

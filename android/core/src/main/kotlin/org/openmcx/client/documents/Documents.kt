@@ -122,8 +122,9 @@ class DocumentClient(private val http: HttpClient, private val cms: String, priv
         }
     }
 
-    suspend fun userProfile(mcpttId: String, token: String): UserProfile =
-        UserProfile.parse(fetch("$cms/xcap-root/3gpp.mcptt.user-profile/users/${enc(mcpttId)}/index", token))
+    /** TS 24.484 §8.3.1A: the user's MCPTT user profile document, mcptt-user-profile-<index>.xml. */
+    suspend fun userProfile(mcpttId: String, index: Int, token: String): UserProfile =
+        UserProfile.parse(fetch("$cms/xcap-root/org.3gpp.mcptt.user-profile/users/${enc(mcpttId)}/mcptt-user-profile-$index.xml", token))
 
     suspend fun group(groupId: String, token: String): GroupDocument =
         GroupDocument.parse(fetch("$gms/xcap-root/org.openmobilealliance.groups/global/byGroupID/${enc(groupId)}", token))

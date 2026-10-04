@@ -47,6 +47,8 @@ data class ClientConfig(
         val answerMode: String, val sessionExpires: Int, val manualAnswerTimeout: Int,
         /** The Resource-Priority of normal, emergency and imminent peril calls (TS 24.379 §6.2.8), as provisioned. */
         val resourcePriority: Map<String, String> = emptyMap(),
+        /** The "user-profile-index" of `<Default-user-profile>` (TS 24.484 §7.2.2.1): mcptt-user-profile-<index>.xml. */
+        val profileIndex: Int = 1,
     )
 
     data class Mcdata(
@@ -99,7 +101,8 @@ data class ClientConfig(
                 mcptt = (root["mcptt"] as? JsonObject)?.let {
                     Mcptt(it.str("user_id"), it.str("psi"), it.strings("groups"), it.optStr("answer_mode") ?: "automatic",
                         it.int("session_expires", 1800), it.int("manual_answer_timeout", 20),
-                        (it["resource_priority"] as? JsonObject)?.mapValues { v -> v.value.jsonPrimitive.content } ?: emptyMap())
+                        (it["resource_priority"] as? JsonObject)?.mapValues { v -> v.value.jsonPrimitive.content } ?: emptyMap(),
+                        it.int("profile_index", 1).takeIf { index -> index in 1..255 } ?: 1)
                 },
                 mcdata = (root["mcdata"] as? JsonObject)?.let {
                     Mcdata(it.str("user_id"), it.str("psi"), it.strings("groups"), it.int("max_payload_size_sds_cplane_bytes", 1000),

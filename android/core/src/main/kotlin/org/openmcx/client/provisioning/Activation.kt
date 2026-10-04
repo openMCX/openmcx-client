@@ -116,6 +116,8 @@ object Activation {
             put("gms", endpoints.str("gms"))
             putJsonObject("mcptt") {
                 put("user_id", mcptt.str("user_id")); put("psi", mcptt.str("service_uri")); put("groups", groups(mcptt))
+                // TS 24.484 §7.2.2.1: the profile index of <Default-user-profile>, 1 when the package has none.
+                put("profile_index", mcptt.opt("profile_index")?.toIntOrNull() ?: 1)
                 put("answer_mode", "automatic"); put("session_expires", 1800); put("manual_answer_timeout", 20)
                 putJsonObject("resource_priority") {}
             }

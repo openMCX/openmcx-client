@@ -484,7 +484,14 @@ class Client {
   std::string config_subscription_;
   unsigned config_notifies_ = 0, config_refreshes_ = 0;
 
-  std::string profile_document_path() const { return "3gpp.mcptt.user-profile/users/" + url_encode(user()) + "/index"; }
+  // TS 24.484 clause 8.3.1A: the user's MCPTT user profile document, mcptt-user-profile-<index>.xml.
+  std::string profile_document_path() const {
+    return "org.3gpp.mcptt.user-profile/users/" + url_encode(user()) + "/mcptt-user-profile-" +
+           std::to_string(profile_index_) + ".xml";
+  }
+  // TS 24.484 clause 7.2.2.1: the "user-profile-index" of <Default-user-profile>, as the activation gives it
+  // (mcptt.profile_index); 1 when absent.
+  unsigned configured_profile_index() const;
 
   // The groups of the user profile, <OnNetwork>/<MCPTTGroupInfo> (TS 24.484 clause 8.3.2): groups the user may
   // select besides the configured ones (the dispatcher's group picker).

@@ -295,7 +295,7 @@ class McxClient(
         _status.update { it.copy(passwordLogins = it.passwordLogins + 1) }
         event("logged in; token expires in ${t.expiresAt - clock()} s")
         config.mcptt?.let { mcptt ->
-            runCatching { documents.userProfile(mcptt.userId, t.accessToken) }
+            runCatching { documents.userProfile(mcptt.userId, mcptt.profileIndex, t.accessToken) }
                 .onSuccess { profile = it; event("user profile: groups ${it.groups}, private call targets ${it.privateCallTargets}") }
                 .onFailure { event("user profile: ${it.message}") }
         }

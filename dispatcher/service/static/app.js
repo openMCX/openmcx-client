@@ -99,6 +99,11 @@ function render(s) {
   const failure = s.last_call_failure;
   text($('call-failure'), failure && call === 'idle' ? (typeof failure === 'string' ? failure : JSON.stringify(failure)) : '');
   $('ptt').disabled = call !== 'active';
+  // Someone else has the floor (Floor Taken, TS 24.380 clause 6.2.4.3.3): the button says so, as on the phones.
+  const owner = s.floor_owner && s.floor_owner !== id.user ? s.floor_owner : '';
+  const busy = call === 'active' && !talking && !!owner && s.floor_state !== 'HasPermission';
+  $('ptt').classList.toggle('busy', busy);
+  if (!talking) $('ptt').textContent = busy ? 'Floor busy · ' + owner.replace(/^sips?:/, '').split('@')[0].replace(/\.mcptt$/, '') + ' is talking' : 'Hold to talk';
   $('incoming').hidden = call !== 'ringing';
   text($('incoming-text'), 'Incoming ' + (s.call_type || '') + ' call' + (s.private_peer ? ' from ' + s.private_peer : ''));
 

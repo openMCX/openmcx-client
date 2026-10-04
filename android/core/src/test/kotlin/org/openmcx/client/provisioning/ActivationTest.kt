@@ -15,7 +15,7 @@ class ActivationTest {
     private val pkg = Json.parseToJsonElement("""{"format":"openmcx-activation-1","domain":"mcx.test","login":"erin",
         "idms":{"issuer":"https://idms:8443","client_id":"mcx-lab-client","redirect_uri":"http://127.0.0.1:8900/callback"},
         "sip":{"core_uri":"sip:sip-core:5061;transport=tls","identity":"sip:erin@mcx.test"},
-        "mcptt":{"user_id":"sip:erin.mcptt@mcx.test","client_id":"urn:uuid:5d3c9a1e-6f0b-4c1e-9a55-0000000000e5","service_uri":"sip:mcptt@mcx.test","group_id":"sip:operations@mcx.test"},
+        "mcptt":{"user_id":"sip:erin.mcptt@mcx.test","client_id":"urn:uuid:5d3c9a1e-6f0b-4c1e-9a55-0000000000e5","service_uri":"sip:mcptt@mcx.test","group_id":"sip:operations@mcx.test","profile_index":"2"},
         "mcdata":{"user_id":"sip:erin.mcdata@mcx.test","service_uri":"sip:mcdata@mcx.test","group_id":"sip:operations@mcx.test"},
         "credentials_url":"https://credentials:8443","certificate_url":"https://credentials:8443/v1/client-certificate",
         "endpoints":{"cms":"https://http-proxy:8443/cms","gms":"https://http-proxy:8443/gms"},
@@ -34,6 +34,8 @@ class ActivationTest {
         assertEquals("urn:uuid:5d3c9a1e-6f0b-4c1e-9a55-0000000000e5", config.clientId)
         assertEquals("secret-password", config.idms.password)
         assertEquals(listOf("sip:operations@mcx.test"), config.mcptt!!.groups)
+        // TS 24.484 §7.2.2.1: the <Default-user-profile> index names mcptt-user-profile-2.xml.
+        assertEquals(2, config.mcptt!!.profileIndex)
         assertEquals("sip:erin.mcdata@mcx.test", config.mcdata!!.userId)
         assertEquals("192.0.2.10:8444", config.endpoints["http-proxy:8443"])
     }

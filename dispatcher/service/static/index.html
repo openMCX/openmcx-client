@@ -61,7 +61,7 @@
       <div>
         <h3>Private call</h3>
         <form id="private">
-          <div class="row"><input name="target" placeholder="MCPTT ID, e.g. sip:bob@example.org" required></div>
+          <div class="row"><input name="target" placeholder="MCPTT ID, e.g. sip:bob.mcptt@mcx.test" required></div>
           <div class="row"><label><input type="checkbox" name="emergency"> emergency</label><button>Call</button></div>
         </form>
       </div>
@@ -86,7 +86,7 @@
         <h2>Messages (SDS)</h2>
         <form id="sds">
           <div class="row">
-            <input name="target" placeholder="MCData ID or group ID" required>
+            <input name="target" placeholder="MCData ID (sip:bob.mcdata@mcx.test) or, with group ticked, group ID (sip:operations@mcx.test)" required>
             <label><input type="checkbox" name="group"> group</label>
           </div>
           <div class="row"><input name="text" placeholder="Message" maxlength="1000" required><button>Send</button></div>
@@ -97,7 +97,7 @@
         <h2>Files (FD)</h2>
         <form id="fd">
           <div class="row">
-            <input name="target" placeholder="MCData ID or group ID" required>
+            <input name="target" placeholder="MCData ID (sip:bob.mcdata@mcx.test) or, with group ticked, group ID (sip:operations@mcx.test)" required>
             <label><input type="checkbox" name="group"> group</label>
             <label><input type="checkbox" name="mandatory"> mandatory</label>
           </div>

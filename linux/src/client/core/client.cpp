@@ -339,6 +339,23 @@ void Client::run() {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.484 clause 7.2.2.1: the profile index of <Default-user-profile> (mcptt.profile_index of the activation).
+unsigned Client::configured_profile_index() const {
+  const auto mcptt = cfg_.value("mcptt", nlohmann::json::object());
+  const auto value = mcptt.value("profile_index", nlohmann::json());
+  unsigned index = 1;
+  if (value.is_number_unsigned()) index = value.get<unsigned>();
+  if (value.is_string()) {
+    try {
+      index = static_cast<unsigned>(std::stoul(value.get<std::string>()));
+    } catch (const std::exception &) {
+      index = 1;
+    }
+  }
+  return index >= 1 && index <= 255 ? index : 1;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.484 clause 8.3.1A and TS 24.481 clause 6.3.3.2.2: retrieve the MCPTT user profile and then the group
 // document at start-up, keeping the profile's actions, groups, ETag and index.
 void Client::load_user_documents() {
@@ -350,8 +367,8 @@ void Client::load_user_documents() {
     event("document_retrieved", {{"resource", resource}, {"bytes", response.body.size()}});
     return response;
   };
-  const auto profile = retrieve(endpoints.at("cms").get<std::string>(),
-                                "/xcap-root/3gpp.mcptt.user-profile/users/" + url_encode(user()) + "/index");
+  profile_index_ = configured_profile_index();
+  const auto profile = retrieve(endpoints.at("cms").get<std::string>(), "/xcap-root/" + profile_document_path());
   profile_actions_ = parse_profile_actions(profile.body);
   take_profile_groups(profile.body);
   status_["configuration"]["etag"] = profile.headers.at("etag");
