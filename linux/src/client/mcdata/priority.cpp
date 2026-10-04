@@ -49,9 +49,10 @@ const char *Client::mdig_name(int state) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.282 clause 6.2.8.1.15: the provisioned Resource-Priority value of a priority communication.
+// TS 24.282 clause 6.2.8.1.15: the Resource-Priority value of a priority communication, from the MCData service
+// configuration document.
 std::vector<SipHeader> Client::mcdata_priority_headers(const char *level) const {
-  const auto resources = cfg_.at("mcdata").value("resource_priority", Json::object());
+  const auto resources = service_priorities("mcdata");
   const auto value = resources.value(level, std::string{});
   if (value.empty()) return {};
   return {{"Resource-Priority", value}};

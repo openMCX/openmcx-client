@@ -119,7 +119,6 @@ object Activation {
                 // TS 24.484 §7.2.2.1: the profile index of <Default-user-profile>, 1 when the package has none.
                 put("profile_index", mcptt.opt("profile_index")?.toIntOrNull() ?: 1)
                 put("answer_mode", "automatic"); put("session_expires", 1800); put("manual_answer_timeout", 20)
-                putJsonObject("resource_priority") {}
             }
             putJsonObject("media") { putJsonArray("port_range") { add(JsonPrimitive(20000)); add(JsonPrimitive(20400)) }; put("amr_wb_mode", 2) }
             pkg["mcdata"]?.jsonObject?.let { d ->
@@ -131,7 +130,7 @@ object Activation {
             pkg["mcvideo"]?.jsonObject?.let { v ->
                 putJsonObject("mcvideo") {
                     put("user_id", v.str("user_id")); put("psi", v.str("service_uri")); put("groups", groups(v))
-                    putJsonArray("chat_groups") {}; put("answer_mode", "automatic"); putJsonObject("resource_priority") {}
+                    putJsonArray("chat_groups") {}; put("answer_mode", "automatic")
                 }
             }
             pkg["address_map"]?.jsonObject?.let { put("endpoints", it) }

@@ -347,8 +347,9 @@ class McpttService(
         else -> info
     }
 
-    private fun resourcePriority(priority: String): String? = config.resourcePriority[priority]?.takeIf { it.isNotBlank() }
-        ?: if (priority != "normal") throw CallError("no Resource-Priority provisioned for $priority calls") else null
+    // TS 24.379 §6.2.8.1.15: from the MCPTT service configuration document.
+    private fun resourcePriority(priority: String): String? = client.serviceResourcePriorities["mcptt"]?.get(priority)?.takeIf { it.isNotBlank() }
+        ?: if (priority != "normal") throw CallError("no Resource-Priority for $priority calls: the MCPTT service configuration document was not read") else null
 
     /** Follow the call state in a request from the server: its emergency and imminent peril indications. */
     private fun notePriority(call: Call, info: McpttInfo, quiet: Boolean = false) {

@@ -143,6 +143,8 @@ class McxClient(
     @Volatile var tokens: Tokens? = null
         private set
     @Volatile var profile: UserProfile? = null
+    /** The Resource-Priority values of the service configuration documents, by service and level (TS 24.484 §8.4). */
+    @Volatile var serviceResourcePriorities: Map<String, Map<String, String>> = emptyMap()
         private set
     /** The GMS group documents fetched at login, by group ID. */
     @Volatile var groupDocuments: Map<String, GroupDocument> = emptyMap()
@@ -298,6 +300,14 @@ class McxClient(
             runCatching { documents.userProfile(mcptt.userId, mcptt.profileIndex, t.accessToken) }
                 .onSuccess { profile = it; event("user profile: groups ${it.groups}, private call targets ${it.privateCallTargets}") }
                 .onFailure { event("user profile: ${it.message}") }
+        }
+        // TS 24.379, TS 24.281 and TS 24.282 §6.2.8.1.15: the Resource-Priority values of each service's service
+        // configuration document; without them, emergency and imminent peril requests cannot be made.
+        for (service in listOfNotNull("mcptt".takeIf { config.mcptt != null }, "mcvideo".takeIf { config.mcvideo != null },
+                "mcdata".takeIf { config.mcdata != null })) {
+            runCatching { documents.serviceResourcePriorities(service, t.accessToken) }
+                .onSuccess { serviceResourcePriorities = serviceResourcePriorities + (service to it); event("service configuration $service: $it") }
+                .onFailure { event("service configuration $service: ${it.message}") }
         }
         for (group in ((config.mcptt?.groups ?: emptyList()) + (config.mcdata?.groups ?: emptyList())).distinct()) {
             runCatching { documents.group(group, t.accessToken) }

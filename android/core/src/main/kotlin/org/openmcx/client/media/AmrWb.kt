@@ -21,6 +21,20 @@ object AmrWb {
 
     fun frameBits(ft: Int): Int = if (ft in BITS.indices) BITS[ft] else 0
 
+    /**
+     * TS 26.179 §4.1.3 with RFC 4867 §8.1: the mode to send with when [wanted] is configured: [wanted] if the peer's
+     * `mode-set` allows it (or the peer gives none), else the highest allowed mode below it, else the lowest allowed.
+     */
+    fun sendMode(wanted: Int, modeSet: List<Int>): Int = when {
+        modeSet.isEmpty() || wanted in modeSet -> wanted
+        else -> modeSet.filter { it < wanted }.maxOrNull() ?: modeSet.min()
+    }
+
+    /** RFC 4867 §8.1: the `mode-set` of an fmtp line (modes 0–8); empty when absent. */
+    fun modeSet(value: String?): List<Int> = value?.split(',')?.map { m ->
+        m.trim().toIntOrNull()?.takeIf { it in 0..8 } ?: throw IllegalArgumentException("mode-set $value")
+    }?.distinct() ?: emptyList()
+
     /** A frame: frame type, quality bit and speech bits (in [frameBits] bits, MSB first). */
     data class Frame(val ft: Int, val quality: Boolean, val speech: ByteArray) {
         /** The storage-format octets of this frame. */

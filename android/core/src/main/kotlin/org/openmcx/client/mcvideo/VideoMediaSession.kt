@@ -291,7 +291,8 @@ class VideoMediaSession(
             try { kotlinx.coroutines.awaitCancellation() } finally { cam.close(); capture = null }
         }
         val source = audio.source()
-        val encoder = codecs.encoder(amrMode)
+        // TS 26.179 §4.1.3: the configured mode within the peer's mode-set.
+        val encoder = codecs.encoder(AmrWb.sendMode(amrMode, remote?.modeSet ?: emptyList()))
         val audioTarget = InetSocketAddress(r.address, r.audioPort)
         val pcm = ShortArray(AmrWb.FRAME_SAMPLES)
         val limit = durationSeconds?.let { System.currentTimeMillis() + it * 1000L }

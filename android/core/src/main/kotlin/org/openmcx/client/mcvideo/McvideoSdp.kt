@@ -1,5 +1,6 @@
 package org.openmcx.client.mcvideo
 
+import org.openmcx.client.media.AmrWb
 import org.openmcx.client.mcptt.SdpNegotiationError
 import org.openmcx.client.sdp.MediaDescription
 import org.openmcx.client.sdp.SessionDescription
@@ -44,6 +45,8 @@ data class RemoteVideoMedia(
     val protected: Boolean = false,
     /** The PCK of `a=key-mgmt:mikey`, if the offer carries one. */
     val keyMgmt: String? = null,
+    /** The peer's AMR-WB `mode-set` (RFC 4867 §8.1); empty: every mode. */
+    val modeSet: List<Int> = emptyList(),
 ) {
     val transmissionControl get() = controlPort != null
 }
@@ -67,7 +70,8 @@ object McvideoSdp {
         "audio", local.audioPort, if (local.protected) "RTP/SAVP" else "RTP/AVP", listOf(pt.toString()), info = "audio component of MCVideo",
         attributes = listOf(
             "rtpmap" to "$pt AMR-WB/16000/1",
-            "fmtp" to "$pt octet-align=${if (octetAligned) 1 else 0};mode-change-capability=2",
+            // TS 26.179 §4.1.3: mode-change-capability 2, max-red 0, ptime 20 and maxptime 240 offered, no mode-set.
+            "fmtp" to "$pt octet-align=${if (octetAligned) 1 else 0};mode-change-capability=2;max-red=0",
             "ptime" to "20",
             "maxptime" to "240",
             local.direction to null,
@@ -133,7 +137,8 @@ object McvideoSdp {
             DIRECTIONS.firstOrNull { video.has(it) } ?: DIRECTIONS.firstOrNull { d -> session.attributes.any { it.first == d } } ?: "sendrecv",
             protected = audio.proto == "RTP/SAVP" || video.proto == "RTP/SAVP",
             keyMgmt = (session.attributes.firstOrNull { it.first == "key-mgmt" }?.second ?: audio.attribute("key-mgmt"))
-                ?.takeIf { it.startsWith("mikey ") }?.removePrefix("mikey ")?.trim())
+                ?.takeIf { it.startsWith("mikey ") }?.removePrefix("mikey ")?.trim(),
+            modeSet = try { AmrWb.modeSet(audioFmtp["mode-set"]) } catch (e: IllegalArgumentException) { throw SdpNegotiationError(e.message ?: "mode-set") })
     }
 
     private val DIRECTIONS = listOf("sendrecv", "sendonly", "recvonly", "inactive")

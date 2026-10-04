@@ -118,7 +118,9 @@ void Client::send_speech_frame(const std::array<std::int16_t, 320> &frame, bool 
   timestamp_ += 320;
   rtp.ssrc = audio_ssrc_;
   rtp.marker = marker;
-  rtp.payload = pack_amr_wb(codec_.encode(frame, cfg_.at("media").value("mode", 0)), remote_->octet_aligned);
+  // TS 26.179 clause 4.1.3: the configured mode, within the peer's mode-set (RFC 4867 section 8.1).
+  const auto mode = amr_wb_send_mode(cfg_.at("media").value("mode", 0), remote_->mode_set);
+  rtp.payload = pack_amr_wb(codec_.encode(frame, mode), remote_->octet_aligned);
   auto bytes = encode_rtp(rtp);
   if (protected_media()) bytes = protection_.protect_media(bytes, user());
   audio_.send(bytes, server_target(remote_->address, remote_->audio_port), remote_->audio_port);
@@ -309,6 +311,7 @@ void Client::run() {
   schedule_token_renewal();
   load_user_documents();
   if (mcvideo_enabled()) read_mcvideo_profile();
+  read_service_configurations();
   if (protected_media() || protected_floor()) {
     provision_keys();
   }
@@ -336,6 +339,39 @@ void Client::run() {
   for (int index = 0; index < 20; index++) sip_.poll(std::chrono::milliseconds(10));
   save_audio();
   sip_.stop();
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379, TS 24.281 and TS 24.282 clause 6.2.8.1.15: the client reads the service configuration document of each
+// of its services (TS 24.484 clauses 8.4.2.8, 9.4.2.8, 10.4.2.8) for the Resource-Priority values of its requests.
+// A document that cannot be read leaves the service without them: its emergency and imminent peril requests fail.
+void Client::read_service_configurations() {
+  std::vector<std::string> services{"mcptt"};
+  if (mcvideo_enabled()) services.push_back("mcvideo");
+  if (mcdata_enabled()) services.push_back("mcdata");
+  for (const auto &service : services) {
+    const auto path = "/xcap-root/org.3gpp." + service + ".service-config/global/service-config.xml";
+    try {
+      auto response = http_.request("GET", cfg_.at("endpoints").at("cms").get<std::string>() + path, {},
+                                    {{"Authorization", "Bearer " + token_}});
+      if (response.status != 200) throw std::runtime_error("HTTP " + std::to_string(response.status));
+      service_priorities_[service] = parse_service_resource_priorities(response.body);
+      event("document_retrieved", {{"resource", path}, {"bytes", response.body.size()}});
+    } catch (const std::exception &error) {
+      event("service_configuration_unavailable", {{"service", service}, {"reason", error.what()}});
+    }
+  }
+  status_["service_configuration"] = service_priorities_;
+}
+
+//------------------------------------------------------------------------------
+// Helper: the Resource-Priority values of a service by level, as JSON ("imminent_peril" as well, MCData's name).
+Json Client::service_priorities(const std::string &service) const {
+  Json out = Json::object();
+  if (const auto found = service_priorities_.find(service); found != service_priorities_.end())
+    for (const auto &[level, value] : found->second) out[level] = value;
+  if (out.contains("imminent")) out["imminent_peril"] = out["imminent"];
+  return out;
 }
 
 //------------------------------------------------------------------------------

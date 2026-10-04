@@ -105,6 +105,30 @@ data class GroupDocument(val uri: String, val members: List<String>, val service
     }
 }
 
+/**
+ * The service configuration documents (TS 24.484 §8.4, §9.4, §10.4) as the clients read them: the Resource-Priority
+ * values by level (`emergency`, `imminent`, `normal`), each `<namespace>.<priority>` of RFC 8101 (mcpttp or mcpttq,
+ * 0 to 15). MCData's are in the `<anyExt>` of `<on-network>` (§10.4.2.1 item 4).
+ */
+object ServiceConfig {
+    private val levels = mapOf("emergency" to "emergency-resource-priority",
+        "imminent" to "imminent-peril-resource-priority", "normal" to "normal-resource-priority")
+
+    fun resourcePriorities(text: String): Map<String, String> {
+        val root = Xml.parse(text)
+        if (root.localName != "service-configuration-info" || root.namespaceURI?.endsWith("ServiceConfig:1.0") != true)
+            throw DocumentError("not a service configuration document")
+        return levels.mapValues { (_, element) ->
+            val value = root.descendants(element).firstOrNull() ?: throw DocumentError("no <$element>")
+            val space = value.descendants("resource-priority-namespace").firstOrNull()?.text()?.trim()
+            val level = value.descendants("resource-priority-priority").firstOrNull()?.text()?.trim()
+            if ((space != "mcpttp" && space != "mcpttq") || level == null || !Regex("0|[1-9]|1[0-5]").matches(level))
+                throw DocumentError("<$element> is not an RFC 8101 value: $space.$level")
+            "$space.$level"
+        }
+    }
+}
+
 /** XCAP retrieval (RFC 4825 §7.3) of the profile and group documents, with the access token (TS 24.481 §6.3.3). */
 class DocumentClient(private val http: HttpClient, private val cms: String, private val gms: String) {
     private val etags = mutableMapOf<String, Pair<String, String>>() // url -> (etag, body)
@@ -125,6 +149,10 @@ class DocumentClient(private val http: HttpClient, private val cms: String, priv
     /** TS 24.484 §8.3.1A: the user's MCPTT user profile document, mcptt-user-profile-<index>.xml. */
     suspend fun userProfile(mcpttId: String, index: Int, token: String): UserProfile =
         UserProfile.parse(fetch("$cms/xcap-root/org.3gpp.mcptt.user-profile/users/${enc(mcpttId)}/mcptt-user-profile-$index.xml", token))
+
+    /** TS 24.484 §8.4.2.8 (§9.4.2.8, §10.4.2.8): the service configuration document of `mcptt`, `mcvideo` or `mcdata`. */
+    suspend fun serviceResourcePriorities(service: String, token: String): Map<String, String> =
+        ServiceConfig.resourcePriorities(fetch("$cms/xcap-root/org.3gpp.$service.service-config/global/service-config.xml", token))
 
     suspend fun group(groupId: String, token: String): GroupDocument =
         GroupDocument.parse(fetch("$gms/xcap-root/org.openmobilealliance.groups/global/byGroupID/${enc(groupId)}", token))

@@ -9,9 +9,10 @@ namespace mcx {
 
 //------------------------------------------------------------------------------
 // TS 24.281 clause 6.2.8.1.15 (used by clauses 6.2.8.1.2, 6.2.8.1.12 and 6.2.8.3.3): the Resource-Priority header
-// field of an emergency or imminent peril call, from mcvideo.resource_priority (RFC 4412 with RFC 8101).
+// field of an emergency or imminent peril call, from the MCVideo service configuration document (RFC 4412 with
+// RFC 8101).
 std::vector<SipHeader> Client::mcvideo_priority_headers(const McpttInfo &info) const {
-  const auto values = cfg_.at("mcvideo").value("resource_priority", Json::object());
+  const auto values = service_priorities("mcvideo");
   const char *name = info.emergency == true ? "emergency" : info.imminent_peril == true ? "imminent" : "normal";
   const auto value = values.value(name, std::string{});
   if (value.empty()) {

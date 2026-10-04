@@ -38,4 +38,19 @@ class McpttSdpTest {
         val r = McpttSdp.remote(sdp)
         assertFalse(r.floorControl); assertEquals(3000, r.audioPort); assertEquals(0, r.floorPort)
     }
+
+    /** TS 26.179 §4.1.3: max-red 0, ptime 20 and maxptime 240 offered, no mode-set; a peer's mode-set limits the mode sent. */
+    @Test fun amrWbPerTs26179() {
+        val offer = McpttSdp.offer(local)
+        assertTrue(offer.contains("mode-change-capability=2;max-red=0\r\n"))
+        assertTrue(offer.contains("a=ptime:20\r\na=maxptime:240\r\n"))
+        assertFalse(offer.contains("mode-set"))
+        val remote = McpttSdp.remote(offer.replace("max-red=0", "max-red=0;mode-set=0,1,2"))
+        assertEquals(listOf(0, 1, 2), remote.modeSet)
+        assertEquals(2, org.openmcx.client.media.AmrWb.sendMode(2, remote.modeSet))
+        assertEquals(2, org.openmcx.client.media.AmrWb.sendMode(8, remote.modeSet))
+        assertEquals(4, org.openmcx.client.media.AmrWb.sendMode(1, listOf(4, 6)))
+        assertEquals(2, org.openmcx.client.media.AmrWb.sendMode(2, emptyList()))
+        org.junit.Assert.assertThrows(SdpNegotiationError::class.java) { McpttSdp.remote(offer.replace("max-red=0", "mode-set=9")) }
+    }
 }

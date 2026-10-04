@@ -303,6 +303,11 @@ class Client {
   std::set<std::string> profile_actions_;
   bool profile_loaded_ = false;
   unsigned profile_index_ = 1;
+  // TS 24.484 clauses 8.4, 9.4 and 10.4: the Resource-Priority values of the service configuration documents, by
+  // service ("mcptt", "mcvideo", "mcdata") and level ("emergency", "imminent", "normal").
+  std::map<std::string, std::map<std::string, std::string>> service_priorities_;
+  void read_service_configurations();
+  Json service_priorities(const std::string &service) const;
   // The MCVideo user profile document (TS 24.484 clause 9.3) as read at start-up.
   Json mcvideo_profile_ = Json::object();
 

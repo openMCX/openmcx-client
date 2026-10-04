@@ -45,8 +45,6 @@ data class ClientConfig(
     data class Mcptt(
         val userId: String, val psi: String, val groups: List<String>,
         val answerMode: String, val sessionExpires: Int, val manualAnswerTimeout: Int,
-        /** The Resource-Priority of normal, emergency and imminent peril calls (TS 24.379 §6.2.8), as provisioned. */
-        val resourcePriority: Map<String, String> = emptyMap(),
         /** The "user-profile-index" of `<Default-user-profile>` (TS 24.484 §7.2.2.1): mcptt-user-profile-<index>.xml. */
         val profileIndex: Int = 1,
     )
@@ -64,8 +62,6 @@ data class ClientConfig(
         val userId: String, val psi: String, val groups: List<String>, val answerMode: String,
         /** Chat groups (TS 24.281 §9.2.2): joined on demand, not affiliated at start-up. */
         val chatGroups: List<String> = emptyList(),
-        /** Resource-Priority values (RFC 4412/8101, §6.2.8) by priority: `normal`, `imminent`, `emergency`. */
-        val resourcePriority: Map<String, String> = emptyMap(),
         val width: Int = 640, val height: Int = 480, val frameRate: Int = 15, val bitrate: Int = 500_000,
     )
 
@@ -101,7 +97,6 @@ data class ClientConfig(
                 mcptt = (root["mcptt"] as? JsonObject)?.let {
                     Mcptt(it.str("user_id"), it.str("psi"), it.strings("groups"), it.optStr("answer_mode") ?: "automatic",
                         it.int("session_expires", 1800), it.int("manual_answer_timeout", 20),
-                        (it["resource_priority"] as? JsonObject)?.mapValues { v -> v.value.jsonPrimitive.content } ?: emptyMap(),
                         it.int("profile_index", 1).takeIf { index -> index in 1..255 } ?: 1)
                 },
                 mcdata = (root["mcdata"] as? JsonObject)?.let {
@@ -112,7 +107,6 @@ data class ClientConfig(
                 mcvideo = (root["mcvideo"] as? JsonObject)?.let {
                     Mcvideo(it.str("user_id"), it.str("psi"), it.strings("groups"), it.optStr("answer_mode") ?: "automatic",
                         it.strings("chat_groups"),
-                        (it["resource_priority"] as? JsonObject)?.mapValues { v -> v.value.jsonPrimitive.content } ?: emptyMap(),
                         it.int("width", 640), it.int("height", 480), it.int("frame_rate", 15), it.int("bitrate", 500_000))
                 },
                 security = (root["security"] as? JsonObject)?.let {

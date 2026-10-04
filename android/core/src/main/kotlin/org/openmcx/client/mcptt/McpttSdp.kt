@@ -1,5 +1,6 @@
 package org.openmcx.client.mcptt
 
+import org.openmcx.client.media.AmrWb
 import org.openmcx.client.sdp.MediaDescription
 import org.openmcx.client.sdp.SessionDescription
 import java.security.SecureRandom
@@ -26,6 +27,8 @@ data class RemoteMedia(
     val floorPriority: Int?,
     /** False for an offer or answer without `m=application` (§11.1.2): no floor, both parties speak at once. */
     val floorControl: Boolean = true,
+    /** The peer's AMR-WB `mode-set` (RFC 4867 §8.1); empty: every mode. */
+    val modeSet: List<Int> = emptyList(),
 )
 
 /**
@@ -45,9 +48,10 @@ object McpttSdp {
         "audio", local.audioPort, "RTP/AVP", listOf(pt.toString()), info = "speech",
         attributes = listOf(
             "rtpmap" to "$pt AMR-WB/16000/1",
-            "fmtp" to "$pt octet-align=${if (octetAligned) 1 else 0};mode-change-capability=2",
+            // TS 26.179 §4.1.3: mode-change-capability 2, max-red 0, ptime 20 and maxptime 240 offered, no mode-set.
+            "fmtp" to "$pt octet-align=${if (octetAligned) 1 else 0};mode-change-capability=2;max-red=0",
             "ptime" to "20",
-            "maxptime" to "20",
+            "maxptime" to "240",
             "rtcp" to (local.audioPort + 1).toString(),
             "sendrecv" to null,
         ) + (if (!local.floorControl) listOf("ssrc" to "${local.audioSsrc} cname:mcptt") else emptyList()),
@@ -84,8 +88,9 @@ object McpttSdp {
         val floorParams = params(floor?.fmtp("MCPTT") ?: "")
         val ssrc = if (floor == null) 0L else floorParams["mc_floor_ssrc"]?.toLongOrNull() ?: throw SdpNegotiationError("no mc_floor_ssrc")
         val address = session.address(audio) ?: throw SdpNegotiationError("no connection address")
+        val modeSet = try { AmrWb.modeSet(fmtp["mode-set"]) } catch (e: IllegalArgumentException) { throw SdpNegotiationError(e.message ?: "mode-set") }
         return RemoteMedia(address, audio.port, floor?.port ?: 0, pt, fmtp["octet-align"] == "1", ssrc, floorParams["mc_priority"]?.toIntOrNull(),
-            floorControl = floor != null)
+            floorControl = floor != null, modeSet = modeSet)
     }
 
     private fun params(text: String): Map<String, String?> = text.split(';').map { it.trim() }.filter { it.isNotEmpty() }

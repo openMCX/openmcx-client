@@ -140,9 +140,10 @@ void Client::priority_response(const SipResponse &response) {
 
 //------------------------------------------------------------------------------
 // TS 24.379 clause 6.2.8.1.2, clause 6.2.8.1.12 and clause 6.2.8.3.3: the Resource-Priority header field of an
-// emergency, imminent peril or normal request, with the provisioned values (clause 6.2.8.1.15).
+// emergency, imminent peril or normal request, with the values of the MCPTT service configuration document (clause
+// 6.2.8.1.15).
 std::vector<SipHeader> Client::priority_headers(const McpttInfo &info) const {
-  const auto values = cfg_.at("mcptt").value("resource_priority", Json::object());
+  const auto values = service_priorities("mcptt");
   const char *name = info.emergency == true                                    ? "emergency"
                      : info.imminent_peril == true                             ? "imminent"
                      : info.emergency == false || info.imminent_peril == false ? "normal"

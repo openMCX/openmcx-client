@@ -665,7 +665,8 @@ class McvideoService(
         else -> info
     }
 
-    private fun resourcePriority(priority: String): String? = config.resourcePriority[priority]?.takeIf { it.isNotBlank() }
+    // TS 24.281 §6.2.8.1.15: from the MCVideo service configuration document.
+    private fun resourcePriority(priority: String): String? = client.serviceResourcePriorities["mcvideo"]?.get(priority)?.takeIf { it.isNotBlank() }
         ?: if (priority != "normal") throw CallError("no Resource-Priority provisioned for $priority") else null
 
     /** Follow the call state in a request from the server: its emergency and imminent peril indications. */

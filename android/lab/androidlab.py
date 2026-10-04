@@ -99,8 +99,7 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
         "cms": ref["endpoints"]["cms"],
         "gms": ref["endpoints"]["gms"],
         "mcptt": {"user_id": mcptt["user_id"], "psi": mcptt["service_uri"], "groups": [mcptt["group_id"]],
-                  "answer_mode": "automatic", "session_expires": 1800, "manual_answer_timeout": 20,
-                  "resource_priority": mcptt.get("resource_priority", {})},
+                  "answer_mode": "automatic", "session_expires": 1800, "manual_answer_timeout": 20},
         "media": {"port_range": [20000, 20400], "amr_wb_mode": 2},
     }
     if mcdata:
@@ -114,8 +113,7 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
         chats = [g["id"] for g in site.get("groups", []) if g.get("type") == "chat"
                  and mcvideo["user_id"] in (g.get("mcvideo") or {}).get("members", [])]
         bundle["mcvideo"] = {"user_id": mcvideo["user_id"], "psi": mcvideo["service_uri"], "groups": [mcvideo["group_id"]],
-                             "chat_groups": chats, "answer_mode": "automatic",
-                             "resource_priority": mcvideo.get("resource_priority", {})}
+                             "chat_groups": chats, "answer_mode": "automatic"}
     security = ref.get("security")
     if security:
         # TS 33.180: the KMS, the Key Parameters wire profile, and what is protected (the fixture's --protected).

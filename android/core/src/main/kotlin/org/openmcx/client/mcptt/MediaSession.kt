@@ -206,7 +206,7 @@ class MediaSession(
     }
 
     private fun speechEncoder(): org.openmcx.client.media.SpeechEncoder =
-        synchronized(encoderLock) { encoder ?: codecs.encoder(amrMode).also { encoder = it } }
+        synchronized(encoderLock) { encoder ?: codecs.encoder(AmrWb.sendMode(amrMode, remote?.modeSet ?: emptyList())).also { encoder = it } }
 
     /**
      * PTT pressed: open the microphone (and the encoder) while the floor is requested, so that sending starts when it
