@@ -70,8 +70,10 @@ void Client::call_state(std::string_view id, SipCallState state, int code) {
     if (cfg_.at("mcptt").value("conference_notifications", true)) schedule([this] { subscribe_conference(); });
   } else if (state == SipCallState::disconnected) {
     if (held_ && id == held_->dialog) {
-      // The held call ended (the transferred user left it, TS 24.379 clause 11.1.8.2.2).
+      // The held call ended: the transferred user left it (TS 24.379 clause 11.1.8.2.3), or, for the transferred user,
+      // the requester ended it after a successful transfer (clause 11.1.8.2.1).
       held_.reset();
+      transfer_kept_ = false;
       if (status_.contains("announced_transfer")) status_["announced_transfer"]["held_released"] = true;
       event("held_call_released", {{"dialog", std::string(id)}});
     }

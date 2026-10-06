@@ -1,4 +1,4 @@
-# openMCX Linux client features
+# The openMCX Linux client features
 
 What the Linux client `mcx-client` supports, and how it is verified. It is an on-network MC service client for the
 [openMCX servers](https://github.com/openMCX/openmcx-server), written from the 3GPP Release 19 specifications: a

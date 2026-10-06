@@ -357,21 +357,30 @@ SipResponse Client::group_key_notify(const SipMessage &message) {
 SipResponse Client::conference_notify(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
+  // RFC 6665 section 4.1.3: the subscription of an ended call lasts until the notifier terminates it, so its
+  // NOTIFYs (a roster sent as the call was released) are accepted, and the final one ends it.
   const auto retired = retired_conferences_.find(message.dialog_id);
-  if (retired != retired_conferences_.end() && asserted_identity(message) == service() &&
-      (conference_service_from(message.from_uri) || message.from_uri == retired->second) &&
-      get_header(message.headers, "Subscription-State").starts_with("terminated")) {
-    retired_conferences_.erase(retired);
+  if (retired != retired_conferences_.end()) {
+    if (asserted_identity(message) != service() ||
+        (!conference_service_from(message.from_uri) && message.from_uri != retired->second)) {
+      response.status_code = 403;
+      return response;
+    }
+    if (get_header(message.headers, "Subscription-State").starts_with("terminated"))
+      retired_conferences_.erase(retired);
     return response;
   }
-  if (message.dialog_id != conference_subscription_ ||
-      (!conference_service_from(message.from_uri) && message.from_uri != session_uri_) ||
+  // RFC 6665 section 4.1.3: a NOTIFY that matches no subscription.
+  if (message.dialog_id != conference_subscription_) {
+    event("conference_notify_rejected", {{"reason", "no subscription"}, {"from_uri", message.from_uri}});
+    response.status_code = 481;
+    return response;
+  }
+  if ((!conference_service_from(message.from_uri) && message.from_uri != session_uri_) ||
       asserted_identity(message) != service()) {
     status_["conference_wait_reason"] = "NOTIFY identity rejected";
-    event("conference_notify_rejected", {{"reason", "identity"},
-                                         {"from_uri", message.from_uri},
-                                         {"session_uri", session_uri_},
-                                         {"dialog_match", message.dialog_id == conference_subscription_}});
+    event("conference_notify_rejected",
+          {{"reason", "identity"}, {"from_uri", message.from_uri}, {"session_uri", session_uri_}});
     response.status_code = 403;
     return response;
   }

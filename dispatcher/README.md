@@ -1,4 +1,4 @@
-# openMCX dispatcher (v1)
+# The openMCX dispatcher (v1)
 
 A dispatcher position in the browser: the MCX client engine (`mcx-client`, built from [`../linux`](../linux)) runs as
 a child of a small Go web service, and the browser drives it. A dispatcher is an MC user with more rights (TS 23.280);

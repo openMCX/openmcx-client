@@ -1,4 +1,4 @@
-# openMCX client for Android
+# The openMCX client for Android
 
 A native Android MC UE: an MCPTT client and an MCData client (with MCVideo, alerts and location, see the feature
 documents) sharing one SIP registration, on-network, written from the 3GPP Release 19 specifications, for the

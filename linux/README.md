@@ -7,7 +7,7 @@
        |_|
 ```
 
-# openMCX Linux client
+# The openMCX Linux client
 
 `mcx-client`, the headless on-network MC service client of the project **openMCX**, for the
 [openMCX servers](https://github.com/openMCX/openmcx-server): **MCPTT** (mission-critical push to talk), **MCData**

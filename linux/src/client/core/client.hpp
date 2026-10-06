@@ -294,6 +294,8 @@ class Client {
   // side: the Replaces value the next call carries (clause 11.1.1.2.1.1 step 14b1).
   // Target side: the incoming call replaces the current one (RFC 3891).
   std::optional<CallSnapshot> held_;
+  // held_ is the transferred user's call with the requester, kept during a transfer (TS 24.379 clause 11.1.8.2.2).
+  bool transfer_kept_ = false;
   std::string announced_target_, announced_replaces_, next_call_replaces_;
   bool replacing_call_ = false;
   Json service_outcomes_ = Json::object();

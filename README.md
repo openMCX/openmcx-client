@@ -7,7 +7,7 @@
        |_|
 ```
 
-# openMCX clients — 3GPP Release 19 MCx clients
+# The openMCX clients — 3GPP Release 19 MCx clients
 
 The project **openMCX** implements **3GPP Release 19 mission-critical services (MCx)** for an IP network. This
 repository holds its **clients**: an Android app for phones, a dispatcher position in the browser, and `mcx-client`,
@@ -23,10 +23,10 @@ clients, in [openmcx-admin](https://github.com/openMCX/openmcx-admin).
 **Containerised** Linux client and dispatcher (Docker); the **Android** app for Android 11 and later (tested on Android 13 and 16 phones), built in Docker
 too ([building](#build)).
 
-**Try it**: [Tutorial 1: MCX over WLAN with the Android app](https://github.com/openMCX/openmcx-server/blob/main/tutorial/01-mcx-over-wlan-android/README.md)
+**Try it**: [Tutorial 1: MCX over WLAN with the Android app](https://github.com/openMCX/openmcx-server/blob/main/tutorials/01-mcx-over-wlan-android/README.md)
 puts the app on two phones against the system from the Docker Hub images, and
-[Tutorial 2](https://github.com/openMCX/openmcx-server/blob/main/tutorial/02-dispatcher-with-android/README.md) adds the
-dispatcher position ([all tutorials](https://github.com/openMCX/openmcx-server/blob/main/tutorial/README.md)). The
+[Tutorial 2](https://github.com/openMCX/openmcx-server/blob/main/tutorials/02-dispatcher-with-android/README.md) adds the
+dispatcher position ([all tutorials](https://github.com/openMCX/openmcx-server/blob/main/tutorials/README.md)). The
 ready-built app is [`android/apk/openmcx-client-v1.apk`](android/apk).
 
 It is not an interoperability-certified implementation: see the limits in each client's documentation.

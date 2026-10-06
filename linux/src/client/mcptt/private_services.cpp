@@ -40,6 +40,14 @@ void Client::report_followup(bool success) {
   next_call_priority_.clear();
   const auto followup = *followup_;
   service_outcomes_[followup.kind] = success ? "success" : "fail";
+  // TS 24.379 clause 11.1.8.2.2: a failed transfer leaves the transferred user in its call with the requester.
+  if (followup.kind == "transfer" && !success && transfer_kept_ && held_) {
+    if (!dialog_.empty()) sip_.bye(dialog_);
+    resume_call(std::move(*held_));
+    held_.reset();
+    transfer_kept_ = false;
+    event("transferred_call_resumed", {{"dialog", dialog_}});
+  }
   // TS 24.379 clause 11.1.7.2.2 NOTE: no report when the requester itself was called successfully.
   if (followup.kind == "remote" && success && followup.requester == followup.target) return;
   McpttInfo info;
@@ -162,10 +170,14 @@ void Client::private_call_service_request(const McpttInfo &info, const std::stri
         {"kms_uri", info.private_call_kms_uri}};
     forwarded_kms_ = {target, info.private_call_kms_uri};
   }
-  // One call at a time: a transferred user leaves the current call first.
-  const bool leave = type == "transfer-private-call-request" && !call_idle();
-  if (leave) sip_.bye(dialog_);
-  schedule_after(leave || forward ? 500 : 0, [this, target, mode] {
+  // TS 24.379 clause 11.1.8.2.2: the transferred user keeps its call with the requester while it calls the target.
+  // The requester ends that call once the transfer succeeds (clause 11.1.8.2.1), and on failure it goes on.
+  if (type == "transfer-private-call-request" && !call_idle() && call_type_ == "private" && !held_) {
+    held_ = suspend_call();
+    transfer_kept_ = true;
+    event("transferred_call_kept", {{"dialog", held_->dialog}, {"requester", held_->private_peer}});
+  }
+  schedule_after(forward ? 500 : 0, [this, target, mode] {
     if (!call_idle()) {
       report_followup(false);
       return;
