@@ -435,12 +435,15 @@ void Client::mcdata_area_notice(const mcdata::Info &info) {
   Json entry;
   if (info.emergency_alert_area) {
     entry = {{"kind", "emergency_alert_area"}, {"entered", *info.emergency_alert_area}};
-    // An MCData emergency alert, unless already in the emergency state (TS 24.282 clause 16.2.1.1).
+    // An MCData emergency alert, unless already in the emergency state (TS 24.282 clause 16.2.1.1). The alert
+    // procedure first checks the user's right (clause 6.2.8.1.6, the MCData user profile); without it the user is
+    // told (this event) and nothing is sent.
     if (*info.emergency_alert_area && !mcdata_location_emergency()) {
       try {
         mcdata_alert(true, {}, {});
         entry["alert"] = true;
       } catch (const std::exception &error) {
+        entry["alert"] = false;
         entry["alert_error"] = error.what();
       }
     }

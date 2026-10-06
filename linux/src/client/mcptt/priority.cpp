@@ -27,6 +27,16 @@ void Client::require_profile(std::initializer_list<const char *> actions) const 
 }
 
 //------------------------------------------------------------------------------
+// TS 24.282 clause 6.2.8.1: refuses an MCData request whose rights the MCData user profile (TS 24.484 clause 10.3)
+// does not grant, as require_profile does for the MCPTT user profile.
+void Client::require_mcdata_profile(std::initializer_list<const char *> actions) const {
+  if (!cfg_.at("mcptt").value("enforce_profile_ruleset", true) || !mcdata_profile_loaded_) return;
+  for (const auto *action : actions)
+    if (!mcdata_profile_actions_.contains(action))
+      throw std::runtime_error(std::string("not authorised by the MCData user profile: ") + action);
+}
+
+//------------------------------------------------------------------------------
 // TS 24.379 annex G.11: the name of an MCPTT emergency private call state (MEPC).
 const char *Client::mepc_name(int state) {
   return state == 2   ? "MEPC 2: emergency-pc-requested"

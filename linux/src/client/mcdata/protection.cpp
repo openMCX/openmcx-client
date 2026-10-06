@@ -106,9 +106,11 @@ std::vector<BodyPart> Client::mcdata_encrypt_xml(std::vector<BodyPart> parts, co
 }
 
 //------------------------------------------------------------------------------
-// TS 24.282 clause 6.5.2.4: decrypt the confidentiality protected XML content of received MIME bodies.
+// TS 24.282 clause 6.5.2.4: decrypt the confidentiality protected XML content of received MIME bodies. The CSK
+// being uploaded in the service authorisation (clause 7.2.2 step 3) also opens them: the server's first protected
+// request (e.g. the location configuration) can overtake its 200 (OK) to the authorisation.
 std::vector<BodyPart> Client::mcdata_decrypt_xml(std::vector<BodyPart> parts) {
-  const auto key = mcdata_xml_key();
+  const auto key = mcdata_xml_key(true);
   for (auto &part : parts) {
     if (!mcdata_xml_part(part.content_type) || !xmlsec::is_protected(part.body)) continue;
     if (!key) throw std::runtime_error("encrypted XML without an XPK");

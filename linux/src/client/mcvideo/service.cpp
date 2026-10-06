@@ -275,7 +275,7 @@ void Client::mcvideo_affiliate(bool affiliate, const std::string &group) {
 // Helper: the MCVideo test commands, each dispatched to the procedure it starts:
 //   mcvideo-affiliate [group]   mcvideo-deaffiliate   mcvideo-authorize [token]
 //   mcvideo-call [implicit]   mcvideo-chat <group>   mcvideo-private <MCVideo ID> [auto|manual|force-auto] [no-control]
-//   mcvideo-answer   mcvideo-reject   mcvideo-transmit   mcvideo-release   mcvideo-end
+//   mcvideo-answer   mcvideo-reject   mcvideo-transmit   mcvideo-end (also mcvideo-release)
 //   mcvideo-call emergency|imminent   mcvideo-emergency on|off   mcvideo-imminent on|off   mcvideo-alert on|off
 //   mcvideo-receive   mcvideo-stop-receiving   mcvideo-hangup
 //   mcvideo-push <MCVideo ID> [auto|manual|force-auto]   mcvideo-pull <MCVideo ID> [auto|manual|force-auto]
@@ -379,9 +379,8 @@ void Client::mcvideo_command(const std::string &cmd) {
   if (verb == "mcvideo-transmit") return mcvideo_request_transmission();
   if (verb == "mcvideo-remote-transmit" || verb == "mcvideo-remote-cancel")
     return mcvideo_remote_transmission(argument, verb == "mcvideo-remote-transmit");
-  if (verb == "mcvideo-release") return mcvideo_release_transmission();
-  if (verb == "mcvideo-receive" || verb == "mcvideo-stop-receiving" || verb == "mcvideo-end")
-    return mcvideo_reception_command(verb);
+  if (verb == "mcvideo-end" || verb == "mcvideo-release") return mcvideo_end_transmission();
+  if (verb == "mcvideo-receive" || verb == "mcvideo-stop-receiving") return mcvideo_reception_command(verb);
   if (verb == "mcvideo-hangup") return mcvideo_hangup_command();
   throw std::runtime_error("unknown MCVideo command");
 }
@@ -485,17 +484,9 @@ void Client::mcvideo_answer_command(const std::string &verb) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.581 clause 6.2.4: mcvideo-receive, mcvideo-stop-receiving or mcvideo-end: transmission control requests
-// about reception, and the end of this user's transmission.
+// TS 24.581 clause 6.2.5: mcvideo-receive or mcvideo-stop-receiving: transmission control requests about reception.
 void Client::mcvideo_reception_command(const std::string &verb) {
   if (!mcvideo_call_) throw std::runtime_error("no MCVideo call");
-  if (verb == "mcvideo-end") {
-    // TS 24.581 clause 6.2.4.5.3: Transmission End Request (TS 24.581 clause 9.2.20) instead of Transmission
-    // Release.
-    if (!mcvideo_call_->granted) throw std::runtime_error("not transmitting MCVideo");
-    mcvideo_call_->granted = false;
-    return mcvideo_send_control(transmission::Type::EndRequest);
-  }
   return mcvideo_send_control(verb == "mcvideo-receive" ? transmission::Type::ReceiveMediaRequest
                                                         : transmission::Type::ReceptionEndRequest);
 }
@@ -525,6 +516,7 @@ void Client::mcvideo_status() {
   status_["mcvideo_affiliation_p_id"] = {{"sent", mcvideo_sent_pid_}, {"received", mcvideo_received_pid_}};
   status_["mcvideo_last_result"] = mcvideo_last_result_;
   status_["mcvideo_functional_aliases"] = mcvideo_aliases_;
+  status_["mcvideo_takeover_possible_aliases"] = mcvideo_takeover_possible_;
   status_["mcvideo_functional_alias_in_use"] = mcvideo_alias_in_use_;
   status_["mcvideo_functional_alias_result"] = mcvideo_fa_result_;
   status_["mcvideo_functional_alias_redirect"] = mcvideo_redirect_;

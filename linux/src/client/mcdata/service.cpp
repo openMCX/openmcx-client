@@ -231,7 +231,7 @@ void Client::mcdata_send_enhanced_status(const std::string &group, const std::st
 // the identity of an ad hoc group already created ("group=<ad hoc group>").
 // Returns the participants to list in an application/resource-lists+xml body.
 std::vector<std::string> Client::mcdata_adhoc_target(const std::string &spec, mcdata::Info &info) const {
-  require_profile({"allow-adhoc-group-data-comn"});
+  require_mcdata_profile({"allow-adhoc-group-data-comn"});
   std::vector<std::string> participants;
   if (spec.starts_with("criteria="))
     info.participant_criteria = spec.substr(9);
@@ -267,7 +267,7 @@ void Client::mcdata_adhoc_answered(const SipResponse &response) {
 // (Multiple Choices) response to a functional alias target sends it again to the selected MCData ID.
 void Client::mcdata_send_sds(const SdsRequest &request) {
   if (!mcdata_authorized_) throw std::runtime_error("SDS requires MCData service authorisation");
-  require_profile({"allow-transmit-data"}); // TS 24.282 clause 11.1 step 1
+  require_mcdata_profile({"allow-transmit-data"}); // TS 24.282 clause 11.1 step 1
   mcdata::Info info;
   info.request_type = request.type;
   std::vector<std::string> participants;

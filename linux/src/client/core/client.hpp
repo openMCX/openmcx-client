@@ -197,6 +197,14 @@ class Client {
   // the last status-change request, and the alias a redirected call was made to.
   std::string functional_alias_, pending_called_alias_, mode_for_redirect_ = "auto";
   std::vector<std::string> requested_aliases_;
+  // TS 24.379 clause 9A.2.1.3: the subscription to this user's functional alias status (its dialog, set up before
+  // the first status change, clause 9A.2.1.1), whether it was answered, the status changes waiting for that answer,
+  // the aliases the last NOTIFY listed active and those it offered for take-over, and the aliases the user asked to
+  // take over before they were offered.
+  std::string alias_status_dialog_;
+  bool alias_status_answered_ = false;
+  std::vector<std::string> pending_alias_commands_;
+  std::set<std::string> active_aliases_, takeover_possible_aliases_, takeover_wanted_;
   // Private call call-back entries (TS 24.379 clause 11.1.5, tables G.13-1 and G.13-2): requesting
   // side MCPTT ID -> "PCCB-I2/3/4" state, target side MCPTT ID -> request data.
   Json pccb_requesting_ = Json::object(), pccb_target_ = Json::object();
@@ -312,8 +320,13 @@ class Client {
   Json service_priorities(const std::string &service) const;
   // The MCVideo user profile document (TS 24.484 clause 9.3) as read at start-up.
   Json mcvideo_profile_ = Json::object();
+  // Granted <ruleset> actions of the MCData user profile document (TS 24.484 clause 10.3) read at start-up: the
+  // MCData rights the MCData client checks (TS 24.282 clause 6.2.8.1).
+  std::set<std::string> mcdata_profile_actions_;
+  bool mcdata_profile_loaded_ = false;
 
   void require_profile(std::initializer_list<const char *> actions) const;
+  void require_mcdata_profile(std::initializer_list<const char *> actions) const;
 
   // Ad hoc group emergency alerts (TS 24.379 clause 12.1A.1): the group of this user's own
   // alert, and the alerts received from others by group.
@@ -742,6 +755,9 @@ private:
   void adhoc_call(const std::string &arguments);
 
   void functional_alias_command(const std::string &arguments);
+  void publish_functional_alias(const std::string &action, const std::vector<std::string> &aliases, bool take_over);
+  void alias_status_subscribe();
+  SipResponse alias_status_notify(const SipMessage &message);
 
   void send_service_message(const std::string &target, McpttInfo info,
                             std::function<void(const SipResponse &)> done = {});
@@ -860,7 +876,7 @@ private:
   void mcvideo_adhoc_command(const std::string &argument, std::istringstream &words);
   // "mcvideo-answer", "mcvideo-reject": answer a ringing call (TS 24.281 clause 10.2.2.2.2).
   void mcvideo_answer_command(const std::string &verb);
-  // "mcvideo-receive", "mcvideo-stop-receiving", "mcvideo-end": transmission control requests (TS 24.581 clause 6.2.4).
+  // "mcvideo-receive", "mcvideo-stop-receiving": reception control requests (TS 24.581 clause 6.2.5).
   void mcvideo_reception_command(const std::string &verb);
   // "mcvideo-hangup": release the MCVideo call.
   void mcvideo_hangup_command();
@@ -987,6 +1003,9 @@ private:
   // ---- MCVideo functional aliases, mcvideo/functional_alias.cpp (TS 24.281 clause 20). The aliases the server confirmed
   // active for this user, the one presented in calls, and the last change's result.
   std::set<std::string> mcvideo_aliases_;
+  // TS 24.281 clause 20.2.1.2 step 6 d): the aliases this user's status NOTIFY offered as "take-over-possible", and
+  // those the user asked to take over before they were offered.
+  std::set<std::string> mcvideo_takeover_possible_, mcvideo_takeover_wanted_;
   std::string mcvideo_alias_in_use_;
   Json mcvideo_fa_result_ = nullptr, mcvideo_redirect_ = nullptr;
   // A call placed to an alias, until its final response: generation, alias and mode.
@@ -1122,7 +1141,7 @@ private:
 
   Json mcvideo_remote_result_;
 
-  void mcvideo_release_transmission();
+  void mcvideo_end_transmission();
 
   void mcvideo_control_packet(const Datagram &datagram);
 
@@ -1725,6 +1744,7 @@ public:
   explicit Client(Json cfg, bool disable_tls);
 
   void read_mcvideo_profile();
+  void read_mcdata_profile();
 
   bool mcvideo_profile_allows(const std::string &action) const;
 

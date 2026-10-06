@@ -555,13 +555,16 @@ void Client::mcvideo_remote_transmission(const std::string &target, bool start) 
 }
 
 //------------------------------------------------------------------------------
-// TS 24.581 clause 9.2.7: the user ends the transmission: send Transmission Release (the Transmission End Request of
-// TS 24.581 clause 6.2.4.5.3 is the "mcvideo-end" command).
-void Client::mcvideo_release_transmission() {
+// TS 24.581 clause 6.2.4.5.3: the user ends the transmission ("mcvideo-end", or its older name "mcvideo-release"):
+// send Transmission end request (TS 24.581 clause 9.2.20); the server answers with Transmission end response. On-network
+// the transmission participant never sends Transmission Release (TS 24.581 clause 9.2.7): clause 6.2.4 has no state
+// that sends it. T101 retransmission is not implemented. Ending a pending or queued request (TS 24.581 clauses 6.2.4.4.7
+// and 6.2.4.9.4) is not supported.
+void Client::mcvideo_end_transmission() {
   if (!mcvideo_call_ || !mcvideo_call_->granted) throw std::runtime_error("not transmitting MCVideo");
   mcvideo_call_->granted = false;
-  mcvideo_send_control(transmission::Type::Release);
-  event("mcvideo_transmission_released");
+  mcvideo_send_control(transmission::Type::EndRequest);
+  event("mcvideo_transmission_ended");
 }
 
 //------------------------------------------------------------------------------

@@ -23,9 +23,9 @@ clients, in [openmcx-admin](https://github.com/openMCX/openmcx-admin).
 **Containerised** Linux client and dispatcher (Docker); the **Android** app for Android 11 and later (tested on Android 13 and 16 phones), built in Docker
 too ([building](#build)).
 
-**Try it**: [Tutorial 1: MCX over WLAN with the Android app](https://github.com/openMCX/openmcx-server/blob/main/tutorials/01-mcx-over-wlan-android/README.md)
+**Try it**: [Tutorial 1: MCX over WLAN with the Android app](https://github.com/openMCX/openmcx-server/blob/main/tutorials/end-to-end/01-mcx-over-wlan-android/README.md)
 puts the app on two phones against the system from the Docker Hub images, and
-[Tutorial 2](https://github.com/openMCX/openmcx-server/blob/main/tutorials/02-dispatcher-with-android/README.md) adds the
+[Tutorial 2](https://github.com/openMCX/openmcx-server/blob/main/tutorials/end-to-end/02-dispatcher-with-android/README.md) adds the
 dispatcher position ([all tutorials](https://github.com/openMCX/openmcx-server/blob/main/tutorials/README.md)). The
 ready-built app is [`android/apk/openmcx-client-v1.apk`](android/apk).
 

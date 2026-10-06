@@ -49,7 +49,7 @@ void Client::ipcon_reset() {
 // SIP 200 (OK) response the tunnel of TS 24.582 clause 13.1.2 is up.
 void Client::ipcon_open(const std::string &target, bool to_alias, const std::string &called_alias) {
   if (!mcdata_authorized_) throw std::runtime_error("IP connectivity requires MCData service authorisation");
-  require_profile({"allow-transmit-data"});
+  require_mcdata_profile({"allow-transmit-data"});
   if (ipcon_socket_) throw std::runtime_error("an IP connectivity session is already open");
   if (ipcon_address().empty())
     throw std::runtime_error("no IP connectivity address is configured (mcdata.ipconn.address)");

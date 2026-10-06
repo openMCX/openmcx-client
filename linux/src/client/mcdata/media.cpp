@@ -106,8 +106,8 @@ void Client::mcdata_open_session(const std::string &target, bool group, const st
     throw std::runtime_error("ad hoc group emergency and imminent peril communications are not implemented");
   if (imminent && !group) throw std::runtime_error("imminent peril applies to group communications");
   // TS 24.282 clause 6.2.8.3.1.1 for a one-to-one communication, clause 6.2.8.1.8 for a group one.
-  if (emergency) require_profile({group ? "allow-emergency-group-call" : "allow-emergency-private-call"});
-  if (imminent) require_profile({"allow-imminent-peril-call"});
+  if (emergency) require_mcdata_profile({group ? "allow-emergency-group-call" : "allow-emergency-private-call"});
+  if (imminent) require_mcdata_profile({"allow-imminent-peril-call"});
   mcdata::Info info;
   info.request_type = adhoc ? "adhoc-group-sds-session" : group ? "group-sds-session" : "one-to-one-sds-session";
   info.client_id = client_id();
@@ -169,7 +169,7 @@ void Client::mcdata_session_priority_state(mcdata::Info &info, const std::string
     mcdata_emergency_ = true;
     if (with_alert) {
       // TS 24.282 clause 6.2.8.1.1 step 3: the alert needs its own authorisation (clause 6.2.8.1.6) and location.
-      require_profile({"allow-activate-emergency-alert"});
+      require_mcdata_profile({"allow-activate-emergency-alert"});
       mdea_ = 2; // MDEA 2: emergency-alert-confirm-pending
       mcdata_alert_group_ = target;
     }
@@ -254,9 +254,9 @@ void Client::mcdata_session_priority(bool emergency, bool enable) {
   if (!emergency && !group) throw std::runtime_error("imminent peril applies to group communications");
   if (group) return mcdata_group_priority(emergency, enable);
   if (enable)
-    require_profile({"allow-emergency-private-call"}); // TS 24.282 clause 6.2.8.3.1.1
+    require_mcdata_profile({"allow-emergency-private-call"}); // TS 24.282 clause 6.2.8.3.1.1
   else
-    require_profile({"allow-cancel-private-emergency-call"}); // TS 24.282 clause 6.2.8.3.1.2
+    require_mcdata_profile({"allow-cancel-private-emergency-call"}); // TS 24.282 clause 6.2.8.3.1.2
   if (enable == mcdata_session_emergency_)
     throw std::runtime_error(enable ? "the session is already an emergency communication"
                                     : "the session is not an emergency communication");
@@ -308,10 +308,10 @@ void Client::mcdata_session_priority(bool emergency, bool enable) {
 // TS 24.282 clauses 6.2.8.1.1, 6.2.8.1.3, 6.2.8.1.9 and 6.2.8.1.11: the group counterpart: the in-progress emergency
 // or imminent peril state of the group of this session is raised or cancelled with a re-INVITE.
 void Client::mcdata_group_priority(bool emergency, bool enable) {
-  if (emergency && enable) require_profile({"allow-emergency-group-call"});    // TS 24.282 clause 6.2.8.1.8
-  if (emergency && !enable) require_profile({"allow-cancel-group-emergency"}); // TS 24.282 clause 6.2.8.1.7
-  if (!emergency && enable) require_profile({"allow-imminent-peril-call"});    // TS 24.282 clause 6.2.8.1.8
-  if (!emergency && !enable) require_profile({"allow-cancel-imminent-peril"}); // TS 24.282 clause 6.2.8.1.10
+  if (emergency && enable) require_mcdata_profile({"allow-emergency-group-call"}); // TS 24.282 clause 6.2.8.1.8
+  // TS 24.282 clause 6.2.8.1.7: cancelling the group's emergency state is left to local policy (no profile right).
+  if (!emergency && enable) require_mcdata_profile({"allow-imminent-peril-call"});    // TS 24.282 clause 6.2.8.1.8
+  if (!emergency && !enable) require_mcdata_profile({"allow-cancel-imminent-peril"}); // TS 24.282 clause 6.2.8.1.10
   if (emergency && enable && mdeg_ == 2) throw std::runtime_error("the group is already in an emergency state");
   if (emergency && !enable && mdeg_ != 2) throw std::runtime_error("the group is not in an emergency state");
   if (!emergency && enable && mdig_ == 2) throw std::runtime_error("the group is already in an imminent peril state");
@@ -392,7 +392,7 @@ void Client::mcdata_group_priority(bool emergency, bool enable) {
 // TS 24.582 clause 6.1.2.4: an SDS message inside an open session.
 void Client::mcdata_session_send(const std::string &text, mcdata::DispositionRequest disposition) {
   if (!mcdata_media_ || !mcdata_media_session_) throw std::runtime_error("no MCData SDS session is open");
-  require_profile({"allow-transmit-data"});
+  require_mcdata_profile({"allow-transmit-data"});
   mcdata::SdsSignalling signalling;
   signalling.date_time = static_cast<std::uint64_t>(std::time(nullptr));
   signalling.conversation = mcdata_media_conversation_;
@@ -415,7 +415,7 @@ void Client::mcdata_session_send(const std::string &text, mcdata::DispositionReq
 void Client::mcdata_send_file_media(const std::string &target, bool group, const std::string &path, bool mandatory,
                                     bool completion) {
   if (!mcdata_authorized_) throw std::runtime_error("file distribution requires MCData service authorisation");
-  require_profile({"allow-transmit-data"}); // TS 24.282 clause 11.1 step 1
+  require_mcdata_profile({"allow-transmit-data"}); // TS 24.282 clause 11.1 step 1
   if (mcdata_media_) throw std::runtime_error("an MCData media plane session is already open");
   std::ifstream file(path, std::ios::binary);
   if (!file) throw std::runtime_error("cannot read " + path);
@@ -489,7 +489,7 @@ void Client::mcdata_send_file_media(const std::string &target, bool group, const
 // media plane; the payload is sent once the MSRP connection is bound.
 void Client::mcdata_send_media_sds(const std::string &target, const std::string &text, bool group) {
   if (!mcdata_authorized_) throw std::runtime_error("SDS requires MCData service authorisation");
-  require_profile({"allow-transmit-data"});
+  require_mcdata_profile({"allow-transmit-data"});
   if (mcdata_media_) throw std::runtime_error("an MCData media plane session is already open");
   const bool adhoc = target.starts_with("adhoc="); // TS 24.282 clause 24.2.2.1.1 step 5
   mcdata::Info info;

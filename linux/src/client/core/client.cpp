@@ -168,6 +168,8 @@ void Client::save_status(std::uint64_t now) {
   status_["profile_actions"] = profile_actions_;
   status_["enforce_profile_ruleset"] = cfg_.at("mcptt").value("enforce_profile_ruleset", true);
   status_["requested_functional_aliases"] = requested_aliases_;
+  status_["active_functional_aliases"] = active_aliases_;
+  status_["takeover_possible_functional_aliases"] = takeover_possible_aliases_;
   status_["audio_ssrc"] = audio_ssrc_;
   status_["floor_control"] = !no_floor();
   status_["pending_floor_confirmation"] = floor_timers_.awaiting_user_confirmation();
@@ -292,6 +294,30 @@ void Client::read_mcvideo_profile() {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.484 clause 10.3.1A: the MCData client reads its MCData user profile, of the profile index in use; its
+// ruleset holds the MCData rights (clause 10.3.2.1 item 11 b) that TS 24.282 has the client check.
+void Client::read_mcdata_profile() {
+  const auto index = profile_index_;
+  const auto path = "/xcap-root/org.3gpp.mcdata.user-profile/users/" + url_encode(mcdata_user()) +
+                    "/mcdata-user-profile-" + std::to_string(index) + ".xml";
+  auto response = http_.request("GET", cfg_.at("endpoints").at("cms").get<std::string>() + path, {},
+                                {{"Authorization", "Bearer " + token_}});
+  if (response.status != 200 || !response.headers.contains("etag"))
+    throw std::runtime_error("MCData user profile retrieval failed: " + std::to_string(response.status));
+  const auto profile = parse_mcdata_profile(response.body);
+  if (profile.user_id != mcdata_user() || profile.profile_index != index)
+    throw std::runtime_error("MCData user profile of another user or index");
+  mcdata_profile_actions_ = profile.actions;
+  mcdata_profile_loaded_ = true;
+  status_["mcdata_profile"] = {{"user_id", profile.user_id},
+                               {"profile_index", profile.profile_index},
+                               {"actions", profile.actions},
+                               {"etag", response.headers.at("etag")}};
+  event("document_retrieved", {{"resource", path}, {"bytes", response.body.size()}});
+  event("mcdata_profile_read", {{"actions", profile.actions.size()}});
+}
+
+//------------------------------------------------------------------------------
 // Helper: whether the MCVideo user profile read at start-up grants an action (an element of <actions> set to true,
 // TS 24.484 clause 9.3.2).
 bool Client::mcvideo_profile_allows(const std::string &action) const {
@@ -311,6 +337,7 @@ void Client::run() {
   schedule_token_renewal();
   load_user_documents();
   if (mcvideo_enabled()) read_mcvideo_profile();
+  if (mcdata_enabled()) read_mcdata_profile();
   read_service_configurations();
   if (protected_media() || protected_floor()) {
     provision_keys();

@@ -194,7 +194,7 @@ std::vector<SipHeader> Client::mcdata_fd_headers() const {
 // (Multiple Choices) response to a functional alias target sends it again to the selected MCData ID.
 void Client::mcdata_send_file(const FdRequest &request) {
   if (!mcdata_authorized_) throw std::runtime_error("file distribution requires MCData service authorisation");
-  require_profile({"allow-transmit-data"}); // TS 24.282 clause 11.1 step 1
+  require_mcdata_profile({"allow-transmit-data"}); // TS 24.282 clause 11.1 step 1
   std::string name, digest;
   std::uint64_t size = 0;
   std::string url = request.url_override;

@@ -1,4 +1,5 @@
-// Functional aliases: the MCPTT client's functional alias status change (activation, takeover, deactivation).
+// Functional aliases: the MCPTT client's functional alias status change (activation, takeover, deactivation) and the
+// determination of its own functional alias status.
 //
 // Specifications: TS 24.379 V19.7.0 (Rel-19).
 
@@ -8,8 +9,11 @@ namespace mcx {
 
 //------------------------------------------------------------------------------
 // TS 24.379 clause 9A.2.1.2: the functional alias status change procedure: send a SIP PUBLISH with the
-// functional alias request to activate, take over or deactivate aliases; record the result and signal the location
-// trigger. Command:
+// functional alias request to activate, take over or deactivate aliases. The answer only says the request was taken;
+// the outcome per alias comes in the NOTIFY of the status subscription (clause 9A.2.1.3), which clause 9A.2.1.1 sets up
+// first. A take-over asked by the user carries <take-over> only for the aliases the NOTIFY offered as
+// "take-over-possible" (clause 9A.2.1.2 step 6 d) and NOTE 4); the others are asked for as activations and taken over
+// once offered. Command:
 //   fa activate|takeover|deactivate <alias>...   fa use <alias>|none
 void Client::functional_alias_command(const std::string &arguments) {
   std::istringstream words(arguments);
@@ -25,33 +29,158 @@ void Client::functional_alias_command(const std::string &arguments) {
   if ((action != "activate" && action != "takeover" && action != "deactivate") || aliases.empty() || !authorized_)
     throw std::runtime_error("usage: fa activate|takeover|deactivate <alias>...");
   if (action == "takeover") require_profile({"allow-takeover-functional-alias-other-user"});
-  FunctionalAliasRequest request{user(), client_id(), random_id(), aliases, action == "takeover"};
+  // TS 24.379 clause 9A.2.1.1: the status determination for the user before the status change.
+  if (!alias_status_answered_) {
+    pending_alias_commands_.push_back(arguments);
+    if (alias_status_dialog_.empty()) alias_status_subscribe();
+    return;
+  }
+  if (action != "takeover") {
+    for (const auto &requested : aliases) takeover_wanted_.erase(requested);
+    publish_functional_alias(action, aliases, false);
+    return;
+  }
+  std::vector<std::string> possible, activations;
+  for (const auto &requested : aliases)
+    (takeover_possible_aliases_.contains(requested) ? possible : activations).push_back(requested);
+  if (!possible.empty()) publish_functional_alias(action, possible, true);
+  if (!activations.empty()) {
+    takeover_wanted_.insert(activations.begin(), activations.end());
+    publish_functional_alias(action, activations, false);
+  }
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9A.2.1.2: the SIP PUBLISH of one status change: Expires 4294967295 to activate (step 4), 0 to
+// deactivate (step 5), the per-user PIDF with a new <p-id-fa> (step 6 e)) and <take-over> when `take_over`.
+void Client::publish_functional_alias(const std::string &action, const std::vector<std::string> &aliases,
+                                      bool take_over) {
+  FunctionalAliasRequest request{user(), client_id(), random_id(), aliases, take_over};
   McpttInfo info;
   info.request_uri = user();
   info.client_id = client_id();
   const auto boundary = "mcx-" + random_id();
   const auto body =
       multipart_body({info_parts(info).front(), {"application/pidf+xml", functional_alias_xml(request)}}, boundary);
+  status_["last_fa_result"] = {{"action", action},
+                               {"aliases", aliases},
+                               {"status", 0},
+                               {"take_over", take_over},
+                               {"p_id_fa", request.publish_id},
+                               {"outcomes", Json::object()}};
   sip_.publish(service(), "multipart/mixed; boundary=" + boundary, body,
                {{"Event", "presence"},
                 {"Expires", action == "deactivate" ? "0" : "4294967295"},
                 {"P-Preferred-Service", mcptt_icsi}},
-               [this, action, aliases](const SipResponse &response) {
+               [this, action, aliases, pid = request.publish_id](const SipResponse &response) {
                  if (response.status_code < 200) return;
-                 status_["last_fa_result"] = {
-                     {"action", action}, {"aliases", aliases}, {"status", response.status_code}};
+                 if (status_["last_fa_result"].value("p_id_fa", "") == pid) {
+                   status_["last_fa_result"]["status"] = response.status_code;
+                   status_["last_fa_result"]["warning"] = std::string(get_header(response.headers, "Warning"));
+                 }
                  if (response.status_code == 200) {
                    for (const auto &requested : aliases) {
                      std::erase(requested_aliases_, requested);
                      if (action != "deactivate") requested_aliases_.push_back(requested);
                    }
-                   if (!aliases.empty()) location_alias_ = aliases.front();
-                   location_signal(action == "deactivate" ? location::Event::FunctionalAliasDeactivation
-                                                          : location::Event::FunctionalAliasActivation);
-                 } else
+                 } else {
+                   for (const auto &requested : aliases) takeover_wanted_.erase(requested);
                    failure("functional alias " + action + ": " + std::to_string(response.status_code));
+                 }
                });
-  event("functional_alias_requested", {{"action", action}, {"aliases", aliases}});
+  event("functional_alias_requested", {{"action", action}, {"aliases", aliases}, {"take_over", take_over}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9A.2.1.3 steps 1 to 4: subscribe to this user's functional alias status: the mcptt-info body names
+// the user with <request-type> "functional-alias-status-determination", Expires 4294967295 for the state and its
+// changes. The status changes held back wait for the answer; a refusal lets them go without it.
+void Client::alias_status_subscribe() {
+  McpttInfo info;
+  info.request_uri = user();
+  info.client_id = client_id();
+  info.service["request-type"] = "functional-alias-status-determination";
+  const auto part = info_parts(info).front();
+  alias_status_dialog_ = sip_.subscribe(
+      service(), "presence", 4294967295u, {{"P-Preferred-Service", mcptt_icsi}, {"Accept", "application/pidf+xml"}},
+      [this](const SipResponse &response) {
+        if (response.status_code < 200) return;
+        status_["functional_alias_subscription_result"] = response.status_code;
+        if (response.status_code >= 300) alias_status_dialog_.clear();
+        alias_status_answered_ = true;
+        for (const auto &pending : std::exchange(pending_alias_commands_, {}))
+          schedule([this, pending] { functional_alias_command(pending); });
+      },
+      part.content_type, part.body);
+  event("functional_alias_subscription_requested");
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9A.2.1.3 and clause 9A.3.1.2: the NOTIFY with this user's functional alias status. It replaces the
+// aliases known active ("activated", or "deactivating" while still active) and those that may be taken over; the
+// <p-id-fa> of the last status change gives its outcome per alias. A change fires the location trigger
+// (<FunctionalAliasActivation> or <FunctionalAliasDeactivation>).
+SipResponse Client::alias_status_notify(const SipMessage &message) {
+  SipResponse response;
+  response.status_code = 200;
+  if (asserted_identity(message) != service()) {
+    response.status_code = 403;
+    return response;
+  }
+  for (const auto &part :
+       message.parts.empty() ? std::vector<BodyPart>{{message.content_type, message.body}} : message.parts) {
+    if (part.content_type != "application/pidf+xml") continue;
+    FunctionalAliasStatus notified;
+    try {
+      notified = parse_functional_alias_status(part.body);
+    } catch (const std::exception &) {
+      response.status_code = 400;
+      return response;
+    }
+    if (notified.mcdata || notified.mcvideo || notified.per_alias || notified.entity != user()) {
+      response.status_code = 400;
+      return response;
+    }
+    std::set<std::string> active, possible;
+    for (const auto &entry : notified.entries)
+      if (entry.status == "activated" || entry.status == "deactivating")
+        active.insert(entry.alias);
+      else if (entry.status == "take-over-possible")
+        possible.insert(entry.alias);
+    for (const auto &alias : active)
+      if (!active_aliases_.contains(alias)) {
+        location_alias_ = alias;
+        location_signal(location::Event::FunctionalAliasActivation);
+      }
+    for (const auto &alias : active_aliases_)
+      if (!active.contains(alias)) {
+        location_alias_ = alias;
+        location_signal(location::Event::FunctionalAliasDeactivation);
+      }
+    active_aliases_ = active;
+    takeover_possible_aliases_ = possible;
+    auto &last = status_["last_fa_result"];
+    if (!notified.publish_id.empty() && last.is_object() && last.value("p_id_fa", "") == notified.publish_id) {
+      for (const auto &alias : last["aliases"].get<std::vector<std::string>>())
+        last["outcomes"][alias] = active.contains(alias)           ? "activated"
+                                  : possible.contains(alias)       ? "take-over-possible"
+                                  : last["action"] == "deactivate" ? "deactivated"
+                                                                   : "refused";
+      // The take-over the user asked for, now that the alias is offered; a refused one is dropped.
+      std::vector<std::string> take_over;
+      for (const auto &alias : last["aliases"].get<std::vector<std::string>>())
+        if (takeover_wanted_.erase(alias) && possible.contains(alias)) take_over.push_back(alias);
+      if (!take_over.empty()) schedule([this, take_over] { publish_functional_alias("takeover", take_over, true); });
+    }
+    event("functional_alias_notified", {{"p_id_fa", notified.publish_id},
+                                        {"active", active_aliases_},
+                                        {"take_over_possible", takeover_possible_aliases_}});
+  }
+  if (get_header(message.headers, "Subscription-State").starts_with("terminated")) {
+    alias_status_dialog_.clear();
+    alias_status_answered_ = false;
+  }
+  return response;
 }
 
 } // namespace mcx

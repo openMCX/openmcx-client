@@ -17,7 +17,11 @@ std::string Client::mcvideo_presented_alias() const {
 //------------------------------------------------------------------------------
 // TS 24.281 clause 20.2.1.2: the functional alias status change procedure: a PUBLISH to the participating function
 // with the mcvideo-info body naming this user and the per-user PIDF (namespace urn:3gpp:ns:mcvideoPresInfoFA:1.0):
-// Expires 4294967295 to activate or take over the listed aliases (step 4), 0 to deactivate them (step 5).
+// Expires 4294967295 to activate or take over the listed aliases (step 4), 0 to deactivate them (step 5). The answer
+// only says the request was taken: with the subscription to this user's status (clause 20.2.1.1) its NOTIFY gives the
+// outcome; without it, the client counts an accepted request as done. <take-over> is sent only for aliases that
+// NOTIFY offered as "take-over-possible" (step 6 d)); a take-over asked earlier goes as an activation and follows
+// once offered.
 void Client::mcvideo_functional_alias(const std::string &action, const std::vector<std::string> &aliases) {
   if (action == "use") {
     if (aliases.size() != 1) throw std::runtime_error("mcvideo-fa use <alias>|none");
@@ -30,17 +34,34 @@ void Client::mcvideo_functional_alias(const std::string &action, const std::vect
   McpttInfo info;
   info.request_uri = mcvideo_user();
   info.client_id = client_id();
-  FunctionalAliasRequest request{mcvideo_user(), client_id(), random_id(), aliases, action == "takeover"};
+  const bool offered = std::all_of(aliases.begin(), aliases.end(),
+                                   [&](const auto &alias) { return mcvideo_takeover_possible_.contains(alias); });
+  for (const auto &alias : aliases)
+    if (action == "takeover" && !offered)
+      mcvideo_takeover_wanted_.insert(alias);
+    else
+      mcvideo_takeover_wanted_.erase(alias);
+  FunctionalAliasRequest request{mcvideo_user(), client_id(), random_id(), aliases, action == "takeover" && offered};
   request.mcvideo = true;
-  mcvideo_fa_result_ = {{"action", action}, {"aliases", aliases}, {"status", 0}, {"p_id_fa", request.publish_id}};
+  mcvideo_fa_result_ = {{"action", action},
+                        {"aliases", aliases},
+                        {"status", 0},
+                        {"p_id_fa", request.publish_id},
+                        {"take_over", request.take_over},
+                        {"outcomes", Json::object()}};
   mcvideo_request("presence",
                   {{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
                    {"application/pidf+xml", functional_alias_xml(request)}},
                   {{"Expires", action == "deactivate" ? "0" : "4294967295"}},
-                  [this, action, aliases](const SipResponse &response) {
+                  [this, action, aliases, pid = request.publish_id](const SipResponse &response) {
                     if (response.status_code < 200) return;
-                    mcvideo_fa_result_["status"] = response.status_code;
-                    if (response.status_code == 200)
+                    if (mcvideo_fa_result_.value("p_id_fa", "") == pid)
+                      mcvideo_fa_result_["status"] = response.status_code;
+                    if (response.status_code != 200)
+                      for (const auto &alias : aliases) mcvideo_takeover_wanted_.erase(alias);
+                    const bool followed = std::any_of(mcvideo_alias_dialogs_.begin(), mcvideo_alias_dialogs_.end(),
+                                                      [](const auto &dialog) { return dialog.second.empty(); });
+                    if (response.status_code == 200 && !followed)
                       for (const auto &alias : aliases) {
                         if (action == "deactivate")
                           mcvideo_aliases_.erase(alias);
@@ -119,11 +140,30 @@ SipResponse Client::mcvideo_alias_notify(const SipMessage &message) {
       return response;
     }
     if (alias.empty() && !notified.per_alias && notified.entity == mcvideo_user()) {
-      std::set<std::string> active;
+      std::set<std::string> active, possible;
       for (const auto &entry : notified.entries)
-        if (entry.status == "activated") active.insert(entry.alias);
+        if (entry.status == "activated" || entry.status == "deactivating")
+          active.insert(entry.alias);
+        else if (entry.status == "take-over-possible")
+          possible.insert(entry.alias);
       mcvideo_aliases_ = active;
+      mcvideo_takeover_possible_ = possible;
       mcvideo_alias_status_known_ = true;
+      // The outcome of this client's last change, by its <p-id-fa>; the take-over the user asked for follows
+      // once the alias is offered.
+      if (!notified.publish_id.empty() && mcvideo_fa_result_.is_object() &&
+          mcvideo_fa_result_.value("p_id_fa", "") == notified.publish_id) {
+        std::vector<std::string> take_over;
+        for (const auto &changed : mcvideo_fa_result_["aliases"].get<std::vector<std::string>>()) {
+          mcvideo_fa_result_["outcomes"][changed] = active.contains(changed)     ? "activated"
+                                                    : possible.contains(changed) ? "take-over-possible"
+                                                    : mcvideo_fa_result_["action"] == "deactivate" ? "deactivated"
+                                                                                                   : "refused";
+          if (mcvideo_takeover_wanted_.erase(changed) && possible.contains(changed)) take_over.push_back(changed);
+        }
+        event("mcvideo_functional_alias_result", mcvideo_fa_result_);
+        if (!take_over.empty()) schedule([this, take_over] { mcvideo_functional_alias("takeover", take_over); });
+      }
     } else if (!alias.empty() && notified.entity == alias && (notified.per_alias || notified.entries.empty())) {
       std::vector<std::string> users;
       for (const auto &entry : notified.entries) users.push_back(entry.user);

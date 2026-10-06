@@ -23,10 +23,11 @@ void Client::mcdata_alert(bool activate, std::string group, const std::string &o
   if (!mcdata_authorized_) throw std::runtime_error("emergency alert requires MCData service authorisation");
   if (group.empty()) group = activate || mcdata_alert_group_.empty() ? mcdata_group() : mcdata_alert_group_;
   if (activate)
-    require_profile({"allow-activate-emergency-alert"}); // TS 24.282 clause 6.2.8.1.6
+    require_mcdata_profile({"allow-activate-emergency-alert"}); // TS 24.282 clause 6.2.8.1.6
   else
-    require_profile({originator.empty() || originator == mcdata_user() ? "allow-cancel-emergency-alert"
-                                                                       : "allow-cancel-emergency-alert-any-user"});
+    require_mcdata_profile({originator.empty() || originator == mcdata_user()
+                                ? "allow-cancel-emergency-alert"
+                                : "allow-cancel-emergency-alert-any-user"});
   mcdata::Info info;
   info.request_uri = group;
   info.alert = activate;
@@ -121,7 +122,7 @@ void Client::mcdata_functional_alias(const std::string &action, const std::vecto
     else
       wanted.insert(alias);
   }
-  if (action == "takeover") require_profile({"allow-takeover-functional-alias-other-user"});
+  if (action == "takeover") require_mcdata_profile({"allow-takeover-functional-alias-other-user"});
   mcdata::Info info;
   info.request_uri = mcdata_user();
   std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
