@@ -298,12 +298,10 @@ void Client::group_call_command(const std::string &cmd) {
   info.session_type = chat ? "chat" : "prearranged";
   info.request_uri = group();
   info.client_id = client_id();
-  info.calling_user = user();
   // TS 24.379 clause 10.1.1.2.1.1 step 14d and clause 10.1.2.2.1.1 step 13d: the constituent group this call on a
-  // regroup is placed from. Deviation: those steps name it in <associated-group-id>, while the controlling function
-  // (clause 10.1.2.4.1.1 steps 5a and 6b) reads <mcptt-calling-group-id>; the specification is inconsistent, and
-  // this client sends <mcptt-calling-group-id>, which the openMCX server checks.
-  if (regroups_.contains(group())) info.calling_group = calling_constituent_;
+  // regroup is placed from, in <associated-group-id>; the function of that group passes it on to the controlling
+  // function in <mcptt-calling-group-id>.
+  if (regroups_.contains(group())) info.associated_group = calling_constituent_;
   info.functional_alias = functional_alias_;
   // TS 24.379 clause 10.1.2.2.1.1: a chat join may carry emergency or imminent peril.
   if (emergency || (!chat && alerts_.contains(user()))) {

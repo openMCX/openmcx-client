@@ -8,6 +8,20 @@
 
 namespace mcx {
 
+namespace {
+
+//------------------------------------------------------------------------------
+// RFC 5621: the body of the given type, the whole body or one part of a multipart/mixed body (a regroup notice
+// also carries the MC service information of the request, TS 24.379 clause 16.2.2.4 step 3 d)); null when absent.
+const std::string *body_of(const SipMessage &message, std::string_view mime) {
+  if (message.content_type.starts_with(mime)) return &message.body;
+  for (const auto &part : message.parts)
+    if (part.content_type == mime) return &part.body;
+  return nullptr;
+}
+
+} // namespace
+
 //------------------------------------------------------------------------------
 // Helper: dispatch an incoming SIP request (after XML protection checks) from the trusted core: MCVideo and MCData
 // requests to their services; NOTIFY for the group key (TS 24.481 clause 6.3.13.2.1, TS 33.180 clause 5.7), the
@@ -48,8 +62,7 @@ SipResponse Client::incoming_clear_message(const SipMessage &message) {
   // The MCVideo server's alerts (TS 24.281 clause 11.2) and in-call priority INFO (TS 24.281 clause 6.2.8.1.13),
   // before any MCPTT handling parses MCPTT information.
   // TS 24.281 clause 21.2.1.3 and clause 21.2.1.4: an MCVideo regroup notice from the MCVideo server.
-  if (mcvideo_enabled() && message.content_type.starts_with(regroup_mime_of(mcvideo_service)))
-    return mcvideo_regroup_message(message);
+  if (mcvideo_enabled() && body_of(message, regroup_mime_of(mcvideo_service))) return mcvideo_regroup_message(message);
   if (mcvideo_enabled() && message.from_uri == mcvideo_service_uri()) {
     if (auto handled = mcvideo_location_incoming(message)) return *handled;
     return mcvideo_message(message);
@@ -61,7 +74,7 @@ SipResponse Client::incoming_clear_message(const SipMessage &message) {
     return mcdata_incoming(message);
   }
   // TS 24.379 clause 16.2.1.3 and clause 16.2.1.4: the regroup this user's group has been put into.
-  if (message.content_type.starts_with(regroup_mime)) return regroup_message(message);
+  if (body_of(message, regroup_mime)) return regroup_message(message);
   const auto info = message_info(message);
   if (info.service.contains("request-type") || info.service.contains("response-type"))
     return private_service_received(message, info);
@@ -81,7 +94,7 @@ SipResponse Client::mcvideo_regroup_message(const SipMessage &message) {
   }
   Regroup regroup;
   try {
-    regroup = parse_regroup(message.body, mcvideo_service);
+    regroup = parse_regroup(*body_of(message, regroup_mime_of(mcvideo_service)), mcvideo_service);
   } catch (const std::exception &) {
     response.status_code = 403;
     return response;
@@ -101,7 +114,7 @@ SipResponse Client::regroup_message(const SipMessage &message) {
   }
   Regroup regroup;
   try {
-    regroup = parse_regroup(message.body);
+    regroup = parse_regroup(*body_of(message, regroup_mime));
   } catch (const std::exception &) {
     response.status_code = 403;
     return response;
@@ -146,8 +159,15 @@ SipResponse Client::adhoc_alert_message(const SipMessage &message, const McpttIn
       response.status_code = 403;
       return response;
     }
-    if (ah_mea_ == 2) ah_mea_ = 3;
-    own_alert_group_ = info.calling_group;
+    // TS 24.379 clause 12.1A.1.3: the receipt of this user's alert, or of its cancellation (clause 12.1A.1.2),
+    // which ends the alert.
+    if (*info.adhoc_alert) {
+      if (ah_mea_ == 2) ah_mea_ = 3;
+      own_alert_group_ = info.calling_group;
+    } else if (ah_mea_ == 4) {
+      ah_mea_ = 1;
+      own_alert_group_.clear();
+    }
   } else if (*info.adhoc_alert) {
     received_adhoc_alerts_[info.calling_group] = {{"initiator", info.calling_user},
                                                   {"criteria", info.participant_criteria}};
@@ -525,7 +545,7 @@ SipResponse Client::private_call_reinvite(const SipMessage &message) {
   }
   update_private_priority(info);
   response.local_media = local_;
-  response.parts = info_parts(info);
+  name_transfer_dialog(response, message, info);
   return response;
 }
 
@@ -555,7 +575,6 @@ SipResponse Client::group_call_reinvite(const SipMessage &message) {
   local_.floor_priority = message.remote_media->floor_priority;
   update_priority(info, message_location(message));
   response.local_media = local_;
-  response.parts = info_parts(info);
   return response;
 }
 
@@ -566,9 +585,9 @@ SipResponse Client::incoming_group(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
   auto info = message_info(message);
-  // TS 24.379 clause 16.3.1.3 with clause 16.2.1.3 step 4: a member of a user regroup is affiliated
-  // with it and takes its calls without selecting it first.
-  const bool via_regroup = user_regroup(info.calling_group) && info.calling_group != group();
+  // TS 24.379 clause 16.2.1.3 step 4 (clause 16.3.1.3 for a user regroup): a client told of a regroup is
+  // affiliated with it and takes its calls without selecting it first.
+  const bool via_regroup = regroups_.contains(info.calling_group) && info.calling_group != group();
   if (!authorized_ || (!affiliated_ && !via_regroup) || !dialog_.empty() || std::time(nullptr) >= expires_) {
     response.status_code = 486;
     return response;
@@ -602,7 +621,6 @@ SipResponse Client::incoming_group(const SipMessage &message) {
   call_group_ = via_hierarchy || via_regroup ? info.calling_group : std::string{};
   status_["calling_functional_alias"] = info.functional_alias;
   response.local_media = local_;
-  response.parts = info_parts(info);
   remember_session(message.headers);
   if (mode == "Manual" || cfg_.at("mcptt").value("answer_mode", "auto") == "manual") {
     pending_answer_ = response;
@@ -700,7 +718,6 @@ SipResponse Client::incoming_private(const SipMessage &message, const McpttInfo 
   }
   adopt_incoming_private(message, info, key, first_to_answer);
   response.local_media = local_;
-  response.parts = info_parts(info);
   name_transfer_dialog(response, message, info);
   remember_session(message.headers);
   // RFC 3891: the call replacing the current one is accepted without alerting.
@@ -749,15 +766,14 @@ void Client::adopt_incoming_private(const SipMessage &message, const McpttInfo &
 }
 
 //------------------------------------------------------------------------------
-// TS 24.379 clause 6.2.3.1.1 step 7a and clause 6.2.3.2.1: the answer to a call announcing a transfer
-// names this dialog (Call-ID, the caller's from-tag and our to-tag).
+// TS 24.379 clause 6.2.3.1.1 step 7a, clause 6.2.3.2.1 and clause 11.1.1.2.1.3 step 5A: the answer to a call
+// announcing a transfer names this dialog (Call-ID, the caller's from-tag and our to-tag). It is the only MCPTT
+// information a 200 (OK) of the MCPTT client carries; the invitation's is not echoed.
 void Client::name_transfer_dialog(SipResponse &response, const SipMessage &message, const McpttInfo &info) {
   if (info.service.contains("transfer-announced-ind") && info.service.at("transfer-announced-ind") == "true") {
-    auto answer = info;
-    answer.service = {};
     response.parts.clear();
-    response.dialog_parts = [this, answer, call_id = message.call_id](std::string_view local, std::string_view remote) {
-      auto named = answer;
+    response.dialog_parts = [call_id = message.call_id](std::string_view local, std::string_view remote) {
+      McpttInfo named;
       named.service["replaces-header-value"] =
           call_id + ";to-tag=" + std::string(local) + ";from-tag=" + std::string(remote);
       return info_parts(named);
@@ -836,7 +852,6 @@ SipResponse Client::incoming_ambient(const SipMessage &message, const McpttInfo 
                   get_header(message.headers, "Alert-Info") == "<file:///dev/null>",
                   ""};
   response.local_media = local_;
-  response.parts = info_parts(info);
   status_["call_state"] = listened_to ? "idle" : "answering";
   event(listened_to ? "ambient_listened_to" : "ambient_listening_incoming",
         {{"calling_user", info.calling_user}, {"type", type}, {"null_alert", ambient_->null_alert}});
@@ -889,7 +904,6 @@ SipResponse Client::incoming_adhoc(const SipMessage &message, const McpttInfo &i
   call_type_ = "adhoc";
   call_group_ = info.calling_group;
   response.local_media = local_;
-  response.parts = info_parts(info);
   remember_session(message.headers);
   const bool manual = mode == "Manual" || cfg_.at("mcptt").value("answer_mode", "auto") == "manual";
   if (manual) {

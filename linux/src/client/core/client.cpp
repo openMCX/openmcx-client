@@ -157,7 +157,8 @@ void Client::save_status(std::uint64_t now) {
   status_["private_alerts"] = private_alerts_;
   status_["adhoc_priority"] = adhoc_priority_;
   status_["functional_alias"] = functional_alias_;
-  status_["adhoc_alert_state"] = ah_mea_ == 3   ? "AH-MEA 3: adhoc-emergency-alert-initiated"
+  status_["adhoc_alert_state"] = ah_mea_ == 4   ? "AH-MEA 4: adhoc-emergency-alert-cancel-pending"
+                                 : ah_mea_ == 3 ? "AH-MEA 3: adhoc-emergency-alert-initiated"
                                  : ah_mea_ == 2 ? "AH-MEA 2: adhoc-emergency-alert-confirm-pending"
                                                 : "AH-MEA 1: no-adhoc-alert";
   status_["adhoc_alert_group"] = own_alert_group_;

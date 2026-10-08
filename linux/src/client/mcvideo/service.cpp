@@ -102,10 +102,10 @@ void Client::mcvideo_request(const std::string &event_name, const std::vector<Bo
   const auto boundary = "mcvideo-" + random_id();
   headers.push_back({"P-Preferred-Service", mcvideo_service.icsi});
   headers.push_back({"Event", event_name});
-  sip_.request("PUBLISH", mcvideo_service_uri(), "multipart/mixed; boundary=" + boundary,
-               multipart_body(parts, boundary), headers, [done](const SipResponse &response) {
-                 if (response.status_code >= 200) done(response);
-               });
+  const auto [type, body] = message_body(parts, boundary);
+  sip_.request("PUBLISH", mcvideo_service_uri(), type, body, headers, [done](const SipResponse &response) {
+    if (response.status_code >= 200) done(response);
+  });
 }
 
 //------------------------------------------------------------------------------

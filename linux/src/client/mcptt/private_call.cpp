@@ -107,7 +107,6 @@ std::vector<BodyPart> Client::private_call_parts(const std::string &target, bool
   McpttInfo info;
   info.session_type = "private";
   info.client_id = client_id();
-  info.calling_user = user();
   info.functional_alias = functional_alias_;
   if (to_alias) info.call_to_functional_alias = true; // TS 24.379 clause 11.1.1.2.1.1 step 14c-ii-A
   info.called_functional_alias = std::exchange(pending_called_alias_, std::string{});
@@ -288,7 +287,6 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
   McpttInfo info;
   info.session_type = "first-to-answer";
   info.client_id = client_id();
-  info.calling_user = user();
   info.functional_alias = functional_alias_;
   if (to_alias) info.call_to_functional_alias = true;
   if (alert && !emergency) throw std::runtime_error("alert requires an emergency first-to-answer call");
@@ -364,7 +362,6 @@ void Client::ambient_call(const std::string &arguments) {
   McpttInfo info;
   info.session_type = "ambient-listening"; // step 7
   info.client_id = client_id();
-  info.calling_user = user();
   info.ambient_listening_type = type; // step 8
   auto parts = info_parts(info);
   parts.push_back({resource_lists_mime, private_call_resource_list(target)}); // step 9

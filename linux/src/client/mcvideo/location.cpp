@@ -15,12 +15,13 @@ void Client::mcvideo_adhoc_alert(const std::string &arguments) {
   if (!mcvideo_authorized_) throw std::runtime_error("ad hoc alert requires MCVideo service authorisation");
   McpttInfo info;
   info.client_id = client_id();
-  info.calling_user = mcvideo_user();
   const bool cancel = arguments == "cancel";
   if (cancel) {
     if (mcvideo_adhoc_alert_group_.empty()) throw std::runtime_error("no MCVideo ad hoc alert to cancel");
     info.request_uri = mcvideo_adhoc_alert_group_;
     info.adhoc_alert = false;
+    // TS 24.281 clause 12.1A.1.2: cancel pending until the receipt (clause 12.1A.1.3) arrives.
+    mcvideo_ah_mea_ = 4;
   } else {
     if (arguments.empty()) throw std::runtime_error("mcvideo-adhoc-alert <criteria> | mcvideo-adhoc-alert cancel");
     info.adhoc_alert = true;
@@ -33,21 +34,21 @@ void Client::mcvideo_adhoc_alert(const std::string &arguments) {
         {mcvideo_service.location_mime, service_location_xml(configured_emergency_location(), mcvideo_service)});
   const auto boundary = "mcx-" + random_id();
   mcvideo_adhoc_alert_result_ = {{"cancel", cancel}, {"status", 0}, {"warning", ""}};
-  sip_.request("MESSAGE", mcvideo_service_uri(), "multipart/mixed; boundary=" + boundary,
-               multipart_body(parts, boundary), mcvideo_call_headers(), [this, cancel](const SipResponse &response) {
+  const auto [type, body] = message_body(parts, boundary); // one part as it is, several as multipart/mixed
+  sip_.request("MESSAGE", mcvideo_service_uri(), type, body, mcvideo_call_headers(),
+               [this, cancel](const SipResponse &response) {
                  if (response.status_code < 200) return;
                  mcvideo_adhoc_alert_result_ = {{"cancel", cancel},
                                                 {"status", response.status_code},
                                                 {"warning", std::string(get_header(response.headers, "Warning"))}};
                  if (response.status_code >= 300) {
+                   // A refused cancellation leaves the alert initiated.
                    if (!cancel) mcvideo_ah_mea_ = 1;
+                   if (cancel && mcvideo_ah_mea_ == 4) mcvideo_ah_mea_ = 3;
                    return;
                  }
-                 if (cancel) {
-                   mcvideo_ah_mea_ = 1;
-                   mcvideo_adhoc_alert_group_.clear();
-                   return;
-                 }
+                 // The 2xx leaves the cancellation pending; the receipt ends it.
+                 if (cancel) return;
                  for (const auto &part : response.parts.empty()
                                              ? std::vector<BodyPart>{{response.content_type, response.body}}
                                              : response.parts)
@@ -265,8 +266,9 @@ void Client::mcvideo_location_command(const std::string &cmd) {
     parts.insert(parts.begin(), {mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)});
   }
   const auto boundary = "mcx-" + random_id();
-  sip_.request("MESSAGE", mcvideo_service_uri(), "multipart/mixed; boundary=" + boundary,
-               multipart_body(parts, boundary), mcvideo_call_headers(), [this, verb](const SipResponse &response) {
+  const auto [type, body] = message_body(parts, boundary);
+  sip_.request("MESSAGE", mcvideo_service_uri(), type, body, mcvideo_call_headers(),
+               [this, verb](const SipResponse &response) {
                  if (response.status_code < 200) return;
                  mcvideo_location_result_ = {{"action", verb},
                                              {"status", response.status_code},

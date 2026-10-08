@@ -126,7 +126,6 @@ void Client::mcvideo_ambient_call(const std::string &target, const std::string &
   info.session_type = "ambient-viewing"; // step 7
   info.ambient_listening_type = type;    // step 8: <ambient-viewing-type>
   info.client_id = client_id();
-  info.calling_user = mcvideo_user();
   const auto pck = mcvideo_offer_pck(target); // step 10
   call.dialog = sip_.invite(
       mcvideo_service_uri(), call.local,
@@ -177,13 +176,12 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
   info.client_id = client_id();
   // TS 24.281 clauses 9.2.1.2.1.1 and 9.2.2.2.1.1: the activated functional alias this user presents.
   info.functional_alias = mcvideo_presented_alias();
-  // A call on a group regroup names, in <mcvideo-calling-group-id>, the constituent group it is placed from (as the
-  // MCPTT client does, TS 24.379 clause 10.1.1.2.1.1 step 14d, with the deviation recorded in commands.cpp; TS 24.281
-  // clause 21 follows TS 24.379): this user's own group if it is one of them, else the first.
+  // TS 24.281 clause 9.2.1.2.1.1 step 14 d) i): a call on a group regroup names, in <associated-group-id>, the
+  // constituent group it is placed from: this user's own group if it is one of them, else the first.
   if (mcvideo_regroups_.contains(call.group)) {
     const auto groups = mcvideo_regroups_.at(call.group).value("groups", std::vector<std::string>{});
     if (!groups.empty())
-      info.calling_group =
+      info.associated_group =
           std::find(groups.begin(), groups.end(), mcvideo_group()) != groups.end() ? mcvideo_group() : groups.front();
   }
   // TS 24.281 clauses 6.2.8.1.1 and 6.2.8.1.9: an emergency (with alert-ind false) or imminent peril group call.

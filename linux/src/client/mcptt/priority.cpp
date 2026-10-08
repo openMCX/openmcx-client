@@ -182,7 +182,6 @@ void Client::change_private_priority(bool enable, bool with_alert) {
   McpttInfo info;
   info.session_type = "private";
   info.client_id = client_id();
-  info.calling_user = user();
   info.emergency = enable;
   if (enable)
     info.alert = with_alert;
@@ -266,7 +265,6 @@ void Client::change_priority(bool emergency, bool enabled) {
   info.session_type = call_type_ == "chat" ? "chat" : "prearranged";
   info.request_uri = group();
   info.client_id = client_id();
-  info.calling_user = user();
   if (emergency) {
     info.emergency = enabled;
     if (enabled) info.alert = false;
@@ -306,7 +304,6 @@ void Client::change_alert(bool enabled, const std::string &origin) {
   McpttInfo info;
   info.request_uri = group();
   info.client_id = client_id();
-  info.calling_user = user();
   info.alert = enabled;
   info.originated_by = origin;
   const auto location = enabled ? std::optional<EmergencyLocation>{configured_emergency_location()} : std::nullopt;
@@ -314,8 +311,9 @@ void Client::change_alert(bool enabled, const std::string &origin) {
   if (location) parts.push_back({mcptt_location_mime, emergency_location_xml(*location)});
   const auto boundary = "mcx-" + random_id();
   alert_pending_ = enabled ? "start" : "cancel";
+  const auto [type, body] = message_body(parts, boundary);
   sip_.request(
-      "MESSAGE", service(), "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
+      "MESSAGE", service(), type, body,
       {{"P-Preferred-Service", mcptt_icsi},
        {"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"},
        {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt\";require;explicit"}},

@@ -371,8 +371,6 @@ class Client {
   // constituent group a call on a group regroup is placed from, empty when the selected group is not a group regroup.
   std::string calling_constituent_;
 
-  bool user_regroup(const std::string &id) const;
-
   void regroup_command(const std::string &action, const std::string &tgi, const std::string &preconfigured,
                        const std::vector<std::string> &groups, const std::vector<std::string> &users = {});
 

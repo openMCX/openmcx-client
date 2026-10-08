@@ -14,7 +14,6 @@ namespace mcx {
 void Client::send_service_message(const std::string &target, McpttInfo info,
                                   std::function<void(const SipResponse &)> done) {
   info.client_id = client_id();
-  info.calling_user = user();
   const auto boundary = "mcx-" + random_id();
   const auto body =
       multipart_body({info_parts(info).front(), {resource_lists_mime, private_call_resource_list(target)}}, boundary);
@@ -234,7 +233,6 @@ void Client::announced_transfer(const std::string &target, const std::string &ac
     media.direction = "sendonly";
     McpttInfo hold;
     hold.session_type = "private";
-    hold.calling_user = user();
     sip_.reinvite(dialog_, media, info_parts(hold), [this, target, dialog = dialog_](const SipResponse &response) {
       if (response.status_code < 200) return;
       if (response.status_code >= 300 || dialog != dialog_) {
@@ -294,7 +292,6 @@ void Client::resume_held() {
   local_.direction = "sendrecv";
   McpttInfo resume;
   resume.session_type = "private";
-  resume.calling_user = user();
   sip_.reinvite(dialog_, local_, info_parts(resume));
   event("private_call_resumed", {{"dialog", dialog_}});
 }

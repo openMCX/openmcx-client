@@ -32,12 +32,6 @@ void Client::regroup_notified(const Regroup &regroup) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.379 clause 16.2.1.3 step 3b: whether the regroup is a user regroup this client has been told it belongs to.
-bool Client::user_regroup(const std::string &id) const {
-  return regroups_.contains(id) && !regroups_.at(id).value("users", std::vector<std::string>{}).empty();
-}
-
-//------------------------------------------------------------------------------
 // TS 24.379 clause 16.2.1.1, clause 16.3.1.1 and clause 16.2.1.2: ask this user's participating function to
 // create a group or user regroup using a preconfigured group, or to remove one (SIP MESSAGE).
 void Client::regroup_command(const std::string &action, const std::string &tgi, const std::string &preconfigured,

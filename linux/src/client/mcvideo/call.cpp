@@ -47,10 +47,7 @@ void Client::mcvideo_change_priority(bool emergency, bool enabled) {
   McpttInfo info;
   info.session_type = call.type;
   info.client_id = client_id();
-  if (call.type == "private")
-    info.calling_user = mcvideo_user();
-  else
-    info.request_uri = call.group;
+  if (call.type != "private") info.request_uri = call.group;
   // TS 24.281 clause 6.2.8.1.1 step 3: an emergency comes with an alert indication (false: no alert).
   if (emergency) {
     info.emergency = enabled;
@@ -93,15 +90,15 @@ void Client::mcvideo_alert(bool enabled) {
         {mcvideo_service.location_mime, service_location_xml(configured_emergency_location(), mcvideo_service)});
   const auto boundary = "mcvideo-" + random_id();
   const auto headers = mcvideo_call_headers();
-  sip_.request("MESSAGE", mcvideo_service_uri(), "multipart/mixed; boundary=" + boundary,
-               multipart_body(parts, boundary), headers, [this, enabled](const SipResponse &response) {
-                 if (response.status_code < 200) return;
-                 mcvideo_alert_result_ = {{"action", "alert"},
-                                          {"enabled", enabled},
-                                          {"status", response.status_code},
-                                          {"warning", std::string(get_header(response.headers, "Warning"))}};
-                 if (response.status_code < 300) mcvideo_alerting_ = enabled;
-               });
+  const auto [type, body] = message_body(parts, boundary);
+  sip_.request("MESSAGE", mcvideo_service_uri(), type, body, headers, [this, enabled](const SipResponse &response) {
+    if (response.status_code < 200) return;
+    mcvideo_alert_result_ = {{"action", "alert"},
+                             {"enabled", enabled},
+                             {"status", response.status_code},
+                             {"warning", std::string(get_header(response.headers, "Warning"))}};
+    if (response.status_code < 300) mcvideo_alerting_ = enabled;
+  });
   event("mcvideo_alert_requested", {{"enabled", enabled}});
 }
 
@@ -129,8 +126,14 @@ SipResponse Client::mcvideo_message(const SipMessage &message) {
         response.status_code = 403;
         return response;
       }
-      if (mcvideo_ah_mea_ == 2) mcvideo_ah_mea_ = 3;
-      mcvideo_adhoc_alert_group_ = info.calling_group;
+      // TS 24.281 clause 12.1A.1.3: the receipt of this user's alert, or of its cancellation, which ends it.
+      if (*info.adhoc_alert) {
+        if (mcvideo_ah_mea_ == 2) mcvideo_ah_mea_ = 3;
+        mcvideo_adhoc_alert_group_ = info.calling_group;
+      } else if (mcvideo_ah_mea_ == 4) {
+        mcvideo_ah_mea_ = 1;
+        mcvideo_adhoc_alert_group_.clear();
+      }
     } else if (*info.adhoc_alert) {
       mcvideo_adhoc_alerts_[info.calling_group] = {{"initiator", info.calling_user},
                                                    {"criteria", info.participant_criteria}};
@@ -310,7 +313,6 @@ void Client::mcvideo_private_call(const std::string &target, std::string mode, b
   McpttInfo info;
   info.session_type = session_type;
   info.client_id = client_id();
-  info.calling_user = mcvideo_user();
   // TS 24.281 clause 10.2.2.2.1 step 11 c) ii): <call-to-functional-alias-ind> for a call to an alias, and
   // the alias this user presents. After a 300, <called-functional-alias-URI> names the
   // alias first called and the indication is left out (300 steps 2 and 3).
@@ -362,7 +364,6 @@ void Client::mcvideo_server_call(const std::string &session_type, const std::str
   McpttInfo info;
   info.session_type = session_type;
   info.client_id = client_id();
-  info.calling_user = mcvideo_user();
   info.video_pull_url = url;
   call.dialog = sip_.invite(
       mcvideo_service_uri(), call.local, {{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}},

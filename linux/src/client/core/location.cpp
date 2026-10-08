@@ -176,9 +176,9 @@ void Client::location_command(const std::string &cmd) {
     info.request_uri = user();
     parts.insert(parts.begin(), info_parts(info).front());
   }
-  const auto boundary = "mcx-" + random_id();
+  const auto [type, body] = message_body(parts, "mcx-" + random_id());
   sip_.request(
-      "MESSAGE", service(), "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
+      "MESSAGE", service(), type, body,
       {{"P-Preferred-Service", mcptt_icsi},
        {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt\";require;explicit"}},
       [this, verb](const SipResponse &response) {

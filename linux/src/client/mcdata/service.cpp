@@ -32,10 +32,10 @@ void Client::mcdata_request(const std::string &event_name, std::vector<BodyPart>
   parts = mcdata_seal_signalling(std::move(parts));
   headers.push_back({"P-Preferred-Service", mcdata::icsi});
   if (!event_name.empty()) headers.push_back({"Event", event_name});
-  sip_.request(method, mcdata_service(), "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
-               headers, [this, done](const SipResponse &response) {
-                 if (response.status_code >= 200) done(mcdata_opened_response(response));
-               });
+  const auto [type, body] = message_body(parts, boundary);
+  sip_.request(method, mcdata_service(), type, body, headers, [this, done](const SipResponse &response) {
+    if (response.status_code >= 200) done(mcdata_opened_response(response));
+  });
 }
 
 //------------------------------------------------------------------------------

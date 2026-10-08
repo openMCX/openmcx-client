@@ -49,7 +49,6 @@ void Client::adhoc_call(const std::string &arguments) {
   McpttInfo info;
   info.session_type = "adhoc";
   info.client_id = client_id();
-  info.calling_user = user();
   info.functional_alias = functional_alias_;
   if (info_broadcast) info.broadcast = true;
   adhoc_broadcast_ = info_broadcast;
@@ -111,12 +110,13 @@ void Client::adhoc_alert(const std::string &arguments) {
   if (!authorized_) throw std::runtime_error("ad hoc alert requires service authorization");
   McpttInfo info;
   info.client_id = client_id();
-  info.calling_user = user();
   const bool cancel = arguments == "cancel";
   if (cancel) {
     if (own_alert_group_.empty()) throw std::runtime_error("no ad hoc alert to cancel");
     info.request_uri = own_alert_group_;
     info.adhoc_alert = false;
+    // TS 24.379 clause 12.1A.1.2 step 4 f): cancel pending until the receipt (clause 12.1A.1.3) arrives.
+    ah_mea_ = 4;
   } else {
     if (arguments.empty()) throw std::runtime_error("usage: adhoc-alert <criteria> | adhoc-alert cancel");
     require_profile({"allow-activate-adhoc-group-emergency-alert"});
@@ -128,8 +128,9 @@ void Client::adhoc_alert(const std::string &arguments) {
   if (!cancel && cfg_.at("mcptt").contains("emergency_location"))
     parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
   const auto boundary = "mcx-" + random_id();
+  const auto [type, body] = message_body(parts, boundary);
   sip_.request(
-      "MESSAGE", service(), "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
+      "MESSAGE", service(), type, body,
       {{"P-Preferred-Service", mcptt_icsi},
        {"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"},
        {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt\";require;explicit"}},
@@ -138,15 +139,14 @@ void Client::adhoc_alert(const std::string &arguments) {
         status_["last_adhoc_alert_result"] = {{"status", response.status_code},
                                               {"warning", std::string(get_header(response.headers, "Warning"))}};
         if (response.status_code >= 300) {
+          // TS 24.379 clause 12.1A.1.2: a refused cancellation leaves the alert initiated.
           if (!cancel) ah_mea_ = 1;
+          if (cancel && ah_mea_ == 4) ah_mea_ = 3;
           failure("ad hoc alert: " + std::to_string(response.status_code));
           return;
         }
-        if (cancel) {
-          ah_mea_ = 1;
-          own_alert_group_.clear();
-          return;
-        }
+        // TS 24.379 clause 12.1A.1.2: the 2xx leaves the cancellation pending; the receipt ends it.
+        if (cancel) return;
         for (const auto &part : response.parts)
           if (part.content_type == mcptt_mime) own_alert_group_ = parse_mcptt_info(part.body).calling_group;
         if (response.parts.empty() && !response.body.empty())
@@ -168,7 +168,6 @@ void Client::adhoc_modify(const std::string &arguments) {
   McpttInfo info;
   info.session_type = "adhoc";
   info.client_id = client_id();
-  info.calling_user = user();
   info.calling_group = call_group_;
   std::vector<std::string> entries;
   std::istringstream words(arguments);
