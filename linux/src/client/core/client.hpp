@@ -477,6 +477,13 @@ class Client {
   std::pair<std::string, std::string> affiliation_subscribe_body();
 
   void authorize();
+  // TS 24.379 clause 7.2.1: the service authorisation in a REGISTER instead of the PUBLISH of clause 7.2.2, when
+  // mcptt.authorise_by_register is set; the SIP core passes it to the server in a third-party REGISTER.
+  [[nodiscard]] bool authorise_by_register() const;
+  [[nodiscard]] std::pair<std::string, std::string> register_body();
+  void register_authorization(std::function<void(const SipResponse &)> handler);
+  // The steps after a successful service authorisation (clause 7.2.2 or 7.2.1).
+  void service_authorized();
 
   // Log-off and log-on (core/log_off.cpp): TS 24.379, TS 24.281 and TS 24.282 clause 7.2.1A step 4 (Expires 0), and
   // the return to service. logged_off_: after "log-off", until "log-on"; nothing authorises a service meanwhile.

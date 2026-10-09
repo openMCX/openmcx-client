@@ -165,6 +165,17 @@ void Client::renew_token() {
 //------------------------------------------------------------------------------
 // TS 24.379 clause 7.2.2: the service authorisation PUBLISH again, with the renewed token.
 void Client::reauthorize() {
+  if (authorise_by_register()) {
+    register_authorization([this](const SipResponse &response) {
+      if (response.status_code < 200) return;
+      if (response.status_code != 200) {
+        authorization_lost("service authorization renewal", response);
+        return;
+      }
+      event("service_authorization_renewed");
+    });
+    return;
+  }
   auto [type, body] = publish_body(false);
   std::vector<SipHeader> headers{
       {"P-Preferred-Service", mcptt_icsi}, {"Event", "poc-settings"}, {"Expires", "4294967295"}};

@@ -148,6 +148,17 @@ void Client::authorize() {
     status_["csk_id"] = key.csb_id;
     csk_ = key;
   }
+  if (authorise_by_register()) {
+    register_authorization([this](const SipResponse &response) {
+      if (response.status_code < 200) return;
+      if (response.status_code != 200) {
+        authorization_lost("service authorization", response);
+        return;
+      }
+      service_authorized();
+    });
+    return;
+  }
   auto [type, body] = publish_body(false);
 
   // TS 24.379 clause 7.2.1A step 2: the MCPTT ICSI in P-Preferred-Service.
@@ -169,21 +180,54 @@ void Client::authorize() {
       return;
     }
     auth_etag_ = get_header(response.headers, "SIP-ETag");
-    authorization_retry_.attempts = 0;
-    authorized_ = true;
-    // TS 33.180 clause 5.4: the server holds the CSK now; the renewals of the authorisation carry none (the server
-    // refuses a CSK it already has), and a new authorisation makes a new one (authorize).
-    csk_upload_.clear();
-    event("service_authorized");
-    // The InitialLogOn trigger fires once the configuration it belongs to arrives (TS 24.379 clause 13.2.2).
-    location_logon_pending_ = !location_.configured();
-    location_signal(location::Event::InitialLogOn);
-    if (mcdata_enabled()) schedule([this] { mcdata_authorize(); });
-    if (mcvideo_enabled()) schedule([this] { mcvideo_authorize(); });
-    if (config_subscription_.empty() && cfg_.at("mcptt").value("subscribe_configuration", true))
-      schedule([this] { subscribe_configuration(); });
-    schedule([this] { subscribe_affiliation(true); });
+    service_authorized();
   });
+}
+
+//------------------------------------------------------------------------------
+// The steps after a successful service authorisation, by PUBLISH (clause 7.2.2) or by REGISTER (clause 7.2.1):
+// MCData and MCVideo authorisation, the configuration and affiliation status subscriptions (clause 9.2.1.3), then the
+// group key subscription.
+void Client::service_authorized() {
+  authorization_retry_.attempts = 0;
+  authorized_ = true;
+  // TS 33.180 clause 5.4: the server holds the CSK now; the renewals of the authorisation carry none (the server
+  // refuses a CSK it already has), and a new authorisation makes a new one (authorize).
+  csk_upload_.clear();
+  event("service_authorized");
+  // The InitialLogOn trigger fires once the configuration it belongs to arrives (TS 24.379 clause 13.2.2).
+  location_logon_pending_ = !location_.configured();
+  location_signal(location::Event::InitialLogOn);
+  if (mcdata_enabled()) schedule([this] { mcdata_authorize(); });
+  if (mcvideo_enabled()) schedule([this] { mcvideo_authorize(); });
+  if (config_subscription_.empty() && cfg_.at("mcptt").value("subscribe_configuration", true))
+    schedule([this] { subscribe_configuration(); });
+  schedule([this] { subscribe_affiliation(true); });
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 7.2.1: whether this client authorises in its REGISTER (mcptt.authorise_by_register).
+bool Client::authorise_by_register() const { return cfg_.at("mcptt").value("authorise_by_register", false); }
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 7.2.1 steps 5 and 6 (TS 33.180 clause 9.2.1.3): the REGISTER body, the mcptt-info with the access
+// token and the client ID, and the CSK upload when there is one.
+std::pair<std::string, std::string> Client::register_body() {
+  McpttInfo info;
+  info.client_id = client_id();
+  info.access_token = token_;
+  std::vector<BodyPart> parts = info_parts(info);
+  if (!csk_upload_.empty()) parts.push_back({"application/mikey", csk_upload_});
+  auto boundary = "mcx-" + random_id();
+  return {"multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary)};
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 7.2.1: a REGISTER on the existing registration, carrying the service authorisation body.
+void Client::register_authorization(std::function<void(const SipResponse &)> handler) {
+  auto [type, body] = register_body();
+  sip_.register_account(register_expires(), type, body, std::move(handler));
+  event("service_authorization_by_register");
 }
 
 //------------------------------------------------------------------------------

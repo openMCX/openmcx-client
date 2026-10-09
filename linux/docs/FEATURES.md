@@ -21,7 +21,9 @@ headless MC UE in a container, driven by commands. This page is a map, not a con
   SIP registration for all services, over mutual TLS, then service authorisation and affiliation (TS 24.379
   clause 9.2.1). Besides the selected group, MCPTT can affiliate to other groups of the user profile (`monitor`):
   their group calls, priority and emergency alerts are received, one call at a time, without protected media. A refused service authorisation that can be transient (403, 408, 480, 500, 503) is retried after a
-  growing delay (5, 10, 20, then every 60 s, or the Retry-After of a 500 or 503).
+  growing delay (5, 10, 20, then every 60 s, or the Retry-After of a 500 or 503). With `mcptt.authorise_by_register`
+  the MCPTT authorisation is carried in a REGISTER (clause 7.2.1) instead of the poc-settings PUBLISH; MCData and
+  MCVideo still authorise by PUBLISH.
 - **Media**: AMR-WB speech over RTP (RFC 4867), H.264 video (RFC 6184); floor control (TS 24.380) and transmission and
   reception control (TS 24.581). Another participant's transmission is announced by the Media Transmission
   Notification (clause 6.2.5.3.2): with automatic reception the client receives at once, with manual reception it

@@ -231,6 +231,7 @@ Where each step lives:
 | Key provisioning, CSKs | `provision_keys` | TS 33.180 clauses 5.3.3, 5.4 |
 | REGISTER | `SipEngine::register_account`, configured by `client_sip_config` (`core/client.hpp`) | TS 24.379, TS 24.282, TS 24.281 clause 7.2.1AA |
 | Service authorisation | `Client::authorize` (`mcptt/service.cpp`), `mcdata_authorize`, `mcvideo_authorize` | TS 24.379 clause 7.2.2, TS 24.282 clause 7.2.2, TS 24.281 clause 7.2.2 |
+| Service authorisation by REGISTER (`mcptt.authorise_by_register`) | `register_authorization`, body from `register_body`; then `service_authorized`, shared with the PUBLISH | TS 24.379 clause 7.2.1 |
 | Configuration subscription | `subscribe_configuration`, `configuration_notified` (`core/group_management.cpp`) | TS 24.484 clause 6.3.13.2.2 |
 | Affiliation status subscription | `subscribe_affiliation`, body from `affiliation_subscribe_body`; refreshed by `refresh_affiliation_subscription` | TS 24.379 clause 9.2.1.3, RFC 6665 section 4.1.2.1 |
 | Group key | `subscribe_keys`, `group_key_notify` | TS 24.481 clause 6.3.13.2.1, TS 33.180 clause 5.7 |
