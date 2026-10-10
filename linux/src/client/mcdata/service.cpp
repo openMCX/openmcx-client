@@ -46,7 +46,8 @@ void Client::mcdata_authorize() {
   info.access_token = token_;
   info.client_id = client_id();
   std::vector<SipHeader> headers{{"Expires", "4294967295"}};
-  if (!mcdata_auth_etag_.empty()) headers.push_back({"SIP-If-Match", mcdata_auth_etag_});
+  const bool refresh = !mcdata_auth_etag_.empty();
+  if (refresh) headers.push_back({"SIP-If-Match", mcdata_auth_etag_});
   std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)},
                               {"application/poc-settings+xml", poc_settings_xml(client_id())}};
   // TS 24.282 clause 7.2.2 step 3: the CSK, once, in the first service authorisation.
@@ -56,10 +57,19 @@ void Client::mcdata_authorize() {
     parts = mcdata_encrypt_xml(std::move(parts), mcdata_xml_key(true));
     parts.push_back({"application/mikey", mcdata_csk_upload_});
   }
-  mcdata_request("poc-settings", parts, headers, [this, uploading](const SipResponse &response) {
+  mcdata_request("poc-settings", parts, headers, [this, uploading, refresh](const SipResponse &response) {
     if (response.status_code != 200) {
-      mcdata_authorized_ = false;
+      // TS 24.282 clause 7.2.2: not authorised, and so not affiliated.
+      mcdata_authorized_ = mcdata_affiliated_ = false;
       failure("MCData service authorisation: " + std::to_string(response.status_code));
+      // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew; the affiliation
+      // status subscription and the affiliation follow the new authorisation.
+      if (refresh && response.status_code == 412) {
+        mcdata_auth_etag_.clear();
+        mcdata_affiliation_etag_.clear();
+        mcdata_subscription_.clear();
+        schedule([this] { mcdata_authorize(); });
+      }
       return;
     }
     mcdata_auth_etag_ = get_header(response.headers, "SIP-ETag");
@@ -176,13 +186,19 @@ void Client::mcdata_affiliate(bool affiliate) {
     if (group != mcdata_group()) affiliation.groups.push_back(group);
   mcdata_sent_pid_ = affiliation.publication_id;
   std::vector<SipHeader> headers{{"Expires", affiliate ? "4294967295" : "0"}};
-  if (!mcdata_affiliation_etag_.empty()) headers.push_back({"SIP-If-Match", mcdata_affiliation_etag_});
+  const bool refresh = !mcdata_affiliation_etag_.empty();
+  if (refresh) headers.push_back({"SIP-If-Match", mcdata_affiliation_etag_});
   // TS 24.282 clause 8.2.2 steps 4 and 5: de-affiliation from every group is Expires 0 without a PIDF body.
   std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
   if (affiliate) parts.push_back({"application/pidf+xml", affiliation_xml(affiliation, false)});
-  mcdata_request("presence", parts, headers, [this, affiliate](const SipResponse &response) {
+  mcdata_request("presence", parts, headers, [this, affiliate, refresh](const SipResponse &response) {
     if (response.status_code != 200) {
       failure("MCData affiliation: " + std::to_string(response.status_code));
+      // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew.
+      if (refresh && response.status_code == 412) {
+        mcdata_affiliation_etag_.clear();
+        schedule([this, affiliate] { mcdata_affiliate(affiliate); });
+      }
       return;
     }
     mcdata_affiliation_etag_ = affiliate ? std::string(get_header(response.headers, "SIP-ETag")) : std::string{};

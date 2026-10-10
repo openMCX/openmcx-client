@@ -79,6 +79,8 @@ tests, the settings and the lab scenarios.
 
 ## Documentation
 
+- **[Developer guide](docs/DEVELOPER_GUIDE.md)**: architecture of the three clients, request flow, state machines and
+  how to add or fix a procedure
 - **[Android app](android/README.md)**: features, build, labs and tests; [wire contracts](android/docs/wire),
   [conformance](android/docs/CONFORMANCE.md), [test report](android/docs/TEST_REPORT.md)
 - **[Dispatcher](dispatcher/README.md)**: scope, limits, API and labs

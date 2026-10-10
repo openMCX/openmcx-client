@@ -86,5 +86,6 @@ tools/regress.py --image openmcx:<tag> --client-image openmcx-client:<tag> --all
 
 ## Documentation
 
+- **[Developer guide](../docs/DEVELOPER_GUIDE.md)**: architecture, request flow, state machines and development workflow
 - **[Feature list](docs/FEATURES.md)**: what the client supports, how it is verified, and what it does not do
 - **[Coding style](docs/CODING_STYLE.md)**

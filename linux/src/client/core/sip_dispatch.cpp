@@ -23,7 +23,9 @@ SipResponse Client::incoming(const SipMessage &message) {
                                         : "399 mcx \"140 unable to decrypt XML content\""}};
     return response;
   }
-  if ((!mcdata_signalling_key() && !mcdata_xml_key()) || message.from_uri != mcdata_service() ||
+  // The CSK being uploaded counts as well: the server's first protected request can overtake its 200 (OK) to the
+  // service authorisation (see mcdata_decrypt_xml()).
+  if ((!mcdata_signalling_key() && !mcdata_xml_key(true)) || message.from_uri != mcdata_service() ||
       (message.body.empty() && message.parts.empty()))
     return incoming_clear(message);
   auto opened = message;

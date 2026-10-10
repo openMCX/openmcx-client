@@ -124,11 +124,17 @@ void Client::authorize() {
   // TS 24.379 clause 7.2.1A step 2: the MCPTT ICSI in P-Preferred-Service.
   std::vector<SipHeader> headers{
       {"P-Preferred-Service", mcptt_icsi}, {"Event", "poc-settings"}, {"Expires", "4294967295"}};
-  if (!auth_etag_.empty()) headers.push_back({"SIP-If-Match", auth_etag_});
-  sip_.publish(service(), type, body, headers, [this](const SipResponse &response) {
+  const bool refresh = !auth_etag_.empty();
+  if (refresh) headers.push_back({"SIP-If-Match", auth_etag_});
+  sip_.publish(service(), type, body, headers, [this, refresh](const SipResponse &response) {
     if (response.status_code < 200) return;
     if (response.status_code != 200) {
-      failure("service authorization: " + std::to_string(response.status_code));
+      // TS 24.379 clause 7.2.2: not authorised. RFC 3903 section 5: after a 412 to a refresh, an initial
+      // publication (authorization_lost); a failed initial publication is not repeated.
+      if (refresh || response.status_code != 412)
+        authorization_lost("service authorization", response.status_code);
+      else
+        failure("service authorization: " + std::to_string(response.status_code));
       return;
     }
     auth_etag_ = get_header(response.headers, "SIP-ETag");
@@ -138,26 +144,85 @@ void Client::authorize() {
     location_logon_pending_ = !location_.configured();
     location_signal(location::Event::InitialLogOn);
     if (mcdata_enabled()) schedule([this] { mcdata_authorize(); });
-    if (mcvideo_enabled())
-      schedule([this] { mcvideo_authorize(); });
+    if (mcvideo_enabled()) schedule([this] { mcvideo_authorize(); });
     if (config_subscription_.empty() && cfg_.at("mcptt").value("subscribe_configuration", true))
       schedule([this] { subscribe_configuration(); });
-    schedule([this] {
-      auto [type, body] = affiliation_subscribe_body();
-      subscription_ = sip_.subscribe(
-          service(), "presence", 3600, {{"P-Preferred-Service", mcptt_icsi}, {"Accept", "application/pidf+xml"}},
-          [this](const SipResponse &response) {
-            if (response.status_code < 200) return;
-            if (response.status_code != 200) {
-              failure("affiliation subscription: " + std::to_string(response.status_code));
-              return;
-            }
-            subscription_expires_ = std::time(nullptr) + 3500;
-            schedule([this] { subscribe_keys(); });
-          },
-          type, body);
-    });
+    schedule([this] { subscribe_affiliation(true); });
   });
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9.2.1.3: the affiliation status determination procedure: SUBSCRIBE to this user's affiliation
+// status, Expires 4294967295 (step 4). The initial subscription is followed by the key subscriptions.
+void Client::subscribe_affiliation(bool initial) {
+  auto [type, body] = affiliation_subscribe_body();
+  subscription_ = sip_.subscribe(
+      service(), "presence", 4294967295u, {{"P-Preferred-Service", mcptt_icsi}, {"Accept", "application/pidf+xml"}},
+      [this, initial](const SipResponse &response) {
+        if (response.status_code < 200) return;
+        if (response.status_code != 200) {
+          failure("affiliation subscription: " + std::to_string(response.status_code));
+          return;
+        }
+        subscription_granted(response, subscription_expires_, subscription_refresh_at_);
+        if (initial) schedule([this] { subscribe_keys(); });
+      },
+      type, body);
+}
+
+//------------------------------------------------------------------------------
+// RFC 6665 section 4.1.2.1: the notifier may grant a shorter duration than the Expires requested (the 200 (OK)
+// carries it); the subscriber refreshes the subscription before it ends. The refresh is due a minute before the end,
+// or half-way through a shorter duration.
+void Client::subscription_granted(const SipResponse &response, std::int64_t &expires, std::int64_t &refresh_at) const {
+  std::int64_t granted = 4294967295;
+  try {
+    if (const auto value = get_header(response.headers, "Expires"); !value.empty())
+      granted = std::stoll(std::string(value));
+  } catch (const std::exception &) {}
+  const std::int64_t now = std::time(nullptr);
+  expires = now + granted;
+  refresh_at = now + granted - std::min<std::int64_t>(granted / 2, 60);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9.2.1.3 and TS 24.281 clause 8.2.1.3: re-subscription by an in-dialog SUBSCRIBE with Expires
+// 4294967295 and Accept application/pidf+xml, before the granted duration ends. A refused or failed refresh ends
+// that subscription; a new one takes its place. The affiliations themselves (made by PUBLISH) and any call are kept.
+void Client::refresh_affiliation_subscription(bool mcvideo) {
+  auto &dialog = mcvideo ? mcvideo_subscription_ : subscription_;
+  (mcvideo ? mcvideo_subscription_refresh_at_ : subscription_refresh_at_) = 0;
+  if (dialog.empty()) return;
+  const std::string service_name = mcvideo ? "mcvideo" : "mcptt";
+  auto resubscribe = [this, mcvideo, service_name](const std::string &reason) {
+    event("affiliation_subscription_refresh_failed", {{"service", service_name}, {"reason", reason}});
+    if (mcvideo) {
+      mcvideo_subscription_.clear();
+      schedule([this] { mcvideo_subscribe(); });
+    } else {
+      subscription_.clear();
+      schedule([this] { subscribe_affiliation(false); });
+    }
+  };
+  const auto id = dialog;
+  try {
+    sip_.request_in_dialog(
+        id, "SUBSCRIBE", {}, {}, {{"Event", "presence"}, {"Expires", "4294967295"}, {"Accept", "application/pidf+xml"}},
+        [this, mcvideo, id, service_name, resubscribe](const SipResponse &response) {
+          if (response.status_code < 200 || (mcvideo ? mcvideo_subscription_ : subscription_) != id) return;
+          if (response.status_code >= 300) {
+            resubscribe(std::to_string(response.status_code));
+            return;
+          }
+          if (mcvideo)
+            subscription_granted(response, mcvideo_subscription_expires_, mcvideo_subscription_refresh_at_);
+          else
+            subscription_granted(response, subscription_expires_, subscription_refresh_at_);
+          event("affiliation_subscription_refreshed", {{"service", service_name}});
+        });
+  } catch (const std::exception &error) {
+    resubscribe(error.what());
+  }
 }
 
 //------------------------------------------------------------------------------
@@ -168,11 +233,17 @@ void Client::affiliate() {
   auto [type, body] = publish_body(true);
   // TS 24.379 clause 9.2.1.2: the MCPTT ICSI in P-Preferred-Service, as for every MCPTT PUBLISH.
   std::vector<SipHeader> headers{{"P-Preferred-Service", mcptt_icsi}, {"Event", "presence"}, {"Expires", "4294967295"}};
-  if (!affiliation_etag_.empty()) headers.push_back({"SIP-If-Match", affiliation_etag_});
-  sip_.publish(service(), type, body, headers, [this](const SipResponse &response) {
+  const bool refresh = !affiliation_etag_.empty();
+  if (refresh) headers.push_back({"SIP-If-Match", affiliation_etag_});
+  sip_.publish(service(), type, body, headers, [this, refresh](const SipResponse &response) {
     if (response.status_code < 200) return;
     if (response.status_code != 200) {
       failure("affiliation publication: " + std::to_string(response.status_code));
+      // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew.
+      if (refresh && response.status_code == 412) {
+        affiliation_etag_.clear();
+        schedule([this] { affiliate(); });
+      }
       return;
     }
     affiliation_etag_ = get_header(response.headers, "SIP-ETag");

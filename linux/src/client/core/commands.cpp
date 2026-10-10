@@ -118,6 +118,23 @@ void Client::run_command(const std::string &cmd) {
     ptt_command(cmd);
   } else if (cmd == "release") {
     if (!ambient_hidden()) release();
+  } else if (cmd == "refresh-affiliation") {
+    // Test aid: refresh the MCPTT (and MCVideo) affiliation status subscriptions now, as the timer does before the
+    // granted duration ends (TS 24.379 clause 9.2.1.3, TS 24.281 clause 8.2.1.3).
+    refresh_affiliation_subscription(false);
+    if (mcvideo_enabled()) refresh_affiliation_subscription(true);
+  } else if (cmd == "refresh-reinvite") {
+    // Test aid: a session refresh by re-INVITE (RFC 4028 section 7.4) with the current offer and no MC service
+    // information, as a third-party client may send; the final status goes to last_refresh.
+    if (dialog_.empty()) {
+      failure("refresh-reinvite: no call");
+    } else {
+      sip_.reinvite(dialog_, local_, {}, [this](const SipResponse &response) {
+        if (response.status_code < 200) return;
+        status_["last_refresh"] = response.status_code;
+        event("session_refresh_answered", {{"status", response.status_code}});
+      });
+    }
   } else if (cmd == "hangup") {
     hangup_command();
   } else if (cmd == "affiliate") {

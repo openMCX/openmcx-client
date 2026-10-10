@@ -125,19 +125,34 @@ void Client::mcvideo_authorize(const std::string &token) {
   info.access_token = token.empty() ? token_ : token;
   info.client_id = client_id();
   std::vector<SipHeader> headers{{"Expires", "4294967295"}};
-  if (!mcvideo_auth_etag_.empty() && token.empty()) headers.push_back({"SIP-If-Match", mcvideo_auth_etag_});
+  const bool refresh = !mcvideo_auth_etag_.empty() && token.empty();
+  if (refresh) headers.push_back({"SIP-If-Match", mcvideo_auth_etag_});
   std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
                               {"application/poc-settings+xml", poc_settings_xml(client_id())}};
   if (!mcvideo_csk_upload_.empty()) parts.push_back({"application/mikey", mcvideo_csk_upload_});
-  mcvideo_request("poc-settings", parts, headers, [this, probe = !token.empty()](const SipResponse &response) {
+  mcvideo_request("poc-settings", parts, headers, [this, probe = !token.empty(), refresh](const SipResponse &response) {
     mcvideo_result("authorize", response);
     if (probe) return; // the real authorisation stays as it was
     if (response.status_code != 200) {
-      mcvideo_authorized_ = false;
+      // TS 24.281 clause 7.2.2: not authorised, and so not affiliated.
+      mcvideo_authorized_ = mcvideo_affiliated_ = false;
       failure("MCVideo service authorisation: " + std::to_string(response.status_code));
+      // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew; the affiliation
+      // status subscription and the affiliation follow the new authorisation.
+      if (refresh && response.status_code == 412) {
+        mcvideo_auth_etag_.clear();
+        mcvideo_affiliation_etag_.clear();
+        mcvideo_subscription_.clear();
+        schedule([this] { mcvideo_authorize(); });
+      }
       return;
     }
     mcvideo_auth_etag_ = get_header(response.headers, "SIP-ETag");
+    // A refresh (the renewed access token) changes nothing else: no new log-on, subscriptions or affiliation.
+    if (refresh && mcvideo_authorized_) {
+      event("mcvideo_service_authorization_renewed");
+      return;
+    }
     mcvideo_authorized_ = true;
     event("mcvideo_service_authorized");
     // TS 24.281 clause 18.3.4.1: the initial log-on trigger, once a configuration is held.
@@ -160,13 +175,17 @@ void Client::mcvideo_subscribe() {
   if (!mcvideo_authorized_ || !mcvideo_subscription_.empty()) return;
   mcvideo_status_known_ = false;
   mcvideo_subscription_ =
-      sip_.subscribe(mcvideo_service_uri(), "presence", 3600,
+      sip_.subscribe(mcvideo_service_uri(), "presence", 4294967295u,
                      {{"P-Preferred-Service", mcvideo_service.icsi}, {"Accept", "application/pidf+xml"}},
                      [this](const SipResponse &response) {
+                       if (response.status_code < 200) return;
                        if (response.status_code >= 300) {
                          mcvideo_subscription_.clear();
                          failure("MCVideo affiliation subscription: " + std::to_string(response.status_code));
+                         return;
                        }
+                       // TS 24.281 clause 8.2.1.3 step 4 (Expires 4294967295); refreshed before the granted end.
+                       subscription_granted(response, mcvideo_subscription_expires_, mcvideo_subscription_refresh_at_);
                      });
 }
 
@@ -249,15 +268,21 @@ void Client::mcvideo_affiliate(bool affiliate, const std::string &group) {
   affiliation.mcvideo = true;
   mcvideo_sent_pid_ = affiliation.publication_id;
   std::vector<SipHeader> headers{{"Expires", affiliate ? "4294967295" : "0"}};
-  if (!mcvideo_affiliation_etag_.empty()) headers.push_back({"SIP-If-Match", mcvideo_affiliation_etag_});
+  const bool refresh = !mcvideo_affiliation_etag_.empty();
+  if (refresh) headers.push_back({"SIP-If-Match", mcvideo_affiliation_etag_});
   mcvideo_request("presence",
                   {{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
                    {"application/pidf+xml", affiliation_xml(affiliation, false)}},
-                  headers, [this, affiliate, group](const SipResponse &response) {
+                  headers, [this, affiliate, group, refresh](const SipResponse &response) {
                     mcvideo_result(affiliate ? "affiliate" : "deaffiliate", response);
                     if (response.status_code != 200) {
                       // A refused extra group leaves the affiliation as it was.
                       if (group.empty()) failure("MCVideo affiliation: " + std::to_string(response.status_code));
+                      // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew.
+                      if (refresh && response.status_code == 412) {
+                        mcvideo_affiliation_etag_.clear();
+                        schedule([this, affiliate, group] { mcvideo_affiliate(affiliate, group); });
+                      }
                       if (mcvideo_selection_pending_.is_object() &&
                           mcvideo_selection_pending_.value("group", std::string{}) == group)
                         schedule([this] { mcvideo_selection_affiliated(false); });

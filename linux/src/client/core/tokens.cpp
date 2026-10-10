@@ -123,6 +123,8 @@ void Client::renew_token() {
   event("token_renewed", {{"expires_at", expires_}});
   if (authorized_) reauthorize();
   if (mcdata_enabled() && mcdata_authorized_) mcdata_authorize();
+  // TS 24.281 clause 7.2.2: the MCVideo service authorisation carries the access token as well.
+  if (mcvideo_enabled() && mcvideo_authorized_) mcvideo_authorize();
   schedule_token_renewal();
 }
 
@@ -136,12 +138,37 @@ void Client::reauthorize() {
   sip_.publish(service(), type, body, headers, [this](const SipResponse &response) {
     if (response.status_code < 200) return;
     if (response.status_code != 200) {
-      failure("service authorization renewal: " + std::to_string(response.status_code));
+      authorization_lost("service authorization renewal", response.status_code);
       return;
     }
     auth_etag_ = get_header(response.headers, "SIP-ETag");
     event("service_authorization_renewed");
   });
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 7.2.2: upon a SIP 4xx, 5xx or 6xx response to the service authorisation PUBLISH, the client
+// considers itself not authorised; with it go its affiliations (clause 9.2.1.2) and any call. A 412 (Conditional
+// Request Failed) means the server holds no publication for the entity-tag, after a server restart for example:
+// RFC 3903 section 5, the client "MUST NOT reattempt the PUBLISH request. Instead, to publish event state, the EPA
+// SHOULD perform an initial publication, i.e., a PUBLISH request without a SIP-If-Match header field", and discards
+// the entity-tag. The initial publication authorises the client again, and its affiliation status subscription and
+// affiliation follow as after the first one (clauses 9.2.1.3 and 9.2.1.2).
+void Client::authorization_lost(const std::string &what, int status) {
+  const bool was_authorized = authorized_;
+  authorized_ = affiliated_ = false;
+  if (was_authorized) {
+    release();
+    if (!dialog_.empty()) sip_.bye(dialog_);
+  }
+  failure(what + ": " + std::to_string(status));
+  if (status != 412) return;
+  auth_etag_.clear();
+  affiliation_etag_.clear();
+  subscription_.clear();
+  subscription_expires_ = 0;
+  event("service_authorization_republished", {{"status", status}});
+  schedule([this] { authorize(); });
 }
 
 } // namespace mcx

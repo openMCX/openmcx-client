@@ -138,6 +138,12 @@ class Client {
 
   void subscribe_keys();
 
+  void subscribe_affiliation(bool initial);
+
+  void refresh_affiliation_subscription(bool mcvideo);
+
+  void subscription_granted(const SipResponse &response, std::int64_t &expires, std::int64_t &refresh_at) const;
+
   void transmit_floor(const FloorPacket &packet);
 
   void stop_protected_call(const std::string &reason);
@@ -164,7 +170,8 @@ class Client {
   std::uint64_t conference_generation_ = 0;
   std::map<std::string, std::string> retired_conferences_;
   std::optional<SipResponse> pending_answer_;
-  std::int64_t expires_ = 0, subscription_expires_ = 0;
+  std::int64_t expires_ = 0, subscription_expires_ = 0, subscription_refresh_at_ = 0;
+  std::int64_t mcvideo_subscription_expires_ = 0, mcvideo_subscription_refresh_at_ = 0;
   unsigned token_renewals_ = 0;
   std::uint64_t next_audio_ = 0, last_save_ = 0;
   std::vector<std::int16_t> transmit_, received_;
@@ -507,6 +514,7 @@ class Client {
     return "org.3gpp.mcptt.user-profile/users/" + url_encode(user()) + "/mcptt-user-profile-" +
            std::to_string(profile_index_) + ".xml";
   }
+
   // TS 24.484 clause 7.2.2.1: the "user-profile-index" of <Default-user-profile>, as the activation gives it
   // (mcptt.profile_index); 1 when absent.
   unsigned configured_profile_index() const;
@@ -1771,6 +1779,8 @@ public:
   void renew_token();
 
   void reauthorize();
+
+  void authorization_lost(const std::string &what, int status);
 
   // ---- The run loop (core/client.cpp) ----
   void run();

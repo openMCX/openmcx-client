@@ -39,6 +39,11 @@ void Client::tick() {
     stop_protected_call("protected call key expired or unavailable");
     return;
   }
+  // RFC 6665 section 4.1.2.1: the affiliation status subscriptions are refreshed before the granted duration ends.
+  if (subscription_refresh_at_ && std::time(nullptr) >= subscription_refresh_at_)
+    refresh_affiliation_subscription(false);
+  if (mcvideo_subscription_refresh_at_ && std::time(nullptr) >= mcvideo_subscription_refresh_at_)
+    refresh_affiliation_subscription(true);
   if (subscription_expires_ && std::time(nullptr) >= subscription_expires_) {
     subscription_expires_ = 0;
     affiliated_ = false;
