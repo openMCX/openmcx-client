@@ -21,16 +21,20 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 /**
- * Between the camera and the encoder: camera frames arrive on a SurfaceTexture in the sensor's
- * orientation and are drawn, turned upright for the way the phone is held, onto the encoder's
- * input surface and onto the local preview (mirrored for the front camera, as a selfie view).
- * Receivers therefore get an upright picture without any orientation signalling.
+ * Between the camera and the encoder: camera frames arrive on a SurfaceTexture, whose transform
+ * matrix already turns them upright for the phone's natural orientation (and mirrors the front
+ * camera, see [VideoOrientation]), and are drawn, turned for the way the phone is held, onto the
+ * encoder's input surface (the front camera's mirror undone) and onto the local preview (mirrored
+ * for the front camera, as a selfie view). Receivers therefore get an upright picture without any
+ * orientation signalling.
  */
 class CameraGl(
     @Volatile private var cameraSize: Size,
     encoderSurface: Surface,
     /** How far to turn each camera frame clockwise to make it upright (0, 90, 180, 270), read per frame. */
     @Volatile private var rotation: () -> Int,
+    /** The camera's sensor orientation, which the SurfaceTexture's transform matrix already applies. */
+    @Volatile private var sensorOrientation: Int,
     @Volatile private var frontFacing: Boolean,
     private val preview: () -> Surface?,
 ) : AutoCloseable {
@@ -98,11 +102,12 @@ class CameraGl(
      * Another camera now draws into [input] (a switch during a transmission): its frame size, rotation and facing.
      * The encoder keeps its picture size; a different camera aspect is letterboxed.
      */
-    fun switchSource(size: Size, rotation: () -> Int, frontFacing: Boolean) {
+    fun switchSource(size: Size, rotation: () -> Int, sensorOrientation: Int, frontFacing: Boolean) {
         val done = CountDownLatch(1)
         handler.post {
             cameraSize = size
             this.rotation = rotation
+            this.sensorOrientation = sensorOrientation
             this.frontFacing = frontFacing
             if (this::surfaceTexture.isInitialized) surfaceTexture.setDefaultBufferSize(size.width, size.height)
             frames.set(0)
@@ -117,8 +122,10 @@ class CameraGl(
         EGL14.eglMakeCurrent(display, encoderEgl, encoderEgl, context)
         surfaceTexture.updateTexImage()
         surfaceTexture.getTransformMatrix(texMatrix)
-        val turn = rotation()
-        render(encoderEgl, turn, mirror = false)
+        val upright = rotation()
+        val turn = VideoOrientation.textureTurn(upright, sensorOrientation, frontFacing)
+        val sideways = upright % 180 != 0
+        render(encoderEgl, turn, sideways, mirror = VideoOrientation.mirrorSent(frontFacing))
         EGLExt.eglPresentationTimeANDROID(display, encoderEgl, surfaceTexture.timestamp)
         EGL14.eglSwapBuffers(display, encoderEgl)
         val target = preview()?.takeIf { it.isValid }
@@ -129,22 +136,24 @@ class CameraGl(
         }
         previewEgl?.let { surface ->
             if (EGL14.eglMakeCurrent(display, surface, surface, context)) {
-                render(surface, turn, mirror = frontFacing)
+                render(surface, turn, sideways, mirror = false) // mirrored already for the front camera
                 EGL14.eglSwapBuffers(display, surface)
             }
         }
     }
 
-    /** Draw the camera frame turned by [turn] degrees clockwise, fitted (letterboxed) into [surface]. */
-    private fun render(surface: EGLSurface, turn: Int, mirror: Boolean) {
+    /**
+     * Draw the camera frame, as the transform matrix gives it, turned by [turn] degrees clockwise and fitted
+     * (letterboxed) into [surface]; [sideways]: the upright picture has the camera size's sides swapped.
+     */
+    private fun render(surface: EGLSurface, turn: Int, sideways: Boolean, mirror: Boolean) {
         val size = IntArray(2)
         EGL14.eglQuerySurface(display, surface, EGL14.EGL_WIDTH, size, 0)
         EGL14.eglQuerySurface(display, surface, EGL14.EGL_HEIGHT, size, 1)
         GLES20.glViewport(0, 0, size[0], size[1])
         GLES20.glClearColor(0f, 0f, 0f, 1f)
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT)
-        // Aspect of the turned picture against the surface's: scale one axis down to letterbox.
-        val sideways = turn % 180 != 0
+        // Aspect of the upright picture against the surface's: scale one axis down to letterbox.
         val content = if (sideways) cameraSize.height.toFloat() / cameraSize.width else cameraSize.width.toFloat() / cameraSize.height
         val target = size[0].toFloat() / size[1]
         val sx = if (content > target) 1f else content / target
@@ -230,12 +239,5 @@ class CameraGl(
             check(ok[0] != 0) { "program: " + GLES20.glGetProgramInfoLog(program) }
             return program
         }
-
-        /**
-         * How far to turn a camera frame clockwise to be upright, from the sensor orientation and the
-         * phone's orientation (OrientationEventListener degrees rounded to 0/90/180/270), as for JPEG_ORIENTATION.
-         */
-        fun uprightRotation(sensorOrientation: Int, deviceOrientation: Int, frontFacing: Boolean): Int =
-            if (frontFacing) (sensorOrientation - deviceOrientation + 360) % 360 else (sensorOrientation + deviceOrientation) % 360
     }
 }

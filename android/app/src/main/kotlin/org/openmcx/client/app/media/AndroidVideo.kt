@@ -119,7 +119,7 @@ class AndroidVideo(private val context: Context) : VideoDevices {
             facing = if (front) "front" else "back"
             orientation.enable()
             // The picture is sent upright: portrait (the camera size turned) when the phone is held upright.
-            val turn = CameraGl.uprightRotation(sensor, deviceOrientation, front)
+            val turn = VideoOrientation.uprightRotation(sensor, deviceOrientation, front)
             val encoded = if (turn % 180 != 0) Size(size.height, size.width) else size
             sending = "${encoded.width}x${encoded.height}, turned $turn°"
             val mediaFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, encoded.width, encoded.height).apply {
@@ -135,7 +135,7 @@ class AndroidVideo(private val context: Context) : VideoDevices {
             encoder.configure(mediaFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             input = encoder.createInputSurface()
             encoder.start()
-            gl = CameraGl(size, input, { CameraGl.uprightRotation(sensor, deviceOrientation, front) }, front, { previewSurface })
+            gl = CameraGl(size, input, { VideoOrientation.uprightRotation(sensor, deviceOrientation, front) }, sensor, front, { previewSurface })
             drain = thread(name = "mcvideo-encoder") { drainEncoder() }
             open(id)
             Log.i(TAG, "capture ${size.width}x${size.height} from camera $id (sensor $sensor°), sending $sending")
@@ -166,7 +166,7 @@ class AndroidVideo(private val context: Context) : VideoDevices {
             val (isFront, size) = chosen
             runCatching { session?.close() }; session = null
             runCatching { camera?.close() }; camera = null
-            gl.switchSource(size, { CameraGl.uprightRotation(sensor, deviceOrientation, isFront) }, isFront)
+            gl.switchSource(size, { VideoOrientation.uprightRotation(sensor, deviceOrientation, isFront) }, sensor, isFront)
             facing = if (isFront) "front" else "back"
             open(id, wait = false)
             switches.incrementAndGet()
@@ -288,7 +288,8 @@ class AndroidVideo(private val context: Context) : VideoDevices {
             var shown = false
             while (true) {
                 val out = codec.dequeueOutputBuffer(info, if (shown) 0 else firstUs)
-                if (out >= 0) { codec.releaseOutputBuffer(out, true); decoded.incrementAndGet(); shown = true }
+                // Shown now: the stream's own times start again with each transmission and would hold the picture back.
+                if (out >= 0) { codec.releaseOutputBuffer(out, System.nanoTime()); decoded.incrementAndGet(); shown = true }
                 else if (out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
                     val f = codec.outputFormat
                     val w = if (f.containsKey("crop-right")) f.getInteger("crop-right") - f.getInteger("crop-left") + 1 else f.getInteger(MediaFormat.KEY_WIDTH)

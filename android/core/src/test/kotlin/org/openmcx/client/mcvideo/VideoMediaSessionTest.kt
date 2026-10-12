@@ -36,6 +36,7 @@ class VideoMediaSessionTest {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val loopback = InetAddress.getLoopbackAddress()
     private val rendered = mutableListOf<List<ByteArray>>()
+    private val resets = java.util.concurrent.atomic.AtomicInteger()
 
     @After fun tearDown() = scope.cancel()
 
@@ -56,6 +57,7 @@ class VideoMediaSessionTest {
         }
         override fun renderer() = object : VideoRenderer {
             override fun render(nals: List<ByteArray>, presentationUs: Long): Boolean { synchronized(rendered) { rendered += nals }; return true }
+            override fun reset() { resets.incrementAndGet() }
             override fun close() {}
         }
     }
@@ -152,6 +154,73 @@ class VideoMediaSessionTest {
         assertTrue(session.control.receiving)
         assertEquals(TxState.NO_PERMISSION, session.control.state.value)
         assertEquals(2, session.stats.received.size)
+        session.stop()
+        server.forEach { it.close() }
+    }
+
+    /** The same transmitter's next transmission (same SSRC, RTP time back to an earlier value) starts a new stream. */
+    @Test fun aNewTransmissionWithTheSameSsrcStartsAfresh() = runBlocking {
+        val server = listOf(DatagramSocket(0, loopback), DatagramSocket(0, loopback), DatagramSocket(0, loopback))
+        val ports = VideoPorts.bind(loopback, 30000..30400)
+        val local = LocalVideoMedia("127.0.0.1", ports.audio.localPort, ports.video.localPort, ports.control.localPort, 111, 222, 333)
+        val session = VideoMediaSession(scope, ports, local, VideoFormat(320, 240, 15, 300_000), devices, codecs, silence, 2)
+        session.start(RemoteVideoMedia("127.0.0.1", server[0].localPort, 96, false, server[1].localPort, 97, server[2].localPort, 4242, null), 97)
+        delay(100)
+        val video = InetSocketAddress(loopback, ports.video.localPort)
+        var seq = 1
+        fun sendPicture(nals: List<ByteArray>, ts: Long) = H264Rtp.packetize(nals).forEach { p ->
+            val b = RtpPacket(97, seq++, ts, 0xcccc, p.bytes, p.marker).encode(); server[1].send(DatagramPacket(b, b.size, video))
+        }
+        val key = listOf(byteArrayOf(0x67, 1), byteArrayOf(0x68, 2), ByteArray(600) { 7 }.also { it[0] = 0x65 })
+        // The first transmission: a key picture and a P picture, 10 s into the stream.
+        sendPicture(key, 900_000); sendPicture(listOf(byteArrayOf(0x41, 5, 5)), 903_000)
+        withTimeout(3000) { while (session.stats.picturesReceived.get() < 2) delay(20) }
+        val before = resets.get()
+        // The next one starts 9 s earlier in RTP time: its P picture before a key picture is not decoded.
+        sendPicture(listOf(byteArrayOf(0x41, 6, 6)), 93_000)
+        sendPicture(key, 96_000); sendPicture(listOf(byteArrayOf(0x41, 7, 7)), 99_000)
+        withTimeout(3000) { while (session.stats.picturesReceived.get() < 4) delay(20) }
+        assertEquals(1, session.stats.skippedBeforeKey.get())
+        assertEquals(before + 1, resets.get())
+        session.stop()
+        server.forEach { it.close() }
+    }
+
+    /** RTP time keeps increasing from one transmission to the next (the receiver would otherwise see the next start in the past). */
+    @Test fun theNextTransmissionContinuesTheRtpTime() = runBlocking {
+        val server = listOf(DatagramSocket(0, loopback), DatagramSocket(0, loopback), DatagramSocket(0, loopback))
+        val ports = VideoPorts.bind(loopback, 30000..30400)
+        val local = LocalVideoMedia("127.0.0.1", ports.audio.localPort, ports.video.localPort, ports.control.localPort, 111, 222, 333)
+        val session = VideoMediaSession(scope, ports, local, VideoFormat(320, 240, 15, 300_000), devices, codecs, silence, 2)
+        session.start(RemoteVideoMedia("127.0.0.1", server[0].localPort, 96, false, server[1].localPort, 97, server[2].localPort, 4242, null), 97)
+        delay(100)
+        val granted = TransmissionMessage(TxType.GRANTED, 111, fields = listOf(
+            TxField.AUDIO_SSRC to TransmissionMessage.ssrcValue(0xaaaa), TxField.VIDEO_SSRC to TransmissionMessage.ssrcValue(0xbbbb))).encode()
+        /** One transmission of about [ms]: the RTP times of its video packets, in order. */
+        suspend fun transmission(ms: Long): List<Long> {
+            session.control.request()
+            var request: Pair<ByteArray, InetSocketAddress>
+            do { request = receive(server[2])!! } while (TransmissionMessage.decode(request.first).type != TxType.REQUEST)
+            server[2].send(DatagramPacket(granted, granted.size, request.second))
+            val times = mutableListOf<Long>()
+            val end = System.currentTimeMillis() + ms
+            while (System.currentTimeMillis() < end) receive(server[1], 500)?.let { times += RtpPacket.parse(it.first)!!.timestamp }
+            session.control.release()
+            // The server answers the release with Transmission Idle (TS 24.581 §6.2.4.6): no transmitter until the next.
+            var release: Pair<ByteArray, InetSocketAddress>
+            do { release = receive(server[2])!! } while (TransmissionMessage.decode(release.first).type != TxType.RELEASE)
+            val idle = TransmissionMessage(TxType.IDLE, 111).encode()
+            server[2].send(DatagramPacket(idle, idle.size, release.second))
+            withTimeout(3000) { while (session.control.state.value != TxState.NO_PERMISSION) delay(10) }
+            delay(300)
+            while (receive(server[1], 100) != null) Unit // what was still on its way
+            return times
+        }
+        val first = transmission(1500)
+        val second = transmission(500)
+        assertTrue(first.size > 10 && second.isNotEmpty())
+        // Unsigned 32-bit RTP times, compared as a step (wrap-around safe).
+        assertTrue("second starts at ${second.first()}, first ended at ${first.last()}", (second.first() - first.last()).toInt() > 0)
         session.stop()
         server.forEach { it.close() }
     }

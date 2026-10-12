@@ -770,6 +770,11 @@ def main() -> None:
         install_phone(args.name, args.serial, args.role)
     elif args.action == "install":
         install(args.name)
+        # The lab's phones too, as up does: a phones-only lab has no Android containers, and install left the old APK
+        # on its phones without a word.
+        for role, phone in (meta(args.name).get("phones") or {}).items():
+            if phone.get("serial"):
+                install_phone(args.name, None, role)
     elif args.action == "down":
         for client in meta(args.name)["clients"]:
             try:

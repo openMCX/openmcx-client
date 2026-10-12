@@ -63,6 +63,12 @@ fun VideoCallScreen(call: VideoCallItem, actions: UiActions) {
         val aspect = call.videoAspect
         VideoSurface(if (aspect != null) Modifier.align(Alignment.Center).fillMaxWidth().aspectRatio(aspect, matchHeightConstraintsFirst = aspect < 1f)
             .testTag(Tags.VIDEO_REMOTE) else Modifier.fillMaxSize()) { actions.remoteSurface(it) }
+        // The surface keeps the last decoded picture: between transmissions (transmission control, nobody transmitting
+        // to us) it is covered, so an ended transmission does not look like a frozen live picture.
+        if (call.transmissionControl && call.state == "established" && call.transmission != "receiving")
+            Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
+                Text(if (call.transmission == "transmitting") "" else "No one is transmitting", color = Color(0xFF9E9E9E), fontSize = 16.sp)
+            }
         Column(Modifier.fillMaxWidth().background(Color(0x99000000)).padding(12.dp)) {
             when (call.priority) {
                 "emergency" -> Text("EMERGENCY", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp,

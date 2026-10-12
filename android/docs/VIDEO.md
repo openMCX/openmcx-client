@@ -48,7 +48,7 @@ transmitting, the **Transmit** button (hold), **Flip** (back or front camera: at
 | Registration, service authorisation (PUBLISH poc-settings with the same access token), affiliation | `client/McxClient.kt` |
 | Camera switch during a transmission: the camera is closed and the other one opened onto the same GL stage (its frame size, rotation and mirroring), the encoder and the RTP stream going on (same SSRC, sequence and timestamps), a key picture sent at once so receivers get a clean picture from the new camera | `AndroidVideo.flip`, `CameraGl.switchSource` |
 | Camera (Camera2) into the hardware H.264 encoder's input surface; MediaCodec decoder onto the call screen | `app/…/media/AndroidVideo.kt` |
-| Upright pictures: an OpenGL stage turns each camera frame by the sensor orientation and the way the phone is held (the JPEG_ORIENTATION rule) before it reaches the encoder and the preview (mirrored for the front camera); the receiver shows the picture at its own shape | `app/…/media/CameraGl.kt`, `ui/VideoCallScreen.kt` |
+| Upright pictures: the SurfaceTexture's transform matrix already turns each camera frame by the sensor orientation (Camera2 sets it on the stream, with a mirror for the front camera); the OpenGL stage turns it further only for the way the phone is held, undoes the front camera's mirror for the encoder and keeps it in the preview; the picture's shape follows the JPEG_ORIENTATION rule; the receiver shows it at its own shape | `app/…/media/CameraGl.kt`, `media/VideoOrientation.kt`, `ui/VideoCallScreen.kt` |
 | Call screen, Call tab entries, camera permission, camera foreground-service type during a call | `app/…/ui/VideoCallScreen.kt`, `Screens.kt`, `MainActivity.kt`, `McxService.kt` |
 | Debug commands `video-call <target> [notc] [manual] [emergency]`, `video-group [group] [emergency\|imminent]`, `video-emergency on\|off`, `video-imminent on\|off`, `video-alert on\|off [lat lon] [for <MCVideo ID>]`, `video-alerts`, `video-chat [group]`, `video-transmit <s>`, `video-release`, `video-status`, `video-hashes`, `video-hangup`, `video-answer`, `video-camera front\|back` | `app/…/DebugControl.kt` |
 
@@ -137,9 +137,12 @@ unit); one picture in 53 had been shown without its first slice before.
 
 The picture is turned upright at the sender, so every receiver, the reference client included, shows it the right way
 up without any orientation signalling (the server rewrites RTP headers, so the RTP video orientation extension of
-TS 26.114 would not reach the receivers). With both phones lying flat (orientation unknown, taken as upright) each
-sends 480×640 turned 90° for its sensor and the other decodes 480×640. `tests/video.py`: **53/53**
-; the reference client decodes the portrait pictures too.
+TS 26.114 would not reach the receivers). Camera2 sets the sensor-orientation turn (and, for the front camera, a mirror) on
+the stream, and the SurfaceTexture's transform matrix applies it: the OpenGL stage turns the frame further only by the
+way the phone is held (`VideoOrientation.textureTurn`) and undoes the front camera's mirror for the encoder. Turning it
+by the sensor orientation again tilted every sent picture by 90° (an upright phone sent a sideways picture). A phone held
+upright sends 480×640; the picture's fingerprints are the same at every receiver, so `tests/video.py` checks content,
+not orientation: look at the picture on the receiving phone.
 
 ### Video chat
 

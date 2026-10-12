@@ -170,6 +170,7 @@ class VideoMediaSession(
         val buffer = ByteArray(2048)
         val depacketizer = H264Depacketizer()
         var ssrc: Long? = null
+        var lastTimestamp = 0L
         var awaitingKey = true
         while (scope.isActive) {
             val packet = DatagramPacket(buffer, buffer.size)
@@ -177,13 +178,18 @@ class VideoMediaSession(
             val data = protection?.let { it.unprotectRtp(buffer.copyOf(packet.length)) ?: continue } ?: buffer.copyOf(packet.length)
             val rtp = RtpPacket.parse(data, data.size) ?: continue
             if (rtp.payloadType != videoPt || control.state.value == TxState.HAS_PERMISSION) continue
-            if (rtp.ssrc != ssrc) {
+            // The same transmitter's next transmission keeps its SSRC but is a new stream (a new encoder, maybe another
+            // camera and size): a jump of the RTP time backwards, or more than 10 s forwards, starts it like a new SSRC.
+            val step = (rtp.timestamp - lastTimestamp).toInt()
+            val restart = rtp.ssrc == ssrc && (step < -45_000 || step > 900_000)
+            if (rtp.ssrc != ssrc || restart) {
                 // A new transmitter: its own SSRC and sequence space (TS 24.581 §9.2.5).
                 ssrc = rtp.ssrc; depacketizer.reset(); awaitingKey = true
                 // The decoder starts afresh too (the same decoder: it keeps the surface), as the picture size may differ.
                 renderer?.let { r -> runCatching { r.reset() }.onFailure { onEvent("video decoder reset: ${it.message}") } }
-                onEvent("video from ssrc %08x".format(rtp.ssrc))
+                onEvent((if (restart) "video restarts from ssrc %08x" else "video from ssrc %08x").format(rtp.ssrc))
             }
+            lastTimestamp = rtp.timestamp
             val units = try { depacketizer.push(rtp.sequence, rtp.timestamp, rtp.marker, rtp.payload) } catch (e: H264Error) {
                 onEvent("video: ${e.message}"); continue
             }
@@ -316,7 +322,9 @@ class VideoMediaSession(
         } finally {
             source.close(); encoder.close()
             cam.close(); capture = null
-            videoTsBase = (videoTsBase + 90_000) and 0xffffffffL
+            // The next transmission goes on from here (a second after this one's last picture): RTP time keeps increasing
+            // for the SSRC (RFC 3550 section 5.1), so a receiver does not see the next transmission start in the past.
+            videoTsBase = (videoTsBase + maxOf(lastOffset, 0L) + 90_000) and 0xffffffffL
         }
         if (r.transmissionControl && control.state.value == TxState.HAS_PERMISSION) scope.launch { control.release() }
     }
