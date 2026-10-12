@@ -37,6 +37,14 @@ data class McvideoInfo(
     val participantCriteria: String? = null,
     val adhocAlert: Boolean? = null,
     val adhocAlertReceived: Boolean? = null,
+    /**
+     * In `<anyExt>` (TS 24.281 Annex F.1.2), functional aliases (§20): the alias presented by the caller, the alias
+     * called, the call to an alias, and the <req-type> of the alias status subscription (§20.2.1.3 step 2).
+     */
+    val functionalAlias: String? = null,
+    val calledFunctionalAlias: String? = null,
+    val callToFunctionalAlias: Boolean? = null,
+    val reqType: String? = null,
 ) {
     fun encode(): String = Xml.document("mcvideoinfo", NAMESPACE) {
         element("mcvideo-Params") {
@@ -52,11 +60,16 @@ data class McvideoInfo(
             wrapped("originated-by", originatedBy, "mcvideoURI")
             wrapped("mcvideo-client-id", clientId, "mcvideoString")
             wrapped("video-pull-url", videoPullUrl, "mcvideoURI")
-            if (ambientViewingType != null || participantCriteria != null || adhocAlert != null || adhocAlertReceived != null) element("anyExt") {
+            if (ambientViewingType != null || participantCriteria != null || adhocAlert != null || adhocAlertReceived != null ||
+                functionalAlias != null || calledFunctionalAlias != null || callToFunctionalAlias != null || reqType != null) element("anyExt") {
                 leaf("ambient-viewing-type", ambientViewingType)
                 leaf("call-participants-criteria", participantCriteria)
                 leaf("adhoc-alert-ind", adhocAlert?.toString())
                 leaf("adhoc-alert-ind-rcvd", adhocAlertReceived?.toString())
+                wrapped("functional-alias-URI", functionalAlias, "mcvideoURI")
+                wrapped("called-functional-alias-URI", calledFunctionalAlias, "mcvideoURI")
+                leaf("call-to-functional-alias-ind", callToFunctionalAlias?.toString())
+                leaf("req-type", reqType)
             }
         }
     }
@@ -92,6 +105,10 @@ data class McvideoInfo(
                 participantCriteria = params.descendants("call-participants-criteria").firstOrNull()?.text(),
                 adhocAlert = params.descendants("adhoc-alert-ind").firstOrNull()?.text()?.trim()?.let { it == "true" || it == "1" },
                 adhocAlertReceived = params.descendants("adhoc-alert-ind-rcvd").firstOrNull()?.text()?.trim()?.let { it == "true" || it == "1" },
+                functionalAlias = params.descendants("functional-alias-URI").firstOrNull()?.text(),
+                calledFunctionalAlias = params.descendants("called-functional-alias-URI").firstOrNull()?.text(),
+                callToFunctionalAlias = params.descendants("call-to-functional-alias-ind").firstOrNull()?.text()?.trim()?.let { it == "true" || it == "1" },
+                reqType = params.descendants("req-type").firstOrNull()?.text(),
             )
         }
     }

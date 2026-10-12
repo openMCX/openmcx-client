@@ -823,12 +823,55 @@ class Lab:
         self.hangup(A)
         self.idle_everywhere([A, B, C])
 
+    def s17_functional_aliases(self) -> None:
+        """MCPTT functional aliases (TS 24.379 clause 9A) on a lab made with --functional-alias: "dispatcher" for alice
+        and bob (one activation at a time, bob may take it over), "reserve" for alice. Activation answered 200 with the
+        outcome by NOTIFY (9A.2.1.2, 9A.2.1.3), the take-over offered then done, a private call to the alias reaching
+        whoever holds it (11.1.1.2.1.1 step 14c, 300 then the call), and an alias presented on alice's calls."""
+        fa = lambda c: self.status(c)["functional_aliases"]
+        alias = lambda c, name: next((x for x in fa(c)["available"] if x.startswith(f"sip:{name}.alias@")), None)
+        dispatcher, reserve = alias(A, "dispatcher"), alias(A, "reserve")
+        if not self.check("alice may use dispatcher and reserve", bool(dispatcher and reserve), available=fa(A)["available"]):
+            return
+        self.cmd(A, "fa", "activate", dispatcher, reserve)
+        self.wait("alice holds dispatcher and reserve", lambda: {dispatcher, reserve} <= set(fa(A)["active"]))
+        self.check("alice's activation is answered 200, the outcome by NOTIFY", fa(A)["last_status"] == 200, last=fa(A))
+        self.cmd(B, "fa", "activate", dispatcher)
+        self.wait("bob is offered dispatcher for take-over", lambda: dispatcher in fa(B)["take_over_possible"])
+        self.check("bob's activation beyond the limit: 200, then take-over-possible", dispatcher not in fa(B)["active"], last=fa(B))
+        self.cmd(B, "fa", "takeover", dispatcher)
+        self.wait("bob holds dispatcher", lambda: dispatcher in fa(B)["active"])
+        self.wait("alice is told she no longer holds dispatcher", lambda: dispatcher not in fa(A)["active"])
+        self.check("bob takes dispatcher over; alice keeps reserve", reserve in fa(A)["active"])
+        # A private call to the alias reaches whoever holds it: bob.
+        third = next(c for c in self.devices if c not in (A, B))
+        self.cmd(third, "private-fa", dispatcher, "auto", timeout=30)
+        bob = self.established(B)
+        self.check("a call to dispatcher reaches bob", bob["peer"] == MCPTT[third], peer=bob["peer"])
+        self.check("bob sees the call was to dispatcher", bob.get("called_alias") == dispatcher, called=bob.get("called_alias"))
+        self.talk_and_verify(third, [B])
+        self.hangup(third)
+        self.idle_everywhere([third, B])
+        # Alice presents reserve on her calls.
+        self.cmd(A, "fa", "use", reserve)
+        self.cmd(A, "private", MCPTT[third], "auto", timeout=30)
+        other = self.established(third)
+        self.check(f"{third} sees alice's call from reserve", other.get("calling_alias") == reserve, calling=other.get("calling_alias"))
+        self.hangup(A)
+        self.idle_everywhere([A, third])
+        self.cmd(A, "fa", "use", "none")
+        self.cmd(A, "fa", "deactivate", reserve)
+        self.cmd(B, "fa", "deactivate", dispatcher)
+        self.wait("the aliases are deactivated", lambda: reserve not in fa(A)["active"] and dispatcher not in fa(B)["active"])
+        self.check("alice and bob deactivate their aliases", True)
+
     SCENARIOS = {"S1": s1_startup, "S2": s2_private_automatic, "S3": s3_private_manual, "S4": s4_group, "S5": s5_adhoc, "S6": s6_sds,
                  "S7": s7_refresh_and_recovery, "S8": s8_lifecycle, "S9": s9_impaired, "S10": s10_latency,
                  "S11": s11_product, "S12": s12_private_no_floor, "S13": s13_location,
                  "S14": s14_emergency_alerts,
                  "S15": s15_server_address,
                  "S16": s16_emergency_calls,
+                 "S17": s17_functional_aliases,
                  "S18": s18_floor_queue}
 
 

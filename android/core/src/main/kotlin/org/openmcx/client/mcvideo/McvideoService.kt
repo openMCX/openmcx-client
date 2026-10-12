@@ -68,6 +68,11 @@ class VideoCall internal constructor(
     @Volatile var priority: String = "normal"
     /** The session's focus URI (the dialog's remote Contact), where the conference subscription goes. */
     @Volatile var sessionUri: String? = null
+    /** Functional aliases (TS 24.281 §20): the alias the caller presented, and the alias that was called. */
+    @Volatile var callingAlias: String? = null
+    @Volatile var calledAlias: String? = null
+    /** A private call to a functional alias, before the server names who holds it (§10.2.2.2.1, 300). */
+    internal var toAlias: Boolean = false
     /** Group calls: who is in the call, MC ID to endpoint status, from the conference event package (§9.2.3). */
     @Volatile var participants: Map<String, String> = emptyMap()
     /** The conference subscription: its Call-ID (NOTIFYs may beat its 200) and, once answered, its dialog. */
@@ -274,6 +279,22 @@ class McvideoService(
         originate(VideoCall(ids.incrementAndGet(), true, target, transmissionControl).also { if (emergency) it.priority = "emergency" }, commencement)
 
     /**
+     * A private call to a functional alias (TS 24.281 §10.2.2.2.1 with §20): the request names the alias with
+     * <call-to-functional-alias-ind>; the server answers 300 with the MCVideo ID it selected, which is then called with
+     * the alias as <called-functional-alias-URI>.
+     */
+    suspend fun privateCallToAlias(alias: String, commencement: Commencement = Commencement.AUTOMATIC, transmissionControl: Boolean = true): VideoCall {
+        val redirect = try {
+            return originate(VideoCall(ids.incrementAndGet(), true, alias, transmissionControl).also { it.toAlias = true }, commencement)
+        } catch (e: AliasRedirect) { e }
+        return originate(VideoCall(ids.incrementAndGet(), true, redirect.selected, transmissionControl).also {
+            it.calledAlias = redirect.alias ?: alias }, commencement)
+    }
+
+    /** The server's 300 to a call to a functional alias: the MCVideo ID it selected. */
+    private class AliasRedirect(val selected: String, val alias: String?) : Exception("redirected to $selected")
+
+    /**
      * A prearranged group call (§9.2.1.2.1): the server invites the group's affiliated members. With
      * [priority] `emergency` or `imminent`, an emergency or imminent peril group call (§6.2.8.1).
      */
@@ -334,7 +355,8 @@ class McvideoService(
         val target = call.peer
         // §10.2.2.2.1 step 11, §15.2.1.1 with TS 33.180 7.4: a protected one-to-one call's media under a PCK we
         // generate for the called MCVideo ID, offered in a=key-mgmt. Calls with the server itself stay clear.
-        val pck = if (protectedMedia && !call.isGroup && !call.withServer) {
+        // A call to an alias is keyed once the server names the user who holds it (the 300, then the call to them).
+        val pck = if (protectedMedia && !call.isGroup && !call.withServer && !call.toAlias) {
             val keys = client.videoKeys ?: throw CallError("no MCVideo keys for a protected call")
             keys.makePck(target ?: throw CallError("no one to call"))
         } else null
@@ -363,9 +385,17 @@ class McvideoService(
                 Commencement.FORCED -> request.headers.add("Priv-Answer-Mode", "Auto")
                 null -> Unit
             }
-            val info = priorityInfo(if (call.isGroup) McvideoInfo(sessionType = call.sessionType, requestUri = call.groupId, clientId = client.config.clientId)
+            // §20: the alias this user presents (the reference client's mcvideo-fa use), the call to an alias, and the
+            // alias called once the server selected its MCVideo ID.
+            val presented = client.aliasesOf(McService.MCVIDEO).value.inUse.takeIf { !call.withServer }
+            call.callingAlias = presented
+            if (call.toAlias) call.calledAlias = target
+            val aliasCalled = call.calledAlias.takeIf { !call.toAlias }
+            val info = priorityInfo(if (call.isGroup) McvideoInfo(sessionType = call.sessionType, requestUri = call.groupId, clientId = client.config.clientId,
+                    functionalAlias = presented)
                 else McvideoInfo(sessionType = call.sessionType, callingUserId = config.userId, clientId = client.config.clientId,
-                    videoPullUrl = if (call.sessionType == PULL_FROM_SERVER) call.pushUrl else null, ambientViewingType = call.ambientType), call.priority)
+                    videoPullUrl = if (call.sessionType == PULL_FROM_SERVER) call.pushUrl else null, ambientViewingType = call.ambientType,
+                    functionalAlias = presented, callToFunctionalAlias = if (call.toAlias) true else null, calledFunctionalAlias = aliasCalled), call.priority)
             resourcePriority(call.priority)?.let { request.headers.add("Resource-Priority", it) }
             val parts = mutableListOf(Part("application/sdp", McvideoSdp.offer(local).toByteArray()), Part(McvideoInfo.CONTENT_TYPE, info.encode().toByteArray()))
             // A call with the server names nobody (§13.2.2.4, §12.2.2.4).
@@ -382,6 +412,13 @@ class McvideoService(
             })
             val sent = ua.lastSent[invite.callId] ?: invite
             call.invite = sent
+            if (call.toAlias && response.status == 300) {
+                val redirect = Multipart.parse(response.contentType, response.body).firstOrNull { it.mediaType == McvideoInfo.CONTENT_TYPE }
+                    ?.let { McvideoInfo.parse(it.text) }
+                val selected = redirect?.requestUri ?: throw CallError("functional alias redirect without an MCVideo ID")
+                event("call ${call.id}: functional alias ${redirect.calledFunctionalAlias ?: target} is $selected")
+                throw AliasRedirect(selected, redirect.calledFunctionalAlias)
+            }
             if (!response.isSuccess) {
                 val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""
                 // 480 after ringing, without a decline (warning 110), is the callee's no-answer timeout: report it as one.
@@ -479,6 +516,8 @@ class McvideoService(
         // One-to-one calls (private, push, pull, ambient viewing) name no group, even with a request URI in the info.
         val group = if (sessionType in ONE_TO_ONE) null else info.callingGroupId ?: info.requestUri
         val call = VideoCall(ids.incrementAndGet(), false, info.callingUserId, remote.transmissionControl, group, sessionType)
+        call.callingAlias = info.functionalAlias
+        call.calledAlias = info.calledFunctionalAlias
         if (sessionType == AMBIENT) {
             // §15.2.1.2 steps 7 and 10: the type and our role; we may release only with the release capability.
             call.ambientType = info.ambientViewingType ?: "remote-init"

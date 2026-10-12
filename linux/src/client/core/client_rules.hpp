@@ -167,7 +167,9 @@ inline std::size_t audio_overflow(std::size_t size, std::size_t limit, std::size
 // TS 24.379, TS 24.282 and TS 24.281 clause 7.2.2: a SIP 4xx, 5xx or 6xx response leaves the client not authorised,
 // and they leave whether and when to try again to the client. A refusal that can be transient is retried: 403 (the
 // server cannot authorise the user yet, for example while its user database reloads the profile after a restart),
-// 408 (no response: the transaction timed out), 480 and 500, and 503 (also a transport failure). The delay grows
+// 408 (no response: the transaction timed out), 477 and 478 (the SIP core could not reach the server, for example
+// while it restarts: sending to the next hop failed, its address did not resolve), 480 and 500, and 503 (also a
+// transport failure). The delay grows
 // 5 s, 10 s, 20 s, then stays at 60 s; RFC 3261 section 20.33: a Retry-After in a 500 or 503 gives the delay instead
 // (bounded to 1 s to 10 minutes). attempt counts the retries already made (0 before the first).
 inline std::optional<std::uint64_t> authorization_retry_delay_ms(int status, unsigned attempt,
@@ -175,6 +177,8 @@ inline std::optional<std::uint64_t> authorization_retry_delay_ms(int status, uns
   switch (status) {
   case 403:
   case 408:
+  case 477:
+  case 478:
   case 480:
   case 500:
   case 503: break;
@@ -192,6 +196,23 @@ inline std::optional<std::uint64_t> authorization_retry_delay_ms(int status, uns
   }
   constexpr std::uint64_t delays[] = {5000, 10000, 20000};
   return attempt < std::size(delays) ? delays[attempt] : 60000;
+}
+
+//------------------------------------------------------------------------------
+// Whether a refused service authorisation PUBLISH, initial or a refresh, is tried again (the refusal can be
+// transient, authorization_retry_delay_ms).
+inline bool transient_authorization_refusal(int status) { return authorization_retry_delay_ms(status, 0).has_value(); }
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9A.2.1.3 (TS 24.282 clause 22.2.1.3, TS 24.281 clause 20.2.1.3) with the statuses of clause
+// 9A.3.1.2: the outcome of one alias of this client's last status change from its status in a NOTIFY (empty when the
+// NOTIFY leaves it out), or std::nullopt while the change is still under way: "activating", or "deactivating" for a
+// deactivation (a server not owning the alias reports these until the owning server's outcome, clause 9A.2.2.2.5).
+inline std::optional<std::string> alias_outcome(std::string_view status, bool deactivation) {
+  if (status == "activating" || (deactivation && status == "deactivating")) return std::nullopt;
+  if (status == "activated" || status == "deactivating") return "activated";
+  if (status == "take-over-possible") return "take-over-possible";
+  return deactivation ? "deactivated" : "refused";
 }
 
 } // namespace mcx::client_rules

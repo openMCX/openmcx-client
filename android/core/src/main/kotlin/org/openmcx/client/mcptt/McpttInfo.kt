@@ -36,6 +36,15 @@ data class McpttInfo(
     val groupGeoArea: Boolean? = null,
     val adhocAlert: Boolean? = null,
     val adhocAlertReceived: Boolean? = null,
+    /**
+     * In `<anyExt>` (TS 24.379 Annex F.1.3), functional aliases (§9A): the alias presented by the caller, the alias
+     * called, the call to an alias (§11.1.1.2.1.1 step 14c), and the request type of the alias status subscription
+     * (`functional-alias-status-determination`, §9A.2.1.3).
+     */
+    val functionalAlias: String? = null,
+    val calledFunctionalAlias: String? = null,
+    val callToFunctionalAlias: Boolean? = null,
+    val requestType: String? = null,
     val extra: Map<String, String> = emptyMap(),
 ) {
     fun encode(): String = Xml.document("mcpttinfo", NAMESPACE) {
@@ -54,12 +63,17 @@ data class McpttInfo(
             wrapped("mcptt-client-id", clientId, "mcpttString")
             alertReceived?.let { wrapped("alert-ind-rcvd", it.toString(), "mcpttBoolean") }
             if (participantCriteria != null || emergencyAlertArea != null || groupGeoArea != null || adhocAlert != null ||
-                adhocAlertReceived != null) element("anyExt") {
+                adhocAlertReceived != null || functionalAlias != null || calledFunctionalAlias != null ||
+                callToFunctionalAlias != null || requestType != null) element("anyExt") {
                 leaf("call-participants-criterias", participantCriteria)
                 leaf("emergency-alert-area-ind", emergencyAlertArea?.toString())
                 leaf("group-geo-area-ind", groupGeoArea?.toString())
                 leaf("adhoc-alert-ind", adhocAlert?.toString())
                 leaf("adhoc-alert-ind-rcvd", adhocAlertReceived?.toString())
+                wrapped("functional-alias-URI", functionalAlias, "mcpttURI")
+                wrapped("called-functional-alias-URI", calledFunctionalAlias, "mcpttURI")
+                leaf("call-to-functional-alias-ind", callToFunctionalAlias?.toString())
+                leaf("request-type", requestType)
             }
         }
     }
@@ -102,6 +116,10 @@ data class McpttInfo(
                 groupGeoArea = flag("group-geo-area-ind"),
                 adhocAlert = flag("adhoc-alert-ind"),
                 adhocAlertReceived = flag("adhoc-alert-ind-rcvd"),
+                functionalAlias = ext("functional-alias-URI"),
+                calledFunctionalAlias = ext("called-functional-alias-URI"),
+                callToFunctionalAlias = flag("call-to-functional-alias-ind"),
+                requestType = ext("request-type"),
                 extra = params.children().filter { it.localName !in known }.associate { it.localName to it.text() },
             )
         }

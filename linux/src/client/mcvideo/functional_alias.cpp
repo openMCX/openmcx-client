@@ -141,29 +141,24 @@ SipResponse Client::mcvideo_alias_notify(const SipMessage &message) {
     }
     if (alias.empty() && !notified.per_alias && notified.entity == mcvideo_user()) {
       std::set<std::string> active, possible;
-      for (const auto &entry : notified.entries)
+      std::map<std::string, std::string> statuses;
+      for (const auto &entry : notified.entries) {
+        statuses[entry.alias] = entry.status;
         if (entry.status == "activated" || entry.status == "deactivating")
           active.insert(entry.alias);
         else if (entry.status == "take-over-possible")
           possible.insert(entry.alias);
+      }
       mcvideo_aliases_ = active;
       mcvideo_takeover_possible_ = possible;
       mcvideo_alias_status_known_ = true;
-      // The outcome of this client's last change, by its <p-id-fa>; the take-over the user asked for follows
-      // once the alias is offered.
-      if (!notified.publish_id.empty() && mcvideo_fa_result_.is_object() &&
-          mcvideo_fa_result_.value("p_id_fa", "") == notified.publish_id) {
-        std::vector<std::string> take_over;
-        for (const auto &changed : mcvideo_fa_result_["aliases"].get<std::vector<std::string>>()) {
-          mcvideo_fa_result_["outcomes"][changed] = active.contains(changed)     ? "activated"
-                                                    : possible.contains(changed) ? "take-over-possible"
-                                                    : mcvideo_fa_result_["action"] == "deactivate" ? "deactivated"
-                                                                                                   : "refused";
-          if (mcvideo_takeover_wanted_.erase(changed) && possible.contains(changed)) take_over.push_back(changed);
-        }
-        event("mcvideo_functional_alias_result", mcvideo_fa_result_);
-        if (!take_over.empty()) schedule([this, take_over] { mcvideo_functional_alias("takeover", take_over); });
-      }
+      // The outcome of this client's last change, by its <p-id-fa> (or a later NOTIFY while it was under way); the
+      // take-over the user asked for follows once the alias is offered.
+      const bool handled = !notified.publish_id.empty() && mcvideo_fa_result_.is_object() &&
+                           mcvideo_fa_result_.value("p_id_fa", "") == notified.publish_id;
+      const auto take_over = settle_alias_outcomes(mcvideo_fa_result_, statuses, handled, mcvideo_takeover_wanted_);
+      if (handled) event("mcvideo_functional_alias_result", mcvideo_fa_result_);
+      if (!take_over.empty()) schedule([this, take_over] { mcvideo_functional_alias("takeover", take_over); });
     } else if (!alias.empty() && notified.entity == alias && (notified.per_alias || notified.entries.empty())) {
       std::vector<std::string> users;
       for (const auto &entry : notified.entries) users.push_back(entry.user);

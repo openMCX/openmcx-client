@@ -775,6 +775,8 @@ private:
 
   void functional_alias_command(const std::string &arguments);
   void publish_functional_alias(const std::string &action, const std::vector<std::string> &aliases, bool take_over);
+  std::vector<std::string> settle_alias_outcomes(Json &last, const std::map<std::string, std::string> &statuses,
+                                                 bool handled, std::set<std::string> &wanted);
   void alias_status_subscribe();
   SipResponse alias_status_notify(const SipMessage &message);
 
@@ -1585,8 +1587,21 @@ private:
   std::set<std::string> mcdata_aliases_wanted_, mcdata_aliases_active_;
   std::string mcdata_alias_in_use_;
   Json mcdata_fa_last_result_ = nullptr;
+  // TS 24.282 clause 22.2.1.3: the subscription to this user's functional alias status (its dialog, whether it was
+  // answered and the changes waiting for it), the aliases offered for take-over and those the user asked to take over.
+  std::string mcdata_alias_dialog_;
+  bool mcdata_alias_answered_ = false;
+  int mcdata_alias_subscription_result_ = 0;
+  std::vector<std::pair<std::string, std::vector<std::string>>> mcdata_pending_alias_changes_;
+  std::set<std::string> mcdata_takeover_possible_, mcdata_takeover_wanted_;
 
   void mcdata_functional_alias(const std::string &action, const std::vector<std::string> &aliases);
+
+  void mcdata_publish_functional_alias(const std::string &action, const std::vector<std::string> &aliases);
+
+  void mcdata_alias_subscribe();
+
+  SipResponse mcdata_alias_notify(const SipMessage &message);
 
   void mcdata_notify(Json &received, mcdata::DispositionNotification type);
 
@@ -1795,7 +1810,7 @@ public:
 
   void reauthorize();
 
-  void authorization_lost(const std::string &what, int status);
+  void authorization_lost(const std::string &what, const SipResponse &response);
 
   // ---- The run loop (core/client.cpp) ----
   void run();

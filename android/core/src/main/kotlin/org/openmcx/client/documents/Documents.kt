@@ -24,6 +24,11 @@ data class UserProfile(
     /** Granted rights, by their TS 24.484 element names (`allow-private-call`, …). */
     val actions: Set<String>,
     val privateCallTargets: List<String>,
+    /**
+     * The functional aliases the user is authorised to activate (§8.3.2.1 item 10 g ii): the <uri-entry> of each
+     * <entry> of <FunctionalAliasList> in the <anyExt> of <OnNetwork>.
+     */
+    val functionalAliases: List<String> = emptyList(),
 ) {
     fun allows(action: String) = action in actions
 
@@ -52,6 +57,8 @@ data class UserProfile(
                 // <Common>/<PrivateCall>/<PrivateCallList>/<PrivateCallURI>/<uri-entry>
                 privateCallTargets = common.flatMap { it.kids("PrivateCall") }.flatMap { it.kids("PrivateCallList") }
                     .flatMap { it.kids("PrivateCallURI") }.mapNotNull { it.uriEntry() },
+                functionalAliases = root.kids("OnNetwork").flatMap { it.kids("anyExt") }.flatMap { it.kids("FunctionalAliasList") }
+                    .flatMap { it.kids("entry") }.mapNotNull { it.uriEntry() },
             )
         }
 

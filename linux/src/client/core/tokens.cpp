@@ -138,7 +138,7 @@ void Client::reauthorize() {
   sip_.publish(service(), type, body, headers, [this](const SipResponse &response) {
     if (response.status_code < 200) return;
     if (response.status_code != 200) {
-      authorization_lost("service authorization renewal", response.status_code);
+      authorization_lost("service authorization renewal", response);
       return;
     }
     auth_etag_ = get_header(response.headers, "SIP-ETag");
@@ -153,8 +153,11 @@ void Client::reauthorize() {
 // RFC 3903 section 5, the client "MUST NOT reattempt the PUBLISH request. Instead, to publish event state, the EPA
 // SHOULD perform an initial publication, i.e., a PUBLISH request without a SIP-If-Match header field", and discards
 // the entity-tag. The initial publication authorises the client again, and its affiliation status subscription and
-// affiliation follow as after the first one (clauses 9.2.1.3 and 9.2.1.2).
-void Client::authorization_lost(const std::string &what, int status) {
+// affiliation follow as after the first one (clauses 9.2.1.3 and 9.2.1.2). A refusal that can be transient, a refresh
+// answered by the SIP core while the server restarts for example, likewise discards the entity-tag, and the initial
+// publication follows after a growing delay (retry_authorization); any other refusal is final.
+void Client::authorization_lost(const std::string &what, const SipResponse &response) {
+  const int status = response.status_code;
   const bool was_authorized = authorized_;
   authorized_ = affiliated_ = false;
   if (was_authorized) {
@@ -162,13 +165,19 @@ void Client::authorization_lost(const std::string &what, int status) {
     if (!dialog_.empty()) sip_.bye(dialog_);
   }
   failure(what + ": " + std::to_string(status));
-  if (status != 412) return;
+  if (status != 412 && !client_rules::transient_authorization_refusal(status)) return;
   auth_etag_.clear();
   affiliation_etag_.clear();
   subscription_.clear();
   subscription_expires_ = 0;
-  event("service_authorization_republished", {{"status", status}});
-  schedule([this] { authorize(); });
+  if (status == 412) {
+    event("service_authorization_republished", {{"status", status}});
+    schedule([this] { authorize(); });
+  } else {
+    retry_authorization(authorization_retry_, "mcptt", response, [this] {
+      if (!authorized_) authorize();
+    });
+  }
 }
 
 } // namespace mcx

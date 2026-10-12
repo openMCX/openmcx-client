@@ -64,6 +64,9 @@ class Call internal constructor(
     /** `normal`, `emergency` or `imminent` (peril): as requested, or as the server last announced (§6.2.8). */
     @Volatile var priority: String = "normal"
     val startedAt = System.currentTimeMillis()
+    /** Functional aliases (TS 24.379 §9A): the alias the caller presented, and the alias that was called. */
+    @Volatile var callingAlias: String? = null
+    @Volatile var calledAlias: String? = null
     val floorEvents: MutableList<String> = CopyOnWriteArrayList()
 }
 
@@ -151,6 +154,22 @@ class McpttService(
         originate(CallType.PRIVATE, target, null, listOf(target), commencement, floorControl, if (emergency) "emergency" else "normal")
 
     /**
+     * A private call to a functional alias (§11.1.1.2.1.1 step 14c): the request names the alias with
+     * <call-to-functional-alias-ind>; the server answers 300 with the MCPTT ID it selected, which is then called
+     * with the alias as <called-functional-alias-URI>.
+     */
+    suspend fun privateCallToAlias(alias: String, commencement: Commencement = Commencement.AUTOMATIC, floorControl: Boolean = true): Call {
+        val redirect = try {
+            return originate(CallType.PRIVATE, alias, null, listOf(alias), commencement, floorControl, toAlias = true)
+        } catch (e: AliasRedirect) { e }
+        return originate(CallType.PRIVATE, redirect.selected, null, listOf(redirect.selected), commencement, floorControl,
+            calledAlias = redirect.alias ?: alias)
+    }
+
+    /** The server's 300 to a call to a functional alias: the MCPTT ID it selected (§11.1.1.2.1.1). */
+    private class AliasRedirect(val selected: String, val alias: String?) : Exception("redirected to $selected")
+
+    /**
      * Prearranged group call (TS 24.379 §10.1.1.2.1.1); with [priority] `emergency` or `imminent`, an emergency or
      * imminent peril group call (§6.2.8.1).
      */
@@ -161,7 +180,8 @@ class McpttService(
     suspend fun adhocCall(participants: List<String>): Call = originate(CallType.ADHOC, null, null, participants, null)
 
     private suspend fun originate(type: CallType, peer: String?, group: String?, targets: List<String>, commencement: Commencement?,
-                                  floorControl: Boolean = true, priority: String = "normal"): Call {
+                                  floorControl: Boolean = true, priority: String = "normal", toAlias: Boolean = false,
+                                  calledAlias: String? = null): Call {
         if (active != null) throw CallError("already in a call")
         val resource = resourcePriority(priority)
         val call = Call(ids.incrementAndGet(), type, true, peer, group).also { it.floorControl = floorControl; it.priority = priority }
@@ -182,7 +202,13 @@ class McpttService(
                 null -> Unit
             }
             resource?.let { request.headers.add("Resource-Priority", it) }
-            val info = priorityInfo(McpttInfo(sessionType = type.sessionType, requestUri = group, clientId = client.config.clientId), priority)
+            // §9A, §11.1.1.2.1.1 step 14c: the alias this user presents (private and ad hoc calls, as the reference client),
+            // the call to an alias, and the alias called once the server selected its MCPTT ID.
+            val presented = client.aliases.value.inUse.takeIf { type != CallType.PREARRANGED }
+            call.callingAlias = presented
+            call.calledAlias = calledAlias ?: peer.takeIf { toAlias }
+            val info = priorityInfo(McpttInfo(sessionType = type.sessionType, requestUri = group, clientId = client.config.clientId,
+                functionalAlias = presented, callToFunctionalAlias = if (toAlias) true else null, calledFunctionalAlias = calledAlias), priority)
             val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(local).toByteArray()),
                 Part(McpttInfo.CONTENT_TYPE, info.encode().toByteArray()))
             if (targets.isNotEmpty()) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(targets).toByteArray())
@@ -197,6 +223,13 @@ class McpttService(
             })
             val sent = ua.lastSent[invite.callId] ?: invite
             call.invite = sent
+            if (toAlias && response.status == 300) {
+                val redirect = Multipart.parse(response.contentType, response.body).firstOrNull { it.mediaType == McpttInfo.CONTENT_TYPE }
+                    ?.let { McpttInfo.parse(it.text) }
+                val selected = redirect?.requestUri ?: throw CallError("functional alias redirect without an MCPTT ID", 300)
+                event("call ${call.id}: functional alias ${redirect.calledFunctionalAlias ?: peer} is $selected")
+                throw AliasRedirect(selected, redirect.calledFunctionalAlias)
+            }
             if (!response.isSuccess) {
                 val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""
                 throw CallError("${response.status} ${response.reason}$warning", response.status)
@@ -264,7 +297,11 @@ class McpttService(
         // §11.1.2: only a private call comes without floor control.
         if (!remote.floorControl && type != CallType.PRIVATE) { tx.respond(488); return }
         val call = Call(ids.incrementAndGet(), type, false, info.callingUserId,
-            if (type == CallType.PRIVATE) null else info.callingGroupId).also { it.floorControl = remote.floorControl }
+            if (type == CallType.PRIVATE) null else info.callingGroupId).also {
+            it.floorControl = remote.floorControl
+            it.callingAlias = info.functionalAlias
+            it.calledAlias = info.calledFunctionalAlias
+        }
         notePriority(call, info, quiet = true)
         call.incoming = tx
         call.invite = request

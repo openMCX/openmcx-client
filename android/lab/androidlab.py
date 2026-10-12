@@ -99,12 +99,18 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
         "cms": ref["endpoints"]["cms"],
         "gms": ref["endpoints"]["gms"],
         "mcptt": {"user_id": mcptt["user_id"], "psi": mcptt["service_uri"], "groups": [mcptt["group_id"]],
-                  "answer_mode": "automatic", "session_expires": 1800, "manual_answer_timeout": 20},
+                  "answer_mode": "automatic", "session_expires": 1800, "manual_answer_timeout": 20,
+                  # The functional aliases this user may activate (TS 24.379 clause 9A), from the site's definitions.
+                  "functional_aliases": [fa["id"] for fa in site.get("functional_aliases", [])
+                                         if mcptt["user_id"] in fa.get("users", [])]},
         "media": {"port_range": [20000, 20400], "amr_wb_mode": 2},
     }
     if mcdata:
         bundle["mcdata"] = {"user_id": mcdata["user_id"], "psi": mcdata["service_uri"], "groups": [mcdata["group_id"]],
-                            "max_payload_size_sds_cplane_bytes": 1000, "tdu1_seconds": 10}
+                            "max_payload_size_sds_cplane_bytes": 1000, "tdu1_seconds": 10,
+                            # MCData functional aliases (TS 24.282 clause 22): those whose MCData user list names this user.
+                            "functional_aliases": [fa["id"] for fa in site.get("functional_aliases", [])
+                                                   if mcdata["user_id"] in fa.get("mcdata_users", [])]}
         if fd:
             bundle["mcdata"]["fd"] = fd
     mcvideo = ref.get("mcvideo")
@@ -113,7 +119,10 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
         chats = [g["id"] for g in site.get("groups", []) if g.get("type") == "chat"
                  and mcvideo["user_id"] in (g.get("mcvideo") or {}).get("members", [])]
         bundle["mcvideo"] = {"user_id": mcvideo["user_id"], "psi": mcvideo["service_uri"], "groups": [mcvideo["group_id"]],
-                             "chat_groups": chats, "answer_mode": "automatic"}
+                             "chat_groups": chats, "answer_mode": "automatic",
+                             # MCVideo functional aliases (TS 24.281 clause 20): those whose <mcvideo-user-list> names this user.
+                             "functional_aliases": [fa["id"] for fa in site.get("functional_aliases", [])
+                                                    if mcvideo["user_id"] in fa.get("mcvideo_users", [])]}
     security = ref.get("security")
     if security:
         # TS 33.180: the KMS, the Key Parameters wire profile, and what is protected (the fixture's --protected).
@@ -217,6 +226,11 @@ def create(args) -> None:
         # Location reporting (TS 24.379 clause 13): the server configures every client's reporting at log-on,
         # client-a may request and configure others' location, client-b shares its location with everyone.
         command.append("--location")
+    if args.functional_alias:
+        # Functional aliases (TS 24.379 clause 9A): "dispatcher" for client-a and client-b (one activation, client-b may
+        # take it over), "medic" for client-c and client-d, "reserve" for client-a.
+        # With the private call policy, as the regression's functional-alias lab: calls to an alias are private calls.
+        command += ["--functional-alias"] + ([] if args.priority else ["--private-call"])
     if args.priority:
         # Emergency, imminent peril and emergency alerts (TS 24.379 §6.2.8, §12.1): client-a and client-b may raise
         # them, client-a may cancel an alert (its own or another user's). With the private call policy: emergency
@@ -725,6 +739,8 @@ def main() -> None:
                    help="location reporting (TS 24.379 clause 13): configurations, reports, requests and the LMS")
     c.add_argument("--floor-queue", action="store_true",
                    help="queued floor requests: the server queues a request while the floor is taken (scenario S18)")
+    c.add_argument("--functional-alias", action="store_true",
+                   help="functional aliases (TS 24.379 clause 9A): dispatcher (client-a, client-b), medic, reserve")
     c.add_argument("--priority", action="store_true",
                    help="emergency and imminent peril, and the MCPTT emergency alert (the group priority policy)")
     c.add_argument("--protected", action="store_true",

@@ -151,6 +151,28 @@ void test_authorization_retry() {
   check(!authorization_retry_delay_ms(412, 0), "a 412 is handled as RFC 3903 section 5 says");
   check(!authorization_retry_delay_ms(488, 0), "a 488 is final");
   check(!authorization_retry_delay_ms(603, 0), "a 603 is final");
+  check(authorization_retry_delay_ms(477, 0) == 5000u, "a 477 (the SIP core could not send to the server) is retried");
+  check(authorization_retry_delay_ms(478, 2) == 20000u, "a 478 (the server's address did not resolve) is retried");
+  using mcx::client_rules::transient_authorization_refusal;
+  check(transient_authorization_refusal(477) && transient_authorization_refusal(503),
+        "a refresh refused with 477 or 503 is published anew");
+  check(!transient_authorization_refusal(412) && !transient_authorization_refusal(404),
+        "a 412 and a 404 are not transient refusals");
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9A.2.1.3: the outcome of an alias of the last status change from its status in a NOTIFY.
+void test_alias_outcome() {
+  using mcx::client_rules::alias_outcome;
+  check(alias_outcome("activated", false) == "activated", "an activated alias is activated");
+  check(alias_outcome("take-over-possible", false) == "take-over-possible", "an offered alias may be taken over");
+  check(alias_outcome("", false) == "refused", "an activation left out is refused");
+  check(!alias_outcome("activating", false), "an activating alias is still under way");
+  check(!alias_outcome("activating", true), "an activating alias is under way for a deactivation too");
+  check(!alias_outcome("deactivating", true), "a deactivating alias is still under way for a deactivation");
+  check(alias_outcome("deactivating", false) == "activated", "a deactivating alias is still active");
+  check(alias_outcome("", true) == "deactivated", "a deactivation left out is done");
+  check(alias_outcome("activated", true) == "activated", "a deactivation the server kept active");
 }
 
 int main() {
@@ -161,6 +183,7 @@ int main() {
   test_profile_groups();
   test_floor_and_audio();
   test_authorization_retry();
+  test_alias_outcome();
   if (failures) std::fprintf(stderr, "%d check(s) failed\n", failures);
   return failures ? 1 : 0;
 }

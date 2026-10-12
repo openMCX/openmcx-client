@@ -130,6 +130,9 @@ object Tags {
     const val LOCATIONS = "locations"
     const val SETTINGS_BACK = "settings-back"
     const val PROFILE_INFO = "profile-info"
+    const val CALL_ALIAS = "call-alias"
+    fun alias(id: String) = "alias-$id"
+    fun aliasAction(id: String, action: String) = "alias-$action-$id"
     const val HISTORY_SECTION = "history-section"
     const val ABOUT_LINK = "about-link"
     const val CLEAR_MESSAGES = "clear-messages"
@@ -341,6 +344,7 @@ private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit
                 }
                 state.endpoints.forEach { (name, target) -> Text("$name → $target", style = MaterialTheme.typography.bodySmall) }
             }
+            if (state.aliases.isNotEmpty()) FunctionalAliases(state, actions)
             // History: calls, messages and files, and who was located; tap the heading to show it.
             Row(Modifier.fillMaxWidth().clickable { history = !history }.testTag(Tags.HISTORY_SECTION), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { Section("History") }
@@ -428,6 +432,7 @@ private fun IncomingCall(call: CallItem, actions: UiActions) {
         .padding(16.dp)) {
         Text("Incoming ${call.type.sessionType} call", style = MaterialTheme.typography.titleMedium, color = Mcx.Muted)
         Text(call.title, color = Mcx.Ink, style = CallTitle)
+        call.alias?.let { Text(it, color = Mcx.Muted, style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag(Tags.CALL_ALIAS)) }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 12.dp)) {
             Button(onClick = actions::answer, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag(Tags.ANSWER), shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32), contentColor = Color.White)) {
@@ -547,6 +552,49 @@ private fun VideoScreen(state: UiState, actions: UiActions) {
     }
 }
 
+/**
+ * This user's functional aliases (TS 24.379 §9A.2.1): each with its status in words, and what can be done with it:
+ * activate, take over (when another user holds it and this user may), deactivate, present it on outgoing calls.
+ */
+@Composable
+private fun FunctionalAliases(state: UiState, actions: UiActions) {
+    Section("Functional aliases")
+    Text("A functional alias is a role others can call, such as a dispatcher. Activate one to receive its calls; " +
+        "present it so your calls show it.", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+    state.aliases.forEach { alias ->
+        Column(Modifier.fillMaxWidth().padding(vertical = 6.dp).background(Mcx.Card, RoundedCornerShape(12.dp))
+            .border(1.dp, Mcx.Line, RoundedCornerShape(12.dp)).padding(12.dp).testTag(Tags.alias("${alias.service}-${alias.id.short()}"))) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(alias.id.short(), color = Mcx.Ink, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Text(when (alias.service) { "mcdata" -> "MCData"; "mcvideo" -> "MCVideo"; else -> "MCPTT" }, color = Mcx.Muted,
+                    style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
+                val (label, ink) = when (alias.status) {
+                    "active" -> (if (alias.inUse) "Active · on your calls" else "Active") to Mcx.OkInk
+                    "take-over-possible" -> "Held by another user" to Mcx.WarnInk
+                    else -> "Not active" to Mcx.Muted
+                }
+                Text(label, color = ink, style = MaterialTheme.typography.bodySmall)
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
+                val tag = { action: String -> Modifier.heightIn(min = 48.dp).testTag(Tags.aliasAction("${alias.service}-${alias.id.short()}", action)) }
+                when (alias.status) {
+                    "active" -> {
+                        OutlinedButton(onClick = { actions.aliasChange("deactivate", alias.id, alias.service) }, modifier = tag("deactivate")) { Text("Deactivate") }
+                        if (alias.inUse) OutlinedButton(onClick = { actions.aliasUse(null, alias.service) }, modifier = tag("unuse")) { Text("Stop presenting") }
+                        else Button(onClick = { actions.aliasUse(alias.id, alias.service) }, modifier = tag("use")) { Text("Present on calls") }
+                    }
+                    "take-over-possible" -> Button(onClick = { actions.aliasChange("takeover", alias.id, alias.service) }, modifier = tag("takeover")) { Text("Take over") }
+                    else -> Button(onClick = { actions.aliasChange("activate", alias.id, alias.service) }, enabled = state.registered, modifier = tag("activate")) { Text("Activate") }
+                }
+                // MCData aliases are reached by short data, not calls (the Messages tab's SDS to an alias is not offered yet).
+                if (alias.status != "active" && alias.service != "mcdata") OutlinedButton(onClick = { actions.callAlias(alias.id, alias.service) },
+                    enabled = state.registered, modifier = tag("call")) { Text("Call") }
+            }
+        }
+    }
+    state.aliasNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Mcx.Muted) }
+}
+
 @Composable
 private fun Section(title: String) =
     Text(title, style = MaterialTheme.typography.titleSmall, color = Mcx.Muted, modifier = Modifier.padding(top = 20.dp, bottom = 6.dp))
@@ -630,6 +678,7 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
                 "imminent" -> PriorityBanner("IMMINENT PERIL", Mcx.Peril, Color.Black)
             }
             Text(call.title, color = Mcx.Ink, style = CallTitle)
+            call.alias?.let { Text(it, color = Mcx.Muted, style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag(Tags.CALL_ALIAS)) }
             if (call.members.isNotEmpty()) {
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     call.members.forEach { member ->

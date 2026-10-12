@@ -30,6 +30,13 @@ data class McdataInfo(
     val usedPriority: Int? = null,
     val userRequestedPriority: Int? = null,
     val controllerPsi: String? = null,
+    /**
+     * In `<anyExt>` (TS 24.282 Annex D.1), functional aliases (§22): the call to an alias, the alias presented by the
+     * sender and the alias called.
+     */
+    val callToFunctionalAlias: Boolean? = null,
+    val functionalAlias: String? = null,
+    val calledFunctionalAlias: String? = null,
 ) {
     fun encode(): String = Xml.document("mcdatainfo", NAMESPACE) {
         element("mcdata-Params") {
@@ -44,13 +51,17 @@ data class McdataInfo(
             if (clientId != null) element("mcdata-client-id") { attr("type", "Normal"); leaf("mcdataString", clientId) }
             uri("mcdata-controller-psi", controllerPsi)
             if (alertReceived != null || associatedGroupId != null || userRequestedPriority != null || usedPriority != null ||
-                emergencyAlertArea != null || groupGeoArea != null) element("anyExt") {
+                emergencyAlertArea != null || groupGeoArea != null || callToFunctionalAlias != null || functionalAlias != null ||
+                calledFunctionalAlias != null) element("anyExt") {
                 leaf("alert-ind-rcvd", alertReceived?.toString())
                 leaf("associated-group-id", associatedGroupId)
                 leaf("user-requested-priority", userRequestedPriority?.toString())
                 leaf("used-priority", usedPriority?.toString())
                 leaf("emergency-alert-area-ind", emergencyAlertArea?.toString())
                 leaf("group-geo-area-ind", groupGeoArea?.toString())
+                leaf("call-to-functional-alias-ind", callToFunctionalAlias?.toString())
+                uri("functional-alias-URI", functionalAlias)
+                uri("called-functional-alias-URI", calledFunctionalAlias)
             }
         }
     }
@@ -86,6 +97,9 @@ data class McdataInfo(
                 usedPriority = params.descendants("used-priority").firstOrNull()?.text()?.toIntOrNull(),
                 userRequestedPriority = params.descendants("user-requested-priority").firstOrNull()?.text()?.toIntOrNull(),
                 controllerPsi = value("mcdata-controller-psi"),
+                callToFunctionalAlias = flag("call-to-functional-alias-ind"),
+                functionalAlias = ext("functional-alias-URI"),
+                calledFunctionalAlias = ext("called-functional-alias-URI"),
             )
         }
     }

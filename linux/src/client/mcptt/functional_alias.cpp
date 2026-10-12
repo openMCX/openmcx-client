@@ -142,11 +142,14 @@ SipResponse Client::alias_status_notify(const SipMessage &message) {
       return response;
     }
     std::set<std::string> active, possible;
-    for (const auto &entry : notified.entries)
+    std::map<std::string, std::string> statuses;
+    for (const auto &entry : notified.entries) {
+      statuses[entry.alias] = entry.status;
       if (entry.status == "activated" || entry.status == "deactivating")
         active.insert(entry.alias);
       else if (entry.status == "take-over-possible")
         possible.insert(entry.alias);
+    }
     for (const auto &alias : active)
       if (!active_aliases_.contains(alias)) {
         location_alias_ = alias;
@@ -160,18 +163,11 @@ SipResponse Client::alias_status_notify(const SipMessage &message) {
     active_aliases_ = active;
     takeover_possible_aliases_ = possible;
     auto &last = status_["last_fa_result"];
-    if (!notified.publish_id.empty() && last.is_object() && last.value("p_id_fa", "") == notified.publish_id) {
-      for (const auto &alias : last["aliases"].get<std::vector<std::string>>())
-        last["outcomes"][alias] = active.contains(alias)           ? "activated"
-                                  : possible.contains(alias)       ? "take-over-possible"
-                                  : last["action"] == "deactivate" ? "deactivated"
-                                                                   : "refused";
-      // The take-over the user asked for, now that the alias is offered; a refused one is dropped.
-      std::vector<std::string> take_over;
-      for (const auto &alias : last["aliases"].get<std::vector<std::string>>())
-        if (takeover_wanted_.erase(alias) && possible.contains(alias)) take_over.push_back(alias);
-      if (!take_over.empty()) schedule([this, take_over] { publish_functional_alias("takeover", take_over, true); });
-    }
+    const bool handled =
+        !notified.publish_id.empty() && last.is_object() && last.value("p_id_fa", "") == notified.publish_id;
+    // The take-over the user asked for, once the alias is offered; a refused one is dropped.
+    const auto take_over = settle_alias_outcomes(last, statuses, handled, takeover_wanted_);
+    if (!take_over.empty()) schedule([this, take_over] { publish_functional_alias("takeover", take_over, true); });
     event("functional_alias_notified", {{"p_id_fa", notified.publish_id},
                                         {"active", active_aliases_},
                                         {"take_over_possible", takeover_possible_aliases_}});
@@ -181,6 +177,37 @@ SipResponse Client::alias_status_notify(const SipMessage &message) {
     alias_status_answered_ = false;
   }
   return response;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9A.2.1.3 (TS 24.282 clause 22.2.1.3, TS 24.281 clause 20.2.1.3): the outcome of each alias of the
+// last status change (`last`: action, aliases, outcomes) from the statuses of a NOTIFY. The NOTIFY with the change's
+// p-id-fa (`handled`) decides every alias; an alias still under way there is kept pending, and a later NOTIFY decides
+// it. Returns the aliases decided "take-over-possible" for which the user asked a take-over (removed from `wanted`).
+std::vector<std::string> Client::settle_alias_outcomes(Json &last, const std::map<std::string, std::string> &statuses,
+                                                       bool handled, std::set<std::string> &wanted) {
+  std::vector<std::string> take_over;
+  if (!last.is_object() || !last.contains("aliases")) return take_over;
+  const bool deactivation = last.value("action", "") == "deactivate";
+  std::vector<std::string> open;
+  if (handled)
+    open = last["aliases"].get<std::vector<std::string>>();
+  else if (last.contains("pending"))
+    open = last["pending"].get<std::vector<std::string>>();
+  if (open.empty()) return take_over;
+  std::vector<std::string> pending;
+  for (const auto &alias : open) {
+    const auto found = statuses.find(alias);
+    const auto outcome = client_rules::alias_outcome(found == statuses.end() ? "" : found->second, deactivation);
+    if (!outcome) {
+      pending.push_back(alias);
+      continue;
+    }
+    last["outcomes"][alias] = *outcome;
+    if (wanted.erase(alias) && *outcome == "take-over-possible") take_over.push_back(alias);
+  }
+  last["pending"] = pending;
+  return take_over;
 }
 
 } // namespace mcx

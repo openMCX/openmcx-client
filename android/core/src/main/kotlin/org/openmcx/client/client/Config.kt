@@ -47,12 +47,19 @@ data class ClientConfig(
         val answerMode: String, val sessionExpires: Int, val manualAnswerTimeout: Int,
         /** The "user-profile-index" of `<Default-user-profile>` (TS 24.484 §7.2.2.1): mcptt-user-profile-<index>.xml. */
         val profileIndex: Int = 1,
+        /**
+         * The functional aliases this user may activate (TS 24.379 §9A.2.1). The CMS of this edition does not put them
+         * in the user profile document, so the provisioning names them; the status notifications add any others.
+         */
+        val functionalAliases: List<String> = emptyList(),
     )
 
     data class Mcdata(
         val userId: String, val psi: String, val groups: List<String>,
         val maxPayloadSizeSdsCplaneBytes: Int, val tdu1Seconds: Int,
         val fd: FdConfig = FdConfig(),
+        /** The MCData functional aliases this user may activate (TS 24.282 §22.2.1), as [Mcptt.functionalAliases]. */
+        val functionalAliases: List<String> = emptyList(),
     )
 
     data class Media(val portRange: IntRange, val amrWbMode: Int)
@@ -63,6 +70,8 @@ data class ClientConfig(
         /** Chat groups (TS 24.281 §9.2.2): joined on demand, not affiliated at start-up. */
         val chatGroups: List<String> = emptyList(),
         val width: Int = 640, val height: Int = 480, val frameRate: Int = 15, val bitrate: Int = 500_000,
+        /** The MCVideo functional aliases this user may activate (TS 24.281 §20.2.1), as [Mcptt.functionalAliases]. */
+        val functionalAliases: List<String> = emptyList(),
     )
 
     /**
@@ -97,17 +106,18 @@ data class ClientConfig(
                 mcptt = (root["mcptt"] as? JsonObject)?.let {
                     Mcptt(it.str("user_id"), it.str("psi"), it.strings("groups"), it.optStr("answer_mode") ?: "automatic",
                         it.int("session_expires", 1800), it.int("manual_answer_timeout", 20),
-                        it.int("profile_index", 1).takeIf { index -> index in 1..255 } ?: 1)
+                        it.int("profile_index", 1).takeIf { index -> index in 1..255 } ?: 1, it.strings("functional_aliases"))
                 },
                 mcdata = (root["mcdata"] as? JsonObject)?.let {
                     Mcdata(it.str("user_id"), it.str("psi"), it.strings("groups"), it.int("max_payload_size_sds_cplane_bytes", 1000),
-                        it.int("tdu1_seconds", 10), FdConfig.parse(it["fd"] as? JsonObject))
+                        it.int("tdu1_seconds", 10), FdConfig.parse(it["fd"] as? JsonObject), it.strings("functional_aliases"))
                 },
                 media = Media(ports[0]..ports[1], media.int("amr_wb_mode", 2)),
                 mcvideo = (root["mcvideo"] as? JsonObject)?.let {
                     Mcvideo(it.str("user_id"), it.str("psi"), it.strings("groups"), it.optStr("answer_mode") ?: "automatic",
                         it.strings("chat_groups"),
-                        it.int("width", 640), it.int("height", 480), it.int("frame_rate", 15), it.int("bitrate", 500_000))
+                        it.int("width", 640), it.int("height", 480), it.int("frame_rate", 15), it.int("bitrate", 500_000),
+                        it.strings("functional_aliases"))
                 },
                 security = (root["security"] as? JsonObject)?.let {
                     val profile = it.obj("key_parameter_profile")

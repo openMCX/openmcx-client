@@ -112,34 +112,142 @@ void Client::mcdata_alert_incoming(const mcdata::Info &info, const std::vector<B
 
 //------------------------------------------------------------------------------
 // TS 24.282 clause 22.2.1.2: the functional alias status change procedure, a SIP PUBLISH request that activates,
-// deactivates or takes over functional aliases of the MCData user.
+// deactivates or takes over functional aliases of the MCData user. The first change subscribes to this user's status
+// (clause 22.2.1.3) and waits for the answer, so that the NOTIFY with its p-id-fa gives the outcome.
 void Client::mcdata_functional_alias(const std::string &action, const std::vector<std::string> &aliases) {
   if (!mcdata_authorized_) throw std::runtime_error("functional alias change requires MCData service authorisation");
-  auto wanted = mcdata_aliases_wanted_;
+  if (action == "takeover") require_mcdata_profile({"allow-takeover-functional-alias-other-user"});
+  if (mcdata_alias_dialog_.empty() || !mcdata_alias_answered_) {
+    mcdata_pending_alias_changes_.emplace_back(action, aliases);
+    if (mcdata_alias_dialog_.empty()) mcdata_alias_subscribe();
+    return;
+  }
+  mcdata_publish_functional_alias(action, aliases);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 22.2.1.2: the PUBLISH with the mcdata-info naming this user and the per-user PIDF (namespace
+// urn:3gpp:ns:mcdataPresInfoFA:1.0) listing every alias wanted active; Expires 0 when none is. <take-over> is sent only
+// when every alias to take over was offered as "take-over-possible" (step 6 d)); a take-over asked earlier goes as an
+// activation and follows once offered. The answer only says the request was taken: the NOTIFY gives the outcome.
+void Client::mcdata_publish_functional_alias(const std::string &action, const std::vector<std::string> &aliases) {
+  auto wanted = mcdata_aliases_active_;
   for (const auto &alias : aliases) {
     if (action == "deactivate")
       wanted.erase(alias);
     else
       wanted.insert(alias);
   }
-  if (action == "takeover") require_mcdata_profile({"allow-takeover-functional-alias-other-user"});
+  const bool offered = std::all_of(aliases.begin(), aliases.end(),
+                                   [&](const auto &alias) { return mcdata_takeover_possible_.contains(alias); });
+  for (const auto &alias : aliases)
+    if (action == "takeover" && !offered)
+      mcdata_takeover_wanted_.insert(alias);
+    else
+      mcdata_takeover_wanted_.erase(alias);
   mcdata::Info info;
   info.request_uri = mcdata_user();
   std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
-  FunctionalAliasRequest request{mcdata_user(),        client_id(), random_id(), {wanted.begin(), wanted.end()},
-                                 action == "takeover", true};
+  FunctionalAliasRequest request{
+      mcdata_user(), client_id(), random_id(), {wanted.begin(), wanted.end()}, action == "takeover" && offered, true};
   parts.push_back({"application/pidf+xml", functional_alias_xml(request)});
+  mcdata_fa_last_result_ = {{"action", action},
+                            {"aliases", aliases},
+                            {"status", 0},
+                            {"p_id_fa", request.publish_id},
+                            {"take_over", request.take_over},
+                            {"outcomes", Json::object()}};
+  mcdata_aliases_wanted_ = wanted;
   mcdata_request("presence", parts, {{"Expires", wanted.empty() ? "0" : "4294967295"}},
-                 [this, action, aliases, wanted](const SipResponse &response) {
-                   mcdata_fa_last_result_ = {
-                       {"action", action}, {"aliases", aliases}, {"status", response.status_code}};
+                 [this, action, aliases, pid = request.publish_id](const SipResponse &response) {
+                   if (response.status_code < 200) return;
+                   if (mcdata_fa_last_result_.value("p_id_fa", "") == pid)
+                     mcdata_fa_last_result_["status"] = response.status_code;
                    if (response.status_code != 200) {
+                     for (const auto &alias : aliases) mcdata_takeover_wanted_.erase(alias);
                      failure("MCData functional alias " + action + ": " + std::to_string(response.status_code));
-                     return;
                    }
-                   mcdata_aliases_wanted_ = mcdata_aliases_active_ = wanted;
                  });
-  event("mcdata_functional_alias_requested", {{"action", action}, {"aliases", aliases}});
+  event("mcdata_functional_alias_requested",
+        {{"action", action}, {"aliases", aliases}, {"take_over", request.take_over}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 22.2.1.3: the functional alias status determination procedure: a SUBSCRIBE to the presence event
+// package with the mcdata-info naming this user and <request-type> "functional-alias-status-determination" (steps
+// 2 and 2A), Expires 4294967295 for the state and its changes (step 4).
+void Client::mcdata_alias_subscribe() {
+  mcdata::Info info;
+  info.request_uri = mcdata_user();
+  info.request_type = "functional-alias-status-determination";
+  mcdata_alias_answered_ = false;
+  mcdata_alias_dialog_ = sip_.subscribe(
+      mcdata_service(), "presence", 4294967295u,
+      {{"P-Preferred-Service", mcdata::icsi}, {"Accept", "application/pidf+xml"}},
+      [this](const SipResponse &response) {
+        if (response.status_code < 200) return;
+        mcdata_alias_subscription_result_ = response.status_code;
+        mcdata_alias_answered_ = true;
+        if (response.status_code >= 300) {
+          mcdata_alias_dialog_.clear();
+          failure("MCData functional alias subscription: " + std::to_string(response.status_code));
+        }
+        for (const auto &[action, aliases] : std::exchange(mcdata_pending_alias_changes_, {}))
+          schedule([this, action, aliases] { mcdata_publish_functional_alias(action, aliases); });
+      },
+      mcdata::info_mime,
+      mcdata_encrypt_xml({{mcdata::info_mime, mcdata::info_xml(info)}}, mcdata_xml_key()).front().body);
+  event("mcdata_functional_alias_subscription_requested");
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 22.2.1.3 with the syntax of clause 22.3.1.2: the NOTIFY with this user's functional alias status.
+// It replaces the aliases known active ("activated", or "deactivating" while still active) and those that may be
+// taken over; the <p-id-fa> of the last status change gives its outcome per alias.
+SipResponse Client::mcdata_alias_notify(const SipMessage &message) {
+  SipResponse response;
+  response.status_code = 200;
+  if (asserted_identity(message) != mcdata_service()) {
+    response.status_code = 403;
+    return response;
+  }
+  for (const auto &part :
+       message.parts.empty() ? std::vector<BodyPart>{{message.content_type, message.body}} : message.parts) {
+    if (part.content_type != "application/pidf+xml") continue;
+    FunctionalAliasStatus notified;
+    try {
+      notified = parse_functional_alias_status(part.body);
+    } catch (const std::exception &) {
+      response.status_code = 400;
+      return response;
+    }
+    if (!notified.mcdata || notified.per_alias || notified.entity != mcdata_user()) {
+      response.status_code = 400;
+      return response;
+    }
+    std::set<std::string> active, possible;
+    std::map<std::string, std::string> statuses;
+    for (const auto &entry : notified.entries) {
+      statuses[entry.alias] = entry.status;
+      if (entry.status == "activated" || entry.status == "deactivating")
+        active.insert(entry.alias);
+      else if (entry.status == "take-over-possible")
+        possible.insert(entry.alias);
+    }
+    mcdata_aliases_active_ = mcdata_aliases_wanted_ = active;
+    mcdata_takeover_possible_ = possible;
+    const bool handled = !notified.publish_id.empty() && mcdata_fa_last_result_.is_object() &&
+                         mcdata_fa_last_result_.value("p_id_fa", "") == notified.publish_id;
+    const auto take_over = settle_alias_outcomes(mcdata_fa_last_result_, statuses, handled, mcdata_takeover_wanted_);
+    if (!take_over.empty()) schedule([this, take_over] { mcdata_publish_functional_alias("takeover", take_over); });
+    event("mcdata_functional_alias_notified",
+          {{"p_id_fa", notified.publish_id}, {"active", active}, {"take_over_possible", possible}});
+  }
+  if (get_header(message.headers, "Subscription-State").starts_with("terminated")) {
+    mcdata_alias_dialog_.clear();
+    mcdata_alias_answered_ = false;
+  }
+  return response;
 }
 
 //------------------------------------------------------------------------------

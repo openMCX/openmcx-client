@@ -964,6 +964,8 @@ void Client::mcdata_status() {
   status_["mcdata_functional_aliases"] = mcdata_aliases_active_;
   status_["mcdata_functional_alias_in_use"] = mcdata_alias_in_use_;
   status_["mcdata_fa_last_result"] = mcdata_fa_last_result_;
+  status_["mcdata_functional_alias_subscription_result"] = mcdata_alias_subscription_result_;
+  status_["mcdata_functional_aliases_take_over_possible"] = mcdata_takeover_possible_;
   status_["mcdata_alert_state"] = mdea_name(mdea_);
   status_["mcdata_emergency"] = mcdata_emergency_;
   status_["mcdata_alerts_received"] = mcdata_alerts_received_;

@@ -31,6 +31,9 @@ import org.openmcx.client.security.WireProfile
 import org.openmcx.client.idms.LoopbackRedirect
 import org.openmcx.client.idms.Tokens
 import org.openmcx.client.mcdata.McdataInfo
+import org.openmcx.client.mcptt.FunctionalAliasPidf
+import org.openmcx.client.mcptt.FunctionalAliasRules
+import org.openmcx.client.mcptt.FunctionalAliasState
 import org.openmcx.client.mcptt.McpttInfo
 import org.openmcx.client.mcvideo.McvideoInfo
 import org.openmcx.client.sip.Connector
@@ -43,6 +46,7 @@ import org.openmcx.client.sip.SipRequest
 import org.openmcx.client.sip.SipResponse
 import org.openmcx.client.sip.UaIdentity
 import org.openmcx.client.sip.UserAgent
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /** ICSIs and feature tags (TS 24.379 §7.2.1, TS 24.282 §7.2.1). */
@@ -160,6 +164,28 @@ class McxClient(
     private val authEtags = ConcurrentHashMap<McService, String>()
     private val affiliationEtags = ConcurrentHashMap<McService, String>()
     private var housekeeping: Job? = null
+
+    /**
+     * Functional aliases (TS 24.379 §9A.2.1, TS 24.282 §22.2.1, TS 24.281 §20.2.1), one channel per service: the aliases
+     * the user may use, the status subscription and the last status change.
+     */
+    private inner class AliasChannel(val service: McService, available: List<String>) {
+        val state = MutableStateFlow(FunctionalAliasState(available = available))
+        @Volatile var request: SipRequest? = null
+        @Volatile var dialog: Dialog? = null
+        @Volatile var publish: FunctionalAliasRules.Change? = null
+        /** Aliases the user asked to take over that the server has not offered yet (§9A.2.1.2 step 6 d, NOTE 4). */
+        val takeOverWanted: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    }
+    private val aliasChannels: Map<McService, AliasChannel> = buildMap {
+        config.mcptt?.let { put(McService.MCPTT, AliasChannel(McService.MCPTT, it.functionalAliases)) }
+        config.mcdata?.let { put(McService.MCDATA, AliasChannel(McService.MCDATA, it.functionalAliases)) }
+        config.mcvideo?.let { put(McService.MCVIDEO, AliasChannel(McService.MCVIDEO, it.functionalAliases)) }
+    }
+    private val noAliases = MutableStateFlow(FunctionalAliasState())
+    /** The MCPTT functional aliases; [aliasesOf] for the other services. */
+    val aliases: StateFlow<FunctionalAliasState> get() = aliasesOf(McService.MCPTT)
+    fun aliasesOf(service: McService): StateFlow<FunctionalAliasState> = aliasChannels[service]?.state ?: noAliases
 
     private class Subscription(val service: McService, val request: SipRequest) {
         @Volatile var dialog: Dialog? = null
@@ -302,7 +328,15 @@ class McxClient(
         event("logged in; token expires in ${t.expiresAt - clock()} s")
         config.mcptt?.let { mcptt ->
             runCatching { documents.userProfile(mcptt.userId, mcptt.profileIndex, t.accessToken) }
-                .onSuccess { profile = it; event("user profile: groups ${it.groups}, private call targets ${it.privateCallTargets}") }
+                .onSuccess { up ->
+                    profile = up
+                    event("user profile: groups ${up.groups}, private call targets ${up.privateCallTargets}, functional aliases ${up.functionalAliases}")
+                    // The provisioning names the aliases, or else the CMS user profile does (TS 24.484 §8.3.2.1 <FunctionalAliasList>).
+                    aliasChannels[McService.MCPTT]?.let { channel ->
+                        if (channel.state.value.available.isEmpty() && up.functionalAliases.isNotEmpty())
+                            channel.state.update { it.copy(available = up.functionalAliases) }
+                    }
+                }
                 .onFailure { event("user profile: ${it.message}") }
         }
         // TS 24.379, TS 24.281 and TS 24.282 §6.2.8.1.15: the Resource-Priority values of each service's service
@@ -501,6 +535,125 @@ class McxClient(
         authorise(service)
         subscribe(service)
         if (groups.isNotEmpty()) affiliate(service, groups)
+        // §9A.2.1.1: the status determination of the aliases this user may use, before any status change.
+        val channel = aliasChannels[service]
+        if (channel != null && channel.state.value.available.isNotEmpty())
+            runCatching { subscribeAliases(channel) }.onFailure { event("functional alias status subscription: ${it.message}") }
+    }
+
+    // Functional aliases (TS 24.379 §9A.2.1, TS 24.282 §22.2.1, TS 24.281 §20.2.1).
+
+    /** The service's info body naming [user] in its request URI, with the <request-type> or <req-type> of [type]. */
+    private fun aliasInfo(service: McService, user: String, type: String? = null): Part = when (service) {
+        McService.MCPTT -> Part(McpttInfo.CONTENT_TYPE, McpttInfo(requestUri = user, clientId = config.clientId, requestType = type).encode().toByteArray())
+        // TS 24.282 §22.2.1.3 step 2 b: <request-type> in <mcdata-Params>.
+        McService.MCDATA -> Part(McdataInfo.CONTENT_TYPE, McdataInfo(requestUri = user, clientId = config.clientId, requestType = type).encode().toByteArray())
+        // TS 24.281 §20.2.1.3 step 2: <req-type> in <anyExt>.
+        McService.MCVIDEO -> Part(McvideoInfo.CONTENT_TYPE, McvideoInfo(requestUri = user, clientId = config.clientId, reqType = type).encode().toByteArray())
+    }
+
+    /**
+     * §9A.2.1.3 steps 1 to 4 (TS 24.282 §22.2.1.3, TS 24.281 §20.2.1.3): subscribe to this user's functional alias
+     * status: the info body names the user with `functional-alias-status-determination`, Expires 4294967295 for the
+     * state and its changes.
+     */
+    private suspend fun subscribeAliases(channel: AliasChannel) {
+        val service = channel.service
+        val request = serviceRequest(service, "SUBSCRIBE", "presence", listOf(aliasInfo(service, ownId(service), "functional-alias-status-determination")))
+        request.headers.add("Contact", contactFor(service)).add("Accept", FunctionalAliasPidf.CONTENT_TYPE).add("Expires", "4294967295")
+        channel.request = request
+        val response = ua.send(request)
+        if (!response.isSuccess) {
+            channel.request = null
+            channel.state.update { it.copy(subscribed = false) }
+            throw IllegalStateException("${service.name} functional alias status: ${response.status} ${response.reason}")
+        }
+        channel.dialog = Dialog.fromResponse(ua.lastSent[request.callId] ?: request, response)
+        channel.state.update { it.copy(subscribed = true) }
+        event("${service.name} functional alias status subscribed")
+    }
+
+    private suspend fun refreshAliasSubscriptions() {
+        for (channel in aliasChannels.values) {
+            val dialog = channel.dialog ?: continue
+            val request = ua.inDialog(dialog, "SUBSCRIBE")
+            request.headers.add("Contact", contactFor(channel.service)).add("Event", "presence")
+                .add("Accept", FunctionalAliasPidf.CONTENT_TYPE).add("Expires", "4294967295")
+            val response = runCatching { ua.send(request, dialog) }.getOrNull()
+            event("${channel.service.name} functional alias subscription refreshed: ${response?.status}")
+        }
+    }
+
+    /**
+     * §9A.2.1.2 (TS 24.282 §22.2.1.2, TS 24.281 §20.2.1.2): the functional alias status change of [service]: [action]
+     * `activate`, `takeover` or `deactivate` for [aliases]. The answer only says the request was taken; the outcome per
+     * alias comes in the status NOTIFY. A take-over carries <take-over> only for the aliases offered as
+     * `take-over-possible` (step 6 d); the others are asked for as activations, and taken over once the NOTIFY offers them.
+     */
+    suspend fun aliasRequest(action: String, aliases: List<String>, service: McService = McService.MCPTT) {
+        require(action in setOf("activate", "takeover", "deactivate") && aliases.isNotEmpty()) { "usage: activate|takeover|deactivate <alias>..." }
+        val channel = aliasChannels[service] ?: throw IllegalStateException("${service.name} not provisioned")
+        if (action == "takeover" && profile?.allows("allow-takeover-functional-alias-other-user") == false && service == McService.MCPTT)
+            throw IllegalStateException("the user profile does not allow taking over a functional alias")
+        if (channel.dialog == null) subscribeAliases(channel) // §9A.2.1.1
+        if (action != "takeover") {
+            aliases.forEach { channel.takeOverWanted.remove(it) }
+            publishAliases(channel, action, aliases, false)
+            return
+        }
+        val (offered, others) = FunctionalAliasRules.splitTakeOver(aliases, channel.state.value.takeOverPossible)
+        if (offered.isNotEmpty()) publishAliases(channel, action, offered, true)
+        if (others.isNotEmpty()) { channel.takeOverWanted += others; publishAliases(channel, action, others, false) }
+    }
+
+    /** The alias presented on this user's outgoing requests of [service] (§11.1.1.2.1.1 step 14c), or none. */
+    fun useAlias(alias: String?, service: McService = McService.MCPTT) {
+        val channel = aliasChannels[service] ?: throw IllegalStateException("${service.name} not provisioned")
+        if (alias != null && alias !in channel.state.value.active) throw IllegalStateException("$alias is not active for this user")
+        channel.state.update { it.copy(inUse = alias) }
+    }
+
+    /**
+     * §9A.2.1.2 steps 4 to 6: the PUBLISH of one status change: Expires 4294967295 to activate, 0 to deactivate, the
+     * per-user PIDF with a new <p-id-fa> and <take-over> when [takeOver].
+     */
+    private suspend fun publishAliases(channel: AliasChannel, action: String, aliases: List<String>, takeOver: Boolean) {
+        val service = channel.service
+        val user = ownId(service)
+        val publishId = UUID.randomUUID().toString()
+        channel.publish = FunctionalAliasRules.Change(action, aliases, publishId)
+        val parts = listOf(aliasInfo(service, user),
+            Part(FunctionalAliasPidf.CONTENT_TYPE, FunctionalAliasPidf.request(user, config.clientId, aliases, takeOver, publishId, service).toByteArray()))
+        val request = serviceRequest(service, "PUBLISH", "presence", parts)
+            .also { it.headers.add("Expires", if (action == "deactivate") "0" else "4294967295") }
+        channel.state.update { it.copy(lastAction = action, lastStatus = null, lastWarning = null, lastOutcomes = emptyMap()) }
+        event("${service.name} functional alias $action $aliases${if (takeOver) " (take-over)" else ""}")
+        val response = ua.send(request)
+        val warning = response.headers["Warning"]
+        channel.state.update { if (channel.publish?.publishId == publishId) it.copy(lastStatus = response.status, lastWarning = warning) else it }
+        if (!response.isSuccess) {
+            aliases.forEach { channel.takeOverWanted.remove(it) }
+            throw IllegalStateException("${service.name} functional alias $action: ${response.status} ${response.reason}${warning?.let { " ($it)" } ?: ""}")
+        }
+    }
+
+    /**
+     * §9A.2.1.3 and §9A.3.1.2 (TS 24.282 §22.2.1.3, TS 24.281 §20.2.1.3): the NOTIFY of this user's functional alias
+     * status. It replaces the aliases known active (`activated`, or `deactivating` while still active) and those that may
+     * be taken over; the <p-id-fa> of the last status change gives its outcome per alias, and a take-over the user asked
+     * for follows once it is offered.
+     */
+    private fun aliasNotify(channel: AliasChannel, request: SipRequest) {
+        val service = channel.service
+        val body = Multipart.parse(request.contentType, request.body).firstOrNull { it.mediaType == FunctionalAliasPidf.CONTENT_TYPE }?.text ?: return
+        val status = runCatching { FunctionalAliasPidf.parseStatus(body, service) }.getOrNull() ?: return
+        // Computed once (its take-overs leave the wanted set), then set: NOTIFYs of one subscription arrive in order.
+        val result = FunctionalAliasRules.notified(channel.state.value, status, channel.publish, channel.takeOverWanted)
+        channel.state.value = result.state
+        event("${service.name} functional alias status: active ${result.state.active}, take-over possible ${result.state.takeOverPossible}")
+        if (result.takeOver.isNotEmpty()) scope.launch {
+            runCatching { publishAliases(channel, "takeover", result.takeOver, true) }.onFailure { event("functional alias take-over: ${it.message}") }
+        }
     }
 
     /** Change the groups of [service] (full state, TS 24.379 §9.2.1.2). */
@@ -536,6 +689,7 @@ class McxClient(
             if (now >= nextSubscription) {
                 refreshSubscription(McService.MCPTT)
                 if (config.mcvideo != null) refreshSubscription(McService.MCVIDEO)
+                refreshAliasSubscriptions()
                 nextSubscription = now + 3000
             }
         }
@@ -551,6 +705,16 @@ class McxClient(
 
     private suspend fun dispatch(tx: ServerTransaction) {
         val request = tx.request
+        val aliasChannel = aliasChannels.values.firstOrNull { it.request?.callId == request.callId }
+        if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "presence" && aliasChannel != null) {
+            tx.respond(200)
+            if (request.body.isNotEmpty()) aliasNotify(aliasChannel, request)
+            if ((request.headers["Subscription-State"] ?: "").startsWith("terminated")) {
+                aliasChannel.dialog = null; aliasChannel.request = null
+                aliasChannel.state.update { it.copy(subscribed = false) }
+            }
+            return
+        }
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "presence") {
             val subscription = subscriptions.values.firstOrNull { it.request.callId == request.callId }
             if (subscription == null) { tx.respond(481); return }

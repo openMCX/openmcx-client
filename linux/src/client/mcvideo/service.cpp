@@ -140,13 +140,18 @@ void Client::mcvideo_authorize(const std::string &token) {
       failure("MCVideo service authorisation: " + std::to_string(response.status_code));
       // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew; the affiliation
       // status subscription and the affiliation follow the new authorisation.
-      if (refresh && response.status_code == 412) {
+      // A refresh refused for a reason that can be transient (the SIP core answering while the server restarts, for
+      // example) is handled alike, the initial publication following after a growing delay.
+      const bool transient = client_rules::transient_authorization_refusal(response.status_code);
+      if (refresh && (response.status_code == 412 || transient)) {
         mcvideo_auth_etag_.clear();
         mcvideo_affiliation_etag_.clear();
         mcvideo_subscription_.clear();
+      }
+      if (refresh && response.status_code == 412) {
         schedule([this] { mcvideo_authorize(); });
-      } else if (!refresh) {
-        // A refused initial publication is published again when the refusal can be transient.
+      } else if (!refresh || transient) {
+        // A refused publication is published again when the refusal can be transient.
         retry_authorization(mcvideo_authorization_retry_, "mcvideo", response, [this] {
           if (!mcvideo_authorized_) mcvideo_authorize();
         });

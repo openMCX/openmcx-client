@@ -82,6 +82,19 @@ class DebugControl(private val context: Context) {
         "private" -> call { it.privateCall(args[0], when (args.getOrNull(1) ?: "auto") {
             "manual" -> Commencement.MANUAL; "force" -> Commencement.FORCED; else -> Commencement.AUTOMATIC }, floorControl = "no-floor" !in args,
             emergency = "emergency" in args) }
+        // Functional aliases (TS 24.379 §9A), as the reference client: fa activate|takeover|deactivate <alias>..., fa use <alias>|none
+        "fa" -> functionalAlias(args, org.openmcx.client.body.McService.MCPTT)
+        // The same for MCData (TS 24.282 §22) and MCVideo (TS 24.281 §20), as the reference client's mcdata-fa and mcvideo-fa.
+        "mcdata-fa" -> functionalAlias(args, org.openmcx.client.body.McService.MCDATA)
+        "mcvideo-fa" -> functionalAlias(args, org.openmcx.client.body.McService.MCVIDEO)
+        // sds-fa <alias> <text> [--disposition ...]: a one-to-one SDS to a functional alias (TS 24.282 §9.2.2.2.1 step 2b ii A)
+        "sds-fa" -> sds(args, group = false, toAlias = true)
+        // video-call-fa <alias> [manual] [notc]: a private video call to a functional alias (TS 24.281 §10.2.2.2.1, §20)
+        "video-call-fa" -> videoJson(mcvideo().privateCallToAlias(args[0],
+            if ("manual" in args) Commencement.MANUAL else Commencement.AUTOMATIC, transmissionControl = "notc" !in args))
+        // private-fa <alias> [auto|manual|force] [no-floor]: a private call to a functional alias (§11.1.1.2.1.1 step 14c)
+        "private-fa" -> call { it.privateCallToAlias(args[0], when (args.getOrNull(1) ?: "auto") {
+            "manual" -> Commencement.MANUAL; "force" -> Commencement.FORCED; else -> Commencement.AUTOMATIC }, floorControl = "no-floor" !in args) }
         "mute" -> { mcptt().setMuted(args.firstOrNull() != "off"); "ok" }
         "group" -> call { it.groupCall(args.firstOrNull { a -> a.startsWith("sip:") } ?: Engine.client!!.config.mcptt!!.groups.first(),
             when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }) }
@@ -272,6 +285,23 @@ class DebugControl(private val context: Context) {
 
     private fun mcptt(): McpttService = Engine.mcptt ?: throw IllegalStateException("MCPTT not provisioned")
 
+    private suspend fun functionalAlias(args: List<String>, service: org.openmcx.client.body.McService): Any {
+        val client = Engine.client ?: throw IllegalStateException("not started")
+        val action = args.firstOrNull() ?: throw IllegalArgumentException("usage: activate|takeover|deactivate <alias>... | use <alias>|none")
+        if (action == "use") client.useAlias(args.getOrNull(1)?.takeIf { it != "none" }, service)
+        else client.aliasRequest(action, args.drop(1), service)
+        return aliasJson(service)
+    }
+
+    private fun aliasJson(service: org.openmcx.client.body.McService = org.openmcx.client.body.McService.MCPTT): JSONObject {
+        val a = Engine.client?.aliasesOf(service)?.value ?: return JSONObject()
+        return JSONObject().put("available", JSONArray(a.available)).put("active", JSONArray(a.active.toList()))
+            .put("take_over_possible", JSONArray(a.takeOverPossible.toList())).put("in_use", a.inUse ?: JSONObject.NULL)
+            .put("subscribed", a.subscribed).put("last_action", a.lastAction ?: JSONObject.NULL)
+            .put("last_status", a.lastStatus ?: JSONObject.NULL).put("last_warning", a.lastWarning ?: JSONObject.NULL)
+            .put("last_outcomes", JSONObject(a.lastOutcomes))
+    }
+
     private suspend fun call(start: suspend (McpttService) -> Call): Any = callJson(start(mcptt()))
 
     /**
@@ -300,7 +330,7 @@ class DebugControl(private val context: Context) {
     }
 
     /** `sds <target> <text…> [--disposition none|delivery|read|delivery-read]` */
-    private suspend fun sds(args: List<String>, group: Boolean): Any {
+    private suspend fun sds(args: List<String>, group: Boolean, toAlias: Boolean = false): Any {
         val service = Engine.mcdata ?: throw IllegalStateException("MCData not provisioned")
         val words = args.toMutableList()
         var disposition: DispositionRequest? = null
@@ -312,7 +342,7 @@ class DebugControl(private val context: Context) {
             }
             words.subList(flag, minOf(flag + 2, words.size)).clear()
         }
-        val sent = service.send(words.first(), words.drop(1).joinToString(" "), group, disposition)
+        val sent = service.send(words.first(), words.drop(1).joinToString(" "), group, disposition, toAlias = toAlias)
         Engine.sent(sent)
         return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status)
     }
@@ -389,6 +419,7 @@ class DebugControl(private val context: Context) {
     private fun videoJson(call: VideoCall): JSONObject {
         val media = call.media
         return JSONObject().put("id", call.id).put("peer", call.peer).put("group", call.groupId).put("session_type", call.sessionType)
+            .put("calling_alias", call.callingAlias).put("called_alias", call.calledAlias)
             .put("outgoing", call.outgoing).put("state", call.state).put("priority", call.priority).put("push_url", call.pushUrl)
             .put("protected", call.media?.local?.protected == true).put("pck_id", call.pckId)
             .put("control_protected", call.media?.protection?.protectsControl == true)
@@ -434,6 +465,7 @@ class DebugControl(private val context: Context) {
         .put("peer", call.peer).put("group", call.groupId).put("state", call.state).put("reason", call.releaseReason)
         .put("floor", call.media?.let { if (it.isStarted) it.floor.state.value.name else null })
         .put("floor_control", call.floorControl).put("muted", call.media?.muted == true).put("priority", call.priority)
+        .put("calling_alias", call.callingAlias).put("called_alias", call.calledAlias)
         .put("talker", call.media?.let { if (it.isStarted) it.floor.talker else null })
         .put("queue_position", call.media?.takeIf { it.isStarted }?.floor?.queuePosition?.value)
         .put("pending_floor_confirmation", call.media?.takeIf { it.isStarted }?.floor?.offered?.value == true)
@@ -460,10 +492,14 @@ class DebugControl(private val context: Context) {
             // The service's foreground types as the app sees them: Android 13's dumpsys does not print them.
             .put("fgs_types", (context as? android.app.Service)?.takeIf { android.os.Build.VERSION.SDK_INT >= 29 }?.foregroundServiceType ?: JSONObject.NULL)
             .put("calls", JSONArray(Engine.mcptt?.calls?.value?.map(::callJson) ?: emptyList<JSONObject>()))
+            .put("functional_aliases", aliasJson())
+            .put("mcdata_functional_aliases", aliasJson(org.openmcx.client.body.McService.MCDATA))
+            .put("mcvideo_functional_aliases", aliasJson(org.openmcx.client.body.McService.MCVIDEO))
             .put("history", JSONArray(Engine.mcptt?.history?.map(::callJson) ?: emptyList<JSONObject>()))
             .put("inbox", JSONArray(Engine.mcdata?.inbox?.value?.map { m ->
                 JSONObject().put("message_id", m.messageId.toString()).put("conversation_id", m.conversationId.toString())
                     .put("sender", m.sender).put("group", m.group).put("text", m.text)
+                    .put("sender_alias", m.senderAlias).put("called_alias", m.calledAlias)
                     .put("disposition", m.disposition?.name).put("displayed", m.displayed).put("notified", m.notified?.name)
             } ?: emptyList<JSONObject>()))
             .put("files", JSONArray(Engine.fd?.records?.value?.map(::fdJson) ?: emptyList<JSONObject>()))

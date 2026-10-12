@@ -54,7 +54,7 @@ has it: the lab scenarios run each server feature through this client.
 - File distribution over HTTP and over the media plane: offers, acceptance, rejection, deferral, extension and release
 - Emergency alerts, emergency and imminent-peril communications
 - IP connectivity, enhanced status, communication release
-- Functional aliases, message store (storage control and notification channels), location
+- Functional aliases (status subscription, outcome by NOTIFY, take-over once offered), message store (storage control and notification channels), location
 - End-to-end protected payloads and signalling
 
 ### MCVideo (TS 24.281, TS 24.581)

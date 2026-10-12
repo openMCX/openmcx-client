@@ -64,14 +64,23 @@ void Client::mcdata_authorize() {
       mcdata_authorized_ = mcdata_affiliated_ = false;
       failure("MCData service authorisation: " + std::to_string(response.status_code));
       // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew; the affiliation
-      // status subscription and the affiliation follow the new authorisation.
-      if (refresh && response.status_code == 412) {
+      // status subscription and the affiliation follow the new authorisation. A refresh refused for a reason that can
+      // be transient (the SIP core answering while the server restarts, for example) is handled alike, the initial
+      // publication following after a growing delay.
+      const bool transient = client_rules::transient_authorization_refusal(response.status_code);
+      if (refresh && (response.status_code == 412 || transient)) {
         mcdata_auth_etag_.clear();
         mcdata_affiliation_etag_.clear();
         mcdata_subscription_.clear();
+        // TS 24.282 clause 22.2.2.3.6: the server ended the aliases with the authorisation, and its subscriptions.
+        mcdata_alias_dialog_.clear();
+        mcdata_alias_answered_ = false;
+        mcdata_aliases_active_.clear();
+      }
+      if (refresh && response.status_code == 412) {
         schedule([this] { mcdata_authorize(); });
-      } else if (!refresh) {
-        // A refused initial publication is published again when the refusal can be transient.
+      } else if (!refresh || transient) {
+        // A refused publication is published again when the refusal can be transient.
         retry_authorization(mcdata_authorization_retry_, "mcdata", response, [this] {
           if (!mcdata_authorized_) mcdata_authorize();
         });
@@ -188,9 +197,14 @@ void Client::mcdata_affiliate(bool affiliate) {
   mcdata::Info info;
   info.request_uri = mcdata_user();
   info.client_id = client_id();
-  Affiliation affiliation{mcdata_user(), client_id(), random_id(), {mcdata_group()}, {}, true};
+  // A user may belong to no MCData group (an account activated without one): an empty configured group is not
+  // affiliated (TS 24.282 clause 8.2.2: every <affiliation> names a group), and with no group at all nothing is
+  // published.
+  Affiliation affiliation{mcdata_user(), client_id(), random_id(), {}, {}, true};
+  if (!mcdata_group().empty()) affiliation.groups.push_back(mcdata_group());
   for (const auto &group : mcdata_groups_)
-    if (group != mcdata_group()) affiliation.groups.push_back(group);
+    if (!group.empty() && group != mcdata_group()) affiliation.groups.push_back(group);
+  if (affiliate && affiliation.groups.empty()) return;
   mcdata_sent_pid_ = affiliation.publication_id;
   std::vector<SipHeader> headers{{"Expires", affiliate ? "4294967295" : "0"}};
   const bool refresh = !mcdata_affiliation_etag_.empty();

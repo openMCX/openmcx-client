@@ -31,6 +31,17 @@ class DocumentsTest {
         "<sip-uri>sip:alice@mcx.test</sip-uri><client-id>urn:uuid:1</client-id></profile-extension></mcptt-user-profile>"
 
     @Test
+    fun functionalAliasesFromTheUserProfile() {
+        // TS 24.484 §8.3.2.1 item 10 g ii: <OnNetwork>/<anyExt>/<FunctionalAliasList>/<entry>/<uri-entry>.
+        val xml = "<mcptt-user-profile xmlns=\"urn:3gpp:mcptt:user-profile:1.0\" XUI-URI=\"sip:alice.mcptt@mcx.test\">" +
+            "<OnNetwork><anyExt><FunctionalAliasList><entry><uri-entry>sip:dispatcher.alias@mcx.test</uri-entry></entry>" +
+            "<entry><uri-entry>sip:reserve.alias@mcx.test</uri-entry><display-name>Reserve</display-name></entry>" +
+            "</FunctionalAliasList></anyExt></OnNetwork></mcptt-user-profile>"
+        assertEquals(listOf("sip:dispatcher.alias@mcx.test", "sip:reserve.alias@mcx.test"), UserProfile.parse(xml).functionalAliases)
+        assertEquals(emptyList<String>(), UserProfile.parse(profile).functionalAliases)
+    }
+
+    @Test
     fun userProfileOfTs24484() {
         val p = UserProfile.parse(profile)
         assertEquals("sip:alice.mcptt@mcx.test", p.mcpttId)

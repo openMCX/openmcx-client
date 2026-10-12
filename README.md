@@ -40,6 +40,8 @@ It is not an interoperability-certified implementation: see the limits in each c
 - MCPTT private calls (automatic, manual and forced commencement), prearranged and ad hoc group calls, floor control
   with AMR-WB speech
 - Emergency and imminent-peril calls, emergency alerts and their cancellation
+- Functional aliases in MCPTT, MCVideo and MCData: activation, take-over and deactivation, an alias presented on calls
+  and messages, calls and short data to an alias
 - MCData short data (one-to-one and group, with delivery and read notifications) and file distribution
 - MCVideo private, group and chat calls, push and pull, ambient viewing, camera switching, protected video
 - Location reporting; calls through Android's telecom stack; one outbound TLS flow (RFC 5626), the phone never listens

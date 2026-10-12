@@ -322,6 +322,9 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
   // TS 24.379 clause 9A.2.1.3: this user's functional alias status.
   if (!message.dialog_id.empty() && message.dialog_id == alias_status_dialog_) return alias_status_notify(message);
   if (get_header(message.headers, "Event") == "conference") return conference_notify(message);
+  // TS 24.282 clause 22.2.1.3: this user's MCData functional alias status.
+  if (mcdata_enabled() && !message.dialog_id.empty() && message.dialog_id == mcdata_alias_dialog_)
+    return mcdata_alias_notify(message);
   if (mcdata_enabled() && !message.dialog_id.empty() &&
       (message.dialog_id == mcdata_subscription_ || message.dialog_id == mcdata_fetch_))
     return mcdata_affiliation_notify(message);

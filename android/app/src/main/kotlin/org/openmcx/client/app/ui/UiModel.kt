@@ -1,5 +1,7 @@
 package org.openmcx.client.app.ui
 
+import org.openmcx.client.body.McService
+
 import kotlinx.coroutines.launch
 import org.openmcx.client.app.Engine
 import org.openmcx.client.app.alert.AlertCenter
@@ -43,7 +45,15 @@ data class CallItem(
     val priority: String = "normal",
     /** Our place in the floor request queue while queued (TS 24.380 §8.2.3.5); 255: queued, position not told. */
     val queuePosition: Int? = null,
+    /** The functional alias of the call (TS 24.379 §9A): "as <alias>" for a caller's alias, "to <alias>" for a called one. */
+    val alias: String? = null,
 )
+
+/**
+ * One of this user's functional aliases (TS 24.379 §9A.2.1): `active`, `take-over-possible` (held by someone else,
+ * this user may take it over) or `inactive`; [inUse] when it is presented on this user's outgoing calls.
+ */
+data class AliasItem(val id: String, val status: String, val inUse: Boolean, val service: String = "mcptt")
 
 /** Another user's location, as their report gave it. */
 data class LocatedItem(val name: String, val latitude: Double?, val longitude: Double?, val cell: String?, val at: Long)
@@ -151,6 +161,9 @@ data class UiState(
     val callFailure: String? = null,
     /** The provisioned identities and servers, as label and value, for the Logs tab. */
     val identities: List<Pair<String, String>> = emptyList(),
+    /** This user's functional aliases, and the outcome of the last change, for the Settings tab. */
+    val aliases: List<AliasItem> = emptyList(),
+    val aliasNote: String? = null,
     /** The call's audio is on the loudspeaker; null when there is no call to route. */
     val speaker: Boolean? = null,
     /** File distribution is provisioned. */
@@ -203,6 +216,10 @@ interface UiActions {
     fun callPrivateEmergency(target: String) {}
     /** Raise or cancel the emergency ([emergency] true) or imminent peril state of the call in progress. */
     fun callPriority(emergency: Boolean, enabled: Boolean) {}
+    /** Functional aliases (TS 24.379 §9A): [action] `activate`, `takeover` or `deactivate`; present one on calls; call one. */
+    fun aliasChange(action: String, alias: String, service: String = "mcptt") {}
+    fun aliasUse(alias: String?, service: String = "mcptt") {}
+    fun callAlias(alias: String, service: String = "mcptt") {}
     fun setMuted(muted: Boolean) {}
     fun setRingFirst(on: Boolean) {}
     fun callAdhoc(targets: List<String>) {}
@@ -340,8 +357,10 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
             CallType.PRIVATE -> listOfNotNull(self, call.peer)
             else -> call.groupId?.let { client.groupDocuments[it]?.members } ?: emptyList()
         }
+        val alias = call.callingAlias?.let { if (call.outgoing) "as ${it.short()}" else "from ${it.short()}" }
+            ?: call.calledAlias?.let { "to ${it.short()}" }
         return CallItem(call.id, title, call.type, call.state, state, floor?.talker, call.floorEvents.lastOrNull(), limit, call.startedAt, members,
-            call.floorControl, call.media?.muted == true, call.priority, floor?.queuePosition?.value)
+            call.floorControl, call.media?.muted == true, call.priority, floor?.queuePosition?.value, alias)
     }
     val calls = mcptt?.calls?.value ?: emptyList()
     val incoming = calls.firstOrNull { !it.outgoing && it.state == "ringing" }
@@ -374,8 +393,27 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     val pending = Engine.pendingAttachment.value?.let {
         PendingItem(it.name, it.metadata?.mediaType, it.metadata?.size, it.file != null && it.error == null, it.error)
     }
+    val aliasState = client.aliases.value
+    val aliases = listOf(McService.MCPTT, McService.MCDATA, McService.MCVIDEO).flatMap { service ->
+        val state = client.aliasesOf(service).value
+        state.available.map { a ->
+            AliasItem(a, when (a) { in state.active -> "active"; in state.takeOverPossible -> "take-over-possible"; else -> "inactive" },
+                a == state.inUse, service.name.lowercase())
+        }
+    }
+    val aliasNote = aliasState.lastAction?.let { action ->
+        val outcomes = aliasState.lastOutcomes.entries.joinToString { "${it.key.short()} ${it.value}" }
+        when {
+            aliasState.lastStatus == null -> "Asking the server to $action…"
+            aliasState.lastStatus !in 200..299 -> "Refused: ${aliasState.lastStatus}${aliasState.lastWarning?.let { " $it" } ?: ""}"
+            outcomes.isNotEmpty() -> outcomes
+            else -> null
+        }
+    }
     return UiState(
         user = client.config.sip.publicUserId.short(),
+        aliases = aliases,
+        aliasNote = aliasNote,
         phase = status.phase,
         registered = status.registered,
         groups = groups,
@@ -395,11 +433,15 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         identities = client.config.let { c ->
             listOfNotNull(
                 "SIP identity" to c.sip.publicUserId,
-                c.mcptt?.let { "MCPTT ID" to it.userId },
-                c.mcdata?.let { "MCData ID" to it.userId },
+                // The MC service IDs: from the provisioning (or the activation package), the MCPTT ID else from the
+                // MCPTT user profile the CMS served (TS 24.484 <MCPTTUserID>).
+                "MCPTT ID" to (c.mcptt?.userId ?: profile?.mcpttId ?: "not provisioned"),
+                "MCData ID" to (c.mcdata?.userId ?: "not provisioned"),
+                "MCVideo ID" to (c.mcvideo?.userId ?: "not provisioned"),
                 c.mcptt?.groups?.takeIf { it.isNotEmpty() }?.let { "MCPTT groups" to it.joinToString() },
                 c.mcdata?.groups?.takeIf { it.isNotEmpty() }?.let { "MCData groups" to it.joinToString() },
-                "Functional aliases" to "none (not supported by this client yet)",
+                c.mcvideo?.groups?.takeIf { it.isNotEmpty() }?.let { "MCVideo groups" to it.joinToString() },
+                "Functional aliases" to (client.aliases.value.active.takeIf { it.isNotEmpty() }?.joinToString { it.short() } ?: "none active"),
                 "SIP core" to "${c.sip.proxy}:${c.sip.proxyPort} (${c.sip.transport})",
                 "IdMS" to c.idms.issuer,
                 "IdMS sign-in" to (c.idms.username?.let { "automatic as $it" } ?: "interactive (browser)"),
@@ -485,6 +527,22 @@ object EngineActions : UiActions {
     override fun callPrivateNoFloor(target: String) = place(target) { Engine.mcptt?.privateCall(target, Commencement.AUTOMATIC, floorControl = false) }
     override fun callGroupPriority(group: String, priority: String) = place(group) { Engine.mcptt?.groupCall(group, priority) }
     override fun callPrivateEmergency(target: String) = place(target) { Engine.mcptt?.privateCall(target, Commencement.AUTOMATIC, emergency = true) }
+    override fun aliasChange(action: String, alias: String, service: String) {
+        Engine.scope.launch {
+            runCatching { Engine.client?.aliasRequest(action, listOf(alias), McService.valueOf(service.uppercase())) }
+                .onFailure { Engine.callFailure.value = "Functional alias ${alias.short()}: ${it.message}" }
+        }
+    }
+    override fun aliasUse(alias: String?, service: String) {
+        runCatching { Engine.client?.useAlias(alias, McService.valueOf(service.uppercase())) }
+            .onFailure { Engine.callFailure.value = "Functional alias: ${it.message}" }
+    }
+    override fun callAlias(alias: String, service: String) = place(alias) {
+        when (service) {
+            "mcvideo" -> Engine.mcvideo?.privateCallToAlias(alias)
+            else -> Engine.mcptt?.privateCallToAlias(alias)
+        }
+    }
     override fun callPriority(emergency: Boolean, enabled: Boolean) = launch {
         runCatching { Engine.mcptt?.setPriority(emergency, enabled) }.onFailure {
             Engine.log.add("call priority change failed: ${it.message}")

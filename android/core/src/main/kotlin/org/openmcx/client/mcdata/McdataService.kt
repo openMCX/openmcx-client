@@ -5,6 +5,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import org.openmcx.client.body.McService
 import org.openmcx.client.body.Multipart
 import org.openmcx.client.body.Part
 import org.openmcx.client.body.ResourceLists
@@ -43,6 +44,9 @@ data class ReceivedSds(
     val disposition: DispositionRequest?,
     val inReplyTo: UUID?,
     val at: Long = System.currentTimeMillis(),
+    /** Functional aliases (§22): the alias the sender presented, and the alias the message was sent to. */
+    val senderAlias: String? = null,
+    val calledAlias: String? = null,
 ) {
     @Volatile var displayed = false
     @Volatile var notified: DispositionNotification? = null
@@ -92,18 +96,31 @@ class McdataService(private val client: McxClient) : ServiceHandler {
      * set. Returns once the MCData server has accepted it (202).
      */
     suspend fun send(target: String, text: String, group: Boolean, disposition: DispositionRequest? = null,
-                     conversationId: UUID = UUID.randomUUID(), inReplyTo: UUID? = null): SentSds {
+                     conversationId: UUID = UUID.randomUUID(), inReplyTo: UUID? = null, toAlias: Boolean = false,
+                     calledAlias: String? = null): SentSds {
         val data = DataPayload(listOf(Payload.text(text)))
         // Above the signalling-plane limit the media plane (MSRP) is required, which this client does not have.
         if (data.size > config.maxPayloadSizeSdsCplaneBytes) throw SdsError("payload of ${data.size} octets is above the signalling-plane limit")
         val signalling = SdsSignalling(now(), conversationId, UUID.randomUUID(), inReplyTo, disposition = disposition)
-        val info = if (group) McdataInfo(requestType = "group-sds", requestUri = target, clientId = client.config.clientId)
-        else McdataInfo(requestType = "one-to-one-sds")
+        // §9.2.2.2.1 steps 2b ii and 3b v: an alias presented only while it is active for this user, and a one-to-one
+        // SDS to an alias (<call-to-functional-alias-ind>), or to the MCData ID the server selected for it.
+        val presented = client.aliasesOf(McService.MCDATA).value.let { a -> a.inUse?.takeIf { it in a.active } }
+        val info = if (group) McdataInfo(requestType = "group-sds", requestUri = target, clientId = client.config.clientId, functionalAlias = presented)
+        else McdataInfo(requestType = "one-to-one-sds", functionalAlias = presented, callToFunctionalAlias = if (toAlias) true else null,
+            calledFunctionalAlias = calledAlias)
         val parts = mutableListOf(Part(McdataInfo.CONTENT_TYPE, info.encode().toByteArray()))
         if (!group) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOf(target)).toByteArray())
         parts += Part(SIGNALLING, signalling.encode())
         parts += Part(PAYLOAD, data.encode())
         val response = ua.send(message(parts))
+        if (toAlias && response.status == 300) {
+            // The server names the MCData ID that holds the alias: the message goes to it, naming the alias called.
+            val redirect = Multipart.parse(response.contentType, response.body).firstOrNull { it.mediaType == McdataInfo.CONTENT_TYPE }
+                ?.let { McdataInfo.parse(it.text) }
+            val selected = redirect?.requestUri ?: throw SdsError("functional alias redirect without an MCData ID", 300)
+            event("SDS to functional alias $target: sent to $selected")
+            return send(selected, text, false, disposition, conversationId, inReplyTo, calledAlias = redirect.calledFunctionalAlias ?: target)
+        }
         if (!response.isSuccess) {
             val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""
             throw SdsError("${response.status} ${response.reason}$warning", response.status)
@@ -147,7 +164,7 @@ class McdataService(private val client: McxClient) : ServiceHandler {
         if (_inbox.value.any { it.messageId == signalling.messageId }) { event("duplicate SDS ${signalling.messageId}"); return }
         val sender = info.callingUserId ?: signalling.sender ?: "unknown"
         val message = ReceivedSds(signalling.messageId, signalling.conversationId, sender, info.callingGroupId,
-            data.payloads, signalling.disposition, signalling.inReplyTo)
+            data.payloads, signalling.disposition, signalling.inReplyTo, senderAlias = info.functionalAlias, calledAlias = info.calledFunctionalAlias)
         _inbox.value = (_inbox.value + message).takeLast(100)
         event("received SDS ${message.messageId} from $sender${message.group?.let { " on $it" } ?: ""}: ${message.text}")
         // Messages for an application are not shown to the user (§9.2.1.2); this client has no applications.

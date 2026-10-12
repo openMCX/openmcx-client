@@ -151,16 +151,12 @@ void Client::authorize() {
     if (response.status_code < 200) return;
     if (response.status_code != 200) {
       // TS 24.379 clause 7.2.2: not authorised. RFC 3903 section 5: after a 412 to a refresh, an initial
-      // publication (authorization_lost). A refused initial publication is published again when the refusal can be
-      // transient (retry_authorization); a 412 to it, which has no entity-tag, is final.
+      // publication; a refusal that can be transient is published again later (authorization_lost). A 412 to an
+      // initial publication, which has no entity-tag, is final.
       if (refresh || response.status_code != 412)
-        authorization_lost("service authorization", response.status_code);
+        authorization_lost("service authorization", response);
       else
         failure("service authorization: " + std::to_string(response.status_code));
-      if (!refresh)
-        retry_authorization(authorization_retry_, "mcptt", response, [this] {
-          if (!authorized_) authorize();
-        });
       return;
     }
     auth_etag_ = get_header(response.headers, "SIP-ETag");

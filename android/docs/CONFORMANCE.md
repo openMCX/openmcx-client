@@ -86,6 +86,13 @@ the published specifications and not re-checked against a local copy; they are m
   - `mcptt-client-id` in every INVITE.
   - SIP-If-Match on every re-publication.
   - The IdMS login is the lab's credential POST.
+- **Functional aliases (TS 24.379 §9A, TS 24.282 §22, TS 24.281 §20):** in each service, the status subscription,
+  activation, take-over once offered and deactivation (answered 200, the outcome by the status NOTIFY), and the alias
+  presented. MCPTT: private and ad hoc calls present it, and a private call can go to an alias (§11.1.1.2.1.1 step 14c,
+  the server's 300 then the call). MCVideo: calls present it, and a private video call can go to an alias. MCData: SDS
+  present it, and a one-to-one SDS can go to an alias (§9.2.2.2.1 step 2b ii). The aliases come from the provisioning,
+  else from the MCPTT user profile's <FunctionalAliasList> (TS 24.484 §8.3.2.1). Not implemented: location-based
+  activation, the per-alias user status subscription, and MCData file distribution to an alias.
 - **Not implemented:**
   - pre-established sessions
   - emergency, imminent peril and broadcast calls

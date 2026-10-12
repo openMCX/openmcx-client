@@ -792,6 +792,48 @@ class Video(Lab):
         return path
 
 
+    def aliases(self) -> None:
+        """MCVideo functional aliases (TS 24.281 clause 20) with the lab's video-dispatcher (alice and bob, one activation,
+        bob may take it over) and video-medic (bob and client-c): activation answered 200 with the outcome by NOTIFY, the
+        take-over once offered, a private video call to the alias reaching its holder, and an alias presented on a call."""
+        a, b = self.a, self.b
+        self.scenario = "aliases"
+        fa = lambda c: self.status(c)["mcvideo_functional_aliases"]
+        alias = lambda c, name: next((x for x in fa(c)["available"] if x.startswith(f"sip:{name}.alias@")), None)
+        dispatcher, medic = alias(a, "video-dispatcher"), alias(b, "video-medic")
+        if not self.check("alice may use video-dispatcher, bob video-medic", bool(dispatcher and medic), a=fa(a), b=fa(b)):
+            return
+        self.cmd(a, "mcvideo-fa", "activate", dispatcher)
+        self.wait(f"{a} holds video-dispatcher", lambda: dispatcher in fa(a)["active"])
+        self.check("alice's activation: 200, the outcome by NOTIFY", fa(a)["last_status"] == 200, last=fa(a))
+        self.cmd(b, "mcvideo-fa", "activate", dispatcher)
+        self.wait(f"{b} is offered video-dispatcher", lambda: dispatcher in fa(b)["take_over_possible"])
+        self.check("bob's activation beyond the limit: 200, then take-over-possible", dispatcher not in fa(b)["active"])
+        self.cmd(b, "mcvideo-fa", "takeover", dispatcher)
+        self.wait(f"{b} holds video-dispatcher", lambda: dispatcher in fa(b)["active"])
+        self.wait(f"{a} is told it no longer holds it", lambda: dispatcher not in fa(a)["active"])
+        self.check("bob takes video-dispatcher over", True)
+        call = self.cmd(a, "video-call-fa", dispatcher, timeout=30)
+        self.check("alice's video call to video-dispatcher is established", call["state"] == "established", call=call)
+        incoming = self.wait(f"{b} has the call", lambda: self.active(b), timeout=10)
+        self.check("the call to video-dispatcher reaches bob, who sees it was to the alias",
+                   incoming["peer"] == self.mcvideo[a] and incoming.get("called_alias") == dispatcher, call=incoming)
+        self.cmd(a, "video-hangup")
+        self.wait(f"{b}'s call released", lambda: self.active(b) is None, timeout=10)
+        self.cmd(b, "mcvideo-fa", "activate", medic)
+        self.wait(f"{b} holds video-medic", lambda: medic in fa(b)["active"])
+        self.cmd(b, "mcvideo-fa", "use", medic)
+        self.cmd(b, "video-call", self.mcptt[a], timeout=30)
+        other = self.wait(f"{a} has the call", lambda: self.active(a), timeout=10)
+        self.check("alice sees bob's call from video-medic", other.get("calling_alias") == medic, call=other)
+        self.cmd(b, "video-hangup")
+        self.wait(f"{a}'s call released", lambda: self.active(a) is None, timeout=10)
+        self.cmd(b, "mcvideo-fa", "use", "none")
+        self.cmd(b, "mcvideo-fa", "deactivate", dispatcher, medic)
+        self.wait("bob's aliases are deactivated", lambda: not ({dispatcher, medic} & set(fa(b)["active"])))
+        self.check("bob deactivates his aliases", True)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("lab")
@@ -803,7 +845,7 @@ def main() -> None:
     args = parser.parse_args()
     run = Video(args.lab, args.a, args.b, args.seconds, args.screenshots)
     parts = args.parts.split(",") if args.parts else (
-        ["setup", "ringing", "group", "emergency", "alerts", "pushpull", "ambient", "camera", "chat"] + (["protection"] if run.protected_lab else []))
+        ["setup", "ringing", "group", "emergency", "alerts", "pushpull", "ambient", "camera", "chat", "aliases"] + (["protection"] if run.protected_lab else []))
     try:
         for part in parts:
             getattr(run, "run" if part == "setup" else part)()
