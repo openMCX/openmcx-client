@@ -83,6 +83,10 @@ data class FloorMessage(
     /** For a Floor Ack: the acknowledged message type. */
     val acknowledgedType: Int? get() = field(FloorField.MESSAGE_TYPE)?.firstOrNull()?.toInt()?.and(0x1f)
     val floorIndicator: Int? get() = u16(FloorField.FLOOR_INDICATOR)
+    /** The Queue Info field (§8.2.3.5): the queue position (254: not queued, 255: queued, position not told). */
+    val queuePosition: Int? get() = field(FloorField.QUEUE_INFO)?.takeIf { it.size >= 2 }?.let { it[0].toInt() and 0xff }
+    /** The Queue Info field's queue priority level (§8.2.3.5, coded as the Floor Priority). */
+    val queuePriority: Int? get() = field(FloorField.QUEUE_INFO)?.takeIf { it.size >= 2 }?.let { it[1].toInt() and 0xff }
     /** The SSRC field: the talker's media SSRC. */
     val mediaSsrc: Long? get() = field(FloorField.SSRC)?.takeIf { it.size >= 4 }?.let { ByteBuffer.wrap(it, 0, 4).int.toLong() and 0xffffffffL }
 
@@ -114,6 +118,10 @@ data class FloorMessage(
         /** Floor Release (§8.2.8), optionally asking the server to acknowledge it. */
         fun release(ssrc: Long, ackRequired: Boolean = false, indicator: Int = FloorIndicator.NORMAL) =
             FloorMessage(FloorType.RELEASE, ssrc, ackRequired, listOf(FloorField.FLOOR_INDICATOR to u16(indicator)))
+
+        /** Floor Queue Position Request (§8.2.11): on-network it has no fields (User ID is off-network only, Track Info for a
+         *  non-controlling function). */
+        fun queuePositionRequest(ssrc: Long) = FloorMessage(FloorType.QUEUE_POSITION_REQUEST, ssrc)
 
         /** Floor Ack (§8.2.12) for [type], from the floor participant (source 0). */
         fun ack(ssrc: Long, type: Int) = FloorMessage(FloorType.ACK, ssrc,

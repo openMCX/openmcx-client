@@ -53,4 +53,16 @@ class McpttSdpTest {
         assertEquals(2, org.openmcx.client.media.AmrWb.sendMode(2, emptyList()))
         org.junit.Assert.assertThrows(SdpNegotiationError::class.java) { McpttSdp.remote(offer.replace("max-red=0", "mode-set=9")) }
     }
+
+    /** TS 24.380 §14.2.2: `mc_queueing` offered when we queue, answered only when both sides support it. */
+    @Test fun queueing() {
+        val offer = McpttSdp.offer(local.copy(queueing = true))
+        assertTrue(offer.contains("a=fmtp:MCPTT mc_floor_ssrc=111;mc_queueing\r\n"))
+        val remote = McpttSdp.remote(offer)
+        assertTrue(remote.queueing)
+        assertTrue(McpttSdp.answer(remote, local.copy(queueing = true)).contains(";mc_queueing"))
+        assertFalse("not answered when we do not queue", McpttSdp.answer(remote, local).contains("mc_queueing"))
+        assertFalse("not answered when not offered", McpttSdp.answer(McpttSdp.remote(McpttSdp.offer(local)), local.copy(queueing = true)).contains("mc_queueing"))
+        assertFalse(McpttSdp.offer(local).contains("mc_queueing"))
+    }
 }

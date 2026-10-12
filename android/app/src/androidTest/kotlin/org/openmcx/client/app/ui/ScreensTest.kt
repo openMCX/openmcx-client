@@ -553,7 +553,7 @@ class ScreensTest {
         compose.onNodeWithText("sip:alice.mcdata@mcx.test").assertExists()
         compose.onNodeWithTag(Tags.IMPORT).performClick()
         compose.onNodeWithTag(Tags.SCAN_QR).performClick()
-        compose.onNodeWithText("The openMCX project is the first open-source implementation of 3GPP Release 19 Mission Critical Services.").assertExists()
+        compose.onNodeWithText("The OpenMCX project is the first open-source implementation of 3GPP Release 19 Mission Critical Services.").assertExists()
         compose.onNodeWithTag(Tags.ABOUT_LINK).assertExists()
         compose.onNodeWithTag(Tags.SETTINGS_BACK).performClick()
         compose.onNodeWithText("Private calls").assertExists()

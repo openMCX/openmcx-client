@@ -174,7 +174,10 @@ void Client::send_floor(FloorType type) {
                              : call_type_ == "adhoc"                            ? adhoc_priority_ == "imminent"
                                                                                 : imminent_;
   const bool broadcast_call = call_type_ == "broadcast" || (call_type_ == "adhoc" && adhoc_broadcast_);
-  packet.fields = {floor_indicator_field(floor_call_type_bits(broadcast_call, emergency_call, imminent_call))};
+  // The Floor Indicator is a field of Floor Request and Floor Release (tables 8.2.4-1, 8.2.7-1), not of Floor Queue
+  // Position Request (table 8.2.11-1: SSRC, and Track Info with a non-controlling function only).
+  if (type != FloorType::QueuePositionRequest)
+    packet.fields = {floor_indicator_field(floor_call_type_bits(broadcast_call, emergency_call, imminent_call))};
   if (type == FloorType::Request) packet.fields.push_back(location_not_provided_field());
   if (type == FloorType::Request)
     packet.fields.push_back(priority_field(static_cast<std::uint8_t>(

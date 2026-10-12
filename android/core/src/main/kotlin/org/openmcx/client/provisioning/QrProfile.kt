@@ -34,7 +34,7 @@ object QrProfile {
     fun load(scanned: String, fetch: (URL, ByteArray) -> String = ::fetchPinned): String {
         val text = scanned.trim()
         if (text.startsWith(INLINE)) return inflate(Base64.getUrlDecoder().decode(text.removePrefix(INLINE)))
-        if (!text.startsWith("https://")) throw IllegalArgumentException("not an openMCX profile QR code")
+        if (!text.startsWith("https://")) throw IllegalArgumentException("not an OpenMCX profile QR code")
         val uri = URI(text)
         val pin = uri.rawFragment?.split('&')?.firstOrNull { it.startsWith("pin=") }?.removePrefix("pin=")
         if (pin == null) {

@@ -36,4 +36,14 @@ class ServiceConfigTest {
             }
         }
     }
+
+    /** TS 24.484 §8.4.2.1: `<floor-control-queue>` in `<on-network>`: the server queues floor requests. */
+    @Test
+    fun floorControlQueue() {
+        val doc = { queue: String -> "<service-configuration-info xmlns=\"urn:3gpp:ns:mcpttServiceConfig:1.0\">" +
+            "<service-configuration-params domain=\"x\"><on-network>$queue$three</on-network></service-configuration-params>" +
+            "</service-configuration-info>" }
+        assertEquals(true, ServiceConfig.floorQueue(doc("<floor-control-queue><depth>3</depth></floor-control-queue>")))
+        assertEquals(false, ServiceConfig.floorQueue(doc("")))
+    }
 }

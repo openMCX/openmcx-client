@@ -20,6 +20,7 @@ import org.openmcx.client.body.PocSettings
 import org.openmcx.client.body.SimpleFilter
 import org.openmcx.client.documents.DocumentClient
 import org.openmcx.client.documents.GroupDocument
+import org.openmcx.client.documents.ServiceConfig
 import org.openmcx.client.documents.UserProfile
 import org.openmcx.client.http.HttpClient
 import org.openmcx.client.idms.IdmsClient
@@ -145,6 +146,9 @@ class McxClient(
     @Volatile var profile: UserProfile? = null
     /** The Resource-Priority values of the service configuration documents, by service and level (TS 24.484 §8.4). */
     @Volatile var serviceResourcePriorities: Map<String, Map<String, String>> = emptyMap()
+        private set
+    /** The MCPTT service configuration has a floor request queue (TS 24.484 §8.4.2.1 `<floor-control-queue>`). */
+    @Volatile var mcpttFloorQueue: Boolean = false
         private set
     /** The GMS group documents fetched at login, by group ID. */
     @Volatile var groupDocuments: Map<String, GroupDocument> = emptyMap()
@@ -305,8 +309,13 @@ class McxClient(
         // configuration document; without them, emergency and imminent peril requests cannot be made.
         for (service in listOfNotNull("mcptt".takeIf { config.mcptt != null }, "mcvideo".takeIf { config.mcvideo != null },
                 "mcdata".takeIf { config.mcdata != null })) {
-            runCatching { documents.serviceResourcePriorities(service, t.accessToken) }
-                .onSuccess { serviceResourcePriorities = serviceResourcePriorities + (service to it); event("service configuration $service: $it") }
+            runCatching { documents.serviceConfiguration(service, t.accessToken) }
+                .mapCatching { text ->
+                    if (service == "mcptt") mcpttFloorQueue = ServiceConfig.floorQueue(text)
+                    ServiceConfig.resourcePriorities(text)
+                }
+                .onSuccess { serviceResourcePriorities = serviceResourcePriorities + (service to it)
+                    event("service configuration $service: $it" + if (service == "mcptt") ", floor queue $mcpttFloorQueue" else "") }
                 .onFailure { event("service configuration $service: ${it.message}") }
         }
         for (group in ((config.mcptt?.groups ?: emptyList()) + (config.mcdata?.groups ?: emptyList())).distinct()) {

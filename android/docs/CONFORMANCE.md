@@ -46,6 +46,7 @@ the published specifications and not re-checked against a local copy; they are m
 | SDP: one AMR-WB stream and `m=application … udp MCPTT` with `mc_floor_ssrc`; an offered `mc_priority` is echoed | TS 24.379 §6.2.1, §6.2.2; TS 24.380 §14 *(not checked locally)* | `mcptt/McpttSdp.kt` | `SdpTest`; S2–S5 |
 | Floor control packets (RTCP APP `MCPT`) | TS 24.380 §8 *(not checked locally)* | `mcptt/Floor.kt` | `FloorTest` (captured bytes) |
 | Floor participant: request, grant, deny, taken, idle, revoke, release, acknowledgements, T100/T101 | TS 24.380 §6.2.4 *(not checked locally)* | `mcptt/FloorParticipant.kt` | `FloorParticipantTest`; S2–S5, S4 (deny), S9 (retransmission) |
+| Queued floor requests: `mc_queueing` offered when the MCPTT service configuration has `<floor-control-queue>`; 'U: queued' with the position (Floor Queue Position Info and Request, T104/C104), leaving the queue, a queued grant accepted by the held PTT or by the user within T132, or given back when T132 runs out | TS 24.380 §6.2.4.9, §14.2.2; TS 24.484 §8.4.2.1 | `mcptt/FloorParticipant.kt`, `mcptt/McpttSdp.kt`, `documents/Documents.kt` (`ServiceConfig.floorQueue`) | `FloorParticipantTest`, `SdpTest`, `ServiceConfigTest`; S18 (lab made with `--floor-queue`) |
 | RTP with the SSRC from Floor Granted; AMR-WB in bandwidth-efficient or octet-aligned form, CMR 15 | RFC 3550, RFC 4867 §4.3–4.4 | `media/Rtp.kt`, `media/AmrWb.kt`, `MediaSession.talk` | `MediaTest`; S2–S11 (payloads identical end to end) |
 | AMR-WB encoding and decoding | TS 26.171, 26.201 | `app/…/media/MediaCodecAmrWb.kt` | `MediaCodecAmrWbTest` (redroid and AVD) |
 | Playout with a jitter buffer and loss concealment | — | `media/JitterBuffer.kt`, `MediaSession` | `JitterBufferTest`; S9 |
@@ -78,7 +79,8 @@ the published specifications and not re-checked against a local copy; they are m
 
 - **Server-driven choices** (see the wire contracts):
   - An explicit floor request; `mc_implicit_request` is refused.
-  - No `mc_queueing`, because the lab disables queueing.
+  - `mc_queueing` only when the MCPTT service configuration has a floor request queue (`<floor-control-queue>`); the
+    lab enables it with `androidlab.py create --floor-queue`.
   - One AMR-WB frame per RTP packet.
   - UPDATE rather than re-INVITE for session refresh.
   - `mcptt-client-id` in every INVITE.
@@ -90,7 +92,6 @@ the published specifications and not re-checked against a local copy; they are m
   - MCData on the media plane (MSRP), file distribution and data streaming
   - end-to-end media and floor protection (TS 33.180 keys)
   - off-network operation
-  - queueing (T104, T132)
 - **Plan changes:**
   - The interactive login follows RFC 8252 directly (Custom Tab and loopback redirect), not through the AppAuth library.
     The core already had the OIDC logic, so the library would have added nothing.

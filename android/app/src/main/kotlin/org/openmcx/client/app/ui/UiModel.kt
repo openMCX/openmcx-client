@@ -24,7 +24,10 @@ data class CallItem(
     val title: String,
     val type: CallType,
     val state: String,
-    /** idle, requesting, talking (us), taken (someone else), releasing. */
+    /**
+     * idle, requesting, queued (our request waits in the floor queue), offered (a queued grant awaits our acceptance),
+     * talking (us), taken (someone else), releasing.
+     */
     val floor: String,
     val talker: String?,
     val lastFloorEvent: String?,
@@ -38,6 +41,8 @@ data class CallItem(
     val muted: Boolean = false,
     /** `normal`, `emergency` or `imminent` (peril), as the server last said (TS 24.379 §6.2.8). */
     val priority: String = "normal",
+    /** Our place in the floor request queue while queued (TS 24.380 §8.2.3.5); 255: queued, position not told. */
+    val queuePosition: Int? = null,
 )
 
 /** Another user's location, as their report gave it. */
@@ -320,6 +325,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
             FloorState.HAS_PERMISSION -> "talking"
             FloorState.PENDING_REQUEST -> "requesting"
             FloorState.PENDING_RELEASE -> "releasing"
+            FloorState.QUEUED -> if (floor.offered.value) "offered" else "queued"
             FloorState.NO_PERMISSION -> if (floor.talker != null) "taken" else "idle"
             else -> "idle"
         }
@@ -335,7 +341,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
             else -> call.groupId?.let { client.groupDocuments[it]?.members } ?: emptyList()
         }
         return CallItem(call.id, title, call.type, call.state, state, floor?.talker, call.floorEvents.lastOrNull(), limit, call.startedAt, members,
-            call.floorControl, call.media?.muted == true, call.priority)
+            call.floorControl, call.media?.muted == true, call.priority, floor?.queuePosition?.value)
     }
     val calls = mcptt?.calls?.value ?: emptyList()
     val incoming = calls.firstOrNull { !it.outgoing && it.state == "ringing" }

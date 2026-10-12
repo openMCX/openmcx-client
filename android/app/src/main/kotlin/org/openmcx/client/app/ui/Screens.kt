@@ -267,7 +267,7 @@ private fun StatusBar(state: UiState, openSettings: () -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Logo()
-            Text(state.user.ifEmpty { "openMCX" }, color = Mcx.Ink, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, modifier = Modifier.weight(1f))
+            Text(state.user.ifEmpty { "OpenMCX" }, color = Mcx.Ink, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, modifier = Modifier.weight(1f))
             // Settings, left of the login status.
             IconButton(onClick = openSettings, modifier = Modifier.size(36.dp).testTag(Tags.SETTINGS).semantics { contentDescription = "Settings" }) {
                 GearIcon(Mcx.Ink, 22.dp)
@@ -350,8 +350,8 @@ private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit
             Section("Location")
             Text(state.locationSharing ?: "Your location is not being reported: no MC service has asked for it.",
                 style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
-            Section("About openMCX")
-            Text("The openMCX project is the first open-source implementation of 3GPP Release ${org.openmcx.client.RELEASE} Mission Critical Services.")
+            Section("About OpenMCX")
+            Text("The OpenMCX project is the first open-source implementation of 3GPP Release ${org.openmcx.client.RELEASE} Mission Critical Services.")
             val uri = androidx.compose.ui.platform.LocalUriHandler.current
             TextButton(onClick = { runCatching { uri.openUri("https://openmcx.com") } }, contentPadding = PaddingValues(0.dp),
                 modifier = Modifier.testTag(Tags.ABOUT_LINK)) { Text("Visit openmcx.com for more information") }
@@ -561,6 +561,13 @@ private data class FloorLook(val fill: Color, val ink: Color, val label: String,
 private fun floorLook(call: CallItem): FloorLook = when (call.floor) {
     "talking" -> FloorLook(Mcx.Talking, Mcx.OnTalking, "You are talking", "Release PTT when done", "Release to stop", KeySign.MIC)
     "requesting" -> FloorLook(Mcx.Requesting, Mcx.OnRequesting, "Requesting the floor…", "Keep holding", "Waiting…", KeySign.WAIT)
+    // TS 24.380 §6.2.4.9: the request waits in the floor queue; releasing PTT leaves the queue (§6.2.4.9.6).
+    "queued" -> FloorLook(Mcx.Requesting, Mcx.OnRequesting,
+        call.queuePosition?.takeIf { it in 1..253 }?.let { "Queued, position $it" } ?: "Queued",
+        "Keep holding to stay in the queue; release to leave it", "In queue", KeySign.WAIT)
+    // §6.2.4.9.4: a queued grant waits for the user's acceptance (T132).
+    "offered" -> FloorLook(Mcx.Talking, Mcx.OnTalking, "The floor is yours", "Press PTT now to talk, or it goes to the next",
+        "Press to talk", KeySign.MIC)
     "releasing" -> FloorLook(Mcx.Releasing, Mcx.OnReleasing, "Releasing…", "Handing the floor back", "Hold to talk", KeySign.WAIT)
     "taken" -> FloorLook(Mcx.Taken, Mcx.OnTaken, "${call.talker?.short() ?: "Someone"} is talking", "Wait for the floor to be free", "Floor busy",
         KeySign.SPEAKER)
@@ -592,6 +599,8 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
     var burstStart by remember(call.id) { mutableLongStateOf(0L) }
     val recent = remember(call.id) { mutableStateListOf<RecentTalk>() }
     val haptics = LocalHapticFeedback.current
+    // A queued grant waits for the user: a cue besides the screen (§6.2.4.9.4 step 2).
+    LaunchedEffect(call.id, call.floor) { if (call.floor == "offered") haptics.performHapticFeedback(HapticFeedbackType.LongPress) }
     DisposableEffect(call.id, holder) {
         val start = System.currentTimeMillis()
         burstStart = start
@@ -664,7 +673,8 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
             // The key is 256 dp across where there is room, smaller on short screens or with a long talker list.
             BoxWithConstraints(Modifier.weight(1f, fill = false).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 val ring = minOf(256.dp, maxWidth, maxHeight)
-                TalkRing(ring, used, if (remaining != null && remaining < 5000) Mcx.Stop else look.fill, pulsing = call.floor == "requesting" && !still)
+                TalkRing(ring, used, if (remaining != null && remaining < 5000) Mcx.Stop else look.fill,
+                    pulsing = (call.floor == "requesting" || call.floor == "offered") && !still)
                 var held by remember { mutableStateOf(false) }
                 if (duplex) PttKey(ring * 0.84f, look, if (call.muted) "MUTED" else "LIVE", held,
                     Modifier.testTag(Tags.MUTE)

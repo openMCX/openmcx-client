@@ -748,12 +748,88 @@ class Lab:
         self.hangup(A)
         self.idle_everywhere([A, B])
 
+    def s18_floor_queue(self) -> None:
+        """Queued floor requests (TS 24.380 §6.2.4.9), as Unit Test Tutorial 2 runs them with the Linux client: a request
+        queued while alice talks, its position asked, the queue left, a queued grant accepted, one let lapse (T132), and
+        the hold-to-talk grant taken at once. Needs a lab made with --floor-queue."""
+        if not meta(self.name).get("floor_queue"):
+            print("  [SKIP] S18 needs a lab made with --floor-queue")
+            self.skipped.append("S18")
+            return
+        call = self.cmd(A, "group", GROUP)
+        self.check("alice's group call is established", call["state"] == "established")
+        for c in (B, C):
+            self.established(c)
+
+        def alice_talks():
+            holder = threading.Thread(target=lambda: self.cmd(A, "ptt", SPEECH[A], "6", timeout=30))
+            holder.start()
+            self.wait("alice holds the floor", lambda: self.call(A).get("floor") == "HAS_PERMISSION", timeout=5)
+            return holder
+
+        def queued(c):
+            return (x := self.call(c)) and x.get("floor") == "QUEUED" and not x.get("pending_floor_confirmation") and x
+
+        # 1. Queued, asked, left (§6.2.4.4.9, §6.2.4.9.9, §6.2.4.9.6), then queued again and accepted (§6.2.4.9.12).
+        holder = alice_talks()
+        self.cmd(B, "floor", "queue", SPEECH[B])
+        got = self.wait("bob queued", lambda: queued(B), timeout=5)
+        self.check("bob's request is queued at position 1, not denied", got.get("queue_position") == 1, call=got)
+        before = sum("queued position" in e for e in got["floor_events"])
+        self.cmd(B, "queue-status")
+        again = self.wait("a fresh Floor Queue Position Info",
+                          lambda: (x := self.call(B)) and sum("queued position" in e for e in x["floor_events"]) > before and x, timeout=5)
+        self.check("bob asks for his position and is told 1", again.get("queue_position") == 1 and again.get("floor") == "QUEUED")
+        self.cmd(B, "floor", "release")
+        left = self.wait("bob left the queue", lambda: (x := self.call(B)) and x.get("floor") == "NO_PERMISSION" and x, timeout=5)
+        self.check("bob leaves the queue; alice still talks", left.get("queue_position") is None
+                   and self.call(A).get("floor") == "HAS_PERMISSION")
+        self.cmd(B, "floor", "queue", SPEECH[B])
+        self.wait("bob queued again", lambda: queued(B), timeout=5)
+        holder.join()
+        offered = self.wait("the floor offered to bob", lambda: (x := self.call(B)) and x.get("pending_floor_confirmation") and x, timeout=8)
+        self.check("alice's release grants the floor to bob's queued request, awaiting his acceptance",
+                   offered.get("floor") == "QUEUED", call=offered)
+        self.cmd(B, "floor-confirm")
+        self.check("bob accepts and talks", self.wait("bob talks", lambda: self.call(B).get("floor") == "HAS_PERMISSION", timeout=3))
+        self.check("alice and client-c are told bob talks",
+                   self.wait("taken by bob", lambda: all((self.call(c) or {}).get("talker") == MCPTT[B] for c in (A, C)), timeout=5))
+        self.cmd(B, "floor", "release")
+        for c in (A, B, C):
+            self.wait(f"{c} floor idle", lambda c=c: (x := self.call(c)) and x.get("floor") == "NO_PERMISSION", timeout=5)
+
+        # 2. A queued grant the user never accepts: T132 runs out, bob gives the floor back (§6.2.4.9.13).
+        sent_before = sum(b["direction"] == "sent" for b in self.call(B)["bursts"])
+        holder = alice_talks()
+        self.cmd(B, "floor", "queue", SPEECH[B])
+        self.wait("bob queued", lambda: queued(B), timeout=5)
+        holder.join()
+        self.wait("the floor offered to bob", lambda: (x := self.call(B)) and x.get("pending_floor_confirmation"), timeout=8)
+        lapsed = self.wait("bob's grant lapses", lambda: (x := self.call(B)) and x.get("floor") == "NO_PERMISSION" and x, timeout=5)
+        self.check("without acceptance the grant lapses after T132 and bob sends no speech",
+                   any("lapsed" in e for e in lapsed["floor_events"])
+                   and sum(b["direction"] == "sent" for b in lapsed["bursts"]) == sent_before, events=lapsed["floor_events"][-4:])
+        for c in (A, C):
+            self.wait(f"{c} floor idle", lambda c=c: (x := self.call(c)) and x.get("floor") == "NO_PERMISSION", timeout=8)
+
+        # 3. Hold to talk: the user still holds PTT, so the queued grant is taken at once (§6.2.4.9.12).
+        holder = alice_talks()
+        self.cmd(B, "floor", SPEECH[B])
+        self.wait("bob queued", lambda: (x := self.call(B)) and x.get("floor") == "QUEUED", timeout=5)
+        holder.join()
+        self.check("holding PTT, bob gets the floor as soon as alice releases",
+                   self.wait("bob talks", lambda: self.call(B).get("floor") == "HAS_PERMISSION", timeout=8))
+        self.cmd(B, "floor", "release")
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+
     SCENARIOS = {"S1": s1_startup, "S2": s2_private_automatic, "S3": s3_private_manual, "S4": s4_group, "S5": s5_adhoc, "S6": s6_sds,
                  "S7": s7_refresh_and_recovery, "S8": s8_lifecycle, "S9": s9_impaired, "S10": s10_latency,
                  "S11": s11_product, "S12": s12_private_no_floor, "S13": s13_location,
                  "S14": s14_emergency_alerts,
                  "S15": s15_server_address,
-                 "S16": s16_emergency_calls}
+                 "S16": s16_emergency_calls,
+                 "S18": s18_floor_queue}
 
 
 def main() -> None:

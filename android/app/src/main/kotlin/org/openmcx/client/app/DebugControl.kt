@@ -91,7 +91,17 @@ class DebugControl(private val context: Context) {
         "answer" -> mcptt().answer()
         "reject" -> mcptt().reject()
         "hangup" -> { mcptt().hangup(); "released" }
-        "floor" -> { if (args.firstOrNull() == "release") mcptt().pttRelease() else mcptt().pttPress(); "ok" }
+        // floor [release|queue] [wav]: press or release PTT; `queue` requests without holding PTT, so a queued grant waits
+        // for floor-confirm (TS 24.380 §6.2.4.9.12) and lapses after T132 without it (§6.2.4.9.13). A WAV file (a path on
+        // the device) is what the burst sends, as for ptt.
+        "floor" -> {
+            args.firstOrNull { it.endsWith(".wav") }?.let { Engine.fileAudio?.nextSource = java.io.File(it) }
+            when (args.firstOrNull()) { "release" -> mcptt().pttRelease(); "queue" -> mcptt().pttPress(hold = false)
+                else -> mcptt().pttPress() }
+            "ok"
+        }
+        "floor-confirm" -> if (mcptt().confirmFloor()) "ok" else throw IllegalStateException("no queued floor grant awaiting confirmation")
+        "queue-status" -> if (mcptt().requestQueuePosition()) "ok" else throw IllegalStateException("no queued floor request")
         "ptt" -> ptt(args[0], args.getOrNull(1)?.toDouble() ?: 5.0)
         "answer-mode" -> { mcptt().answerMode = args[0]; args[0] }
         "import" -> { Provisioning(context).import(java.io.File(args[0]).readText()); Engine.restart(context); "imported" }
@@ -425,6 +435,8 @@ class DebugControl(private val context: Context) {
         .put("floor", call.media?.let { if (it.isStarted) it.floor.state.value.name else null })
         .put("floor_control", call.floorControl).put("muted", call.media?.muted == true).put("priority", call.priority)
         .put("talker", call.media?.let { if (it.isStarted) it.floor.talker else null })
+        .put("queue_position", call.media?.takeIf { it.isStarted }?.floor?.queuePosition?.value)
+        .put("pending_floor_confirmation", call.media?.takeIf { it.isStarted }?.floor?.offered?.value == true)
         .put("floor_events", JSONArray(call.floorEvents))
         .put("bursts", JSONArray(call.media?.bursts?.map { b ->
             JSONObject().put("direction", b.direction).put("ssrc", b.ssrc).put("frames", b.payloadHashes.size)

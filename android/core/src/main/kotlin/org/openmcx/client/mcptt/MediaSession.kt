@@ -284,6 +284,10 @@ class MediaSession(
     override fun denied(cause: Int?, text: String?) { cancelPrepared(); floorEvents?.denied(cause, text) }
     override fun revoked(cause: Int?) { cancelPrepared(); floorEvents?.revoked(cause) }
     override fun requestFailed() { cancelPrepared(); floorEvents?.requestFailed() }
+    override fun queued(position: Int?, priority: Int?) { floorEvents?.queued(position, priority) }
+    override fun queuedGrantOffered(seconds: Int) { floorEvents?.queuedGrantOffered(seconds) }
+    override fun queuedGrantLapsed() { cancelPrepared(); floorEvents?.queuedGrantLapsed() }
+    override fun queueTimeout() { cancelPrepared(); floorEvents?.queueTimeout() }
 
     suspend fun stop() {
         if (this::floor.isInitialized) floor.stop()

@@ -493,7 +493,8 @@ object Engine {
         scope.launch {
             val call = service.active
             when {
-                call != null && pressed -> service.pttPress(call)
+                // A queued grant waiting for the user (TS 24.380 §6.2.4.9.12): pressing PTT accepts it.
+                call != null && pressed -> if (!service.confirmFloor(call)) service.pttPress(call)
                 call != null -> service.pttRelease(call)
                 pressed -> {
                     val group = selectedGroup.value ?: return@launch

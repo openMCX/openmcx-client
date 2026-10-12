@@ -222,6 +222,10 @@ def create(args) -> None:
         # them, client-a may cancel an alert (its own or another user's). With the private call policy: emergency
         # private calls, client-a to anyone, client-b to client-a only.
         command += ["--priority", "--private-call"]
+    if args.floor_queue:
+        # Queued floor requests (TS 24.380 §6.2.4.9, §6.3.5.4.4): the server queues a request while the floor is taken
+        # and publishes <floor-control-queue> in the MCPTT service configuration, from which the app offers mc_queueing.
+        command.append("--floor-queue")
     if args.protected:
         # End-to-end protection (TS 33.180): media, transmission control and key management, with the
         # interoperability profile's Key Parameters IEI.
@@ -367,7 +371,7 @@ def create(args) -> None:
         speech_wav(speech / f"{name}.wav", seed)
     meta_doc = {"openmcx": str(openmcx), "project": f"mcxandroid-{args.name}", "debug_sip": args.debug_sip,
                 "server_image": args.server_image, "mcvideo": args.mcvideo, "protected": args.protected, "location": args.location,
-                "priority": args.priority,
+                "priority": args.priority, "floor_queue": args.floor_queue,
                 "reference_clients": args.reference_client or [], "client_image": args.client_image,
                 "admin": args.admin, "admin_image": args.admin_image,
                 "mcptt_server": mcptt_server_name(compose["services"]),
@@ -719,6 +723,8 @@ def main() -> None:
     c.add_argument("--mcvideo", action="store_true", help="add the MCVideo server and provision MCVideo (video calls)")
     c.add_argument("--location", action="store_true",
                    help="location reporting (TS 24.379 clause 13): configurations, reports, requests and the LMS")
+    c.add_argument("--floor-queue", action="store_true",
+                   help="queued floor requests: the server queues a request while the floor is taken (scenario S18)")
     c.add_argument("--priority", action="store_true",
                    help="emergency and imminent peril, and the MCPTT emergency alert (the group priority policy)")
     c.add_argument("--protected", action="store_true",

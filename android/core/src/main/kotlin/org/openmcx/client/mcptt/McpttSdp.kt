@@ -13,7 +13,9 @@ class SdpNegotiationError(message: String) : Exception(message)
  * our speech is sent with, which the server checks.
  */
 data class LocalMedia(val address: String, val audioPort: Int, val floorPort: Int, val floorSsrc: Long,
-                      val floorControl: Boolean = true, val audioSsrc: Long = 0)
+                      val floorControl: Boolean = true, val audioSsrc: Long = 0,
+                      /** We support queued floor requests (`mc_queueing`, TS 24.380 §14.2.2). */
+                      val queueing: Boolean = false)
 
 /** What the other side (the MCPTT server) negotiated. */
 data class RemoteMedia(
@@ -29,12 +31,15 @@ data class RemoteMedia(
     val floorControl: Boolean = true,
     /** The peer's AMR-WB `mode-set` (RFC 4867 §8.1); empty: every mode. */
     val modeSet: List<Int> = emptyList(),
+    /** The peer's `mc_queueing` (TS 24.380 §14.2.2): queued floor requests. */
+    val queueing: Boolean = false,
 )
 
 /**
  * SDP for an MCPTT on-demand session (TS 24.379 §6.2.1, §6.2.2; TS 24.380 §14): one
  * AMR-WB audio stream and one floor control stream, `m=application <port> udp MCPTT`.
- * This client offers no implicit floor request and no queueing (the server rejects them).
+ * This client offers no implicit floor request; it offers queueing (`mc_queueing`) when the service configuration has a
+ * floor request queue, since the server rejects an offer of queueing it does not support.
  */
 object McpttSdp {
     const val PAYLOAD_TYPE = 96
@@ -57,23 +62,24 @@ object McpttSdp {
         ) + (if (!local.floorControl) listOf("ssrc" to "${local.audioSsrc} cname:mcptt") else emptyList()),
     )
 
-    private fun floor(local: LocalMedia, priority: Int?) = MediaDescription(
+    private fun floor(local: LocalMedia, priority: Int?, queueing: Boolean) = MediaDescription(
         "application", local.floorPort, "udp", listOf("MCPTT"),
-        attributes = listOf("fmtp" to "MCPTT mc_floor_ssrc=${local.floorSsrc}" + (priority?.let { ";mc_priority=$it" } ?: "")),
+        attributes = listOf("fmtp" to "MCPTT mc_floor_ssrc=${local.floorSsrc}" + (priority?.let { ";mc_priority=$it" } ?: "") +
+            if (queueing) ";mc_queueing" else ""),
     )
 
     fun offer(local: LocalMedia): String = SessionDescription(
         origin = "- ${sessionId()} 1 IN IP4 ${local.address}",
         connection = "IN IP4 ${local.address}",
-        media = listOfNotNull(audio(local, PAYLOAD_TYPE, false), if (local.floorControl) floor(local, null) else null),
+        media = listOfNotNull(audio(local, PAYLOAD_TYPE, false), if (local.floorControl) floor(local, null, local.queueing) else null),
     ).encode()
 
-    /** Answer [offer]: its payload type and octet alignment, and its floor priority echoed. */
+    /** Answer [offer]: its payload type and octet alignment, its floor priority echoed, queueing when both support it (§14.2.2). */
     fun answer(offer: RemoteMedia, local: LocalMedia): String = SessionDescription(
         origin = "- ${sessionId()} 1 IN IP4 ${local.address}",
         connection = "IN IP4 ${local.address}",
         media = listOfNotNull(audio(local, offer.payloadType, offer.octetAligned),
-            if (offer.floorControl && local.floorControl) floor(local, offer.floorPriority) else null),
+            if (offer.floorControl && local.floorControl) floor(local, offer.floorPriority, offer.queueing && local.queueing) else null),
     ).encode()
 
     /** The remote side of [sdp] (an offer or an answer). */
@@ -90,7 +96,7 @@ object McpttSdp {
         val address = session.address(audio) ?: throw SdpNegotiationError("no connection address")
         val modeSet = try { AmrWb.modeSet(fmtp["mode-set"]) } catch (e: IllegalArgumentException) { throw SdpNegotiationError(e.message ?: "mode-set") }
         return RemoteMedia(address, audio.port, floor?.port ?: 0, pt, fmtp["octet-align"] == "1", ssrc, floorParams["mc_priority"]?.toIntOrNull(),
-            floorControl = floor != null, modeSet = modeSet)
+            floorControl = floor != null, modeSet = modeSet, queueing = floor != null && "mc_queueing" in floorParams)
     }
 
     private fun params(text: String): Map<String, String?> = text.split(';').map { it.trim() }.filter { it.isNotEmpty() }

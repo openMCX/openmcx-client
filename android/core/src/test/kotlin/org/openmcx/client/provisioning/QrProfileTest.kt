@@ -43,8 +43,8 @@ class QrProfileTest {
     }
 
     @Test fun refusals() {
-        refused("hello", "not an openMCX profile")
-        refused("http://host/p#pin=AAAA", "not an openMCX profile")
+        refused("hello", "not an OpenMCX profile")
+        refused("http://host/p#pin=AAAA", "not an OpenMCX profile")
         refused("https://mcxadmin:8443/activate/abcdef", "MCX Admin activation code without the certificate pin")
         refused("https://host/p", "names no server certificate")
         refused("https://host/p#pin=AAAA", "not a SHA-256")

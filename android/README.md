@@ -49,7 +49,7 @@ This directory is `android/` of the openmcx-client repository; the openmcx-serve
 | `tools` | `gradle-docker.sh` (Dockerised Gradle), `build-image/` (the build image), `instrumented-test.sh` |
 | `lab/androidlab.py` | Builds a lab: the OpenMCX servers with redroid (Android 15) containers as the MC UEs, or real phones |
 | `lab/nettools`, `lab/capture` | Helper images: nftables and tc for coverage loss and impairment in a client's network namespace; packet capture |
-| `tests/` | `scenarios.py` (end-to-end S1-S16), `video.py`, `attachments.py` (phone labs) and `test_androidlab.py` (unit tests of the lab tool) |
+| `tests/` | `scenarios.py` (end-to-end S1-S16 and S18), `video.py`, `attachments.py` (phone labs) and `test_androidlab.py` (unit tests of the lab tool) |
 | `docs/` | Feature documents, wire contracts, conformance matrix and test report |
 
 ## Build

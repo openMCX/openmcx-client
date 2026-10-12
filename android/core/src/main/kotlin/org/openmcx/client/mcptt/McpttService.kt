@@ -118,7 +118,7 @@ class McpttService(
         val flow = ua.flow ?: throw CallError("not connected")
         val address = flow.connection.localHost
         val ports = MediaPorts.bind(InetAddress.getByName(address), client.config.media.portRange)
-        return ports to LocalMedia(address, ports.audioPort, ports.floorPort, McpttSdp.newFloorSsrc())
+        return ports to LocalMedia(address, ports.audioPort, ports.floorPort, McpttSdp.newFloorSsrc(), queueing = client.mcpttFloorQueue)
     }
 
     private fun newMedia(call: Call, ports: MediaPorts, local: LocalMedia) = MediaSession(scope, ports, local, codecs, audio,
@@ -131,6 +131,10 @@ class McpttService(
             override fun denied(cause: Int?, text: String?) = floor(call, "denied cause $cause")
             override fun revoked(cause: Int?) = floor(call, "revoked cause $cause")
             override fun requestFailed() = floor(call, "request failed")
+            override fun queued(position: Int?, priority: Int?) = floor(call, "queued position $position priority $priority")
+            override fun queuedGrantOffered(seconds: Int) = floor(call, "queued grant offered ${seconds}s")
+            override fun queuedGrantLapsed() = floor(call, "queued grant lapsed")
+            override fun queueTimeout() = floor(call, "queue position request timed out")
         }
     }
 
@@ -461,14 +465,25 @@ class McpttService(
         changed(call)
     }
 
-    /** Push to talk: request the floor. */
-    suspend fun pttPress(call: Call? = active) {
+    /**
+     * Push to talk: request the floor. [hold]: the user keeps PTT pressed, so a queued grant is accepted at once
+     * (TS 24.380 §6.2.4.9.12); without it a queued grant waits for [confirmFloor] within T132.
+     */
+    suspend fun pttPress(call: Call? = active, hold: Boolean = true) {
         val media = call?.media ?: throw CallError("no call")
         if (media.isStarted && media.duplex) return // no floor: the microphone is already sent
         media.requestedAt = System.currentTimeMillis()
         media.prepareTalk()
+        media.floor.autoConfirm = hold
         media.floor.request()
     }
+
+    /** Accept a queued grant (TS 24.380 §6.2.4.9.12); false when none awaits acceptance. */
+    suspend fun confirmFloor(call: Call? = active): Boolean = call?.media?.takeIf { it.isStarted }?.floor?.confirm() ?: false
+
+    /** Ask for the queue position of our queued floor request (TS 24.380 §6.2.4.9.9); false when not queued. */
+    suspend fun requestQueuePosition(call: Call? = active): Boolean =
+        call?.media?.takeIf { it.isStarted }?.floor?.requestQueuePosition() ?: false
 
     suspend fun pttRelease(call: Call? = active) {
         if (call?.media?.let { it.isStarted && it.duplex } == true) return

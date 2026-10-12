@@ -114,6 +114,17 @@ object ServiceConfig {
     private val levels = mapOf("emergency" to "emergency-resource-priority",
         "imminent" to "imminent-peril-resource-priority", "normal" to "normal-resource-priority")
 
+    /**
+     * TS 24.484 §8.4.2.1: `<floor-control-queue>` in `<on-network>` of the MCPTT service configuration: the floor control
+     * server queues floor requests, so the client offers `mc_queueing` (TS 24.380 §14.2.2).
+     */
+    fun floorQueue(text: String): Boolean {
+        val root = Xml.parse(text)
+        if (root.localName != "service-configuration-info" || root.namespaceURI?.endsWith("ServiceConfig:1.0") != true)
+            throw DocumentError("not a service configuration document")
+        return root.descendants("floor-control-queue").any()
+    }
+
     fun resourcePriorities(text: String): Map<String, String> {
         val root = Xml.parse(text)
         if (root.localName != "service-configuration-info" || root.namespaceURI?.endsWith("ServiceConfig:1.0") != true)
@@ -151,8 +162,11 @@ class DocumentClient(private val http: HttpClient, private val cms: String, priv
         UserProfile.parse(fetch("$cms/xcap-root/org.3gpp.mcptt.user-profile/users/${enc(mcpttId)}/mcptt-user-profile-$index.xml", token))
 
     /** TS 24.484 §8.4.2.8 (§9.4.2.8, §10.4.2.8): the service configuration document of `mcptt`, `mcvideo` or `mcdata`. */
+    suspend fun serviceConfiguration(service: String, token: String): String =
+        fetch("$cms/xcap-root/org.3gpp.$service.service-config/global/service-config.xml", token)
+
     suspend fun serviceResourcePriorities(service: String, token: String): Map<String, String> =
-        ServiceConfig.resourcePriorities(fetch("$cms/xcap-root/org.3gpp.$service.service-config/global/service-config.xml", token))
+        ServiceConfig.resourcePriorities(serviceConfiguration(service, token))
 
     suspend fun group(groupId: String, token: String): GroupDocument =
         GroupDocument.parse(fetch("$gms/xcap-root/org.openmobilealliance.groups/global/byGroupID/${enc(groupId)}", token))
