@@ -15,9 +15,27 @@ android {
         versionName = "0.1.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+    buildTypes {
+        // The screens with sample data and no engine, installed beside the client to try the look (see src/uiPreview).
+        create("uiPreview") {
+            initWith(getByName("debug"))
+            applicationIdSuffix = ".uipreview"
+            versionNameSuffix = "-uipreview"
+            matchingFallbacks += "debug"
+        }
+    }
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+    testOptions {
+        unitTests.isIncludeAndroidResources = true
+        // Robolectric's Android runtime (~200 MB) is kept beside the Gradle cache, so it is fetched only once.
+        unitTests.all { test ->
+            val dir = gradle.gradleUserHomeDir.resolve("robolectric-home")
+            test.systemProperty("user.home", dir.path)
+            test.doFirst { dir.mkdirs() }
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -44,4 +62,9 @@ dependencies {
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation(libs.compose.ui.test.junit4)
     debugImplementation(libs.compose.ui.test.manifest)
+    testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.junit)
+    testImplementation(platform(libs.compose.bom))
+    testImplementation(libs.compose.ui.test.junit4)
 }

@@ -22,7 +22,9 @@ headless MC UE in a container, driven by commands. This page is a map, not a con
   clause 9.2.1). A refused service authorisation that can be transient (403, 408, 480, 500, 503) is retried after a
   growing delay (5, 10, 20, then every 60 s, or the Retry-After of a 500 or 503).
 - **Media**: AMR-WB speech over RTP (RFC 4867), H.264 video (RFC 6184); floor control (TS 24.380) and transmission and
-  reception control (TS 24.581).
+  reception control (TS 24.581). Another participant's transmission is announced by the Media Transmission
+  Notification (clause 6.2.5.3.2): with automatic reception the client receives at once, with manual reception it
+  sends Receive Media Request (unless `mcvideo.auto_receive` is false).
 - **Location** (TS 24.379 clause 13, TS 24.282 clause 17, TS 24.281 clause 18): configurations, triggers, reports and
   requests, for each service.
 - **Key management** (TS 33.180): the KMS, key material and group keys from the GMS.

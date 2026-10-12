@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -76,7 +77,9 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
@@ -85,13 +88,15 @@ import androidx.compose.ui.graphics.drawscope.rotate
 import androidx.compose.ui.graphics.drawscope.scale
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.foundation.text.TextAutoSize
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
@@ -192,23 +197,6 @@ object Tags {
     fun callPrivate(target: String) = "call-private-$target"
 }
 
-/** The OpenMCX look: warm ivory, near-black ink and the icon's orange; floor states differ in lightness too. */
-private object Mcx {
-    val Ivory = Color(0xFFFBF6EE)
-    val Ink = Color(0xFF1C1917)
-    val Muted = Color(0xFF57534E)
-    val Line = Color(0xFFE7DFD3)
-    val Brand = Color(0xFFFFCC80)
-    /** The top strip: a lighter shade of the logo's orange. */
-    val Strip = Color(0xFFFFE6C4)
-    val Idle = Color(0xFF292524)
-    val Requesting = Color(0xFFB45309)
-    val Talking = Color(0xFFC2410C)
-    val Taken = Color(0xFF1D4ED8)
-    val Releasing = Color(0xFF57534E)
-    val Stop = Color(0xFFB91C1C)
-}
-
 @Composable
 fun McxApp(state: UiState, actions: UiActions, initialTab: Int = 0) {
     var tab by rememberSaveable { mutableStateOf(initialTab) }
@@ -221,7 +209,8 @@ fun McxApp(state: UiState, actions: UiActions, initialTab: Int = 0) {
             // Other people's emergency alerts, above everything else, once each whatever services they came through.
             state.receivedAlerts.forEach { alert ->
                 Row(Modifier.fillMaxWidth().background(Mcx.Stop).padding(horizontal = 12.dp, vertical = 8.dp).testTag(Tags.alertFrom(alert.person)),
-                    verticalAlignment = Alignment.CenterVertically) {
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    WarningIcon(Color.White, 24.dp)
                     Column(Modifier.weight(1f)) {
                         Text("EMERGENCY ALERT: ${alert.person}", color = Color.White, fontWeight = FontWeight.Bold)
                         Text(alert.what + " · " + alert.via + (if (alert.latitude != null) " · %.5f, %.5f".format(alert.latitude, alert.longitude) else ""),
@@ -234,8 +223,8 @@ fun McxApp(state: UiState, actions: UiActions, initialTab: Int = 0) {
                 }
             }
             state.videoFailure?.let { failure ->
-                Row(Modifier.fillMaxWidth().background(Mcx.Line).padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(failure, color = Mcx.Stop, modifier = Modifier.weight(1f).testTag(Tags.VIDEO_FAILURE))
+                Row(Modifier.fillMaxWidth().background(Mcx.WarnBg).padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(failure, color = Mcx.WarnInk, modifier = Modifier.weight(1f).testTag(Tags.VIDEO_FAILURE))
                     TextButton(onClick = actions::dismissVideoFailure) { Text("Dismiss") }
                 }
             }
@@ -246,10 +235,14 @@ fun McxApp(state: UiState, actions: UiActions, initialTab: Int = 0) {
                 OutlinedButton(onClick = actions::scanProvisioning, modifier = Modifier.weight(1f)) { Text("Scan QR code") }
             }
             PrimaryTabRow(selectedTabIndex = tab, containerColor = Mcx.Ivory, contentColor = Mcx.Ink,
-                indicator = { TabRowDefaults.PrimaryIndicator(Modifier.tabIndicatorOffset(tab, matchContentSize = true), color = Mcx.Talking) }) {
+                indicator = { TabRowDefaults.PrimaryIndicator(Modifier.tabIndicatorOffset(tab, matchContentSize = true), color = Mcx.Ink) }) {
                 listOf("Call", "Video", "Message", "Logs").forEachIndexed { i, title ->
                     Tab(selected = tab == i, onClick = { tab = i }, selectedContentColor = Mcx.Ink, unselectedContentColor = Mcx.Muted,
-                        text = { Text(title, fontWeight = if (tab == i) FontWeight.SemiBold else FontWeight.Normal) })
+                        text = {
+                            // One line at any font scale: a long name shrinks rather than breaks.
+                            Text(title, fontWeight = if (tab == i) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1,
+                                autoSize = TextAutoSize.StepBased(minFontSize = 11.sp, maxFontSize = MaterialTheme.typography.titleSmall.fontSize * LocalDensity.current.fontScale))
+                        })
                 }
             }
             when (tab) {
@@ -280,12 +273,12 @@ private fun StatusBar(state: UiState, openSettings: () -> Unit) {
                 GearIcon(Mcx.Ink, 22.dp)
             }
             Row(
-                Modifier.background(if (ready) Color(0xFFDCFCE7) else Color(0xFFFEF3C7), RoundedCornerShape(50)).padding(horizontal = 10.dp, vertical = 4.dp),
+                Modifier.background(if (ready) Mcx.OkBg else Mcx.WarnBg, RoundedCornerShape(50)).padding(horizontal = 10.dp, vertical = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Box(Modifier.size(7.dp).background(if (ready) Color(0xFF16A34A) else Mcx.Requesting, CircleShape))
-                Text(state.phase, color = if (ready) Color(0xFF14532D) else Color(0xFF78350F), fontSize = 12.sp,
+                Box(Modifier.size(7.dp).background(if (ready) Mcx.OkDot else Mcx.Requesting, CircleShape))
+                Text(state.phase, color = if (ready) Mcx.OkInk else Mcx.WarnInk, fontSize = 12.sp,
                     fontWeight = FontWeight.SemiBold, modifier = Modifier.testTag(Tags.PHASE))
             }
         }
@@ -413,26 +406,36 @@ private fun ServerAddress(state: UiState, actions: UiActions) {
     )
 }
 
-/** The launcher icon in small: "open" over "MCX" on the brand orange. */
+/**
+ * The launcher icon in small: "open" over "MCX" on the brand orange. A mark, not text to read: it keeps its dark ink
+ * in dark mode and its size whatever the font scale (the tile is fixed).
+ */
 @Composable
 private fun Logo() {
-    Column(Modifier.size(49.dp).background(Mcx.Brand, RoundedCornerShape(13.dp)),
-        horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-        Text("open", color = Mcx.Ink, fontSize = 11.5.sp, lineHeight = 13.sp)
-        Text("MCX", color = Mcx.Ink, fontSize = 15.8.sp, lineHeight = 17.3.sp, fontWeight = FontWeight.Bold)
+    val ink = LightMcx.Ink
+    with(LocalDensity.current) {
+        Column(Modifier.size(49.dp).background(Mcx.Brand, RoundedCornerShape(13.dp)),
+            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            Text("open", color = ink, fontSize = 11.5.dp.toSp(), lineHeight = 13.dp.toSp())
+            Text("MCX", color = ink, fontSize = 15.8.dp.toSp(), lineHeight = 17.3.dp.toSp(), fontWeight = FontWeight.Bold)
+        }
     }
 }
 
 @Composable
 private fun IncomingCall(call: CallItem, actions: UiActions) {
-    Card(Modifier.fillMaxWidth().padding(8.dp)) {
-        Column(Modifier.padding(16.dp)) {
-            Text("Incoming ${call.type.sessionType} call", style = MaterialTheme.typography.titleMedium)
-            Text(call.title, style = MaterialTheme.typography.headlineSmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 12.dp)) {
-                Button(onClick = actions::answer, modifier = Modifier.testTag(Tags.ANSWER),
-                    colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))) { Text("Answer") }
-                OutlinedButton(onClick = actions::reject, modifier = Modifier.testTag(Tags.REJECT)) { Text("Decline") }
+    Column(Modifier.fillMaxWidth().padding(12.dp).background(Mcx.Card, RoundedCornerShape(16.dp)).border(1.dp, Mcx.Line, RoundedCornerShape(16.dp))
+        .padding(16.dp)) {
+        Text("Incoming ${call.type.sessionType} call", style = MaterialTheme.typography.titleMedium, color = Mcx.Muted)
+        Text(call.title, color = Mcx.Ink, style = CallTitle)
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 12.dp)) {
+            Button(onClick = actions::answer, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag(Tags.ANSWER), shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32), contentColor = Color.White)) {
+                Text("Answer", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            }
+            OutlinedButton(onClick = actions::reject, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag(Tags.REJECT),
+                shape = RoundedCornerShape(16.dp), border = BorderStroke(1.5.dp, Mcx.Ink)) {
+                Text("Decline", color = Mcx.Ink, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
             }
         }
     }
@@ -450,22 +453,26 @@ private fun TalkScreen(state: UiState, actions: UiActions) {
         state.callFailure?.let { failure ->
             item {
                 Row(
-                    Modifier.fillMaxWidth().padding(top = 12.dp).background(Color(0xFFFEF3C7), RoundedCornerShape(12.dp))
+                    Modifier.fillMaxWidth().padding(top = 12.dp).background(Mcx.WarnBg, RoundedCornerShape(12.dp))
                         .padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Text(failure, color = Color(0xFF78350F), fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f).testTag(Tags.CALL_FAILURE))
-                    TextButton(onClick = actions::dismissCallFailure) { Text("Dismiss", color = Color(0xFF78350F)) }
+                    Text(failure, color = Mcx.WarnInk, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f).testTag(Tags.CALL_FAILURE))
+                    TextButton(onClick = actions::dismissCallFailure) { Text("Dismiss", color = Mcx.WarnInk) }
                 }
             }
         }
         item { Section("Groups") }
         items(state.groups) { g ->
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp)) {
                 RadioButton(selected = g.selected, onClick = { actions.selectGroup(g.id) })
                 Column(Modifier.weight(1f)) {
-                    Text(g.id.short(), fontWeight = FontWeight.Medium)
-                    Text(if (g.affiliated) "affiliated" else "not affiliated", style = MaterialTheme.typography.bodySmall)
+                    Text(g.id.short(), style = MaterialTheme.typography.titleMedium)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Box(Modifier.size(7.dp).background(if (g.affiliated) Mcx.OkDot else Color.Transparent, CircleShape)
+                            .border(1.dp, if (g.affiliated) Mcx.OkDot else Mcx.Muted, CircleShape))
+                        Text(if (g.affiliated) "affiliated" else "not affiliated", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                    }
                 }
                 Button(onClick = { actions.callGroup(g.id) }, enabled = state.registered,
                     modifier = Modifier.testTag(Tags.callGroup(g.id))) { Text("Call") }
@@ -474,9 +481,9 @@ private fun TalkScreen(state: UiState, actions: UiActions) {
         }
         item { Section("Private calls") }
         items(state.privateTargets) { t ->
-            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
                 Checkbox(checked = t in adhoc, onCheckedChange = { if (it) adhoc += t else adhoc -= t })
-                Text(t.short(), modifier = Modifier.weight(1f))
+                Text(t.short(), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 OutlinedButton(onClick = { actions.callPrivate(t) }, enabled = state.registered,
                     modifier = Modifier.testTag(Tags.callPrivate(t))) { Text("Call") }
                 CallOptions(t, state.registered, actions)
@@ -485,7 +492,7 @@ private fun TalkScreen(state: UiState, actions: UiActions) {
         item {
             Button(onClick = { actions.callAdhoc(adhoc.toList()) }, enabled = state.registered && adhoc.isNotEmpty(),
                 modifier = Modifier.padding(vertical = 8.dp)) { Text("Ad hoc call with ${adhoc.size} selected") }
-            Text("Press PTT with no call to call the selected group.", style = MaterialTheme.typography.bodySmall)
+            Text("Press PTT with no call to call the selected group.", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
         }
         if (state.alertServices.isNotEmpty()) {
             item { Section("Emergency alert") }
@@ -542,31 +549,42 @@ private fun VideoScreen(state: UiState, actions: UiActions) {
 
 @Composable
 private fun Section(title: String) =
-    Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.padding(top = 16.dp, bottom = 4.dp))
+    Text(title, style = MaterialTheme.typography.titleSmall, color = Mcx.Muted, modifier = Modifier.padding(top = 20.dp, bottom = 6.dp))
 
-private data class FloorLook(val colour: Color, val label: String, val hint: String, val button: String)
+/** What the PTT key shows besides its colour, so a state reads without it (colour blindness, glare). */
+private enum class KeySign { MIC, SPEAKER, WAIT, MUTED }
 
+/** How a floor state looks: [fill] for the PTT key and badge, [ink] for its name on the background, and a [sign]. */
+private data class FloorLook(val fill: Color, val ink: Color, val label: String, val hint: String, val button: String, val sign: KeySign)
+
+@Composable
 private fun floorLook(call: CallItem): FloorLook = when (call.floor) {
-    "talking" -> FloorLook(Mcx.Talking, "You are talking", "Release PTT when done", "Release to stop")
-    "requesting" -> FloorLook(Mcx.Requesting, "Requesting the floor…", "Keep holding", "Waiting…")
-    "releasing" -> FloorLook(Mcx.Releasing, "Releasing…", "Handing the floor back", "Hold to talk")
-    "taken" -> FloorLook(Mcx.Taken, "${call.talker?.short() ?: "Someone"} is talking", "Wait for the floor to be free", "Floor busy")
-    else -> if (call.state == "established") FloorLook(Mcx.Idle, "Floor idle", "Press and hold PTT to talk", "Hold to talk")
-    else FloorLook(Mcx.Idle, call.state.replaceFirstChar { it.uppercase() } + "…", "Setting up the call", "Hold to talk")
+    "talking" -> FloorLook(Mcx.Talking, Mcx.OnTalking, "You are talking", "Release PTT when done", "Release to stop", KeySign.MIC)
+    "requesting" -> FloorLook(Mcx.Requesting, Mcx.OnRequesting, "Requesting the floor…", "Keep holding", "Waiting…", KeySign.WAIT)
+    "releasing" -> FloorLook(Mcx.Releasing, Mcx.OnReleasing, "Releasing…", "Handing the floor back", "Hold to talk", KeySign.WAIT)
+    "taken" -> FloorLook(Mcx.Taken, Mcx.OnTaken, "${call.talker?.short() ?: "Someone"} is talking", "Wait for the floor to be free", "Floor busy",
+        KeySign.SPEAKER)
+    else -> if (call.state == "established") FloorLook(Mcx.Idle, Mcx.OnIdle, "Floor idle", "Press and hold PTT to talk", "Hold to talk", KeySign.MIC)
+    else FloorLook(Mcx.Idle, Mcx.OnIdle, call.state.replaceFirstChar { it.uppercase() } + "…", "Setting up the call", "Hold to talk", KeySign.WAIT)
 }
 
 private data class RecentTalk(val who: String, val millis: Long, val at: Long)
 
 private fun clock(millis: Long): String { val s = millis.coerceAtLeast(0) / 1000; return "%d:%02d".format(s / 60, s % 60) }
 
-/** The active call: who, the floor with the talk time left, a press-and-hold PTT button and the recent talkers. */
+/** The call's name and the floor state: condensed, to be read at a glance. */
+private val CallTitle = TextStyle(fontFamily = Condensed, fontWeight = FontWeight.Bold, fontSize = 34.sp, lineHeight = 38.sp)
+private val FloorLabel = TextStyle(fontFamily = Condensed, fontWeight = FontWeight.Bold, fontSize = 21.sp, lineHeight = 24.sp)
+
+/** The active call: who, the floor with the talk time left, a press-and-hold PTT key and the recent talkers. */
 @Composable
 fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Boolean? = null, failure: String? = null) {
-    // Without floor control both talk at once: the big button mutes the microphone instead of requesting the floor.
+    // Without floor control both talk at once: the big key mutes the microphone instead of requesting the floor.
     val duplex = !call.floorControl
     val look = if (!duplex) floorLook(call) else if (call.muted)
-        FloorLook(Mcx.Muted, "Muted", "Your microphone is off; you still hear the other side", "Tap to unmute")
-    else FloorLook(Mcx.Talking, "Both can talk", "Speak freely, like a phone call", "Tap to mute")
+        FloorLook(Mcx.Releasing, Mcx.OnReleasing, "Muted", "Your microphone is off; you still hear the other side", "Tap to unmute", KeySign.MUTED)
+    else FloorLook(Mcx.Talking, Mcx.OnTalking, "Both can talk", "Speak freely, like a phone call", "Tap to mute", KeySign.MIC)
+    val still = reducedMotion()
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(200) } }
     // Who holds the floor; a talk burst is timed from when that changes, and listed when it ends.
@@ -592,141 +610,191 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
     val used = if (limitMs != null && call.floor == "talking") (elapsed.toFloat() / limitMs).coerceIn(0f, 1f) else 0f
 
     Column(Modifier.fillMaxSize().background(Mcx.Ivory)) {
-        Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 18.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(when (call.type) { CallType.PRIVATE -> "PRIVATE CALL"; CallType.PREARRANGED -> "GROUP CALL"; CallType.ADHOC -> "AD HOC CALL" },
-                    color = Mcx.Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp, modifier = Modifier.weight(1f))
-                if (call.startedAt > 0) Text(clock(now - call.startedAt), color = Mcx.Muted, fontSize = 12.sp, fontFamily = FontFamily.Monospace)
+                Text(when (call.type) { CallType.PRIVATE -> "Private call"; CallType.PREARRANGED -> "Group call"; CallType.ADHOC -> "Ad hoc call" },
+                    color = Mcx.Muted, style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
+                if (call.startedAt > 0) Text(clock(now - call.startedAt), color = Mcx.Muted, style = MaterialTheme.typography.labelLarge.merge(Tabular))
             }
             when (call.priority) {
-                "emergency" -> Text("EMERGENCY", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp,
-                    modifier = Modifier.fillMaxWidth().background(Mcx.Stop, RoundedCornerShape(8.dp)).padding(8.dp).testTag(Tags.CALL_PRIORITY))
-                "imminent" -> Text("IMMINENT PERIL", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 16.sp,
-                    modifier = Modifier.fillMaxWidth().background(Color(0xFFF59E0B), RoundedCornerShape(8.dp)).padding(8.dp).testTag(Tags.CALL_PRIORITY))
+                "emergency" -> PriorityBanner("EMERGENCY", Mcx.Stop, Color.White)
+                "imminent" -> PriorityBanner("IMMINENT PERIL", Mcx.Peril, Color.Black)
             }
-            Text(call.title, color = Mcx.Ink, fontSize = 30.sp, fontWeight = FontWeight.Bold)
+            Text(call.title, color = Mcx.Ink, style = CallTitle)
             if (call.members.isNotEmpty()) {
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     call.members.forEach { member ->
                         val name = member.short()
                         val you = name == user
                         val on = (you && call.floor == "talking") || (!you && call.floor == "taken" && call.talker?.short() == name)
-                        val colour = if (on) look.colour else Color(0xFFA8A29E)
                         Row(
-                            Modifier.background(if (on) Color.White else Color.Transparent, RoundedCornerShape(50))
-                                .border(1.dp, if (on) colour else Mcx.Line, RoundedCornerShape(50)).padding(horizontal = 10.dp, vertical = 5.dp),
+                            Modifier.background(if (on) Mcx.Card else Color.Transparent, RoundedCornerShape(50))
+                                .border(if (on) 2.dp else 1.dp, if (on) look.fill else Mcx.Line, RoundedCornerShape(50))
+                                .padding(horizontal = 10.dp, vertical = 5.dp),
                             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            Box(Modifier.size(7.dp).background(colour, CircleShape))
-                            Text(if (you) "$name (you)" else name, fontSize = 13.sp, color = if (on) colour else Color(0xFF44403C),
-                                fontWeight = if (on) FontWeight.SemiBold else FontWeight.Medium)
+                            Box(Modifier.size(7.dp).background(if (on) look.fill else Mcx.Muted, CircleShape))
+                            Text(if (you) "$name (you)" else name, fontSize = 13.sp, color = if (on) look.ink else Mcx.Ink,
+                                fontWeight = if (on) FontWeight.SemiBold else FontWeight.Normal)
                         }
                     }
                 }
             }
         }
 
+        // The floor: a badge in the state's colour with its sign, the state's name and what to do.
         Row(
-            Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp).fillMaxWidth()
-                .background(Color.White, RoundedCornerShape(14.dp)).border(1.dp, Mcx.Line, RoundedCornerShape(14.dp))
-                .padding(horizontal = 16.dp, vertical = 14.dp),
+            Modifier.padding(start = 20.dp, end = 20.dp, top = 14.dp).fillMaxWidth()
+                .background(Mcx.Card, RoundedCornerShape(16.dp)).border(1.dp, Mcx.Line, RoundedCornerShape(16.dp))
+                .padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Box(Modifier.size(34.dp).background(look.colour, CircleShape), contentAlignment = Alignment.Center) {
-                if (holder != null) LevelBars(Color.White)
+            Box(Modifier.size(40.dp).background(look.fill, CircleShape), contentAlignment = Alignment.Center) {
+                if (holder != null) LevelBars(Color.White, still) else KeySignIcon(look.sign, Color.White, 22.dp)
             }
             Column(Modifier.weight(1f)) {
-                Text(look.label, modifier = Modifier.testTag(Tags.FLOOR), color = look.colour, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Text(look.label, modifier = Modifier.testTag(Tags.FLOOR), color = look.ink, style = FloorLabel)
                 Text(look.hint, color = Mcx.Muted, fontSize = 13.sp)
             }
             if (remaining != null && call.floor == "talking")
-                Text(clock(remaining + 999), color = Mcx.Ink, fontSize = 15.sp, fontFamily = FontFamily.Monospace)
+                Text(clock(remaining + 999), color = if (remaining < 5000) Mcx.OnStop else Mcx.Ink, style = FloorLabel.merge(Tabular))
         }
 
         Column(Modifier.weight(1f).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
-            // The ring is 256 dp where there is room, smaller on short screens or with a long talker list.
+            // The key is 256 dp across where there is room, smaller on short screens or with a long talker list.
             BoxWithConstraints(Modifier.weight(1f, fill = false).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 val ring = minOf(256.dp, maxWidth, maxHeight)
-                TalkRing(ring, used, if (remaining != null && remaining < 5000) Mcx.Stop else look.colour, pulsing = call.floor == "requesting")
-                if (duplex) Column(
-                    Modifier.size(ring * 0.86f).shadow(12.dp, CircleShape).background(look.colour, CircleShape).testTag(Tags.MUTE)
+                TalkRing(ring, used, if (remaining != null && remaining < 5000) Mcx.Stop else look.fill, pulsing = call.floor == "requesting" && !still)
+                var held by remember { mutableStateOf(false) }
+                if (duplex) PttKey(ring * 0.84f, look, if (call.muted) "MUTED" else "LIVE", held,
+                    Modifier.testTag(Tags.MUTE)
                         .semantics { role = Role.Button; contentDescription = if (call.muted) "Unmute the microphone" else "Mute the microphone" }
-                        .clickable { actions.setMuted(!call.muted) },
-                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
-                ) {
-                    MicIcon(Color.White, 34.dp)
-                    Text(if (call.muted) "MUTED" else "LIVE", color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
-                    Text(look.button, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                } else Column(
-                    Modifier.size(ring * 0.86f).shadow(12.dp, CircleShape).background(look.colour, CircleShape).testTag(Tags.PTT)
+                        .pointerInput(call.id) {
+                            detectTapGestures(onPress = { held = true; tryAwaitRelease(); held = false }, onTap = { actions.setMuted(!call.muted) })
+                        })
+                else PttKey(ring * 0.84f, look, "PTT", held,
+                    Modifier.testTag(Tags.PTT)
                         .semantics { role = Role.Button; contentDescription = "Push to talk: press and hold" }
                         .pointerInput(call.id) {
                             detectTapGestures(onPress = {
+                                held = true
                                 actions.ptt(true)
                                 tryAwaitRelease()
                                 actions.ptt(false)
+                                held = false
                             })
-                        },
-                    horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
-                ) {
-                    MicIcon(Color.White, 34.dp)
-                    Text("PTT", color = Color.White, fontSize = 38.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
-                    Text(look.button, color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-                }
+                        })
             }
             call.lastFloorEvent?.takeIf { it.startsWith("denied") || it.startsWith("revoked") || it.startsWith("request failed") }?.let {
-                Text("Floor $it", color = Color(0xFF78350F), fontSize = 13.sp, fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(top = 14.dp).background(Color(0xFFFEF3C7), RoundedCornerShape(50)).padding(horizontal = 12.dp, vertical = 6.dp))
+                Text("Floor $it", color = Mcx.WarnInk, fontSize = 13.sp, fontWeight = FontWeight.Medium,
+                    modifier = Modifier.padding(top = 14.dp).background(Mcx.WarnBg, RoundedCornerShape(50)).padding(horizontal = 12.dp, vertical = 6.dp))
             }
         }
 
         if (recent.isNotEmpty()) {
             Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("RECENT TALKERS", color = Mcx.Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
+                Text("Recent talkers", color = Mcx.Muted, style = MaterialTheme.typography.titleSmall)
                 recent.forEach { t ->
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Text(t.who, color = Mcx.Ink, fontSize = 14.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
-                        Text(clock(t.millis + 500), color = Mcx.Muted, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
-                        Text(DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(t.at)), color = Mcx.Muted, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+                        Text(clock(t.millis + 500), color = Mcx.Muted, fontSize = 13.sp, style = Tabular)
+                        Text(DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(t.at)), color = Mcx.Muted, fontSize = 13.sp, style = Tabular)
                     }
                 }
             }
         }
 
         failure?.let {
-            Text(it, color = Color(0xFF78350F), fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
-                .background(Color(0xFFFEF3C7), RoundedCornerShape(8.dp)).padding(8.dp).testTag(Tags.CALL_FAILURE))
+            Text(it, color = Mcx.WarnInk, fontSize = 13.sp, modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
+                .background(Mcx.WarnBg, RoundedCornerShape(8.dp)).padding(8.dp).testTag(Tags.CALL_FAILURE))
         }
         if (call.state == "established") Row(Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             val emergency = call.priority == "emergency"
-            OutlinedButton(onClick = { actions.callPriority(true, !emergency) }, modifier = Modifier.testTag(Tags.CALL_EMERGENCY),
-                border = BorderStroke(1.dp, Mcx.Stop)) { Text(if (emergency) "Cancel emergency" else "Emergency", color = Mcx.Stop) }
+            OutlinedButton(onClick = { actions.callPriority(true, !emergency) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag(Tags.CALL_EMERGENCY),
+                shape = RoundedCornerShape(14.dp), border = BorderStroke(1.5.dp, Mcx.OnStop)) {
+                Text(if (emergency) "Cancel emergency" else "Emergency", color = Mcx.OnStop, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+            }
             if (call.type != CallType.PRIVATE && !emergency) {
                 val peril = call.priority == "imminent"
-                OutlinedButton(onClick = { actions.callPriority(false, !peril) }, modifier = Modifier.testTag(Tags.CALL_IMMINENT),
-                    border = BorderStroke(1.dp, Mcx.Requesting)) { Text(if (peril) "End imminent peril" else "Imminent peril", color = Mcx.Requesting) }
+                OutlinedButton(onClick = { actions.callPriority(false, !peril) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag(Tags.CALL_IMMINENT),
+                    shape = RoundedCornerShape(14.dp), border = BorderStroke(1.5.dp, Mcx.OnRequesting)) {
+                    Text(if (peril) "End imminent peril" else "Imminent peril", color = Mcx.OnRequesting, fontWeight = FontWeight.SemiBold,
+                        textAlign = TextAlign.Center)
+                }
             }
         }
-        Row(Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 22.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(Modifier.padding(start = 20.dp, end = 20.dp, top = 12.dp, bottom = 22.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             if (speaker != null) {
-                Button(onClick = { actions.setSpeaker(!speaker) }, modifier = Modifier.height(52.dp).testTag(Tags.SPEAKER),
-                    shape = RoundedCornerShape(14.dp), border = BorderStroke(1.dp, Mcx.Ink),
-                    colors = ButtonDefaults.buttonColors(containerColor = if (speaker) Mcx.Ink else Color.White, contentColor = if (speaker) Color.White else Mcx.Ink)) {
+                Button(onClick = { actions.setSpeaker(!speaker) }, modifier = Modifier.height(56.dp).testTag(Tags.SPEAKER),
+                    shape = RoundedCornerShape(16.dp), border = BorderStroke(1.dp, Mcx.Ink),
+                    colors = ButtonDefaults.buttonColors(containerColor = if (speaker) Mcx.Ink else Mcx.Card, contentColor = if (speaker) Mcx.Ivory else Mcx.Ink)) {
                     Text(if (speaker) "Speaker" else "Earpiece", fontWeight = FontWeight.SemiBold)
                 }
             }
-            Box(Modifier.size(52.dp).border(1.dp, Mcx.Ink, RoundedCornerShape(14.dp)), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(56.dp).background(Mcx.Card, RoundedCornerShape(16.dp)).border(1.dp, Mcx.Ink, RoundedCornerShape(16.dp)),
+                contentAlignment = Alignment.Center) {
                 VideoButton("Video call", Modifier.testTag(Tags.VIDEO)) { actions.videoCall(call.members.firstOrNull { it.short() != user } ?: call.title) }
             }
-            Button(onClick = actions::hangup, modifier = Modifier.weight(1f).height(52.dp).testTag(Tags.HANGUP), shape = RoundedCornerShape(14.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = Mcx.Stop)) { Text("Hang up", fontWeight = FontWeight.SemiBold, fontSize = 16.sp) }
+            Button(onClick = actions::hangup, modifier = Modifier.weight(1f).height(56.dp).testTag(Tags.HANGUP), shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = Mcx.Stop, contentColor = Color.White)) {
+                Text("Hang up", fontWeight = FontWeight.Bold, fontSize = 17.sp)
+            }
         }
     }
 }
 
-/** The talk-time ring around the PTT button, and a pulse while the floor is being requested. */
+/** Emergency or imminent peril, across the call: the strongest thing on the screen. */
+@Composable
+private fun PriorityBanner(text: String, fill: Color, ink: Color) {
+    Row(Modifier.fillMaxWidth().background(fill, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        WarningIcon(ink, 22.dp)
+        Text(text, color = ink, style = FloorLabel, letterSpacing = 1.sp, modifier = Modifier.testTag(Tags.CALL_PRIORITY))
+    }
+}
+
+/**
+ * The push-to-talk key, drawn like a radio's: raised, lit from above and casting a shadow in its own colour; while
+ * held it sinks (shading reversed, no highlight, a shallow shadow). In dark mode a light rim keeps its edge visible.
+ */
+@Composable
+private fun PttKey(diameter: Dp, look: FloorLook, word: String, held: Boolean, modifier: Modifier) {
+    val rim = if (Mcx.dark) Color.White.copy(alpha = 0.30f) else Color.Black.copy(alpha = 0.10f)
+    val top = lerp(look.fill, Color.White, if (held) 0f else 0.12f)
+    val bottom = lerp(look.fill, Color.Black, if (held) 0f else 0.16f)
+    Box(
+        modifier.size(diameter)
+            .shadow(if (held) 2.dp else 14.dp, CircleShape, ambientColor = look.fill, spotColor = look.fill)
+            .background(Brush.verticalGradient(if (held) listOf(bottom, look.fill, top) else listOf(top, look.fill, bottom)), CircleShape)
+            .border(2.dp, rim, CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (!held) Canvas(Modifier.matchParentSize()) {
+            val inset = 7.dp.toPx()
+            drawArc(Color.White.copy(alpha = 0.28f), 205f, 130f, false, Offset(inset, inset), Size(size.width - 2 * inset, size.height - 2 * inset),
+                style = Stroke(3.dp.toPx(), cap = StrokeCap.Round))
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
+            KeySignIcon(look.sign, Color.White, 36.dp)
+            Text(word, color = Color.White, fontFamily = Condensed, fontSize = 42.sp, lineHeight = 46.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+            Text(look.button, color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Medium)
+        }
+    }
+}
+
+@Composable
+private fun KeySignIcon(sign: KeySign, colour: Color, size: Dp) = when (sign) {
+    KeySign.MIC -> MicIcon(colour, size)
+    KeySign.SPEAKER -> SpeakerIcon(colour, size)
+    KeySign.WAIT -> WaitIcon(colour, size)
+    KeySign.MUTED -> MutedMicIcon(colour, size)
+}
+
+/** The talk-time ring around the PTT key, and a pulse while the floor is being requested. */
 @Composable
 private fun TalkRing(diameter: Dp, used: Float, colour: Color, pulsing: Boolean) {
+    val track = Mcx.Line
+    val pulseColour = Mcx.Requesting
     val pulse = rememberInfiniteTransition(label = "pulse")
     val beat by pulse.animateFloat(0f, 1f, infiniteRepeatable(tween(500), RepeatMode.Reverse), label = "beat")
     Canvas(Modifier.size(diameter)) {
@@ -734,24 +802,72 @@ private fun TalkRing(diameter: Dp, used: Float, colour: Color, pulsing: Boolean)
         val inset = width / 2 + 2.dp.toPx()
         val topLeft = Offset(inset, inset)
         val box = Size(size.width - 2 * inset, size.height - 2 * inset)
-        drawArc(Mcx.Line, 0f, 360f, false, topLeft, box, style = Stroke(width))
+        drawArc(track, 0f, 360f, false, topLeft, box, style = Stroke(width))
         if (used > 0f) drawArc(colour, -90f, 360f * used, false, topLeft, box, style = Stroke(width, cap = StrokeCap.Round))
-        if (pulsing) drawCircle(Mcx.Requesting.copy(alpha = 0.35f + 0.55f * beat), radius = (size.minDimension / 2 - 13.dp.toPx()) * (1f + 0.04f * beat),
+        if (pulsing) drawCircle(pulseColour.copy(alpha = 0.35f + 0.55f * beat), radius = (size.minDimension / 2 - 13.dp.toPx()) * (1f + 0.04f * beat),
             style = Stroke(6.dp.toPx()))
     }
 }
 
-/** Four bars bouncing while someone holds the floor. */
+/** Four bars bouncing while someone holds the floor; standing still when animations are off. */
 @Composable
-private fun LevelBars(colour: Color) {
+private fun LevelBars(colour: Color, still: Boolean = false) {
     val t = rememberInfiniteTransition(label = "bars")
     val phase by t.animateFloat(0f, 1f, infiniteRepeatable(tween(900, easing = LinearEasing)), label = "phase")
     Row(Modifier.height(18.dp), horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
         repeat(4) { i ->
-            val level = (sin((phase + i * 0.17f) * 2 * PI).toFloat() + 1) / 2
+            val level = if (still) 0.3f + 0.2f * (i % 2) else (sin((phase + i * 0.17f) * 2 * PI).toFloat() + 1) / 2
             Box(Modifier.width(3.dp).height((5 + 11 * level).dp).background(colour, RoundedCornerShape(2.dp)))
         }
     }
+}
+
+/** A loudspeaker with two sound waves: someone else is talking, you listen. */
+@Composable
+private fun SpeakerIcon(colour: Color, size: Dp) = Canvas(Modifier.size(size)) {
+    val u = this.size.width / 24f
+    val body = Path().apply {
+        moveTo(3 * u, 9 * u); lineTo(7 * u, 9 * u); lineTo(12 * u, 4.5f * u); lineTo(12 * u, 19.5f * u); lineTo(7 * u, 15 * u); lineTo(3 * u, 15 * u); close()
+    }
+    drawPath(body, colour)
+    val stroke = Stroke(2 * u, cap = StrokeCap.Round)
+    drawArc(colour, -45f, 90f, false, Offset(9 * u, 8 * u), Size(8 * u, 8 * u), style = stroke)
+    drawArc(colour, -50f, 100f, false, Offset(7 * u, 4 * u), Size(16 * u, 16 * u), style = stroke)
+}
+
+/** An hourglass: the floor is being asked for or handed back. */
+@Composable
+private fun WaitIcon(colour: Color, size: Dp) = Canvas(Modifier.size(size)) {
+    val u = this.size.width / 24f
+    val stroke = Stroke(2 * u, cap = StrokeCap.Round, join = StrokeJoin.Round)
+    drawLine(colour, Offset(6 * u, 3 * u), Offset(18 * u, 3 * u), 2 * u, StrokeCap.Round)
+    drawLine(colour, Offset(6 * u, 21 * u), Offset(18 * u, 21 * u), 2 * u, StrokeCap.Round)
+    val glass = Path().apply {
+        moveTo(7.5f * u, 3 * u); lineTo(7.5f * u, 7 * u); lineTo(12 * u, 12 * u); lineTo(7.5f * u, 17 * u); lineTo(7.5f * u, 21 * u)
+        moveTo(16.5f * u, 3 * u); lineTo(16.5f * u, 7 * u); lineTo(12 * u, 12 * u); lineTo(16.5f * u, 17 * u); lineTo(16.5f * u, 21 * u)
+    }
+    drawPath(glass, colour, style = stroke)
+    drawPath(Path().apply { moveTo(9 * u, 19.5f * u); lineTo(12 * u, 15.5f * u); lineTo(15 * u, 19.5f * u); close() }, colour)
+}
+
+/** The microphone struck through: muted. */
+@Composable
+private fun MutedMicIcon(colour: Color, size: Dp) = Box(Modifier.size(size)) {
+    MicIcon(colour, size)
+    Canvas(Modifier.size(size)) {
+        val u = this.size.width / 24f
+        drawLine(colour, Offset(4 * u, 3 * u), Offset(20 * u, 21 * u), 2.2f * u, StrokeCap.Round)
+    }
+}
+
+/** A warning triangle with an exclamation mark, for emergency notices. */
+@Composable
+private fun WarningIcon(colour: Color, size: Dp) = Canvas(Modifier.size(size)) {
+    val u = this.size.width / 24f
+    drawPath(Path().apply { moveTo(12 * u, 3 * u); lineTo(22.5f * u, 21 * u); lineTo(1.5f * u, 21 * u); close() }, colour,
+        style = Stroke(2 * u, join = StrokeJoin.Round))
+    drawLine(colour, Offset(12 * u, 9.5f * u), Offset(12 * u, 14.5f * u), 2.2f * u, StrokeCap.Round)
+    drawCircle(colour, 1.3f * u, Offset(12 * u, 17.8f * u))
 }
 
 /** ▾ beside a private Call: connect at once (the default) or ring the other phone first. */
@@ -766,7 +882,7 @@ private fun CallOptions(target: String, enabled: Boolean, actions: UiActions) {
                 onClick = { open = false; actions.callPrivateRinging(target) })
             DropdownMenuItem(text = { Text("Call, both talk (no floor control)") }, modifier = Modifier.testTag(Tags.callNoFloor(target)),
                 onClick = { open = false; actions.callPrivateNoFloor(target) })
-            DropdownMenuItem(text = { Text("Emergency call", color = Mcx.Stop) }, modifier = Modifier.testTag(Tags.callEmergency(target)),
+            DropdownMenuItem(text = { Text("Emergency call", color = Mcx.OnStop) }, modifier = Modifier.testTag(Tags.callEmergency(target)),
                 onClick = { open = false; actions.callPrivateEmergency(target) })
             DropdownMenuItem(text = { Text("Where are they? (location)") }, modifier = Modifier.testTag(Tags.locate(target)),
                 onClick = { open = false; actions.locate(target) })
@@ -784,7 +900,7 @@ private fun VideoOptions(target: String, enabled: Boolean, actions: UiActions) {
             DropdownMenuItem(text = { Text("Video call, hold to transmit (with voice)") }, onClick = { open = false; actions.videoCall(target) })
             DropdownMenuItem(text = { Text("Video call and ring (they answer)") }, modifier = Modifier.testTag(Tags.videoRinging(target)),
                 onClick = { open = false; actions.videoCallRinging(target) })
-            DropdownMenuItem(text = { Text("Emergency video call", color = Mcx.Stop) }, modifier = Modifier.testTag(Tags.videoEmergency(target)),
+            DropdownMenuItem(text = { Text("Emergency video call", color = Mcx.OnStop) }, modifier = Modifier.testTag(Tags.videoEmergency(target)),
                 onClick = { open = false; actions.videoCallEmergency(target) })
             DropdownMenuItem(text = { Text("Push my video to them") }, modifier = Modifier.testTag(Tags.videoPush(target)),
                 onClick = { open = false; actions.videoPush(target) })
@@ -822,16 +938,18 @@ private fun EmergencyAlert(state: UiState, actions: UiActions) {
     var choosing by remember { mutableStateOf(false) }
     val up = state.ownAlert.isNotEmpty() || state.ownAdhoc != null
     Column(Modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-            Column(Modifier.weight(1f)) {
-                Text(state.alertGroup?.short()?.let { "To $it" } ?: "No group selected", fontWeight = FontWeight.Medium)
-                Text(if (up) "Your alert is up: ${(state.ownAlert + listOfNotNull(state.ownAdhoc?.let { "ad hoc to $it" })).joinToString(", ")}"
-                    else "Through ${state.alertServices.joinToString(", ")}", style = MaterialTheme.typography.bodySmall,
-                    color = if (up) Mcx.Stop else Mcx.Muted)
-            }
+        // Who it goes to above, and the button across the width below: easy to hit, and nothing squeezed at large text.
+        Text(state.alertGroup?.short()?.let { "To $it" } ?: "No group selected", style = MaterialTheme.typography.titleMedium)
+        Text(if (up) "Your alert is up: ${(state.ownAlert + listOfNotNull(state.ownAdhoc?.let { "ad hoc to $it" })).joinToString(", ")}"
+            else "Through ${state.alertServices.joinToString(", ")}", style = MaterialTheme.typography.bodySmall,
+            color = if (up) Mcx.OnStop else Mcx.Muted)
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
             Button(onClick = { actions.emergencyAlert(!up) }, enabled = state.registered && (up || state.alertGroup != null),
-                colors = ButtonDefaults.buttonColors(containerColor = if (up) Mcx.Muted else Mcx.Stop),
-                modifier = Modifier.testTag(Tags.EMERGENCY_ALERT)) { Text(if (up) "Cancel alert" else "Send emergency alert") }
+                shape = RoundedCornerShape(16.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = if (up) Mcx.Releasing else Mcx.Stop, contentColor = Color.White),
+                modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag(Tags.EMERGENCY_ALERT)) {
+                Text(if (up) "Cancel alert" else "Send emergency alert", fontWeight = FontWeight.Bold, fontSize = 17.sp, textAlign = TextAlign.Center)
+            }
             Box {
                 MoreButton("More emergency alert choices", Tags.ALERT_OPTIONS, state.registered) { open = true }
                 DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
@@ -875,9 +993,9 @@ private fun GroupOptions(group: String, enabled: Boolean, actions: UiActions) {
     Box {
         MoreButton("More ways to call ${group.short()}", Tags.groupOptions(group), enabled) { open = true }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
-            DropdownMenuItem(text = { Text("Emergency group call", color = Mcx.Stop) }, modifier = Modifier.testTag(Tags.callEmergency(group)),
+            DropdownMenuItem(text = { Text("Emergency group call", color = Mcx.OnStop) }, modifier = Modifier.testTag(Tags.callEmergency(group)),
                 onClick = { open = false; actions.callGroupPriority(group, "emergency") })
-            DropdownMenuItem(text = { Text("Imminent peril group call", color = Mcx.Requesting) }, modifier = Modifier.testTag(Tags.callImminent(group)),
+            DropdownMenuItem(text = { Text("Imminent peril group call", color = Mcx.OnRequesting) }, modifier = Modifier.testTag(Tags.callImminent(group)),
                 onClick = { open = false; actions.callGroupPriority(group, "imminent") })
         }
     }
@@ -976,7 +1094,7 @@ private fun MessagesScreen(state: UiState, actions: UiActions) {
                 if (text.isNotBlank()) actions.send(target, group, text)
                 text = ""
             }, enabled = canSend, modifier = Modifier.testTag(Tags.SEND).semantics { contentDescription = "Send" }) {
-                SendIcon(if (canSend) Mcx.Talking else Mcx.Line, 28.dp)
+                SendIcon(if (canSend) Mcx.Ink else Mcx.Line, 28.dp)
             }
         }
     }
@@ -1029,8 +1147,8 @@ private fun PendingAttachment(item: PendingItem, limit: Long?, tooLarge: Boolean
             val details = listOfNotNull(item.type, item.size?.let(AttachmentFiles::readableSize),
                 limit?.let { "limit ${AttachmentFiles.readableSize(it)}" }).joinToString(" · ")
             when {
-                item.error != null -> Text(item.error, color = Mcx.Stop, style = MaterialTheme.typography.labelSmall)
-                tooLarge -> Text("$details: too large for this recipient", color = Mcx.Stop, style = MaterialTheme.typography.labelSmall)
+                item.error != null -> Text(item.error, color = Mcx.OnStop, style = MaterialTheme.typography.labelSmall)
+                tooLarge -> Text("$details: too large for this recipient", color = Mcx.OnStop, style = MaterialTheme.typography.labelSmall)
                 !item.ready -> Text("preparing…", style = MaterialTheme.typography.labelSmall)
                 else -> Text(details, style = MaterialTheme.typography.labelSmall)
             }
@@ -1042,7 +1160,7 @@ private fun PendingAttachment(item: PendingItem, limit: Long?, tooLarge: Boolean
 @Composable
 private fun MessageRow(m: MessageItem, actions: UiActions = object : UiActions {}) {
     Row(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalArrangement = if (m.incoming) Arrangement.Start else Arrangement.End) {
-        Column(Modifier.background(if (m.incoming) Color(0xFFE3F2FD) else Color(0xFFE8F5E9), RoundedCornerShape(12.dp)).padding(10.dp)) {
+        Column(Modifier.background(if (m.incoming) Mcx.Card else Mcx.Strip, RoundedCornerShape(12.dp)).padding(10.dp)) {
             val who = if (m.incoming) m.peer.short() + (m.group?.let { " on ${it.short()}" } ?: "") else "to ${m.peer.short()}"
             Text(who, style = MaterialTheme.typography.labelSmall)
             val file = m.file
@@ -1065,7 +1183,7 @@ private fun FileBlock(id: String, file: FileItem, actions: UiActions) {
     if ((file.state == "downloading" || file.state == "uploading") && file.size > 0)
         LinearProgressIndicator(progress = { (file.transferred.toFloat() / file.size).coerceIn(0f, 1f) },
             modifier = Modifier.width(180.dp).padding(vertical = 4.dp))
-    file.error?.let { Text(it, color = Mcx.Stop, style = MaterialTheme.typography.labelSmall) }
+    file.error?.let { Text(it, color = Mcx.OnStop, style = MaterialTheme.typography.labelSmall) }
     Row {
         if (file.canDownload) TextButton(onClick = { actions.downloadAttachment(id) }, modifier = Modifier.testTag(Tags.fileDownload(id))) {
             Text(if (file.state == "failed" || file.state == "interrupted") "Retry" else "Download")

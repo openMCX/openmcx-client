@@ -14,7 +14,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -29,6 +29,7 @@ import org.openmcx.client.app.attachments.AttachmentFiles
 import org.openmcx.client.app.attachments.AttachmentKind
 import org.openmcx.client.app.ui.EngineActions
 import org.openmcx.client.app.ui.McxApp
+import org.openmcx.client.app.ui.OpenMcxTheme
 import org.openmcx.client.app.ui.UiActions
 import org.openmcx.client.app.ui.UiState
 import org.openmcx.client.app.ui.snapshot
@@ -178,7 +179,7 @@ class MainActivity : ComponentActivity() {
                 // Location reporting to the MC service (TS 24.379 clause 13): position and cell.
                 Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
         val tab = if (intent.getStringExtra(EXTRA_TAB) == TAB_MESSAGES) 2 else 0 // Call, Video, Message, History, Logs
-        setContent { MaterialTheme { McxApp(state, actions, tab) } }
+        setContent { OpenMcxTheme(dark = isSystemInDarkTheme()) { McxApp(state, actions, tab) } }
         // In a call the volume keys set the call's volume (the earpiece's or the loudspeaker's), not the media volume.
         lifecycleScope.launch {
             kotlinx.coroutines.flow.combine(Engine.inCall, Engine.inVideoCall) { a, v -> a || v }.collect { calling ->

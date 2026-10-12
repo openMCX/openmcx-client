@@ -31,9 +31,10 @@ interface TransmissionListener {
 
 /**
  * The transmission participant of one MCVideo call (TS 24.581 §6.2.4): transmission requests
- * and releases with retransmission (T100/T101 as in TS 24.380), and reception control, where
- * each Media Reception Notification is accepted at once with a Receive Media Request
- * (automatic reception). [serverSsrc] is the server's `mc_transmission_ssrc`.
+ * and releases with retransmission (T100/T101 as in TS 24.380), and reception control (§6.2.5): a
+ * Media Transmission Notification with Reception Mode '0' starts the reception at once, and one with
+ * '1', like a Media Reception Notification, is accepted at once with a Receive Media Request
+ * (automatic acceptance). [serverSsrc] is the server's `mc_transmission_ssrc`.
  */
 class TransmissionParticipant(
     private val scope: CoroutineScope,
@@ -56,6 +57,14 @@ class TransmissionParticipant(
         private set
     /** Whether the server relays the current transmission to us. */
     @Volatile var receiving = false
+        private set
+    /** The transmitting user's Audio and Video SSRCs, from the last Media Transmission Notification. */
+    @Volatile var transmitterAudioSsrc: Long? = null
+        private set
+    @Volatile var transmitterVideoSsrc: Long? = null
+        private set
+    /** The transmitting user's functional alias, if the notification carried one. */
+    @Volatile var transmitterAlias: String? = null
         private set
 
     /**
@@ -134,12 +143,34 @@ class TransmissionParticipant(
                     TxState.HAS_PERMISSION -> { listener.stopTransmitting(); _state.value = TxState.NO_PERMISSION }
                     else -> Unit
                 }
-                if (_state.value != TxState.PENDING_REQUEST) { transmitter = null; receiving = false; listener.idle() }
+                if (_state.value != TxState.PENDING_REQUEST) {
+                    transmitter = null; transmitterAudioSsrc = null; transmitterVideoSsrc = null; transmitterAlias = null
+                    receiving = false; listener.idle()
+                }
             }
             TxType.REVOKED -> if (_state.value == TxState.HAS_PERMISSION) {
                 listener.stopTransmitting()
                 listener.revoked(message.rejectCause)
                 startRelease()
+            }
+            TxType.MEDIA_TRANSMISSION_NOTIFICATION -> {
+                // TS 24.581 §6.2.5.3.2 (reception control, 'U: reception controller'): tell the user (step 2), store the
+                // transmitting user's ID, Audio and Video SSRCs (step 3) and functional alias (step 4). With Reception Mode
+                // '0' the reception starts at once ('U: has permission to receive', step 5); with '1' the user accepts it
+                // with a Receive Media Request (§6.2.5.3.3), sent at once with automatic acceptance. The transmission
+                // control state (§6.2.4) does not change: the server sends this to the other participants.
+                transmitter = message.transmittingUser
+                transmitterAudioSsrc = message.audioSsrc
+                transmitterVideoSsrc = message.videoSsrc
+                transmitterAlias = message.functionalAlias
+                listener.taken(transmitter)
+                if (message.automaticReception == true) {
+                    receiving = true
+                    listener.reception(true, null)
+                } else {
+                    receiving = false
+                    if (autoReceive) send(TransmissionMessage.receiveMedia(serverSsrc))
+                }
             }
             TxType.MEDIA_RECEPTION_NOTIFICATION -> {
                 // §6.2.4: a new transmission to receive; accepted at once (automatic reception).

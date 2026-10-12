@@ -46,6 +46,34 @@ class TransmissionTest {
         assertEquals("sip:bob.mcvideo@mcx.test", taken.transmittingUser); assertEquals(3, taken.sequence)
     }
 
+    /** The server's Media Transmission Notification (TS 24.581 §9.2.13): the transmitter, its SSRCs and the Reception Mode. */
+    @Test fun mediaTransmissionNotification() {
+        fun notification(mode: Int) = TransmissionMessage(TxType.MEDIA_TRANSMISSION_NOTIFICATION, 9, fields = listOf(
+            TxField.TRANSMITTING_USER_ID to "sip:bob.mcvideo@mcx.test".toByteArray(),
+            TxField.AUDIO_SSRC to TransmissionMessage.ssrcValue(0xa1a2a3a4),
+            TxField.VIDEO_SSRC to TransmissionMessage.ssrcValue(0xb1b2b3b4),
+            TxField.PERMISSION_TO_REQUEST to TransmissionMessage.u16(1),
+            TxField.INDICATOR to TransmissionMessage.u16(0x1000),
+            TxField.RECEPTION_MODE to TransmissionMessage.u16(mode)))
+        val encoded = notification(1).encode()
+        assertEquals(0x80 or 6, encoded[0].toInt() and 0xff); assertEquals("MCV1", String(encoded, 8, 4))
+        // §9.2.3.22: field ID 22, length 2, the value in two octets, as the server builds it.
+        val at = encoded.indices.first { encoded[it].toInt() == 22 && encoded[it + 1].toInt() == 2 }
+        assertArrayEquals(bytes(22, 2, 0, 1), encoded.copyOfRange(at, at + 4))
+        val manual = TransmissionMessage.decode(encoded)
+        assertEquals(TxType.MEDIA_TRANSMISSION_NOTIFICATION, manual.type)
+        assertEquals("sip:bob.mcvideo@mcx.test", manual.transmittingUser)
+        assertEquals(0xa1a2a3a4, manual.audioSsrc); assertEquals(0xb1b2b3b4, manual.videoSsrc)
+        assertEquals(true, manual.permissionToRequest); assertEquals(0x1000, manual.indicator)
+        assertEquals(false, manual.automaticReception)
+        assertEquals(true, TransmissionMessage.decode(notification(0).encode()).automaticReception)
+        assertNull(TransmissionMessage(TxType.MEDIA_TRANSMISSION_NOTIFICATION, 9).automaticReception)
+        for (bad in listOf(bytes(0), bytes(0, 2), bytes(1, 0), bytes(0, 0, 0))) {
+            val packet = TransmissionMessage(TxType.MEDIA_TRANSMISSION_NOTIFICATION, 9, fields = listOf(TxField.RECEPTION_MODE to bad)).encode()
+            assertTrue(runCatching { TransmissionMessage.decode(packet) }.exceptionOrNull() is TransmissionCodecError)
+        }
+    }
+
     @Test fun remoteTransmissionRequestAndResult() {
         val start = TransmissionMessage.remote(9, "sip:bob.mcvideo@mcx.test", start = true)
         val encoded = start.encode()

@@ -42,6 +42,8 @@ object TxField {
     const val INDICATOR = 13
     const val AUDIO_SSRC = 14
     const val RESULT = 15
+    const val FUNCTIONAL_ALIAS = 21
+    const val RECEPTION_MODE = 22
     const val VIDEO_SSRC = 23
 }
 
@@ -66,6 +68,14 @@ data class TransmissionMessage(
     val userId: String? get() = field(TxField.USER_ID)?.let { String(it, Charsets.UTF_8) }
     /** The Result field of a remote transmission response: true when done (§9.2.3.17). */
     val result: Boolean? get() = field(TxField.RESULT)?.firstOrNull()?.let { it.toInt() == 1 }
+    /** The Permission to Request the Transmission field: true for '1' (§9.2.3.7). */
+    val permissionToRequest: Boolean? get() = u16(TxField.PERMISSION_TO_REQUEST)?.let { it == 1 }
+    /** The Transmission Indicator field's bits (§9.2.3.11). */
+    val indicator: Int? get() = u16(TxField.INDICATOR)
+    /** The Functional Alias of the transmitting user (§9.2.3.21). */
+    val functionalAlias: String? get() = field(TxField.FUNCTIONAL_ALIAS)?.let { String(it, Charsets.UTF_8) }
+    /** The Reception Mode field: true for '0', the receiver may receive at once (automatic reception, §9.2.3.22). */
+    val automaticReception: Boolean? get() = u16(TxField.RECEPTION_MODE)?.let { it == 0 }
 
     fun encode(): ByteArray {
         if (ackRequired && type == TxType.ACK) throw TransmissionCodecError("an ack cannot ask for an ack")
@@ -90,9 +100,13 @@ data class TransmissionMessage(
             for ((id, value) in app.fields) when (id) {
                 TxField.AUDIO_SSRC, TxField.VIDEO_SSRC ->
                     if (value.size != 6 || value[4].toInt() != 0 || value[5].toInt() != 0) throw TransmissionCodecError("invalid SSRC field")
-                TxField.DURATION, TxField.MESSAGE_SEQUENCE, TxField.SOURCE, TxField.INDICATOR ->
+                TxField.DURATION, TxField.MESSAGE_SEQUENCE, TxField.SOURCE, TxField.INDICATOR, TxField.PERMISSION_TO_REQUEST ->
                     if (value.size != 2) throw TransmissionCodecError("invalid field $id")
-                TxField.TRANSMITTING_USER_ID, TxField.USER_ID -> if (value.isEmpty()) throw TransmissionCodecError("empty identity field")
+                // §9.2.3.22: two octets, '0' (automatic) or '1' (manual reception).
+                TxField.RECEPTION_MODE ->
+                    if (value.size != 2 || value[0].toInt() != 0 || value[1].toInt() !in 0..1) throw TransmissionCodecError("invalid Reception Mode field")
+                TxField.TRANSMITTING_USER_ID, TxField.USER_ID, TxField.FUNCTIONAL_ALIAS ->
+                    if (value.isEmpty()) throw TransmissionCodecError("empty identity field")
             }
             return TransmissionMessage(type, app.ssrc, ack, app.fields)
         }

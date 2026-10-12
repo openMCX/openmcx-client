@@ -958,10 +958,12 @@ private:
     // TS 24.281 clause 9.2.3: the session's focus URI and the conference event subscription to it.
     std::string session_uri, conference_subscription;
     std::map<std::string, std::string> participants; // MCVideo ID -> RFC 4575 status
-    // Reception control (TS 24.581 clause 4.1.1.2): transmissions announced by Media Reception
-    // Notification, and whether this client receives the current one.
+    // Reception control (TS 24.581 clause 4.1.1.2): transmissions announced by Media Transmission Notification
+    // (on-network) or Media Reception Notification, and whether this client receives the current one.
     unsigned reception_notifications = 0;
     bool receiving = true;
+    // The transmitting user's SSRCs from the Media Transmission Notification (TS 24.581 clause 6.2.5.3.2 step 3).
+    std::uint32_t transmitter_audio_ssrc = 0, transmitter_video_ssrc = 0;
     std::uint16_t reception_reject_cause = 0;
     std::uint16_t revoke_cause = 0;
     // "<SSRC>:<RTP timestamp>" -> checksum of the picture, sent or received.

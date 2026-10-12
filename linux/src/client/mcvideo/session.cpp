@@ -628,6 +628,33 @@ void Client::mcvideo_control_packet(const Datagram &datagram) {
     }
     event("mcvideo_transmission_revoked", {{"cause", call.revoke_cause}});
     break;
+  case transmission::Type::MediaTransmissionNotification: {
+    // TS 24.581 clause 6.2.5.3.2: the server announces another participant's transmission (on-network, clauses
+    // 6.3.6.3.3 and 6.3.7.3.3, it replaces Transmission Arbitration Taken and Media Reception Notification).
+    if (packet.ack_required) // step 1: the Transmission control Ack (Message Type '6', Source '0')
+      mcvideo_send_control(transmission::Type::Ack, {{static_cast<std::uint8_t>(Field::MessageType), {6, 0}},
+                                                     {static_cast<std::uint8_t>(Field::Source), {0, 0}}});
+    ++call.reception_notifications;
+    // Step 3: the transmitting user and its SSRCs; the user is the sender a protected group call's video is keyed by.
+    if (const auto *field = transmission::find(packet, Field::TransmittingUserId))
+      call.transmitter = transmission::read_transmitting_user(*field);
+    if (const auto *field = transmission::find(packet, Field::AudioSsrc))
+      call.transmitter_audio_ssrc = read_audio_ssrc(*field);
+    if (const auto *field = transmission::find(packet, Field::VideoSsrc))
+      call.transmitter_video_ssrc = transmission::read_video_ssrc(*field);
+    call.granted = false;
+    // Step 5: Reception Mode '0' (automatic, TS 24.581 clause 9.2.3.22) gives permission to receive at once;
+    // otherwise the user asks for it (clause 6.2.5.3.3), at once unless mcvideo.auto_receive is false.
+    const auto *mode = transmission::find(packet, Field::ReceptionMode);
+    const bool automatic = mode && transmission::read_reception_mode(*mode);
+    call.receiving = automatic;
+    if (automatic) call.awaiting_key = true; // the relayed stream starts at an arbitrary picture
+    event("mcvideo_transmission_taken", {{"by", call.transmitter}}); // step 2: notify the user
+    event("mcvideo_reception_notified", {{"by", call.transmitter}, {"automatic", automatic}});
+    if (!automatic && cfg_.at("mcvideo").value("auto_receive", true))
+      mcvideo_send_control(transmission::Type::ReceiveMediaRequest);
+    break;
+  }
   case transmission::Type::MediaReceptionNotification:
     // TS 24.581 clauses 6.2.5.3.2 and 9.2.16: a new transmission; accepted at once unless mcvideo.auto_receive is false.
     ++call.reception_notifications;
@@ -775,6 +802,7 @@ void Client::mcvideo_call_status() {
                             "mcvideo_participants",
                             "mcvideo_receiving",
                             "mcvideo_reception_notifications",
+                            "mcvideo_transmitter_ssrcs",
                             "mcvideo_reception_reject_cause",
                             "mcvideo_skipped_before_key",
                             "mcvideo_call_type",
@@ -818,6 +846,8 @@ void Client::mcvideo_call_status() {
     status_["mcvideo_session_uri"] = call.session_uri;
     status_["mcvideo_receiving"] = call.receiving;
     status_["mcvideo_reception_notifications"] = call.reception_notifications;
+    status_["mcvideo_transmitter_ssrcs"] = {{"audio", call.transmitter_audio_ssrc},
+                                            {"video", call.transmitter_video_ssrc}};
     status_["mcvideo_reception_reject_cause"] = call.reception_reject_cause;
     Json participants = Json::object();
     for (const auto &[id, state] : call.participants) participants[id] = state;
