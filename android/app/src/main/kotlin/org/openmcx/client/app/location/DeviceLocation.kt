@@ -122,7 +122,7 @@ class DeviceLocation(private val context: Context, private val scope: CoroutineS
     }
 
     companion object {
-        /** MCC and MNC as the six digits of Annex F.3; a two-digit MNC is followed by a 0, as openMCX writes "001010" for 001/01. */
+        /** MCC and MNC as the six digits of Annex F.3; a two-digit MNC is followed by a 0, as OpenMCX writes "001010" for 001/01. */
         fun plmn(mcc: String?, mnc: String?): String? {
             if (mcc == null || mnc == null || mcc.length != 3 || mnc.length !in 2..3 || !(mcc + mnc).all(Char::isDigit)) return null
             return mcc + mnc.padEnd(3, '0')

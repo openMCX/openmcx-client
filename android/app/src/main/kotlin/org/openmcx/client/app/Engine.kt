@@ -462,7 +462,7 @@ object Engine {
     }
 
     /**
-     * The MCVideo ID for a user picked on the Call tab by MCPTT ID: the lab and the openMCX
+     * The MCVideo ID for a user picked on the Call tab by MCPTT ID: the lab and the OpenMCX
      * provisioning name them alike (`sip:bob.mcptt@…`, `sip:bob.mcvideo@…`).
      */
     fun mcvideoId(target: String): String = when {

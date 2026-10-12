@@ -98,4 +98,4 @@ the published specifications and not re-checked against a local copy; they are m
 - **NAT:** the MCPTT server does not latch media and checks the SDP address, so the UE must be directly reachable for
   UDP. The lab puts every Android client on the server network. Clients behind NAT need server support that OpenMCX
   lacks.
-- **Flow reuse at the SIP core** is a lab overlay (`lab/androidlab.py`), not part of the openMCX configuration.
+- **Flow reuse at the SIP core** is a lab overlay (`lab/androidlab.py`), not part of the OpenMCX configuration.

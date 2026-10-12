@@ -1,7 +1,7 @@
 # Why the SIP core needs flow reuse
 
 The Android client never accepts an incoming SIP connection. Every request to it (a call, a NOTIFY, a BYE, an SDS)
-has to come back over the TLS connection the client opened to register. A SIP core that dials a client's Contact does not do this. The openMCX SIP
+has to come back over the TLS connection the client opened to register. A SIP core that dials a client's Contact does not do this. The OpenMCX SIP
 core (Kamailio) reuses the registered flow for RFC 5626 clients only, and the Android lab uses its configuration
 unchanged. This document explains why flow reuse is needed, what the configuration changes, and how it is gated.
 
@@ -69,7 +69,7 @@ address, and route to it without ever dialling.
 
 ## What the configuration changes
 
-The openMCX `docker/kamailio.cfg` makes these changes:
+The OpenMCX `docker/kamailio.cfg` makes these changes:
 
 | Change | Where | What it does |
 |---|---|---|

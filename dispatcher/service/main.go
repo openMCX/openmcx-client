@@ -1,7 +1,7 @@
-// Command dispatcher is the openMCX dispatcher position: a web service that runs the MCX
+// Command dispatcher is the OpenMCX dispatcher position: a web service that runs the MCX
 // client engine (mcx-client) as a child process and gives a browser its calls, push to
 // talk with live voice, short data (SDS) and file distribution (FD). It reuses what the
-// openMCX servers implement; nothing on the servers is specific to it.
+// OpenMCX servers implement; nothing on the servers is specific to it.
 //
 // Two modes:
 //   - lab mode (--config): the engine runs for good with a full configuration, as a lab client;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Create and run an Android test lab: the openMCX servers of an openmcx-server checkout with
+"""Create and run an Android test lab: the OpenMCX servers of an openmcx-server checkout with
 redroid containers as the MC UEs, each running the Android client.
 
     lab/androidlab.py create --name a1 [--debug-sip]
@@ -16,7 +16,7 @@ redroid containers as the MC UEs, each running the Android client.
     lab/androidlab.py admin-activate m1 --user p2 --qr       # the same for a phone the lab does not drive: shows its QR code
     lab/androidlab.py down a1
 
-The server side comes from openMCX's own fixture generator (tools/prepare-prearranged-test.py),
+The server side comes from OpenMCX's own fixture generator (tools/prepare-prearranged-test.py),
 unchanged: its SIP core reaches these clients, which have no listener, over the connections
 they registered on (RFC 5626 flows; docs/SIP_CORE_FLOW_REUSE.md). Each client is a redroid container on the lab network, under the reference
 client's hostname, so the provisioned TLS certificates still match. It is driven over adb

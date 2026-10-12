@@ -1,18 +1,18 @@
 ```
-                            __  __   ____ __  __
-  ___   _ __    ___  _ __  |  \/  | / ___|\ \/ /
- / _ \ | '_ \  / _ \| '_ \ | |\/| || |     \  /
-| (_) || |_) ||  __/| | | || |  | || |___  /  \
- \___/ | .__/  \___||_| |_||_|  |_| \____|/_/\_\
-       |_|
+  ___                   __  __  ______  __
+ / _ \ _ __   ___ _ __ |  \/  |/ ___\ \/ /
+| | | | '_ \ / _ \ '_ \| |\/| | |    \  /
+| |_| | |_) |  __/ | | | |  | | |___ /  \
+ \___/| .__/ \___|_| |_|_|  |_|\____/_/\_\
+      |_|
 ```
 
-# The openMCX Linux client
+# The OpenMCX Linux client
 
-`mcx-client`, the headless on-network MC service client of the project **openMCX**, for the
-[openMCX servers](https://github.com/openMCX/openmcx-server): **MCPTT** (mission-critical push to talk), **MCData**
+`mcx-client`, the headless on-network MC service client of the project **OpenMCX**, for the
+[OpenMCX servers](https://github.com/openMCX/openmcx-server): **MCPTT** (mission-critical push to talk), **MCData**
 (mission-critical data) and **MCVideo** (mission-critical video) in one MC system. It is a headless MC UE that runs in
-a container, driven by commands; the openMCX lab scenarios use it for every feature the servers support. It is
+a container, driven by commands; the OpenMCX lab scenarios use it for every feature the servers support. It is
 written from the 3GPP Release 19 specifications and is not an interoperability-certified implementation: see what it
 supports, and what not, in the [feature list](docs/FEATURES.md).
 

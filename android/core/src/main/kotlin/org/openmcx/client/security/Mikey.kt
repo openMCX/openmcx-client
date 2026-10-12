@@ -39,7 +39,7 @@ class KeyMessage(val key: ByteArray, val random: ByteArray, val csbId: Long, val
  */
 data class WireProfile(val messageType: Int, val algorithm: Int, val keyParametersIei: Int, val encryptedPayloadIei: Int)
 
-/** MIKEY-SAKKE (RFC 6509) I_MESSAGEs as TS 33.180 Annex E profiles them, byte for byte as openMCX writes them. */
+/** MIKEY-SAKKE (RFC 6509) I_MESSAGEs as TS 33.180 Annex E profiles them, byte for byte as OpenMCX writes them. */
 object Mikey {
     const val NTP_EPOCH = 2208988800L
     private val random = SecureRandom()

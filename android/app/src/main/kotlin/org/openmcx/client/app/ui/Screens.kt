@@ -192,7 +192,7 @@ object Tags {
     fun callPrivate(target: String) = "call-private-$target"
 }
 
-/** The openMCX look: warm ivory, near-black ink and the icon's orange; floor states differ in lightness too. */
+/** The OpenMCX look: warm ivory, near-black ink and the icon's orange; floor states differ in lightness too. */
 private object Mcx {
     val Ivory = Color(0xFFFBF6EE)
     val Ink = Color(0xFF1C1917)

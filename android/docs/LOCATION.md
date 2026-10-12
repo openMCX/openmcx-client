@@ -2,7 +2,7 @@
 
 The app takes part in the MC location procedures: TS 24.379 clause 13 for MCPTT, TS 24.282 clause 17 for MCData and
 TS 24.281 clause 18 for MCVideo. The position and cell it reports are the phone's own: the platform's location (fused,
-GPS or network provider) and the cell it is registered on, from TelephonyManager. The openMCX reference client only
+GPS or network provider) and the cell it is registered on, from TelephonyManager. The OpenMCX reference client only
 simulates them.
 
 ## How it works
@@ -11,7 +11,7 @@ simulates them.
   a `<Configuration>` in a MESSAGE: what to report (coordinate, serving ECGI or NCGI, and so on), the minimum report
   interval, and the triggers. The app applies Full and Update configurations. It refuses one that is not from the
   service's PSI with 403.
-- **Triggers** (Annex F.3.3), evaluated twice a second by a port of openMCX's reference `Reporter`:
+- **Triggers** (Annex F.3.3), evaluated twice a second by a port of OpenMCX's reference `Reporter`:
   - cell, tracking area, PLMN and RAT changes, and entering or leaving a given cell;
   - periodic reports and travelled distance;
   - the signalling events: initial log-on, a non-emergency group or private call starting, configuration received;
@@ -30,7 +30,7 @@ simulates them.
   - ECGI: MCC and MNC as six digits, then the 28-bit cell identity in binary;
   - NCGI: the same with the 36-bit NR cell identity;
   - tracking area: six digits and 16 bits; 5G tracking area: six hexadecimal digits;
-  - a two-digit MNC is followed by a 0, as openMCX writes `001010` for 001/01.
+  - a two-digit MNC is followed by a 0, as OpenMCX writes `001010` for 001/01.
 
 | Part | Where |
 |---|---|

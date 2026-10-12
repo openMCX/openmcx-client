@@ -46,7 +46,7 @@ The Call tab has one **Emergency alert** section, after the calls and before the
 | Ad hoc group alert | mcptt-info (or mcvideo-info) with `<anyExt>` `<adhoc-alert-ind>` and the criteria (`<call-participants-criterias>`; MCVideo `<call-participants-criteria>`); the 200 OK names the ad hoc group in `<mcptt-calling-group-id>`; cancelled with `<adhoc-alert-ind>` false to that group | `<adhoc-alert-ind-rcvd>`; recipients get `<adhoc-alert-ind>` with the caller, group, criteria and location |
 | Area notice | — | MESSAGE from the PSI with `<emergency-alert-area-ind>` (or `<group-geo-area-ind>` and `<associated-group-id>`) in `<anyExt>` |
 
-The openMCX servers accept only a coordinate in the alert's location report, so the app sends the current coordinate
+The OpenMCX servers accept only a coordinate in the alert's location report, so the app sends the current coordinate
 alone, in each service's location-info namespace.
 
 | Part | Where |

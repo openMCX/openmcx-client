@@ -1,7 +1,7 @@
 package org.openmcx.client.location
 
 /**
- * The client side of location reporting (TS 24.379 §13.3, TS 24.282 §17.3, TS 24.281 §18.3), as openMCX's reference
+ * The client side of location reporting (TS 24.379 §13.3, TS 24.282 §17.3, TS 24.281 §18.3), as OpenMCX's reference
  * client does it: the stored configuration and its triggers, what the UE observes (position, radio identities,
  * signalling events), and the minimumReportInterval timer. Times are milliseconds on a monotonic clock.
  */

@@ -9,7 +9,7 @@ of `androidlab.py` is the exception). Test scripts: `tests/`; lab: `lab/androidl
 | JVM unit tests (`tools/gradle-docker.sh :core:test`) | Docker, JDK 17 | 175 passed, 0 failed (re-run on import into this repository; 56 at the time of the original report) |
 | Instrumented tests (`tools/instrumented-test.sh`) | AVD: Android 16 (API 36), google_apis, x86_64 | 11 passed (codec 2, UI 6, telecom 2, browser login 1) |
 | Instrumented tests, without telecom and browser login | redroid 15 | 8 passed. Redroid's Telecom has no telephony service, so its self-managed calls stall at random |
-| Lab scenarios S1-S11 (`tests/scenarios.py a1`) | Three redroid 15 clients on the openMCX lab, TLS | 144 of 144 checks passed, repeatedly, against several server builds |
+| Lab scenarios S1-S11 (`tests/scenarios.py a1`) | Three redroid 15 clients on the OpenMCX lab, TLS | 144 of 144 checks passed, repeatedly, against several server builds |
 
 In S9, 91-97% of the payloads arrived at each listener, all unchanged, with 52-57 reordered. In S10 the access time was
 4-10 ms and mouth-to-ear 47-72 ms. Some S10 mouth-to-ear samples are large negative numbers: a listener reported no

@@ -1,7 +1,7 @@
 // Unit tests of src/client/core/client_rules.hpp: the rules of the MC client that need no client state.
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19),
-// TS 24.484 V19.6.0 (Rel-19), RFC 3261, RFC 3986, RFC 6749.
+// TS 24.484 V19.6.0 (Rel-19), RFC 3261, RFC 3903, RFC 3986, RFC 6749.
 
 #include "client_rules.hpp"
 
@@ -129,6 +129,30 @@ void test_floor_and_audio() {
 
 } // namespace
 
+//------------------------------------------------------------------------------
+// TS 24.379 clause 7.2.2 with RFC 3261 section 20.33: when a refused initial service authorisation is published again.
+void test_authorization_retry() {
+  using mcx::client_rules::authorization_retry_delay_ms;
+  check(authorization_retry_delay_ms(403, 0) == 5000u, "a 403 is retried after 5 s");
+  check(authorization_retry_delay_ms(403, 1) == 10000u, "the second retry after 10 s");
+  check(authorization_retry_delay_ms(403, 2) == 20000u, "the third retry after 20 s");
+  check(authorization_retry_delay_ms(403, 3) == 60000u, "then every 60 s");
+  check(authorization_retry_delay_ms(408, 50) == 60000u, "a timed-out transaction is retried, at most every 60 s");
+  check(authorization_retry_delay_ms(480, 0) == 5000u, "a 480 is retried");
+  check(authorization_retry_delay_ms(503, 0, "30") == 30000u, "a 503 honours Retry-After");
+  check(authorization_retry_delay_ms(500, 4, " 2 (busy)") == 2000u, "a 500 honours Retry-After with a comment");
+  check(authorization_retry_delay_ms(503, 0, "0") == 1000u, "a Retry-After of 0 waits 1 s");
+  check(authorization_retry_delay_ms(503, 0, "99999") == 600000u, "a long Retry-After is bounded to 10 minutes");
+  check(authorization_retry_delay_ms(503, 1, "soon") == 10000u, "a Retry-After that is not a number is ignored");
+  check(authorization_retry_delay_ms(403, 0, "30") == 5000u, "a Retry-After in a 403 is ignored");
+  check(!authorization_retry_delay_ms(400, 0), "a 400 is final");
+  check(!authorization_retry_delay_ms(401, 0), "a 401 is left to the SIP stack's challenge handling");
+  check(!authorization_retry_delay_ms(404, 0), "a 404 is final");
+  check(!authorization_retry_delay_ms(412, 0), "a 412 is handled as RFC 3903 section 5 says");
+  check(!authorization_retry_delay_ms(488, 0), "a 488 is final");
+  check(!authorization_retry_delay_ms(603, 0), "a 603 is final");
+}
+
 int main() {
   test_notifiers();
   test_has_warning();
@@ -136,6 +160,7 @@ int main() {
   test_percent_decode();
   test_profile_groups();
   test_floor_and_audio();
+  test_authorization_retry();
   if (failures) std::fprintf(stderr, "%d check(s) failed\n", failures);
   return failures ? 1 : 0;
 }

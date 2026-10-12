@@ -56,6 +56,26 @@ void Client::schedule_after(std::uint64_t delay_ms, std::function<void()> fn) {
 }
 
 //------------------------------------------------------------------------------
+// Helper: TS 24.379, TS 24.282 and TS 24.281 clause 7.2.2 leave the client not authorised after a refused service
+// authorisation and leave retrying to it. A refusal that can be transient (client_rules::authorization_retry_delay_ms)
+// is published again after a growing delay, reported by a service_authorization_retry event; false when the refusal
+// is final. The retry is dropped when another authorisation PUBLISH was sent meanwhile or the client is stopping.
+bool Client::retry_authorization(AuthorizationRetry &retry, const std::string &service_name,
+                                 const SipResponse &response, std::function<void()> again) {
+  const auto delay = client_rules::authorization_retry_delay_ms(response.status_code, retry.attempts,
+                                                                get_header(response.headers, "Retry-After"));
+  if (!delay || stopping) return false;
+  ++retry.attempts;
+  event(
+      "service_authorization_retry",
+      {{"service", service_name}, {"status", response.status_code}, {"attempt", retry.attempts}, {"delay_ms", *delay}});
+  schedule_after(*delay, [this, &retry, generation = retry.generation, again = std::move(again)] {
+    if (!stopping && retry.generation == generation) again();
+  });
+  return true;
+}
+
+//------------------------------------------------------------------------------
 // Helper: record and report a procedure failure (status last_error, event client_error).
 void Client::failure(const std::string &what) {
   status_["last_error"] = what;
@@ -126,18 +146,25 @@ void Client::authorize() {
       {"P-Preferred-Service", mcptt_icsi}, {"Event", "poc-settings"}, {"Expires", "4294967295"}};
   const bool refresh = !auth_etag_.empty();
   if (refresh) headers.push_back({"SIP-If-Match", auth_etag_});
+  ++authorization_retry_.generation;
   sip_.publish(service(), type, body, headers, [this, refresh](const SipResponse &response) {
     if (response.status_code < 200) return;
     if (response.status_code != 200) {
       // TS 24.379 clause 7.2.2: not authorised. RFC 3903 section 5: after a 412 to a refresh, an initial
-      // publication (authorization_lost); a failed initial publication is not repeated.
+      // publication (authorization_lost). A refused initial publication is published again when the refusal can be
+      // transient (retry_authorization); a 412 to it, which has no entity-tag, is final.
       if (refresh || response.status_code != 412)
         authorization_lost("service authorization", response.status_code);
       else
         failure("service authorization: " + std::to_string(response.status_code));
+      if (!refresh)
+        retry_authorization(authorization_retry_, "mcptt", response, [this] {
+          if (!authorized_) authorize();
+        });
       return;
     }
     auth_etag_ = get_header(response.headers, "SIP-ETag");
+    authorization_retry_.attempts = 0;
     authorized_ = true;
     event("service_authorized");
     // The InitialLogOn trigger fires once the configuration it belongs to arrives (TS 24.379 clause 13.2.2).

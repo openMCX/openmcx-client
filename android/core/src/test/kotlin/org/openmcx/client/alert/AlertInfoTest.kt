@@ -9,7 +9,7 @@ import org.openmcx.client.mcptt.McpttInfo
 import org.openmcx.client.mcvideo.EmergencyLocation
 import org.openmcx.client.mcvideo.McvideoInfo
 
-/** The alert fields of the info documents, in the order and form the openMCX servers write and read them. */
+/** The alert fields of the info documents, in the order and form the OpenMCX servers write and read them. */
 class AlertInfoTest {
     private val mcptt = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><mcpttinfo xmlns=\"urn:3gpp:ns:mcpttInfo:1.0\"><mcptt-Params>"
 

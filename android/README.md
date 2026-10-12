@@ -1,4 +1,4 @@
-# The openMCX client for Android
+# The OpenMCX client for Android
 
 A native Android MC UE: an MCPTT client and an MCData client (with MCVideo, alerts and location, see the feature
 documents) sharing one SIP registration, on-network, written from the 3GPP Release 19 specifications, for the
@@ -21,7 +21,7 @@ What the servers expect on the wire, clause by clause, is in the wire contracts:
 [MCPTT](docs/wire/phase2-mcptt.md) and [MCData](docs/wire/phase3-mcdata.md).
 [CONFORMANCE.md](docs/CONFORMANCE.md) maps requirements to code and evidence. [TEST_REPORT.md](docs/TEST_REPORT.md) has the
 results. [SIP_CORE_FLOW_REUSE.md](docs/SIP_CORE_FLOW_REUSE.md) explains why the SIP core must reuse this client's flow, and
-how openMCX does it. [PHONE.md](docs/PHONE.md) sets up a real phone on your Wi-Fi against the lab.
+how OpenMCX does it. [PHONE.md](docs/PHONE.md) sets up a real phone on your Wi-Fi against the lab.
 
 ## Design
 
@@ -47,7 +47,7 @@ This directory is `android/` of the openmcx-client repository; the openmcx-serve
 | `core` | The protocol engine, in pure Kotlin on the JVM with no Android imports: SIP (`sip/`), bodies (`body/`), SDP (`sdp/`), HTTP, IdMS and documents, MCPTT (`mcptt/`: SDP, floor codec and participant, media session, calls), MCData (`mcdata/`: clause 15 codec, SDS and file distribution), media (`media/`: RTP, AMR-WB packing, jitter buffer, WAV) and the client (`client/`: start-up, refreshes and recovery) |
 | `app` | The Android app. It holds the foreground service and engine, MediaCodec AMR-WB and audio devices, the Keystore client certificate, telecom (core-telecom), notifications, PTT inputs, SQLite history, the Compose UI, a Custom Tab login and a debug-only control endpoint |
 | `tools` | `gradle-docker.sh` (Dockerised Gradle), `build-image/` (the build image), `instrumented-test.sh` |
-| `lab/androidlab.py` | Builds a lab: the openMCX servers with redroid (Android 15) containers as the MC UEs, or real phones |
+| `lab/androidlab.py` | Builds a lab: the OpenMCX servers with redroid (Android 15) containers as the MC UEs, or real phones |
 | `lab/nettools`, `lab/capture` | Helper images: nftables and tc for coverage loss and impairment in a client's network namespace; packet capture |
 | `tests/` | `scenarios.py` (end-to-end S1-S16), `video.py`, `attachments.py` (phone labs) and `test_androidlab.py` (unit tests of the lab tool) |
 | `docs/` | Feature documents, wire contracts, conformance matrix and test report |
@@ -65,7 +65,7 @@ tools/gradle-docker.sh :app:assembleDebug      # app/build/outputs/apk/debug/app
 tools/instrumented-test.sh <adb-serial>   # instrumented tests (codec, UI, telecom, browser login); leaves the app installed
 ```
 
-## Run against the openMCX servers
+## Run against the OpenMCX servers
 
 Build the server images in `../../openmcx-server` first (`tools/build-images`, see its `docs/BUILD.md`; the lab uses the
 images `openmcx-all:0.1`, Kamailio and the user database named by its compose file, or pass `--server-image`). For a
@@ -83,7 +83,7 @@ DOCKER_BUILDKIT=0 docker build -t mcx-nettools:1 lab/nettools
 Then:
 
 ```bash
-lab/androidlab.py create --name a1          # the openMCX fixture, provisioning bundles
+lab/androidlab.py create --name a1          # the OpenMCX fixture, provisioning bundles
 lab/androidlab.py up a1                     # servers and three redroid clients; installs and provisions the APK
 lab/androidlab.py exec a1 client-a status
 tests/scenarios.py a1               # S1-S11; results in lab/run/a1/android-scenarios.json
@@ -97,7 +97,7 @@ NAT.
 
 ### The SIP core and flow reuse
 
-An outbound-only client needs requests sent back over the flow it registered on. The openMCX Kamailio configuration does
+An outbound-only client needs requests sent back over the flow it registered on. The OpenMCX Kamailio configuration does
 this for RFC 5626 clients (a registration with `+sip.instance` or `reg-id`, Contacts with `ob`), with
 `fix_nated_register`, `add_contact_alias`, `handle_ruri_alias` and `set_forward_no_connect`; listening clients are
 still reached at their Contact. `androidlab.py` uses that configuration unchanged, so `--openmcx` names the openmcx-server

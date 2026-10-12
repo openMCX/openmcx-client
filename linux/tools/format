@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Format the code the way the openMCX coding style says (docs/CODING_STYLE.md), in the
+# Format the code the way the OpenMCX coding style says (docs/CODING_STYLE.md), in the
 # openmcx-lint image (nothing on the host): clang-format (C++), ruff format (Python).
 #   tools/format           rewrite the files
 #   tools/format --check   change nothing; list what is not formatted and fail if anything is

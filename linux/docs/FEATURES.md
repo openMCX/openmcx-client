@@ -1,7 +1,7 @@
-# The openMCX Linux client features
+# The OpenMCX Linux client features
 
 What the Linux client `mcx-client` supports, and how it is verified. It is an on-network MC service client for the
-[openMCX servers](https://github.com/openMCX/openmcx-server), written from the 3GPP Release 19 specifications: a
+[OpenMCX servers](https://github.com/openMCX/openmcx-server), written from the 3GPP Release 19 specifications: a
 headless MC UE in a container, driven by commands. This page is a map, not a conformance claim: see
 [what it does not do](#what-is-not-supported).
 
@@ -19,14 +19,15 @@ headless MC UE in a container, driven by commands. This page is a map, not a con
   the GMS.
 - **Registration and service authorisation** (TS 24.379 clause 7.2, TS 24.282 clause 7.2, TS 24.281 clause 7.2): one
   SIP registration for all services, over mutual TLS, then service authorisation and affiliation (TS 24.379
-  clause 9.2.1).
+  clause 9.2.1). A refused service authorisation that can be transient (403, 408, 480, 500, 503) is retried after a
+  growing delay (5, 10, 20, then every 60 s, or the Retry-After of a 500 or 503).
 - **Media**: AMR-WB speech over RTP (RFC 4867), H.264 video (RFC 6184); floor control (TS 24.380) and transmission and
   reception control (TS 24.581).
 - **Location** (TS 24.379 clause 13, TS 24.282 clause 17, TS 24.281 clause 18): configurations, triggers, reports and
   requests, for each service.
 - **Key management** (TS 33.180): the KMS, key material and group keys from the GMS.
 
-Everything the openMCX servers offer, as their [feature list](https://github.com/openMCX/openmcx-server/blob/main/docs/FEATURES.md)
+Everything the OpenMCX servers offer, as their [feature list](https://github.com/openMCX/openmcx-server/blob/main/docs/FEATURES.md)
 has it: the lab scenarios run each server feature through this client.
 
 ### MCPTT (TS 24.379, TS 24.380)
@@ -67,5 +68,5 @@ has it: the lab scenarios run each server feature through this client.
 
 - Off-network (ProSe) operation
 - Interconnection between MC systems and migration to a partner system: the client works in one MC system
-- Whatever the openMCX servers do not support either: see their
-  [limits](https://github.com/openMCX/openmcx-server/blob/main/docs/FEATURES.md#what-is-not-supported)
+- Whatever the OpenMCX servers do not support either: see their
+  [limitations](https://github.com/openMCX/openmcx-server/blob/main/docs/LIMITATIONS.md)

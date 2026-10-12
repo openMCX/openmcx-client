@@ -13,7 +13,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Against key material and messages made by the openMCX server's own implementation (mcx-keytool,
+ * Against key material and messages made by the OpenMCX server's own implementation (mcx-keytool,
  * wolfCrypt): its KMS documents, and a GMK I_MESSAGE with key properties sent to bob by a GMS.
  */
 class KeyingInteropTest {

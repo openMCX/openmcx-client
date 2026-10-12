@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Turns a client of a prepared openMCX lab into a dispatcher position.
+"""Turns a client of a prepared OpenMCX lab into a dispatcher position.
 
 Lab mode (default): client-c becomes the dispatcher. Prepare the lab first with openmcx-server's
 tools/prepare-prearranged-test.py (for example --private-call --mcdata), then run this on

@@ -8,7 +8,7 @@ class H264Error(message: String) : Exception(message)
 class H264Payload(val bytes: ByteArray, val marker: Boolean)
 
 /**
- * H.264 over RTP (RFC 6184) in packetization mode 1, as the openMCX MCVideo server relays it:
+ * H.264 over RTP (RFC 6184) in packetization mode 1, as the OpenMCX MCVideo server relays it:
  * a NAL unit that fits is sent alone (§5.6), a larger one in FU-A fragments (§5.8); the marker
  * is set on the last packet of each access unit.
  */

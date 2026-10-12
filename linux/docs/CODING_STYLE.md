@@ -1,6 +1,6 @@
 # Coding style
 
-This repository follows the openMCX coding style: openmcx-server `docs/CODING_STYLE.md` (names, 3GPP references,
+This repository follows the OpenMCX coding style: openmcx-server `docs/CODING_STYLE.md` (names, 3GPP references,
 separators, file and function size, formatting, tools). The configuration here is the same (`.clang-format`,
 `.clang-tidy`, `ruff.toml`), and so are the commands:
 

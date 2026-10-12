@@ -1,7 +1,7 @@
 # Video calls (MCVideo)
 
 Video calls between MC users, as MCVideo (TS 24.281) with the transmission control of TS 24.581, against the
-openMCX `mcvideo-server`: private calls (§10.2) and prearranged group calls (§9.2.1). Three kinds of call:
+OpenMCX `mcvideo-server`: private calls (§10.2) and prearranged group calls (§9.2.1). Three kinds of call:
 
 | Call | What happens | Voice |
 |---|---|---|

@@ -4,7 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
-/** conference-info documents shaped as the openMCX server writes them (protocol.cpp conference_info_xml). */
+/** conference-info documents shaped as the OpenMCX server writes them (protocol.cpp conference_info_xml). */
 class ConferenceInfoTest {
     private fun doc(state: String, vararg users: Pair<String, String>) =
         "<?xml version=\"1.0\"?><conference-info xmlns=\"urn:ietf:params:xml:ns:conference-info\" " +

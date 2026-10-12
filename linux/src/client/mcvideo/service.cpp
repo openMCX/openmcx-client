@@ -130,6 +130,7 @@ void Client::mcvideo_authorize(const std::string &token) {
   std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
                               {"application/poc-settings+xml", poc_settings_xml(client_id())}};
   if (!mcvideo_csk_upload_.empty()) parts.push_back({"application/mikey", mcvideo_csk_upload_});
+  if (token.empty()) ++mcvideo_authorization_retry_.generation;
   mcvideo_request("poc-settings", parts, headers, [this, probe = !token.empty(), refresh](const SipResponse &response) {
     mcvideo_result("authorize", response);
     if (probe) return; // the real authorisation stays as it was
@@ -144,10 +145,16 @@ void Client::mcvideo_authorize(const std::string &token) {
         mcvideo_affiliation_etag_.clear();
         mcvideo_subscription_.clear();
         schedule([this] { mcvideo_authorize(); });
+      } else if (!refresh) {
+        // A refused initial publication is published again when the refusal can be transient.
+        retry_authorization(mcvideo_authorization_retry_, "mcvideo", response, [this] {
+          if (!mcvideo_authorized_) mcvideo_authorize();
+        });
       }
       return;
     }
     mcvideo_auth_etag_ = get_header(response.headers, "SIP-ETag");
+    mcvideo_authorization_retry_.attempts = 0;
     // A refresh (the renewed access token) changes nothing else: no new log-on, subscriptions or affiliation.
     if (refresh && mcvideo_authorized_) {
       event("mcvideo_service_authorization_renewed");

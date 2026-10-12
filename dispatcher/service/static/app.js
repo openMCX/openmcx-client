@@ -1,5 +1,5 @@
 'use strict';
-// openMCX dispatcher UI: state from /api/events, actions to /api/command, voice over /api/audio.
+// OpenMCX dispatcher UI: state from /api/events, actions to /api/command, voice over /api/audio.
 const $ = (id) => document.getElementById(id);
 const RATE = 16000, FRAME = 320; // the engine's live audio: 16 kHz s16le, 20 ms frames
 

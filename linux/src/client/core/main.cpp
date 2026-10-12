@@ -1,4 +1,4 @@
-// mcx-client: the process entry point of the openMCX MC client (MCX Admin activation, control commands, run).
+// mcx-client: the process entry point of the OpenMCX MC client (MCX Admin activation, control commands, run).
 //
 // Specifications: none cited (the procedures are in the Client member files).
 

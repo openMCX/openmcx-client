@@ -57,6 +57,7 @@ void Client::mcdata_authorize() {
     parts = mcdata_encrypt_xml(std::move(parts), mcdata_xml_key(true));
     parts.push_back({"application/mikey", mcdata_csk_upload_});
   }
+  ++mcdata_authorization_retry_.generation;
   mcdata_request("poc-settings", parts, headers, [this, uploading, refresh](const SipResponse &response) {
     if (response.status_code != 200) {
       // TS 24.282 clause 7.2.2: not authorised, and so not affiliated.
@@ -69,10 +70,16 @@ void Client::mcdata_authorize() {
         mcdata_affiliation_etag_.clear();
         mcdata_subscription_.clear();
         schedule([this] { mcdata_authorize(); });
+      } else if (!refresh) {
+        // A refused initial publication is published again when the refusal can be transient.
+        retry_authorization(mcdata_authorization_retry_, "mcdata", response, [this] {
+          if (!mcdata_authorized_) mcdata_authorize();
+        });
       }
       return;
     }
     mcdata_auth_etag_ = get_header(response.headers, "SIP-ETag");
+    mcdata_authorization_retry_.attempts = 0;
     mcdata_authorized_ = true;
     if (uploading) {
       mcdata_csk_accepted_ = true;

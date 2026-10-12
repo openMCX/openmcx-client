@@ -8,7 +8,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import kotlin.math.abs
 
-/** Ported from the openMCX server's tests/test_location.cpp: the same known answers and the same trigger scenario. */
+/** Ported from the OpenMCX server's tests/test_location.cpp: the same known answers and the same trigger scenario. */
 class LocationTest {
     private fun near(a: Double, b: Double, tolerance: Double) = abs(a - b) <= tolerance
     private fun square(lat: Double, lon: Double, half: Double) = Area(polygon = listOf(Point.at(lat - half, lon - half),

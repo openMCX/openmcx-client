@@ -1,16 +1,17 @@
 // Small rules of the MC client without client state, kept apart from the Client class so that
 // tests/test_client_rules.cpp can check them: the notifiers of MCData disposition notifications, the warn-codes of a
 // Warning header field, when a refused refresh token is dropped, the percent-decoding of an XCAP selector and the
-// groups of an MCPTT user profile.
+// groups of an MCPTT user profile, and the retry delay of a refused initial service authorisation.
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19),
-// TS 24.484 V19.6.0 (Rel-19), RFC 3261, RFC 3986, RFC 6749.
+// TS 24.484 V19.6.0 (Rel-19), RFC 3261, RFC 3903, RFC 3986, RFC 6749.
 
 #pragma once
 
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -159,6 +160,38 @@ inline std::string_view floor_message_name(std::uint8_t type) {
 // limit remain; dropped in whole seconds (rate samples) past the limit, so the buffer is not shifted per packet.
 inline std::size_t audio_overflow(std::size_t size, std::size_t limit, std::size_t rate) {
   return size > limit + rate ? size - limit : 0;
+}
+
+//------------------------------------------------------------------------------
+// The delay before the client publishes its initial service authorisation again, or nothing when it does not.
+// TS 24.379, TS 24.282 and TS 24.281 clause 7.2.2: a SIP 4xx, 5xx or 6xx response leaves the client not authorised,
+// and they leave whether and when to try again to the client. A refusal that can be transient is retried: 403 (the
+// server cannot authorise the user yet, for example while its user database reloads the profile after a restart),
+// 408 (no response: the transaction timed out), 480 and 500, and 503 (also a transport failure). The delay grows
+// 5 s, 10 s, 20 s, then stays at 60 s; RFC 3261 section 20.33: a Retry-After in a 500 or 503 gives the delay instead
+// (bounded to 1 s to 10 minutes). attempt counts the retries already made (0 before the first).
+inline std::optional<std::uint64_t> authorization_retry_delay_ms(int status, unsigned attempt,
+                                                                 std::string_view retry_after = {}) {
+  switch (status) {
+  case 403:
+  case 408:
+  case 480:
+  case 500:
+  case 503: break;
+  default: return std::nullopt;
+  }
+  if (status == 500 || status == 503) {
+    std::uint64_t seconds = 0;
+    std::size_t index = 0;
+    while (index < retry_after.size() && retry_after[index] == ' ') ++index;
+    const std::size_t first = index;
+    while (index < retry_after.size() && std::isdigit(static_cast<unsigned char>(retry_after[index])) &&
+           index - first < 6)
+      seconds = seconds * 10 + static_cast<std::uint64_t>(retry_after[index++] - '0');
+    if (index > first) return std::clamp<std::uint64_t>(seconds, 1, 600) * 1000;
+  }
+  constexpr std::uint64_t delays[] = {5000, 10000, 20000};
+  return attempt < std::size(delays) ? delays[attempt] : 60000;
 }
 
 } // namespace mcx::client_rules

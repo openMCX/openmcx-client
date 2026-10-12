@@ -245,7 +245,11 @@ TS 24.281 clause 8.2.1.3 step 4). The server may grant less in its 200 (OK); `su
 duration and `tick` re-subscribes in the dialog (`refresh_affiliation_subscription`) a minute before it ends, or
 half-way through a shorter one. A refused refresh is replaced by a new subscription; the affiliations and any call are
 kept. The `refresh-affiliation` command triggers a refresh at once (a test aid). A 4xx–6xx answer to the authorisation PUBLISH ends the authorisation, the affiliations and any call
-(`authorization_lost`); after a 412 the client discards the entity-tags and publishes anew (RFC 3903 section 5).
+(`authorization_lost`); after a 412 the client discards the entity-tags and publishes anew (RFC 3903 section 5). A
+refused initial authorisation that can be transient (403, 408, 480, 500, 503) is published again after 5, 10 and 20 s,
+then every 60 s, or after the Retry-After of a 500 or 503 (`retry_authorization`, the delays in
+`client_rules::authorization_retry_delay_ms`); each retry is reported by a `service_authorization_retry` event, and a
+retry is dropped when another authorisation PUBLISH went out meanwhile.
 
 ### 2.4 Incoming request pipeline
 
@@ -697,7 +701,8 @@ the client is therefore tested by:
 
 ### 8.1 Build
 
-Docker is the only build requirement; nothing is installed on the host.
+Docker is the only build requirement; nothing is installed on the host. The client image builds against
+openmcx-server checked out beside this repository (`../openmcx-server`; `--server <path>` if it is elsewhere).
 
 ```bash
 linux/tools/build-image -t openmcx-client:<tag> [--server <openmcx-server checkout>]
@@ -728,7 +733,7 @@ What the code shows in practice:
 - **Lower-case** `clause`, `table`, `annex`, `section`; the spec's own names for messages, fields, states and timers
   (`Floor Request`, 'U: has permission', `T101`).
 - **Not 3GPP**: functions that implement no procedure start with `// Helper:`; OpenMCX-specific behaviour says so
-  (`openMCX, not 3GPP` in the comment, as in `core/activation.cpp`); test aids are marked "Test aid".
+  (`OpenMCX, not 3GPP` in the comment, as in `core/activation.cpp`); test aids are marked "Test aid".
 - **Deviations** are marked `// Deviation from TS … clause …: … because …` (see `mcdata/message_store.cpp`), gaps
   `// Not implemented: TS … clause …`.
 

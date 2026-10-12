@@ -1,4 +1,4 @@
-// The openMCX MC client (mcx-client): an MCPTT client (TS 24.379) with its floor participant
+// The OpenMCX MC client (mcx-client): an MCPTT client (TS 24.379) with its floor participant
 // (TS 24.380), and as configured an MCData client (TS 24.282, TS 24.582) and an MCVideo client
 // (TS 24.281, TS 24.581), their key management and protection (TS 33.180), location reporting
 // (TS 24.379 clause 13.3, TS 24.545), group and configuration management (TS 24.481, TS 24.484).
@@ -54,7 +54,7 @@ namespace mcx {
 inline volatile std::sig_atomic_t stopping = 0;
 
 //------------------------------------------------------------------------------
-// The SIGINT and SIGTERM handler (openMCX process control, not 3GPP): ends the run loop.
+// The SIGINT and SIGTERM handler (OpenMCX process control, not 3GPP): ends the run loop.
 inline void stop_signal(int /*signal_number*/) { stopping = 1; }
 
 //------------------------------------------------------------------------------
@@ -427,6 +427,19 @@ class Client {
   std::pair<std::string, std::string> affiliation_subscribe_body();
 
   void authorize();
+
+  // TS 24.379, TS 24.282 and TS 24.281 clause 7.2.2: the retries of a refused initial service authorisation of one
+  // service. attempts counts the retries since the last success; generation changes with every authorisation
+  // PUBLISH, so that a retry scheduled for an older one is dropped.
+  struct AuthorizationRetry {
+    unsigned attempts = 0;
+    std::uint64_t generation = 0;
+  };
+
+  AuthorizationRetry authorization_retry_, mcdata_authorization_retry_, mcvideo_authorization_retry_;
+
+  bool retry_authorization(AuthorizationRetry &retry, const std::string &service_name, const SipResponse &response,
+                           std::function<void()> again);
 
   void affiliate();
 

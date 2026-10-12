@@ -123,7 +123,7 @@ class AlertCenter(
     }
 
     companion object {
-        /** A person's name from their MC IDs, which the openMCX provisioning gives a per-service suffix. */
+        /** A person's name from their MC IDs, which the OpenMCX provisioning gives a per-service suffix. */
         fun person(id: String) = id.removePrefix("sip:").substringBefore('@')
             .removeSuffix(".mcptt").removeSuffix(".mcdata").removeSuffix(".mcvideo")
 

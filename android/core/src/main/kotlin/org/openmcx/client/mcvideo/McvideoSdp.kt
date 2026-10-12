@@ -52,7 +52,7 @@ data class RemoteVideoMedia(
 }
 
 /**
- * SDP for an MCVideo call (TS 24.281 §6.2.1–6.2.2, TS 24.581 §14) as the openMCX server takes it:
+ * SDP for an MCVideo call (TS 24.281 §6.2.1–6.2.2, TS 24.581 §14) as the OpenMCX server takes it:
  * one AMR-WB audio stream, one H.264 video stream (RFC 6184 packetization mode 1, Constrained
  * Baseline level 3.1), each with a single payload type, `a=rtcp` and `a=ssrc`, and, under
  * transmission control, `m=application <port> udp MCVideo`. No queueing is offered.

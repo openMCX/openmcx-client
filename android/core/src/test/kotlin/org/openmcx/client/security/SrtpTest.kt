@@ -13,7 +13,7 @@ class SrtpTest {
     private val random = hex("101112131415161718191a1b1c1d1e1f")
     private fun km(m: SecurityMaterial) = m.masterKey + m.masterSalt
 
-    /** The openMCX server's known answers (tests/test_security.cpp), themselves from the TLS P_SHA256 vector and Python hmac. */
+    /** The OpenMCX server's known answers (tests/test_security.cpp), themselves from the TLS P_SHA256 vector and Python hmac. */
     @Test fun keyDerivationKnownAnswers() {
         assertArrayEquals(hex("e3f229ba727be17b8d122620557cd453c2aab21d07c3d495329b52d4e61edb5a6b301791e90d35c9c9a46b4e14baf9af0fa022f7077def17abfd3797c0564bab4fbc91666e9def9b97fce34f796789baa48082d122ee42c5a72e5a5110fff70187347b66"),
             SrtpKeys.mikeyPrf(hex("9bbe436ba940f017b17652849a71db35"), hex("74657374206c6162656ca0ba9f936cda311827a6f796ffd5198c"), 100))

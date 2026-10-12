@@ -1,4 +1,4 @@
-// MCX Admin activation of the client's configuration from a one-time activation URL (openMCX, not 3GPP).
+// MCX Admin activation of the client's configuration from a one-time activation URL (OpenMCX, not 3GPP).
 //
 // Specifications: TS 24.482 V19.1.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).
 
