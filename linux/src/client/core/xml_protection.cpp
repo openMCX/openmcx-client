@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // XML integrity and confidentiality protection of SIP bodies under the client-server key (CSK), MCPTT and MCVideo.
 //
 // Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.281 V19.6.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).
@@ -156,6 +160,7 @@ std::vector<BodyPart> Client::protect_outgoing(const SipTransmission &transmissi
       mcdata_transmission(transmission))
     return parts;
   if (mcvideo_transmission(transmission)) return mcvideo_protect_outgoing(std::move(parts));
+
   // TS 24.379 clause 7.2.1: until the server holds the CSK, only the request uploading it is protected.
   const bool uploads = std::any_of(parts.begin(), parts.end(),
                                    [](const BodyPart &part) { return part.content_type == "application/mikey"; });

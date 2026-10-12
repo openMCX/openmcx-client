@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCVideo calls: priority conditions, emergency alerts, incoming MESSAGEs, private calls and calls to the server
 // (TS 24.281 clauses 6.2.8, 10.2, 11.2.1, 12.2.2, 13.2.2). Member functions of Client (declared in client.hpp).
 //
@@ -48,6 +52,7 @@ void Client::mcvideo_change_priority(bool emergency, bool enabled) {
   info.session_type = call.type;
   info.client_id = client_id();
   if (call.type != "private") info.request_uri = call.group;
+
   // TS 24.281 clause 6.2.8.1.1 step 3: an emergency comes with an alert indication (false: no alert).
   if (emergency) {
     info.emergency = enabled;
@@ -57,6 +62,7 @@ void Client::mcvideo_change_priority(bool emergency, bool enabled) {
   }
   std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}};
   if (call.type == "private") parts.push_back({resource_lists_mime, private_call_resource_list(call.peer)});
+
   // The re-INVITE asks for MCVideo like the initial INVITE (Accept-Contact, P-Preferred-Service).
   auto headers = mcvideo_call_headers();
   for (const auto &header : mcvideo_priority_headers(info)) headers.push_back(header);
@@ -114,6 +120,7 @@ SipResponse Client::mcvideo_message(const SipMessage &message) {
     return response;
   }
   const auto info = message_info(message, mcvideo_service);
+
   // TS 24.281 clause 12.1A.1.3: an ad hoc group emergency alert notification, its cancellation, or the
   // receipt of this user's own alert.
   if (info.adhoc_alert.has_value()) {
@@ -313,12 +320,14 @@ void Client::mcvideo_private_call(const std::string &target, std::string mode, b
   McpttInfo info;
   info.session_type = session_type;
   info.client_id = client_id();
+
   // TS 24.281 clause 10.2.2.2.1 step 11 c) ii): <call-to-functional-alias-ind> for a call to an alias, and
   // the alias this user presents. After a 300, <called-functional-alias-URI> names the
   // alias first called and the indication is left out (300 steps 2 and 3).
   if (to_alias) info.call_to_functional_alias = true;
   info.called_functional_alias = called_alias;
   info.functional_alias = mcvideo_presented_alias();
+
   // TS 24.281 clause 6.2.8.3.2: an emergency private call.
   if (emergency) {
     info.emergency = true;

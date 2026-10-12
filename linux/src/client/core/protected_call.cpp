@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Protected calls: private call keys (PCK), the group key subscription and protected floor control transmission.
 //
 // Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.481 V19.3.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).

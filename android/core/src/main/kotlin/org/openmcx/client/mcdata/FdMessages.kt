@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 package org.openmcx.client.mcdata
 
 import java.util.UUID

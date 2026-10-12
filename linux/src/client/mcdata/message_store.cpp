@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCData message store client and message notification client, control of communications storage, and file upload by
 // reference to a stored object (member functions of Client).
 //

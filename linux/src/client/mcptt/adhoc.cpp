@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Ad hoc group calls: call setup, participant modification and the ad hoc group emergency alert (MCPTT client side).
 //
 // Specifications: TS 24.379 V19.7.0 (Rel-19).
@@ -37,6 +41,7 @@ void Client::adhoc_call(const std::string &arguments) {
   require_profile({"allow-adhoc-group-call"});
   if (priority == "emergency") require_profile({"allow-emergency-adhoc-group-call"});
   if (priority == "imminent") require_profile({"allow-imminent-peril-adhoc-group-call"});
+
   // TS 24.379 clause 17.2.2.1.1 step 10 NOTE 1: a call following an ad hoc emergency alert names the alert's group.
   std::string alert_group_id;
   if (alert_group) {

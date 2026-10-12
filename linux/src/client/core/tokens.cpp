@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // IdMS sign-in and token renewal of the identity management client: user authentication, refresh tokens and the
 // service authorisation renewed with a new access token.
 //
@@ -77,6 +81,7 @@ Json Client::obtain_tokens() {
   auto tokens = oidc_login(http_, oauth);
   keep_refresh_state(tokens);
   ++password_logins_;
+
   // oauth.forget_password (a dispatcher position): the password serves the operator's sign-in only; renewals then
   // rely on the refresh token alone, so that IdMS refusing it (suspension, Revoke devices) ends the session.
   if (cfg_["oauth"].value("forget_password", false) && !refresh_token_.empty()) cfg_["oauth"].erase("password");

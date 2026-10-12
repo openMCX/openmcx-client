@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 package org.openmcx.client.app.ui
 
 import androidx.compose.animation.core.LinearEasing
@@ -359,6 +363,9 @@ private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit
             val uri = androidx.compose.ui.platform.LocalUriHandler.current
             TextButton(onClick = { runCatching { uri.openUri("https://openmcx.com") } }, contentPadding = PaddingValues(0.dp),
                 modifier = Modifier.testTag(Tags.ABOUT_LINK)) { Text("Visit openmcx.com for more information") }
+            TextButton(onClick = { runCatching { uri.openUri("mailto:contact@openmcx.com") } }, contentPadding = PaddingValues(0.dp)) {
+                Text("Contact: contact@openmcx.com")
+            }
             Text("Version ${org.openmcx.client.app.BuildConfig.VERSION_NAME}", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted,
                 modifier = Modifier.padding(bottom = 16.dp))
         }
@@ -432,7 +439,7 @@ private fun IncomingCall(call: CallItem, actions: UiActions) {
         .padding(16.dp)) {
         Text("Incoming ${call.type.sessionType} call", style = MaterialTheme.typography.titleMedium, color = Mcx.Muted)
         Text(call.title, color = Mcx.Ink, style = CallTitle)
-        call.alias?.let { Text(it, color = Mcx.Muted, style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag(Tags.CALL_ALIAS)) }
+        call.alias?.let { Text(it, color = Mcx.Ink, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.testTag(Tags.CALL_ALIAS)) }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(top = 12.dp)) {
             Button(onClick = actions::answer, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag(Tags.ANSWER), shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32), contentColor = Color.White)) {
@@ -561,11 +568,15 @@ private fun FunctionalAliases(state: UiState, actions: UiActions) {
     Section("Functional aliases")
     Text("A functional alias is a role others can call, such as a dispatcher. Activate one to receive its calls; " +
         "present it so your calls show it.", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+    // A call presents at most one alias (TS 24.379 §9A): say which.
+    val presented = state.aliases.filter { it.inUse }.joinToString { CallDisplay.role(it.id) }
+    Text(if (presented.isEmpty()) "Your calls present no role." else "Your calls present: $presented",
+        style = MaterialTheme.typography.bodySmall, color = Mcx.Ink, modifier = Modifier.padding(top = 4.dp))
     state.aliases.forEach { alias ->
         Column(Modifier.fillMaxWidth().padding(vertical = 6.dp).background(Mcx.Card, RoundedCornerShape(12.dp))
             .border(1.dp, Mcx.Line, RoundedCornerShape(12.dp)).padding(12.dp).testTag(Tags.alias("${alias.service}-${alias.id.short()}"))) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(alias.id.short(), color = Mcx.Ink, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                Text(CallDisplay.role(alias.id), color = Mcx.Ink, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
                 Text(when (alias.service) { "mcdata" -> "MCData"; "mcvideo" -> "MCVideo"; else -> "MCPTT" }, color = Mcx.Muted,
                     style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
                 val (label, ink) = when (alias.status) {
@@ -575,6 +586,11 @@ private fun FunctionalAliases(state: UiState, actions: UiActions) {
                 }
                 Text(label, color = ink, style = MaterialTheme.typography.bodySmall)
             }
+            // The server leaves a refused alias out of its NOTIFY without a reason (TS 24.379 §9A.2.2.3.3): held by
+            // another user at its limit without a take-over right for this user, or not allowed for this user.
+            if (alias.status == "inactive" && alias.outcome == "refused")
+                Text("Not activated: another user holds it and you may not take it over, or it is not allowed for you.",
+                    color = Mcx.WarnInk, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
                 val tag = { action: String -> Modifier.heightIn(min = 48.dp).testTag(Tags.aliasAction("${alias.service}-${alias.id.short()}", action)) }
                 when (alias.status) {
@@ -678,7 +694,7 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
                 "imminent" -> PriorityBanner("IMMINENT PERIL", Mcx.Peril, Color.Black)
             }
             Text(call.title, color = Mcx.Ink, style = CallTitle)
-            call.alias?.let { Text(it, color = Mcx.Muted, style = MaterialTheme.typography.titleSmall, modifier = Modifier.testTag(Tags.CALL_ALIAS)) }
+            call.alias?.let { Text(it, color = Mcx.Ink, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.testTag(Tags.CALL_ALIAS)) }
             if (call.members.isNotEmpty()) {
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     call.members.forEach { member ->

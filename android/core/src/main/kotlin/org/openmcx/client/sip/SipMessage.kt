@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 package org.openmcx.client.sip
 
 /** RFC 3261 §7.3.3 compact header forms, and the full names they stand for. */

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Group management client (TS 24.481 clauses 6.3.2 to 6.3.15) and configuration management client
 // (TS 24.484 clauses 6.3.3, 6.3.4, 6.3.13.2.2). Member functions of Client (declared in client.hpp).
 //
@@ -88,6 +92,7 @@ void Client::profile_command(const std::string &cmd) {
     revoked = true;
   }
   if (!revoked) throw std::runtime_error("the profile does not grant " + action);
+
   // The MIME type of the user profile document (TS 24.484 clause 8.3.2.5).
   std::map<std::string, std::string> headers{{"Authorization", "Bearer " + token_},
                                              {"Content-Type", "application/vnd.3gpp.mcptt-user-profile+xml"}};
@@ -115,6 +120,7 @@ std::string Client::temporary_group_request_xml(const std::string &group_id, con
     start = end + 1;
   }
   const std::string flag = protect ? "true" : "false";
+
   // The group document of the temporary group, in a GMOP group regroup creation
   // request (TS 24.481 clause 7.3.4.3): its <on-network-temporary> lists the constituent groups.
   std::string group =

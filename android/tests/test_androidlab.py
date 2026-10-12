@@ -1,3 +1,7 @@
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 """lab/androidlab.py: phone roles and the file distribution settings of a phone lab."""
 import argparse
 import json

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Group and user regroup using a preconfigured group: the MCPTT client's requests and the notices it receives.
 //
 // Specifications: TS 24.379 V19.7.0 (Rel-19).

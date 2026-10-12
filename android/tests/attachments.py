@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 """Attachments in Messages between two phones: MCData file distribution over HTTP.
 
     tests/attachments.py LAB [--a client-a] [--b client-b] [--large] [--screenshots]

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCVideo client: media security keys, service authorisation, affiliation, test commands and status
 // (TS 24.281 clauses 4.7, 7.2, 8.2.1). Member functions of Client (declared in client.hpp).
 //
@@ -241,6 +245,7 @@ SipResponse Client::mcvideo_affiliation_notify(const SipMessage &message) {
   mcvideo_groups_ = groups;
   mcvideo_affiliated_ = groups.contains(mcvideo_group());
   if (!affiliation.publication_id.empty()) mcvideo_received_pid_ = affiliation.publication_id;
+
   // TS 24.281 clause 9.2.4.2.2 step 1 c): the NOTIFY for the affiliation a group selection change asked for.
   if (mcvideo_selection_pending_.is_object() && !affiliation.publication_id.empty() &&
       affiliation.publication_id == mcvideo_selection_pending_.value("p_id", std::string{})) {
@@ -352,6 +357,7 @@ void Client::mcvideo_command(const std::string &cmd) {
     return mcvideo_alert(argument == "on");
   }
   if (verb == "mcvideo-private") return mcvideo_private_command(argument, words);
+
   // TS 24.281 clause 20.2.1.2: functional alias status change, and the alias presented in calls.
   if (verb == "mcvideo-fa") {
     std::vector<std::string> aliases;
@@ -362,6 +368,7 @@ void Client::mcvideo_command(const std::string &cmd) {
   if (verb == "mcvideo-fa-subscribe" || verb == "mcvideo-fa-fetch")
     return mcvideo_alias_subscribe(argument, verb == "mcvideo-fa-fetch");
   if (verb == "mcvideo-fa-unsubscribe") return mcvideo_alias_unsubscribe(argument);
+
   // TS 24.281 clauses 18.3.2.2 and 18.3.3.2: an authorised user's location request or configuration change.
   if (verb == "mcvideo-location") return mcvideo_location_command(cmd);
   // TS 24.281 clauses 12.1A.1.1 and 12.1A.1.2: an ad hoc group emergency alert, or its cancellation.
@@ -392,6 +399,7 @@ void Client::mcvideo_command(const std::string &cmd) {
   // TS 24.281 clauses 21.2.1.1, 21.3.1.1 and 21.2.1.2: create a group or user regroup using a
   // preconfigured group, or remove one.
   if (verb == "mcvideo-regroup") return mcvideo_regroup_request_command(argument, words);
+
   // TS 24.281 clause 22.2.2.1.1: an ad hoc group call to MCVideo users or by criteria.
   if (verb == "mcvideo-adhoc") return mcvideo_adhoc_command(argument, words);
   // TS 24.281 clause 15.2.1.1: an ambient viewing call, viewing the target (remote) or

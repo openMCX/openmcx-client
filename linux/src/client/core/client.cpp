@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // The MC client: construction, start-up (profiles, group document, keys, SIP registration), the run loop, the
 // periodic tick (timers, speech transmission, status) and the MCVideo user profile.
 //

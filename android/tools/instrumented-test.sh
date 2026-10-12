@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 # Run the instrumented tests on one device and leave the app installed (the Gradle
 # connected task uninstalls it, which removes a lab client's provisioning).
 #   tools/instrumented-test.sh <serial> [test class or class#method]

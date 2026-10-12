@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 package org.openmcx.client.app.telecom
 
 import android.content.Context
@@ -5,20 +9,21 @@ import android.net.Uri
 import android.telecom.DisconnectCause
 import android.util.Log
 import androidx.core.telecom.CallAttributesCompat
-import androidx.core.telecom.CallControlScope
 import androidx.core.telecom.CallControlResult
+import androidx.core.telecom.CallControlScope
 import androidx.core.telecom.CallEndpointCompat
 import androidx.core.telecom.CallsManager
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import org.openmcx.client.app.ui.CallDisplay
 import org.openmcx.client.mcptt.Call
 import org.openmcx.client.mcptt.CallType
 import org.openmcx.client.mcptt.McpttService
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Tells Android's telecom stack about MCPTT calls (Jetpack core-telecom, a self-managed
@@ -46,7 +51,7 @@ class TelecomBridge(private val context: Context, private val scope: CoroutineSc
     fun track(call: Call) {
         if (registered.putIfAbsent(call.id, true) != null) return
         val name = when (call.type) {
-            CallType.PRIVATE -> call.peer ?: "MCPTT"
+            CallType.PRIVATE -> CallDisplay.caller(call.peer, call.callingAlias, call.calledAlias, "MCPTT")
             else -> call.groupId ?: call.peer ?: "MCPTT group"
         }
         val attributes = CallAttributesCompat(

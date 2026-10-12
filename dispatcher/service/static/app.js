@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 'use strict';
 // OpenMCX dispatcher UI: state from /api/events, actions to /api/command, voice over /api/audio.
 const $ = (id) => document.getElementById(id);

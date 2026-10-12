@@ -77,3 +77,5 @@ It is not an interoperability-certified implementation: see the limits in each c
 
 The OpenMCX clients are licensed under the [GNU Affero General Public License v3.0 or later](LICENSE).
 Third-party software and its licences: [NOTICE](NOTICE).
+
+Contact: [contact@openmcx.com](mailto:contact@openmcx.com)

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCData file distribution using HTTP, MCData client and media storage client side: upload, download, FD request,
 // FD notifications and FD termination (member functions of Client).
 //
@@ -73,6 +77,7 @@ std::string Client::mcdata_upload(const std::string &path, const std::string &gr
   std::ifstream file(path, std::ios::binary);
   if (!file) throw std::runtime_error("cannot read " + path);
   std::string contents((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
   // TS 24.282 clause 10.2.2.1 step 7: a one-to-one file is protected before it is uploaded.
   // The metadata then describes the stored object, as the media storage function holds it.
   if (key) contents = mcdata_seal_file(contents, *key);
@@ -198,6 +203,7 @@ void Client::mcdata_send_file(const FdRequest &request) {
   std::string name, digest;
   std::uint64_t size = 0;
   std::string url = request.url_override;
+
   // TS 33.180 clause 8.3 with TS 24.282 clause 10.2.2.1 steps 7 and 8: a one-to-one file is protected
   // with the PCK shared with the recipient; a group file is uploaded in clear.
   std::optional<keying::KeyMessage> key;

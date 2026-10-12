@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 package org.openmcx.client.body
 
 /** A resource-lists document (RFC 4826 §3.4, as used by RFC 5366 URI lists). */

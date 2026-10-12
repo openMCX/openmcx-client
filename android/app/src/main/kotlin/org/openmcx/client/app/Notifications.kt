@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 package org.openmcx.client.app
 
 import android.app.NotificationChannel
@@ -9,11 +13,12 @@ import android.content.Intent
 import androidx.core.app.NotificationCompat
 import androidx.core.app.Person
 import kotlinx.coroutines.launch
+import org.openmcx.client.app.ui.CallDisplay
 import org.openmcx.client.mcdata.FdRecord
 import org.openmcx.client.mcdata.ReceivedSds
-import org.openmcx.client.mcvideo.VideoCall
 import org.openmcx.client.mcptt.Call
 import org.openmcx.client.mcptt.CallType
+import org.openmcx.client.mcvideo.VideoCall
 
 /** Incoming-call and message notifications. */
 class Notifications(private val context: Context) {
@@ -35,7 +40,8 @@ class Notifications(private val context: Context) {
     /** A ringing call (manual commencement): a CallStyle notification with a full-screen intent. */
     fun incomingCall(call: Call) {
         if (call.state != "ringing" && call.type != CallType.PRIVATE) return
-        val caller = Person.Builder().setName(call.peer?.removePrefix("sip:") ?: "MCPTT").setImportant(true).build()
+        // The role first when the call is to or from a functional alias (TS 24.379 §9A).
+        val caller = Person.Builder().setName(CallDisplay.caller(call.peer, call.callingAlias, call.calledAlias, "MCPTT")).setImportant(true).build()
         val notification = NotificationCompat.Builder(context, CALLS)
             .setSmallIcon(android.R.drawable.stat_sys_phone_call)
             .setStyle(NotificationCompat.CallStyle.forIncomingCall(caller, action(ACTION_REJECT), action(ACTION_ANSWER)))
@@ -101,7 +107,7 @@ class Notifications(private val context: Context) {
     /** A ringing video call (manual commencement): full screen, with Answer and Decline. */
     fun incomingVideoCall(call: VideoCall) {
         if (call.state != "ringing" && call.isGroup) return
-        val caller = Person.Builder().setName(call.peer?.removePrefix("sip:")?.substringBefore('@')?.removeSuffix(".mcvideo") ?: "MCVideo")
+        val caller = Person.Builder().setName(CallDisplay.caller(call.peer, call.callingAlias, call.calledAlias, "MCVideo"))
             .setImportant(true).build()
         val notification = NotificationCompat.Builder(context, CALLS)
             .setSmallIcon(android.R.drawable.presence_video_online)

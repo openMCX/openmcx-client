@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Small rules of the MC client without client state, kept apart from the Client class so that
 // tests/test_client_rules.cpp can check them: the notifiers of MCData disposition notifications, the warn-codes of a
 // Warning header field, when a refused refresh token is dropped, the percent-decoding of an XCAP selector and the

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 package org.openmcx.client.app.ui
 
 import org.openmcx.client.body.McService
@@ -53,7 +57,8 @@ data class CallItem(
  * One of this user's functional aliases (TS 24.379 §9A.2.1): `active`, `take-over-possible` (held by someone else,
  * this user may take it over) or `inactive`; [inUse] when it is presented on this user's outgoing calls.
  */
-data class AliasItem(val id: String, val status: String, val inUse: Boolean, val service: String = "mcptt")
+/** A functional alias of this user: its status, whether its calls present it, and the outcome of the last change of it. */
+data class AliasItem(val id: String, val status: String, val inUse: Boolean, val service: String = "mcptt", val outcome: String? = null)
 
 /** Another user's location, as their report gave it. */
 data class LocatedItem(val name: String, val latitude: Double?, val longitude: Double?, val cell: String?, val at: Long)
@@ -357,10 +362,11 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
             CallType.PRIVATE -> listOfNotNull(self, call.peer)
             else -> call.groupId?.let { client.groupDocuments[it]?.members } ?: emptyList()
         }
-        val alias = call.callingAlias?.let { if (call.outgoing) "as ${it.short()}" else "from ${it.short()}" }
-            ?: call.calledAlias?.let { "to ${it.short()}" }
-        return CallItem(call.id, title, call.type, call.state, state, floor?.talker, call.floorEvents.lastOrNull(), limit, call.startedAt, members,
-            call.floorControl, call.media?.muted == true, call.priority, floor?.queuePosition?.value, alias)
+        // The role first when a functional alias is involved (TS 24.379 §9A): "Call to <role>", "<role> (<caller>)", "as <role>".
+        val shown = if (call.type == CallType.PRIVATE) CallDisplay.privateCall(call.outgoing, call.peer, call.callingAlias, call.calledAlias)
+            else CallDisplay.groupCall(title, call.outgoing, call.callingAlias)
+        return CallItem(call.id, shown.title, call.type, call.state, state, floor?.talker, call.floorEvents.lastOrNull(), limit, call.startedAt, members,
+            call.floorControl, call.media?.muted == true, call.priority, floor?.queuePosition?.value, shown.subtitle)
     }
     val calls = mcptt?.calls?.value ?: emptyList()
     val incoming = calls.firstOrNull { !it.outgoing && it.state == "ringing" }
@@ -398,7 +404,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         val state = client.aliasesOf(service).value
         state.available.map { a ->
             AliasItem(a, when (a) { in state.active -> "active"; in state.takeOverPossible -> "take-over-possible"; else -> "inactive" },
-                a == state.inUse, service.name.lowercase())
+                a == state.inUse, service.name.lowercase(), state.lastOutcomes[a])
         }
     }
     val aliasNote = aliasState.lastAction?.let { action ->
@@ -441,7 +447,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
                 c.mcptt?.groups?.takeIf { it.isNotEmpty() }?.let { "MCPTT groups" to it.joinToString() },
                 c.mcdata?.groups?.takeIf { it.isNotEmpty() }?.let { "MCData groups" to it.joinToString() },
                 c.mcvideo?.groups?.takeIf { it.isNotEmpty() }?.let { "MCVideo groups" to it.joinToString() },
-                "Functional aliases" to (client.aliases.value.active.takeIf { it.isNotEmpty() }?.joinToString { it.short() } ?: "none active"),
+                "Functional aliases" to (client.aliases.value.active.takeIf { it.isNotEmpty() }?.joinToString { CallDisplay.role(it) } ?: "none active"),
                 "SIP core" to "${c.sip.proxy}:${c.sip.proxyPort} (${c.sip.transport})",
                 "IdMS" to c.idms.issuer,
                 "IdMS sign-in" to (c.idms.username?.let { "automatic as $it" } ?: "interactive (browser)"),
@@ -482,7 +488,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
                 TxState.PENDING_RELEASE -> "releasing"
                 else -> if (media?.control?.transmitter != null) "receiving" else "idle"
             }
-            VideoCallItem(v.id, v.groupId?.short() ?: v.peer?.short() ?: "video call", v.state, if (v.transmissionControl) tx else "two-way",
+            VideoCallItem(v.id, v.groupId?.short() ?: v.peer?.let { CallDisplay.caller(it, v.callingAlias, v.calledAlias, it.short()) } ?: "video call", v.state, if (v.transmissionControl) tx else "two-way",
                 media?.control?.transmitter?.short(), v.transmissionControl, v.groupId, !v.outgoing, v.sessionType == "chat", v.priority,
                 v.sessionType, v.pushUrl?.takeIf { v.sessionType == org.openmcx.client.mcvideo.McvideoService.PUSH_TO_SERVER },
                 v.participants.keys.filter { it != client.config.mcvideo?.userId },

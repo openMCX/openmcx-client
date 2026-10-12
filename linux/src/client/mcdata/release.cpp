@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCData communication release over the media plane, MCData client side (member functions of Client).
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19), RFC 6086 (SIP INFO), RFC 3326 (Reason header field).

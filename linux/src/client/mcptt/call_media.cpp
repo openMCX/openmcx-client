@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Call state, the on-network floor participant's messages and the received media of an MCPTT call.
 //
 // Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.380 V19.2.0 (Rel-19), TS 24.282 V19.7.0 (Rel-19),
@@ -126,6 +130,7 @@ void Client::clear_call_state() {
   receive_ssrc_ = audio_ssrc_ = 0;
   talking_ = requesting_ = false;
   transmit_.clear();
+
   // A private session cannot be rejoined; keep only group session identities.
   if (call_type_ == "private" || call_type_ == "ambient") {
     session_uri_.clear();
@@ -139,6 +144,7 @@ void Client::clear_call_state() {
   call_type_.clear();
   call_group_.clear();
   private_peer_.clear();
+
   // Cancelled before answering, or released as not selected: restore MEPP.
   if (saved_mepp_ && (fta_not_selected_ || status_.value("call_state", "") != "active")) {
     status_["private_priority_restored"] = mepp_name(*saved_mepp_);
@@ -165,6 +171,7 @@ void Client::send_floor(FloorType type) {
   packet.type = type;
   packet.ssrc = remote_->floor_ssrc;
   packet.ack_required = type == FloorType::Release && cfg_.at("mcptt").value("floor_ack", true);
+
   // TS 24.380 clause 8.2.3.15: the call type of this call, including an emergency
   // private call (MEPP 2) and an emergency or imminent-peril ad hoc call.
   const bool emergency_call = call_type_ == "private" || call_type_ == "ambient" ? mepp_ == 2
@@ -174,6 +181,7 @@ void Client::send_floor(FloorType type) {
                              : call_type_ == "adhoc"                            ? adhoc_priority_ == "imminent"
                                                                                 : imminent_;
   const bool broadcast_call = call_type_ == "broadcast" || (call_type_ == "adhoc" && adhoc_broadcast_);
+
   // The Floor Indicator is a field of Floor Request and Floor Release (tables 8.2.4-1, 8.2.7-1), not of Floor Queue
   // Position Request (table 8.2.11-1: SSRC, and Track Info with a non-controlling function only).
   if (type != FloorType::QueuePositionRequest)

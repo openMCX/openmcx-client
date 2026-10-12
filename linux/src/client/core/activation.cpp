@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCX Admin activation of the client's configuration from a one-time activation URL (OpenMCX, not 3GPP).
 //
 // Specifications: TS 24.482 V19.1.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).
@@ -141,6 +145,7 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
           "the activation URL was refused (" + std::to_string(fetched.status) + "): used, expired or unknown");
   const auto boot = fetched.json();
   require(boot.value("format", "") == "openmcx-activation-1", "unknown bootstrap format");
+
   // The system's trust root from the package: the client then needs no CA file of its own.
   if (boot.contains("trust_root") && !dir.empty()) {
     const auto root = std::filesystem::path(dir) / "trust-root.pem";
@@ -153,6 +158,7 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
   // ports); every HTTPS request of the client applies it.
   if (boot.contains("address_map")) cfg["address_map"] = boot.at("address_map");
   HttpClient http(cfg.at("tls").at("ca_file").get<std::string>(), {}, address_map(cfg));
+
   // Identity and system settings from the bootstrap; local settings stay.
   const auto &idms = boot.at("idms");
   cfg["oauth"] = {{"issuer", idms.at("issuer")},
@@ -169,6 +175,7 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
     cfg[service] = merged;
   }
   if (boot.contains("endpoints")) cfg["endpoints"] = boot.at("endpoints");
+
   // Sign in (TS 24.482 clause 6.2.1) and ask the Credential Service for the SIP credential.
   const auto tokens = oidc_login(http, cfg.at("oauth"));
   const auto token = tokens.at("access_token").get<std::string>();
@@ -179,6 +186,7 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
   const auto credential = issued.json();
   cfg["sip"]["username"] = credential.at("username");
   cfg["sip"]["password"] = credential.at("password");
+
   // Slice F2: a configuration without a device certificate gets one for a key made
   // here, which never leaves this device.
   if (!has_device_certificate(cfg) && boot.contains("certificate_url")) {

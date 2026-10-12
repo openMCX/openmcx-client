@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Ambient listening and suspended calls: the listened-to client's microphone and yielding the ambient listening call
 // to another call.
 //

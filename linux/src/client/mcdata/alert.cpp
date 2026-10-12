@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCData emergency alert, functional alias status change and disposition notifications, MCData client side
 // (member functions of Client).
 //

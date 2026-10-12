@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCPTT service authorisation, group affiliation, the affiliation and conference event subscriptions, and helpers.
 //
 // Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.380 V19.2.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).
@@ -141,6 +145,7 @@ void Client::authorize() {
     csk_ = key;
   }
   auto [type, body] = publish_body(false);
+
   // TS 24.379 clause 7.2.1A step 2: the MCPTT ICSI in P-Preferred-Service.
   std::vector<SipHeader> headers{
       {"P-Preferred-Service", mcptt_icsi}, {"Event", "poc-settings"}, {"Expires", "4294967295"}};

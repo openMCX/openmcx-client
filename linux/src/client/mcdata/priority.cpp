@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCData emergency and imminent peril group communication states of the MCData client (member functions of Client).
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19).

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Emergency and imminent peril: the priority call conditions and states of the MCPTT client, priority changes in
 // group and private calls, emergency alerts and the user profile checks.
 //

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCVideo remote change of a user's selected group (TS 24.281 clause 9.2.4) and functional alias to group binding
 // (TS 24.281 clause 20.4). Member functions of Client (declared in client.hpp).
 //

@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 """Browser check of the position's sign-in page (M3), in Chromium, on a running MCX Admin lab
 (prepare.py --position). Prepare an account on the host, then run the check in the Playwright image:
 

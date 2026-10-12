@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Outgoing private calls (with or without floor control, emergency, to a functional alias), first-to-answer calls
 // and ambient listening calls of the MCPTT client (on-demand session).
 //
@@ -84,6 +88,7 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
   call_type_ = "private";
   private_peer_ = target;
   status_["last_call_failure"] = nullptr;
+
   // A functional alias is resolved by a 300 before any media: the PCK goes to the
   // MCPTT ID selected for it (step 11d with clause 6.2.8.3.9).
   const auto key = to_alias ? std::nullopt : offer_private_key(target);
@@ -314,6 +319,7 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
   first_to_answer_ = true;
   private_peer_.clear();
   status_["last_call_failure"] = nullptr;
+
   // TS 33.180 clause 7.2.4.2: no key material in the request; the PCK arrives in the answer
   // from one of the invitees (any user, when a functional alias chooses).
   local_.key_mgmt.clear();
@@ -405,6 +411,7 @@ void Client::ambient_call(const std::string &arguments) {
       {{"Priv-Answer-Mode", "Auto"}}); // step 14
   bind_private_key(key, true);
   ambient_->dialog = dialog_;
+
   // TS 24.379 clause 11.1.6.2.0: only the listening user sees the call being set up.
   status_["call_state"] = listening ? "calling" : "idle";
   event("ambient_call_requested", {{"type", type}, {"target", target}});

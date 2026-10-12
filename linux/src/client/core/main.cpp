@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // mcx-client: the process entry point of the OpenMCX MC client (MCX Admin activation, control commands, run).
 //
 // Specifications: none cited (the procedures are in the Client member files).

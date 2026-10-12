@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 """End-to-end check of the dispatcher on a running lab (see prepare.py).
 
 Drives the dispatcher only through its web API, as the browser does, and checks the

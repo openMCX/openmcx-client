@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCVideo sessions: regroups, ad hoc, ambient viewing and group calls, invitations, conference event package,
 // transmission control and video media (TS 24.281 clauses 9.2, 15.2, 21, 22; TS 24.581 clause 6.2). Member functions
 // of Client (declared in client.hpp).
@@ -159,6 +163,7 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
   mcvideo_call_ = new_mcvideo_call();
   const McvideoCallSetup setup{mcvideo_call_};
   auto &call = *mcvideo_call_;
+
   // A prearranged call to another group than the selected one, such as a regroup's
   // temporary group identity (TS 24.281 clause 21.2.1.3), names it in target_group.
   call.group = !chat_group.empty() ? chat_group : !target_group.empty() ? target_group : mcvideo_group();
@@ -176,6 +181,7 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
   info.client_id = client_id();
   // TS 24.281 clauses 9.2.1.2.1.1 and 9.2.2.2.1.1: the activated functional alias this user presents.
   info.functional_alias = mcvideo_presented_alias();
+
   // TS 24.281 clause 9.2.1.2.1.1 step 14 d) i): a call on a group regroup names, in <associated-group-id>, the
   // constituent group it is placed from: this user's own group if it is one of them, else the first.
   if (mcvideo_regroups_.contains(call.group)) {
@@ -251,6 +257,7 @@ SipResponse Client::mcvideo_answer_invite(const SipMessage &message, const Mcptt
     return response;
   }
   auto answer = mcvideo_call_->local;
+
   // TS 24.281 clause 4.7.1: protected media only with the matching key: the GMK in a group call.
   if (message.remote_media->protected_media)
     if (auto refused = mcvideo_accept_protection(message, info, answer)) return *refused;
@@ -258,6 +265,7 @@ SipResponse Client::mcvideo_answer_invite(const SipMessage &message, const Mcptt
     answer.control = MediaControl::none; // TS 24.281 clause 10.2.3.1
   answer.floor_priority = message.remote_media->floor_priority;
   answer.queueing = message.remote_media->queueing && mcvideo_call_->local.queueing;
+
   // RFC 3264 section 6.1: a sendonly offer is answered recvonly and a recvonly one sendonly
   // (the server's offers to the two parties of an ambient viewing call).
   if (message.remote_media->direction == "sendonly")
@@ -273,6 +281,7 @@ SipResponse Client::mcvideo_answer_invite(const SipMessage &message, const Mcptt
   mcvideo_call_->local = answer;
   response.status_code = 200;
   response.local_media = answer;
+
   // TS 24.281 clause 6.2.3: a private call rings unless automatic commencement applies (Priv-Answer-Mode
   // Auto forces it; Answer-Mode Manual, or mcvideo.answer_mode manual, asks the user).
   const bool forced = get_header(message.headers, "Priv-Answer-Mode") == "Auto";
@@ -305,6 +314,7 @@ void Client::mcvideo_adopt_invited_call(const SipMessage &message, const McpttIn
   // The caller's functional alias and the alias this user was called by (TS 24.281 clause 10.2.2.2.2).
   mcvideo_call_->calling_alias = info.functional_alias;
   mcvideo_call_->called_alias = info.called_functional_alias;
+
   // TS 24.281 clause 22.2.2.1.2: an invitation to an ad hoc group call names its group in <mcvideo-calling-group-id>.
   if (info.session_type == "adhoc") mcvideo_call_->type = "adhoc";
   if (one_to_one_video(info.session_type)) {
@@ -707,6 +717,7 @@ void Client::mcvideo_video_packet(const Datagram &datagram) {
   const auto packet = decode_rtp(
       call.local.protected_media ? mcvideo_protection_.unprotect_media(datagram.bytes, sender) : datagram.bytes);
   if (packet.payload_type != call.local.video->payload_type) throw std::runtime_error("unexpected video payload type");
+
   // A new transmitting user is a new stream (TS 24.581 clause 9.2.5: its own SSRC, and its
   // own sequence numbers): start reassembling and decoding afresh.
   if (packet.ssrc != call.received_ssrc) {

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCData client: incoming SIP MESSAGE requests (SDS, notifications, FD, emergency and in-progress state
 // notifications), the MCData user commands and the MCData status (member functions of Client).
 //
@@ -288,6 +292,7 @@ SipResponse Client::mcdata_sds_received(const std::vector<BodyPart> &parts, cons
   SipResponse response;
   response.status_code = 200;
   const auto sds = mcdata::decode_sds_signalling(signalling.body);
+
   // TS 24.282 clause 9.2.2.2.2 step 3 and clause 6.6.3.2: a PCK sent with the message, then the
   // protected DATA PAYLOAD (bit 7 of its message type) decrypted end to end.
   std::string data_body = data.body;

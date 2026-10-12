@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // SEAL location management client: location reporting configuration, periodic reports and history reports
 // (TS 24.545 clauses 6.2.2, 6.2.20). Member functions of Client (declared in client.hpp).
 //

@@ -1,3 +1,7 @@
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 # Android build environment: Temurin JDK 17, Android SDK platform 37.0, build-tools 37.0.0 (and 36.0.0, the AGP default).
 FROM eclipse-temurin:17-jdk
 ENV ANDROID_HOME=/opt/android-sdk ANDROID_SDK_ROOT=/opt/android-sdk

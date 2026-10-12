@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 # Run the Gradle wrapper inside the Android build image; nothing is installed on the host.
 # Usage: tools/gradle-docker.sh :core:test :app:assembleDebug ...
 # The Gradle cache lives in the Docker volume mcx-android-gradle. The host debug keystore,

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCVideo ad hoc group emergency alert (TS 24.281 clause 12.1A.1), location procedures (clause 18.3) and area
 // notices (clauses 11.2.1.4, 11.2.1.5). Member functions of Client (declared in client.hpp).
 //

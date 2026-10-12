@@ -1,3 +1,7 @@
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 # The MC client image (openmcx-client): one build stage on the development image, then a slim Ubuntu image with
 # only the client's run-time packages and the client stripped of its debug information (the same -O2 machine code),
 # plus curl and Python for the lab's health checks. Build with tools/build-image, which stages this repository under

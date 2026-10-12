@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Functional aliases: the MCPTT client's functional alias status change (activation, takeover, deactivation) and the
 // determination of its own functional alias status.
 //
@@ -29,6 +33,7 @@ void Client::functional_alias_command(const std::string &arguments) {
   if ((action != "activate" && action != "takeover" && action != "deactivate") || aliases.empty() || !authorized_)
     throw std::runtime_error("usage: fa activate|takeover|deactivate <alias>...");
   if (action == "takeover") require_profile({"allow-takeover-functional-alias-other-user"});
+
   // TS 24.379 clause 9A.2.1.1: the status determination for the user before the status change.
   if (!alias_status_answered_) {
     pending_alias_commands_.push_back(arguments);

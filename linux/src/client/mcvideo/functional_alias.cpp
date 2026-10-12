@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCVideo functional aliases: activation, deactivation, take-over and status subscription (TS 24.281 clause 20.2.1).
 // Member functions of Client (declared in client.hpp).
 //

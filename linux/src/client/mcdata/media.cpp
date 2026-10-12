@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCData communications over the media plane, originating MCData client side: standalone SDS, SDS sessions (with
 // their emergency and imminent peril priority) and FD over MSRP (member functions of Client).
 //
@@ -100,11 +104,13 @@ void Client::mcdata_open_session(const std::string &target, bool group, const st
   if (!mcdata_authorized_) throw std::runtime_error("an SDS session requires MCData service authorisation");
   if (mcdata_media_) throw std::runtime_error("an MCData media plane session is already open");
   const bool emergency = priority == "emergency", imminent = priority == "imminent";
+
   // TS 24.282 clause 24.2.2.1.1: target "adhoc=<ad hoc group>" opens an ad hoc group SDS session.
   const bool adhoc = target.starts_with("adhoc=");
   if (adhoc && (emergency || imminent))
     throw std::runtime_error("ad hoc group emergency and imminent peril communications are not implemented");
   if (imminent && !group) throw std::runtime_error("imminent peril applies to group communications");
+
   // TS 24.282 clause 6.2.8.3.1.1 for a one-to-one communication, clause 6.2.8.1.8 for a group one.
   if (emergency) require_mcdata_profile({group ? "allow-emergency-group-call" : "allow-emergency-private-call"});
   if (imminent) require_mcdata_profile({"allow-imminent-peril-call"});
@@ -128,6 +134,7 @@ void Client::mcdata_open_session(const std::string &target, bool group, const st
     parts.push_back({mcdata::location_mime, emergency_location_xml(mcdata_emergency_location(), true)});
   }
   auto headers = mcdata_media_headers();
+
   // TS 24.282 clauses 6.2.8.3.3, 6.2.8.1.2 and 6.2.8.1.12: the priority of the request.
   if (emergency || imminent)
     for (const auto &header : mcdata_priority_headers(imminent ? "imminent_peril" : "emergency"))
@@ -270,6 +277,7 @@ void Client::mcdata_session_priority(bool emergency, bool enable) {
     mcdata_emergency_ = true;
   }
   auto headers = mcdata_media_headers();
+
   // TS 24.282 clause 6.2.8.3.3: the emergency priority applies while the condition is requested or granted.
   for (const auto &header : mcdata_priority_headers()) headers.push_back(header);
   const bool emergency_request = enable;
@@ -341,6 +349,7 @@ void Client::mcdata_group_priority(bool emergency, bool enable) {
     }
   }
   auto headers = mcdata_media_headers();
+
   // TS 24.282 clauses 6.2.8.1.2 and 6.2.8.1.12: a cancellation carries the normal priority.
   const char *level = !enable ? "normal" : emergency ? "emergency" : "imminent_peril";
   for (const auto &header : mcdata_priority_headers(level)) headers.push_back(header);
@@ -425,6 +434,7 @@ void Client::mcdata_send_file_media(const std::string &target, bool group, const
   MsrpMedia protection;
   mcdata_media_protect(protection, target, group, adhoc);
   const auto plain_bytes = contents.size();
+
   // RFC 5547: the size and hash selectors describe what is transferred, which for a
   // protected file is its series of Protected Payload messages.
   if (mcdata_media_key_) contents = mcdata_seal_file(contents, *mcdata_media_key_);

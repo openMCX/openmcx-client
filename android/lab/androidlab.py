@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 """Create and run an Android test lab: the OpenMCX servers of an openmcx-server checkout with
 redroid containers as the MC UEs, each running the Android client.
 
@@ -227,8 +231,8 @@ def create(args) -> None:
         # client-a may request and configure others' location, client-b shares its location with everyone.
         command.append("--location")
     if args.functional_alias:
-        # Functional aliases (TS 24.379 clause 9A): "dispatcher" for client-a and client-b (one activation, client-b may
-        # take it over), "medic" for client-c and client-d, "reserve" for client-a.
+        # Functional aliases (TS 24.379 clause 9A): "duty-officer" for client-a and client-b (one activation, client-b may
+        # take it over), "patrol-car-12" for client-c and client-d, "incident-commander" for client-a.
         # With the private call policy, as the regression's functional-alias lab: calls to an alias are private calls.
         command += ["--functional-alias"] + ([] if args.priority else ["--private-call"])
     if args.priority:
@@ -740,7 +744,7 @@ def main() -> None:
     c.add_argument("--floor-queue", action="store_true",
                    help="queued floor requests: the server queues a request while the floor is taken (scenario S18)")
     c.add_argument("--functional-alias", action="store_true",
-                   help="functional aliases (TS 24.379 clause 9A): dispatcher (client-a, client-b), medic, reserve")
+                   help="functional aliases (TS 24.379 clause 9A): duty-officer (client-a, client-b), patrol-car-12, incident-commander")
     c.add_argument("--priority", action="store_true",
                    help="emergency and imminent peril, and the MCPTT emergency alert (the group priority policy)")
     c.add_argument("--protected", action="store_true",

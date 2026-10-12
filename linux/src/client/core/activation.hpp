@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCX Admin activation of the client's configuration from a one-time activation URL (OpenMCX, not 3GPP):
 // the declarations of activation.cpp.
 //

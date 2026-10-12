@@ -48,6 +48,13 @@ The [dispatcher](../dispatcher) uses the client as its engine, through settings 
 `media.live` (live audio over UDP), `sip.register_expires`, `mcptt.group_from_profile` and `oauth.forget_password`.
 Without them the client behaves as a plain client.
 
+### Debug log
+
+Off by default. `"log_level": "debug"` in the client's configuration, or the environment variable `MCX_LOG=debug`,
+writes a line on stderr per SIP message sent and received, starting with the date, time and `OpenMCX DEBUG [client]`
+(`SIP <-` or `SIP ->`, method or status, From, To, Call-ID, CSeq, peer; never the body). The JSON events on stdout are unchanged. See the server's [using the lab](https://github.com/openMCX/openmcx-server/blob/main/docs/USAGE.md#7-troubleshooting-logs-and-readable-sip),
+which also describes the SIP core's TLS key file, a separate switch.
+
 ## Layout
 
 | Path | Contents |

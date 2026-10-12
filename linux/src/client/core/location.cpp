@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Location procedures of the MCPTT and MCData clients (TS 24.379 clauses 12.1.1.4, 12.1.1.6, 13.3;
 // TS 24.282 clauses 16.2.1.4, 16.2.1.5, 17.3). Member functions of Client (declared in client.hpp).
 //
@@ -46,6 +50,7 @@ std::optional<SipResponse> Client::location_incoming(const SipMessage &message) 
                                                               : message.parts;
   SipResponse response;
   response.status_code = 200;
+
   // TS 24.379 clauses 12.1.1.4 and 12.1.1.6: area entry and exit notifications.
   if (const auto info_part = std::find_if(parts.begin(), parts.end(),
                                           [](const BodyPart &part) { return part.content_type == mcptt_mime; });

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCData IP connectivity, MCData client side: session control and the GRE-in-UDP tunnel (member functions of Client).
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.582 V19.0.0 (Rel-19), RFC 8086 (GRE-in-UDP),
@@ -152,6 +156,7 @@ SipResponse Client::ipcon_incoming(const SipMessage &request, const mcdata::Info
   }
   ipcon_bind();
   ipcon_dialog_ = request.dialog_id;
+
   // TS 24.282 clause 20.2.2 steps 3 to 3B: who is calling, and under which functional aliases.
   ipcon_result_ = {{"from", info.calling_user},
                    {"state", "open"},

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 package org.openmcx.client.media
 
 /** What the camera sends: size, rate and target bitrate of the H.264 stream. */

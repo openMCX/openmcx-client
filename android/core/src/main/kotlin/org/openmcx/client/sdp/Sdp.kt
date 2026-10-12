@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 package org.openmcx.client.sdp
 
 /** One media description (RFC 8866 §5.14) with its connection and attributes. */

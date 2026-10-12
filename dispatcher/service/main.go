@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Command dispatcher is the OpenMCX dispatcher position: a web service that runs the MCX
 // client engine (mcx-client) as a child process and gives a browser its calls, push to
 // talk with live voice, short data (SDS) and file distribution (FD). It reuses what the

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Live audio for the dispatcher position (OpenMCX, not 3GPP; media.live, off unless configured): the dispatcher's
 // web service sends the operator's microphone as 16 kHz 16-bit little-endian mono PCM to a local UDP port, which
 // "ptt live" transmits as the user's speech (TS 24.380 clause 6.2.4.3.5) once the floor is granted; and every

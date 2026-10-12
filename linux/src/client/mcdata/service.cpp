@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCData service authorisation, affiliation, enhanced status and standalone SDS over the signalling control plane,
 // MCData client side (member functions of Client).
 //
@@ -156,6 +160,7 @@ SipResponse Client::mcdata_affiliation_notify(const SipMessage &request) {
   const bool terminated = get_header(request.headers, "Subscription-State").starts_with("terminated");
   const auto body = request.parts.empty() ? request.body : request.parts.front().body;
   const auto affiliation = parse_affiliation(body);
+
   // An empty status has no <affiliation> element to show its namespace.
   if (!affiliation.mcdata && !affiliation.groups.empty())
     throw std::runtime_error("MCData affiliation NOTIFY without the MCData namespace");
@@ -197,6 +202,7 @@ void Client::mcdata_affiliate(bool affiliate) {
   mcdata::Info info;
   info.request_uri = mcdata_user();
   info.client_id = client_id();
+
   // A user may belong to no MCData group (an account activated without one): an empty configured group is not
   // affiliated (TS 24.282 clause 8.2.2: every <affiliation> names a group), and with no group at all nothing is
   // published.
@@ -209,6 +215,7 @@ void Client::mcdata_affiliate(bool affiliate) {
   std::vector<SipHeader> headers{{"Expires", affiliate ? "4294967295" : "0"}};
   const bool refresh = !mcdata_affiliation_etag_.empty();
   if (refresh) headers.push_back({"SIP-If-Match", mcdata_affiliation_etag_});
+
   // TS 24.282 clause 8.2.2 steps 4 and 5: de-affiliation from every group is Expires 0 without a PIDF body.
   std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
   if (affiliate) parts.push_back({"application/pidf+xml", affiliation_xml(affiliation, false)});
@@ -318,6 +325,7 @@ void Client::mcdata_send_sds(const SdsRequest &request) {
     info.call_to_functional_alias = true; // TS 24.282 clause 9.2.2.2.1 step 2b ii A
   }
   info.called_functional_alias = request.called_alias;
+
   // TS 24.282 clause 9.2.2.2.1 steps 2b ii B and 3b v A: present an alias only while it is active for this user.
   if (!mcdata_alias_in_use_.empty() && mcdata_aliases_active_.contains(mcdata_alias_in_use_))
     info.functional_alias = mcdata_alias_in_use_;

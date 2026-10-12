@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 # Build the mcx-client image from this repository and an openmcx-server checkout.
 #
 #   tools/build-image [-t openmcx-client:0.1] [--server ../../openmcx-server]

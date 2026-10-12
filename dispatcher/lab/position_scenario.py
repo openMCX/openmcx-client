@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 """M3: the dispatcher position bound to MCX Admin, on a running MCX Admin lab (prepare.py --position).
 
   python3 ../openmcx-server/tools/prepare-prearranged-test.py --directory <lab> --project m3 --admin \

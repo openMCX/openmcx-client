@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // The OpenMCX MC client (mcx-client): an MCPTT client (TS 24.379) with its floor participant
 // (TS 24.380), and as configured an MCData client (TS 24.282, TS 24.582) and an MCVideo client
 // (TS 24.281, TS 24.581), their key management and protection (TS 33.180), location reporting
@@ -81,6 +85,7 @@ inline SipConfig client_sip_config(const Json &cfg, bool disable_tls) {
   }
   // TS 24.281 clause 7.2.1AA: a client that also uses MCVideo registers its tag and ICSI.
   if (cfg.contains("mcvideo")) config.other_services.push_back(&mcvideo_service);
+
   // sip.outbound: RFC 5626, the SIP core reaches this client over its registration's connection, its instance being
   // the MC client ID (TS 24.379 clause 4.10), as the Android client does (a client behind NAT, or on the server's
   // computer). Off by default: a plain Contact the core connects to.

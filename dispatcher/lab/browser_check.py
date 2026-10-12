@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 """Browser check of the dispatcher UI on a running lab (see prepare.py), in Chromium with
 its fake microphone. Run it in the Playwright image with the host network, for example:
   docker run --rm --network host -v <lab>:/lab -v $PWD:/check -w /check \

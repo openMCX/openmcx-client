@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCData communications over the media plane, terminating MCData client side: incoming standalone SDS, SDS session
 // and FD invitations, received MSRP content, and the MSRP transfer loop (member functions of Client).
 //
@@ -299,6 +303,7 @@ void Client::mcdata_media_close(const std::vector<SipHeader> &bye_headers) {
   mcdata_media_key_.reset();
   mcdata_media_peer_.clear();
   mdepc_ = 1;
+
   // TS 24.282 clause 6.2.8.1.17: releasing the communication returns the communication states, and
   // a request that was still pending; the in-progress state of the group itself
   // lasts until it is cancelled, so MDEG 2 and MDIG 2 are left alone.

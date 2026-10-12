@@ -1,3 +1,7 @@
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 """Basic executable contract of mcx-client; the openmcx-server lab scenarios supply behavioural coverage.
 
 tests/test_binary.py [path/to/mcx-client]     (default: build/mcx-client)

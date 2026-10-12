@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // The control commands of the client: its own test and dispatcher interface, each starting an MCPTT procedure or
 // handing the command to the MCData, MCVideo, location, group management or private call service commands.
 //
@@ -230,6 +234,7 @@ void Client::select_group(const std::string &cmd) {
   // TS 24.379 clause 16.1: a regroup this client has been told about is used at once, with the
   // configuration of its preconfigured group; it has no document of its own.
   const bool regroup = regroups_.contains(selected);
+
   // TS 24.379 clause 10.1.1.2.1.1 step 14d (clause 10.1.2.2.1.1 step 13d for a chat group): a call on a group
   // regroup names the constituent group it is placed from, which is the group this client was using before it
   // moved to the regroup.
@@ -240,6 +245,7 @@ void Client::select_group(const std::string &cmd) {
     calling_constituent_.clear();
   }
   if (from) calling_constituent_ = *from;
+
   // The configured groups (mcptt.allowed_groups) and those of the user profile (TS 24.484 clause 8.3.2).
   const auto allowed = cfg_.at("mcptt").value("allowed_groups", std::vector<std::string>{group()});
   if (!regroup && std::find(allowed.begin(), allowed.end(), selected) == allowed.end() &&
@@ -310,11 +316,13 @@ void Client::group_call_command(const std::string &cmd) {
       !dialog_.empty())
     throw std::runtime_error("call requires affiliation and idle state");
   McpttInfo info;
+
   // TS 24.379 clause 10.1.2.2.1.1: initiating and joining a chat group call use the
   // same INVITE with session-type "chat"; the server never invites members.
   info.session_type = chat ? "chat" : "prearranged";
   info.request_uri = group();
   info.client_id = client_id();
+
   // TS 24.379 clause 10.1.1.2.1.1 step 14d and clause 10.1.2.2.1.1 step 13d: the constituent group this call on a
   // regroup is placed from, in <associated-group-id>; the function of that group passes it on to the controlling
   // function in <mcptt-calling-group-id>.
@@ -326,6 +334,7 @@ void Client::group_call_command(const std::string &cmd) {
     info.alert = false;
   }
   if (imminent && !info.emergency) info.imminent_peril = true;
+
   // TS 24.379 clause 6.2.8.2: <broadcast-ind> true on an on-demand prearranged call,
   // optionally an emergency or imminent-peril one (local policy).
   if (broadcast) info.broadcast = true;

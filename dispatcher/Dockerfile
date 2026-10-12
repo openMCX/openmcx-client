@@ -1,3 +1,7 @@
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 # The OpenMCX dispatcher position: the MCX client engine (the openmcx-client image built from ../linux with
 # tools/build-image) plus the dispatcher web service.
 #   docker build -t openmcx-dispatcher:<tag> --build-arg CLIENT_IMAGE=openmcx-client:<tag> dispatcher

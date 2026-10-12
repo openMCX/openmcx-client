@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Private call services of the MCPTT client: call-back, remotely initiated private and group calls, private call
 // transfer (announced and unannounced) and forwarding, requesting and handling side.
 //
@@ -39,6 +43,7 @@ void Client::report_followup(bool success) {
   next_call_priority_.clear();
   const auto followup = *followup_;
   service_outcomes_[followup.kind] = success ? "success" : "fail";
+
   // TS 24.379 clause 11.1.8.2.2: a failed transfer leaves the transferred user in its call with the requester.
   if (followup.kind == "transfer" && !success && transfer_kept_ && held_) {
     if (!dialog_.empty()) sip_.bye(dialog_);

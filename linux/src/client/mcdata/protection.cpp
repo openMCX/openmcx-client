@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // MCData payload, signalling and XML protection, MCData client side: PCK, GMK and CSK protected payloads, payload
 // authentication and XML confidentiality (member functions of Client).
 //

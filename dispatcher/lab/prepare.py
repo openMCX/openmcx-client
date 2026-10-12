@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
 """Turns a client of a prepared OpenMCX lab into a dispatcher position.
 
 Lab mode (default): client-c becomes the dispatcher. Prepare the lab first with openmcx-server's

@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 // Incoming SIP requests in the clear: notifications, messages, INFO and the terminating group, private, first-to-answer,
 // ambient listening and ad hoc group calls of the MCPTT client, with the hand-over to MCData and MCVideo.
 //
@@ -308,6 +312,7 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
   if (mcvideo_enabled() && !message.dialog_id.empty() && message.dialog_id == mcvideo_key_subscription_)
     return mcvideo_key_notify(message);
   if (get_header(message.headers, "Event") == "xcap-diff") return group_key_notify(message);
+
   // The MCVideo call's own conference subscription (TS 24.281 clause 9.2.3).
   if (mcvideo_call_ && !message.dialog_id.empty() && message.dialog_id == mcvideo_call_->conference_subscription)
     return mcvideo_conference_notify(message);
@@ -322,6 +327,7 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
   // TS 24.379 clause 9A.2.1.3: this user's functional alias status.
   if (!message.dialog_id.empty() && message.dialog_id == alias_status_dialog_) return alias_status_notify(message);
   if (get_header(message.headers, "Event") == "conference") return conference_notify(message);
+
   // TS 24.282 clause 22.2.1.3: this user's MCData functional alias status.
   if (mcdata_enabled() && !message.dialog_id.empty() && message.dialog_id == mcdata_alias_dialog_)
     return mcdata_alias_notify(message);
@@ -365,6 +371,7 @@ SipResponse Client::group_key_notify(const SipMessage &message) {
   auto document = keying::parse_gktp_xcap_diff(message.body, group(), xcap_root());
   auto key = keys_->open_group(gms_identity(), group(), document);
   protection_.set_group(key);
+
   // The GMK also protects MCData payloads for its MC group IDs (TS 33.180 clause 8.4).
   group_keys_[key.csb_id] = key;
   while (group_keys_.size() > 16) group_keys_.erase(group_keys_.begin());
@@ -588,6 +595,7 @@ SipResponse Client::incoming_group(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
   auto info = message_info(message);
+
   // TS 24.379 clause 16.2.1.3 step 4 (clause 16.3.1.3 for a user regroup): a client told of a regroup is
   // affiliated with it and takes its calls without selecting it first.
   const bool via_regroup = regroups_.contains(info.calling_group) && info.calling_group != group();
@@ -723,6 +731,7 @@ SipResponse Client::incoming_private(const SipMessage &message, const McpttInfo 
   response.local_media = local_;
   name_transfer_dialog(response, message, info);
   remember_session(message.headers);
+
   // RFC 3891: the call replacing the current one is accepted without alerting.
   const bool manual =
       !replacing && (priv == "Manual" ||
@@ -808,6 +817,7 @@ SipResponse Client::incoming_ambient(const SipMessage &message, const McpttInfo 
   }
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
   check_remote(*message.remote_media, true);
+
   // TS 33.180 clause 7.2.5: an ambient listening call is protected as a private call.
   std::optional<keying::KeyMessage> key;
   if (protected_media()) {
@@ -844,6 +854,7 @@ SipResponse Client::incoming_ambient(const SipMessage &message, const McpttInfo 
   call_type_ = "ambient";
   bind_private_key(key, false);
   private_peer_ = info.calling_user;
+
   // Steps 7 to 9: cache the role and type; the annex D.3 indication decides whether we may release.
   ambient_ =
       AmbientCall{message.dialog_id,

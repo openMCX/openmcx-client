@@ -1,3 +1,7 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
 package org.openmcx.client.media
 
 /** Encodes 20 ms of 16 kHz mono PCM ([AmrWb.FRAME_SAMPLES] samples) into one AMR-WB frame. */
