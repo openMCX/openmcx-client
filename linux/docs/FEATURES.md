@@ -42,7 +42,7 @@ has it: the lab scenarios run each server feature through this client.
   user, ad hoc group emergency alerts
 - Call-back, call transfer and call forwarding
 - Functional aliases (activation, takeover, calls to an alias); regroups and temporary groups
-- Pre-established sessions
+- Pre-established sessions: not in present edition (the `pre-establish` test aid checks the server's refusal)
 - Location reporting and requests, emergency alert areas and group geographic areas, SEAL location reporting
   (TS 24.545)
 - End-to-end protection: media and floor control (GMK, PCK), XML signalling confidentiality and integrity

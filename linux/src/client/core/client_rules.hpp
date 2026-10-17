@@ -172,8 +172,9 @@ inline std::size_t audio_overflow(std::size_t size, std::size_t limit, std::size
 // and they leave whether and when to try again to the client. A refusal that can be transient is retried: 403 (the
 // server cannot authorise the user yet, for example while its user database reloads the profile after a restart),
 // 408 (no response: the transaction timed out), 477 and 478 (the SIP core could not reach the server, for example
-// while it restarts: sending to the next hop failed, its address did not resolve), 480 and 500, and 503 (also a
-// transport failure). The delay grows
+// while it restarts: sending to the next hop failed, its address did not resolve), 480, 486 (clause 7.3.3 steps 3a
+// and 3b: the user is authorised on another client, which may log off or whose authorisation may end, for example a
+// phone that died) and 500, and 503 (also a transport failure). The delay grows
 // 5 s, 10 s, 20 s, then stays at 60 s; RFC 3261 section 20.33: a Retry-After in a 500 or 503 gives the delay instead
 // (bounded to 1 s to 10 minutes). attempt counts the retries already made (0 before the first).
 inline std::optional<std::uint64_t> authorization_retry_delay_ms(int status, unsigned attempt,
@@ -184,6 +185,7 @@ inline std::optional<std::uint64_t> authorization_retry_delay_ms(int status, uns
   case 477:
   case 478:
   case 480:
+  case 486:
   case 500:
   case 503: break;
   default: return std::nullopt;

@@ -360,6 +360,19 @@ void Client::run() {
         return protect_incoming(transmission, std::move(parts));
       });
   sip_.start();
+  register_and_authorize();
+  while (!stopping) run_once();
+  release();
+  if (!dialog_.empty()) sip_.bye(dialog_);
+  for (int index = 0; index < 20; index++) sip_.poll(std::chrono::milliseconds(10));
+  save_audio();
+  sip_.stop();
+}
+
+//------------------------------------------------------------------------------
+// RFC 3261 section 10.2: the SIP registration (TS 24.379 clause 7.2.1AA: with the feature tags of the client's
+// services), then the service authorisation (TS 24.379 clause 7.2.2), at start-up and at log-on.
+void Client::register_and_authorize() {
   sip_.register_account(register_expires(), [this](const SipResponse &response) {
     if (response.status_code < 200) return;
     if (response.status_code != 200) {
@@ -370,12 +383,6 @@ void Client::run() {
     event("sip_registered");
     schedule([this] { authorize(); });
   });
-  while (!stopping) run_once();
-  release();
-  if (!dialog_.empty()) sip_.bye(dialog_);
-  for (int index = 0; index < 20; index++) sip_.poll(std::chrono::milliseconds(10));
-  save_audio();
-  sip_.stop();
 }
 
 //------------------------------------------------------------------------------

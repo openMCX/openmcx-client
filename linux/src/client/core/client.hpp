@@ -433,6 +433,16 @@ class Client {
 
   void authorize();
 
+  // Log-off and log-on (core/log_off.cpp): TS 24.379, TS 24.281 and TS 24.282 clause 7.2.1A step 4 (Expires 0), and
+  // the return to service. logged_off_: after "log-off", until "log-on"; nothing authorises a service meanwhile.
+  bool logged_off_ = false;
+  void log_off_command();
+  void end_service_subscriptions();
+  void finish_log_off();
+  void log_on_command();
+  // RFC 3261 section 10.2 and TS 24.379 clause 7.2.2: SIP registration, then the service authorisation.
+  void register_and_authorize();
+
   // TS 24.379, TS 24.282 and TS 24.281 clause 7.2.2: the retries of a refused initial service authorisation of one
   // service. attempts counts the retries since the last success; generation changes with every authorisation
   // PUBLISH, so that a retry scheduled for an older one is dropped.

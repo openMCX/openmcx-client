@@ -68,7 +68,7 @@ bool Client::retry_authorization(AuthorizationRetry &retry, const std::string &s
                                  const SipResponse &response, std::function<void()> again) {
   const auto delay = client_rules::authorization_retry_delay_ms(response.status_code, retry.attempts,
                                                                 get_header(response.headers, "Retry-After"));
-  if (!delay || stopping) return false;
+  if (!delay || stopping || logged_off_) return false;
   ++retry.attempts;
   event(
       "service_authorization_retry",
@@ -137,6 +137,7 @@ std::pair<std::string, std::string> Client::affiliation_subscribe_body() {
 // 5.4); on 200 (OK) start MCData and MCVideo authorisation, the configuration subscription and the affiliation
 // status subscription (clause 9.2.1.3), then the group key subscription.
 void Client::authorize() {
+  if (logged_off_) return;
   if (keys_) {
     auto [key, upload] = keys_->make_csk(service());
     protection_.set_floor(key);

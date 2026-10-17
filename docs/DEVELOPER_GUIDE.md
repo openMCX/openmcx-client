@@ -246,10 +246,19 @@ duration and `tick` re-subscribes in the dialog (`refresh_affiliation_subscripti
 half-way through a shorter one. A refused refresh is replaced by a new subscription; the affiliations and any call are
 kept. The `refresh-affiliation` command triggers a refresh at once (a test aid). A 4xx–6xx answer to the authorisation PUBLISH ends the authorisation, the affiliations and any call
 (`authorization_lost`); after a 412 the client discards the entity-tags and publishes anew (RFC 3903 section 5). A
-refused initial authorisation that can be transient (403, 408, 480, 500, 503) is published again after 5, 10 and 20 s,
-then every 60 s, or after the Retry-After of a 500 or 503 (`retry_authorization`, the delays in
+refused initial authorisation that can be transient (403, 408, 480, 486, 500, 503) is published again after 5, 10 and
+20 s, then every 60 s, or after the Retry-After of a 500 or 503 (`retry_authorization`, the delays in
 `client_rules::authorization_retry_delay_ms`); each retry is reported by a `service_authorization_retry` event, and a
-retry is dropped when another authorisation PUBLISH went out meanwhile.
+retry is dropped when another authorisation PUBLISH went out meanwhile. A 486 (warning 164, 166 or 228) means the user
+is authorised on another client: the retry succeeds once that one logs off or its authorisation ends.
+
+The `log-off` command (`core/log_off.cpp`) logs off every MC service the client is authorised for (TS 24.379, TS 24.281
+and TS 24.282 clause 7.2.1A step 4): it ends the call and the subscriptions held with the authorisations (SUBSCRIBE with
+Expires 0), sends each server a poc-settings PUBLISH with Expires 0, the entity tag in SIP-If-Match and no body (RFC
+3903 section 4.5), and when all have answered deletes the dynamic keys (CSKs, PCKs and the keys derived from them and
+the GMKs; TS 33.180) and de-registers (`SipEngine::unregister_account`). The tokens and KMS key material stay; nothing
+authorises a service again until `log-on`, which registers again and authorises with new CSKs. The status file shows
+`logged_off`, the servers' answers in `log_off` and the de-REGISTER's in `deregistered`.
 
 ### 2.4 Incoming request pipeline
 

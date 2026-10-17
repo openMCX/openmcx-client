@@ -45,7 +45,7 @@ void Client::mcdata_request(const std::string &event_name, std::vector<BodyPart>
 //------------------------------------------------------------------------------
 // TS 24.282 clause 7.2.2: service authorisation and MCData service settings by PUBLISH.
 void Client::mcdata_authorize() {
-  if (!mcdata_enabled() || token_.empty()) return;
+  if (!mcdata_enabled() || token_.empty() || logged_off_) return;
   mcdata::Info info;
   info.access_token = token_;
   info.client_id = client_id();

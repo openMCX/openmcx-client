@@ -50,6 +50,7 @@ void Client::command(const std::string &cmd) {
 //   hangup: release the call (clause 10.1.1.2.3.1, clause 11.1.3.1.1.1, ambient clause 11.1.6.2.1.3);
 //   affiliate, deaffiliate: affiliation status change (clause 9.2.1.2);
 //   options <SIP URI>: reachability probe (RFC 3261 section 11);
+//   log-off, log-on: log off every MC service (clause 7.2.1A step 4 and NOTE 3) and de-register, then back;
 //   quit; the other words go to the private call service, ad hoc, functional alias, MCData, MCVideo, SEAL, location,
 //   profile and group management commands.
 void Client::run_command(const std::string &cmd) {
@@ -161,6 +162,10 @@ void Client::run_command(const std::string &cmd) {
     mcvideo_command(cmd);
   } else if (cmd.starts_with("options ")) {
     options_command(cmd);
+  } else if (cmd == "log-off") {
+    log_off_command();
+  } else if (cmd == "log-on") {
+    log_on_command();
   } else if (cmd == "quit")
     stopping = 1;
   else

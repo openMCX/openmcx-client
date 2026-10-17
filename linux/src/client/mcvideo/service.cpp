@@ -124,7 +124,7 @@ void Client::mcvideo_result(const std::string &action, const SipResponse &respon
 // TS 24.281 clause 7.2.2: service authorisation and MCVideo service settings by PUBLISH; token replaces the access
 // token (a test aid for the 101 refusal of TS 24.281 clause 7.3.3 step 6).
 void Client::mcvideo_authorize(const std::string &token) {
-  if (!mcvideo_enabled() || token_.empty()) return;
+  if (!mcvideo_enabled() || token_.empty() || logged_off_) return;
   McpttInfo info;
   info.access_token = token.empty() ? token_ : token;
   info.client_id = client_id();

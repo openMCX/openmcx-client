@@ -143,6 +143,7 @@ void test_authorization_retry() {
   check(authorization_retry_delay_ms(403, 3) == 60000u, "then every 60 s");
   check(authorization_retry_delay_ms(408, 50) == 60000u, "a timed-out transaction is retried, at most every 60 s");
   check(authorization_retry_delay_ms(480, 0) == 5000u, "a 480 is retried");
+  check(authorization_retry_delay_ms(486, 3) == 60000u, "a 486 (another client authorised) is retried");
   check(authorization_retry_delay_ms(503, 0, "30") == 30000u, "a 503 honours Retry-After");
   check(authorization_retry_delay_ms(500, 4, " 2 (busy)") == 2000u, "a 500 honours Retry-After with a comment");
   check(authorization_retry_delay_ms(503, 0, "0") == 1000u, "a Retry-After of 0 waits 1 s");

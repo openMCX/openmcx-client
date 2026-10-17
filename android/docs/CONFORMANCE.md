@@ -41,6 +41,7 @@ the published specifications and not re-checked against a local copy; they are m
 | Private call, terminating: commencement mode from Priv-Answer-Mode, Answer-Mode or the local setting; 180, then 200 or 480 with warning 110 | TS 24.379 §11.1.1.2.1.2, §6.2.3 | `McpttService.incoming` | S2, S3 |
 | Prearranged group call, originating and terminating | TS 24.379 §10.1.1.2.1 | `McpttService` | S4 |
 | Ad hoc group call; the group identity comes from `mcptt-calling-group-id` | TS 24.379 §17.2.2.1 | `McpttService` | S5 |
+| Emergency and imminent-peril group and private calls: the indications in mcptt-info, and the call state the server announces by re-INVITE | TS 24.379 §6.2.8.1, §10.1.1.2.1, §11.1.1.2.1 | `McpttService.originate`, `McpttService.setPriority` | `lab/androidlab.py --priority` |
 | Release: BYE (with Reason for ad hoc), or CANCEL before the answer | TS 24.379 §6.2.4, §17.2.3.1.1 | `McpttService.hangup` | S2–S5 |
 | Session timer; refresh by UPDATE (as UAS we are the refresher) | RFC 4028, TS 24.379 §6.2.3.1.1 step 5 | `McpttService.startRefresh` | S7 (an 80 s private call; bob's UPDATE refresh gets 200 and the call outlives the server's roughly 60 s session timer) |
 | SDP: one AMR-WB stream and `m=application … udp MCPTT` with `mc_floor_ssrc`; an offered `mc_priority` is echoed | TS 24.379 §6.2.1, §6.2.2; TS 24.380 §14 *(not checked locally)* | `mcptt/McpttSdp.kt` | `SdpTest`; S2–S5 |
@@ -95,7 +96,7 @@ the published specifications and not re-checked against a local copy; they are m
   activation, the per-alias user status subscription, and MCData file distribution to an alias.
 - **Not implemented:**
   - pre-established sessions
-  - emergency, imminent peril and broadcast calls
+  - broadcast group calls
   - MCData on the media plane (MSRP), file distribution and data streaming
   - end-to-end media and floor protection (TS 33.180 keys)
   - off-network operation
