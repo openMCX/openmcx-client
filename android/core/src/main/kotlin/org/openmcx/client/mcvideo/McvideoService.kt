@@ -847,6 +847,11 @@ class McvideoService(
 
     override suspend fun flowLost() { _calls.value.forEach { release(it, "connection lost") } }
 
+    /** The user logs off: every call is left (BYE, or CANCEL while calling); an ambient viewing call too. */
+    override suspend fun logOff() {
+        _calls.value.forEach { call -> runCatching { hangup(call) }.onFailure { release(call, "logged off") } }
+    }
+
     companion object {
         /** How long a protected group call waits for the group's GMK before giving up. */
         const val GROUP_KEY_WAIT_MS = 10_000L

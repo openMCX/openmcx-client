@@ -20,6 +20,16 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     buildTypes {
+        // The develop APK (apk/openmcx-client-develop.apk): the debug build, with its debug control for the tests and the
+        // same signature, but the libraries shrunk by R8 and unused resources removed.
+        create("develop") {
+            initWith(getByName("debug"))
+            isMinifyEnabled = true
+            isShrinkResources = true
+            versionNameSuffix = "-develop"
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-develop.pro")
+            matchingFallbacks += "debug"
+        }
         // The screens with sample data and no engine, installed beside the client to try the look (see src/uiPreview).
         create("uiPreview") {
             initWith(getByName("debug"))

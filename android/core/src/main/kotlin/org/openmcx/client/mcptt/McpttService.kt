@@ -549,6 +549,11 @@ class McpttService(
         _calls.value.forEach { release(it, "connection lost") }
     }
 
+    /** The user logs off: every call is left (BYE, or CANCEL while calling), as by hang-up. */
+    override suspend fun logOff() {
+        _calls.value.forEach { call -> runCatching { hangup(call) }.onFailure { release(call, "logged off") } }
+    }
+
     companion object {
         const val ALLOW = "INVITE, ACK, CANCEL, BYE, UPDATE, INFO, MESSAGE, NOTIFY, OPTIONS"
     }

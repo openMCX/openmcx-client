@@ -113,6 +113,9 @@ import java.util.Date
 import kotlin.math.PI
 import kotlin.math.sin
 
+/** The secondary filled button: very light grey, beside the dark primary one. */
+private val LightGrey = Color(0xFFECEAE6)
+
 object Tags {
     const val PHASE = "phase"
     const val PTT = "ptt"
@@ -191,6 +194,10 @@ object Tags {
     const val CALL_IMMINENT = "call-imminent"
     const val SERVER_ADDRESS = "server-address"
     const val SERVER_ADDRESS_EDIT = "server-address-edit"
+    const val LOG_OFF = "log-off"
+    const val LOG_OFF_CONFIRM = "log-off-confirm"
+    const val LOGGED_OFF_BANNER = "logged-off-banner"
+    const val LOG_ON = "log-on"
     const val SERVER_ADDRESS_FIELD = "server-address-field"
     const val SERVER_ADDRESS_SAVE = "server-address-save"
     const val SERVER_ADDRESS_RESET = "server-address-reset"
@@ -235,11 +242,20 @@ fun McxApp(state: UiState, actions: UiActions, initialTab: Int = 0) {
                     TextButton(onClick = actions::dismissVideoFailure) { Text("Dismiss") }
                 }
             }
+            // Logged off (Settings › Log off): nothing reaches this phone, which must be plain to see.
+            if (state.loggedOff) Row(Modifier.fillMaxWidth().background(Mcx.Stop).padding(horizontal = 12.dp, vertical = 8.dp)
+                .testTag(Tags.LOGGED_OFF_BANNER), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                WarningIcon(Color.White, 24.dp)
+                Text("Logged off: no calls or messages reach this phone", color = Color.White, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f))
+                TextButton(onClick = actions::logOn, modifier = Modifier.testTag(Tags.LOG_ON)) { Text("Log on", color = Color.White) }
+            }
             state.incoming?.let { IncomingCall(it, actions) }
             if (!state.provisioned) Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = actions::scanProvisioning, modifier = Modifier.weight(1f),
+                    colors = ButtonDefaults.buttonColors(containerColor = LightGrey, contentColor = Mcx.Ink)) { Text("Scan QR code") }
                 Button(onClick = actions::importProvisioning, modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = Mcx.Ink)) { Text("Import MCX profile") }
-                OutlinedButton(onClick = actions::scanProvisioning, modifier = Modifier.weight(1f)) { Text("Scan QR code") }
             }
             PrimaryTabRow(selectedTabIndex = tab, containerColor = Mcx.Ivory, contentColor = Mcx.Ink,
                 indicator = { TabRowDefaults.PrimaryIndicator(Modifier.tabIndicatorOffset(tab, matchContentSize = true), color = Mcx.Ink) }) {
@@ -326,9 +342,11 @@ private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit
                 Switch(checked = state.ringFirst, onCheckedChange = actions::setRingFirst, modifier = Modifier.testTag(Tags.RING_FIRST))
             }
             Section("Provisioning")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(vertical = 4.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+                // The outlined action on the left, the filled one on the right, as every pair of buttons here.
+                Button(onClick = actions::scanProvisioning, modifier = Modifier.testTag(Tags.SCAN_QR),
+                    colors = ButtonDefaults.buttonColors(containerColor = LightGrey, contentColor = Mcx.Ink)) { Text("Scan QR code") }
                 Button(onClick = actions::importProvisioning, modifier = Modifier.testTag(Tags.IMPORT)) { Text("Import MCX profile") }
-                OutlinedButton(onClick = actions::scanProvisioning, modifier = Modifier.testTag(Tags.SCAN_QR)) { Text("Scan QR code") }
             }
             Text("Import the profile file, or scan the QR code your administrator shows: it carries the profile or a one-time link to it.",
                 style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
@@ -349,6 +367,8 @@ private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit
                 state.endpoints.forEach { (name, target) -> Text("$name → $target", style = MaterialTheme.typography.bodySmall) }
             }
             if (state.aliases.isNotEmpty()) FunctionalAliases(state, actions)
+            // Log off just after the functional aliases (or where they would be).
+            if (state.provisioned) LogOff(state, actions)
             // History: calls, messages and files, and who was located; tap the heading to show it.
             Row(Modifier.fillMaxWidth().clickable { history = !history }.testTag(Tags.HISTORY_SECTION), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { Section("History") }
@@ -373,6 +393,35 @@ private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit
 }
 
 /**
+ * Log off the MC services (TS 24.379 §7.2.1A step 4): the servers end the affiliations and forget this device until it
+ * logs on again; the account stays on the phone.
+ */
+@Composable
+private fun LogOff(state: UiState, actions: UiActions) {
+    var confirm by remember { mutableStateOf(false) }
+    if (confirm) AlertDialog(
+        onDismissRequest = { confirm = false },
+        title = { Text("Log off?") },
+        text = { Text("You will not receive calls or messages until you log on.") },
+        confirmButton = { TextButton(onClick = { confirm = false; actions.logOff() }, modifier = Modifier.testTag(Tags.LOG_OFF_CONFIRM)) { Text("Log off") } },
+        dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel") } },
+    )
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(if (state.loggedOff) "Logged off" else "Logged on as ${state.user}")
+            Text(if (state.loggedOff) "No calls or messages reach this phone until you log on." else
+                "Log off before another device takes this account: the servers accept one device at a time.",
+                style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+        }
+        // Log off in red, as a call's stop; Log on as the other primary actions.
+        Button(onClick = { if (state.loggedOff) actions.logOn() else confirm = true }, modifier = Modifier.testTag(Tags.LOG_OFF),
+            colors = ButtonDefaults.buttonColors(containerColor = if (state.loggedOff) Mcx.Ink else Mcx.Stop, contentColor = Color.White)) {
+            Text(if (state.loggedOff) "Log on" else "LOG OFF", fontWeight = FontWeight.Bold)
+        }
+    }
+}
+
+/**
  * The address the servers are reached at: the profile's, or one the user set (a new DHCP address, another network).
  * Only the address changes; the certificates name the servers, so they are still checked against the profile's CA.
  */
@@ -385,7 +434,7 @@ private fun ServerAddress(state: UiState, actions: UiActions) {
             Text((state.serverAddress ?: "set by the profile") + if (state.serverAddressEdited) " (edited; profile: ${state.profileServerAddress ?: "none"})" else "",
                 style = MaterialTheme.typography.bodySmall, color = Mcx.Muted, modifier = Modifier.testTag(Tags.SERVER_ADDRESS))
         }
-        TextButton(onClick = { editing = true }, modifier = Modifier.testTag(Tags.SERVER_ADDRESS_EDIT)) { Text("Edit") }
+        Button(onClick = { editing = true }, modifier = Modifier.testTag(Tags.SERVER_ADDRESS_EDIT)) { Text("Edit") }
     }
     if (!editing) return
     var text by remember { mutableStateOf(state.serverAddress ?: "") }
@@ -591,8 +640,12 @@ private fun FunctionalAliases(state: UiState, actions: UiActions) {
             if (alias.status == "inactive" && alias.outcome == "refused")
                 Text("Not activated: another user holds it and you may not take it over, or it is not allowed for you.",
                     color = Mcx.WarnInk, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 6.dp)) {
+            // Right-aligned, the outlined actions first and the filled one last, on the right.
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
                 val tag = { action: String -> Modifier.heightIn(min = 48.dp).testTag(Tags.aliasAction("${alias.service}-${alias.id.short()}", action)) }
+                // MCData aliases are reached by short data, not calls (the Messages tab's SDS to an alias is not offered yet).
+                if (alias.status != "active" && alias.service != "mcdata") OutlinedButton(onClick = { actions.callAlias(alias.id, alias.service) },
+                    enabled = state.registered, modifier = tag("call")) { Text("Call") }
                 when (alias.status) {
                     "active" -> {
                         OutlinedButton(onClick = { actions.aliasChange("deactivate", alias.id, alias.service) }, modifier = tag("deactivate")) { Text("Deactivate") }
@@ -602,9 +655,6 @@ private fun FunctionalAliases(state: UiState, actions: UiActions) {
                     "take-over-possible" -> Button(onClick = { actions.aliasChange("takeover", alias.id, alias.service) }, modifier = tag("takeover")) { Text("Take over") }
                     else -> Button(onClick = { actions.aliasChange("activate", alias.id, alias.service) }, enabled = state.registered, modifier = tag("activate")) { Text("Activate") }
                 }
-                // MCData aliases are reached by short data, not calls (the Messages tab's SDS to an alias is not offered yet).
-                if (alias.status != "active" && alias.service != "mcdata") OutlinedButton(onClick = { actions.callAlias(alias.id, alias.service) },
-                    enabled = state.registered, modifier = tag("call")) { Text("Call") }
             }
         }
     }

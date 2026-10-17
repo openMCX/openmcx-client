@@ -79,6 +79,8 @@ interface ServiceHandler {
     suspend fun handle(tx: ServerTransaction): Boolean
     /** The flow was replaced: calls and transfers on the old one are gone. */
     suspend fun flowLost() {}
+    /** The user logs off (TS 24.379 §7.2.1A step 4): end the service's calls while the flow is still up. */
+    suspend fun logOff() {}
 }
 
 data class ServiceState(val authorised: Boolean = false, val affiliations: Map<String, String> = emptyMap())
@@ -95,6 +97,10 @@ data class ClientStatus(
     val tokenRefreshes: Int = 0,
     val passwordLogins: Int = 0,
     val lastError: String? = null,
+    /** After [McxClient.logOff], until [McxClient.logOn]: the servers' answers to the log-off, and the de-REGISTER's. */
+    val loggedOff: Boolean = false,
+    val logOff: Map<String, Int> = emptyMap(),
+    val deregistered: Int? = null,
 )
 
 /**
@@ -111,6 +117,8 @@ class McxClient(
     private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
     private val keepaliveMs: Long = 25_000,
     private val browser: BrowserLauncher? = null,
+    /** The MCPTT functional aliases of the last user profile this user had, shown until the profile is read again. */
+    knownAliases: List<String> = emptyList(),
 ) {
     val scope = CoroutineScope(parent.coroutineContext + SupervisorJob())
     private val _status = MutableStateFlow(ClientStatus())
@@ -182,7 +190,7 @@ class McxClient(
         val takeOverWanted: MutableSet<String> = ConcurrentHashMap.newKeySet()
     }
     private val aliasChannels: Map<McService, AliasChannel> = buildMap {
-        config.mcptt?.let { put(McService.MCPTT, AliasChannel(McService.MCPTT, it.functionalAliases)) }
+        config.mcptt?.let { put(McService.MCPTT, AliasChannel(McService.MCPTT, it.functionalAliases.ifEmpty { knownAliases })) }
         config.mcdata?.let { put(McService.MCDATA, AliasChannel(McService.MCDATA, it.functionalAliases)) }
         config.mcvideo?.let { put(McService.MCVIDEO, AliasChannel(McService.MCVIDEO, it.functionalAliases)) }
     }
@@ -207,12 +215,15 @@ class McxClient(
         scope.launch {
             var backoff = 2_000L
             while (isActive) {
+                // Logged off: nothing starts again until the user logs on.
+                if (loggedOff) logOnRequest.await()
                 try {
                     run()
                     backoff = 2_000L
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    if (loggedOff) { setPhase("logged-off"); continue }
                     event("start-up failed: ${e.message}")
                     _status.update { it.copy(lastError = e.message, registered = false) }
                     ua.flow?.close(e)
@@ -231,6 +242,66 @@ class McxClient(
     }
 
     @Volatile private var reconnectNow = CompletableDeferred<Unit>()
+    @Volatile private var loggedOff = false
+    @Volatile private var logOnRequest = CompletableDeferred<Unit>()
+
+    /**
+     * Log off every MC service (TS 24.379, TS 24.281 and TS 24.282 §7.2.1A step 4 and NOTE 3): the calls end and the
+     * subscriptions held with the authorisations end (RFC 6665 §4.1.2.3, SUBSCRIBE with Expires 0); each server is
+     * sent a PUBLISH for poc-settings with Expires 0 that names the publication in SIP-If-Match and has no body
+     * (RFC 3903 §4.5), and removes the affiliations and the binding (§7.3.5). Then the dynamic keys go (the MCVideo CSK,
+     * TS 33.180 §9; tokens and KMS key material stay), the client de-registers (no MC service is left, TS 24.229
+     * §5.1.1.6) and the flow closes. Nothing authorises a service again before [logOn].
+     */
+    suspend fun logOff() {
+        if (loggedOff) throw IllegalStateException("already logged off")
+        loggedOff = true
+        logOnRequest = CompletableDeferred()
+        housekeeping?.cancel()
+        setPhase("logging-off")
+        handlers.forEach { runCatching { it.logOff() } }
+        for (channel in aliasChannels.values) {
+            channel.dialog?.let { unsubscribe(it, channel.service, FunctionalAliasPidf.CONTENT_TYPE) }
+            channel.dialog = null; channel.request = null
+            channel.state.update { it.copy(subscribed = false) }
+        }
+        for ((service, subscription) in subscriptions) subscription.dialog?.let { unsubscribe(it, service, Affiliation.CONTENT_TYPE) }
+        subscriptions.clear()
+        val answers = mutableMapOf<String, Int>()
+        for (service in listOf(McService.MCVIDEO, McService.MCDATA, McService.MCPTT)) {
+            val etag = authEtags.remove(service) ?: continue
+            val request = ua.newRequest("PUBLISH", psi(service), NameAddr(psi(service)))
+            request.headers.add("P-Preferred-Service", icsi(service)).add("Event", "poc-settings")
+                .add("Expires", "0").add("SIP-If-Match", etag)
+            val status = runCatching { withTimeoutOrNull(10_000) { ua.send(request) }?.status }.getOrNull() ?: 0
+            answers[service.name.lowercase()] = status
+            updateService(service) { ServiceState() }
+            event("${service.name} logged off: $status")
+        }
+        affiliationEtags.clear()
+        videoCsk = null; videoCskUpload = null
+        val deregistered = runCatching { withTimeoutOrNull(10_000) { deregister() } }.getOrNull()
+        registration = null
+        _status.update { it.copy(loggedOff = true, logOff = answers, deregistered = deregistered, registered = false) }
+        event("logged off: $answers, de-REGISTER $deregistered")
+        ua.flow?.close()
+    }
+
+    /** After [logOff]: register again and authorise the services with the tokens kept (new CSKs), as at start-up. */
+    fun logOn() {
+        if (!loggedOff) throw IllegalStateException("not logged off")
+        loggedOff = false
+        _status.update { it.copy(loggedOff = false, logOff = emptyMap(), deregistered = null) }
+        event("logging on")
+        logOnRequest.complete(Unit)
+    }
+
+    /** RFC 6665 §4.1.2.3: end a subscription with a SUBSCRIBE in its dialog, Expires 0. */
+    private suspend fun unsubscribe(dialog: Dialog, service: McService, accept: String) {
+        val request = ua.inDialog(dialog, "SUBSCRIBE")
+        request.headers.add("Contact", contactFor(service)).add("Event", "presence").add("Accept", accept).add("Expires", "0")
+        runCatching { withTimeoutOrNull(5_000) { ua.send(request, dialog) } }
+    }
 
     /** Drop the flow and start again at once (a network change, or a test). */
     fun reconnect(reason: String) {
@@ -335,10 +406,10 @@ class McxClient(
                 .onSuccess { up ->
                     profile = up
                     event("user profile: groups ${up.groups}, private call targets ${up.privateCallTargets}, functional aliases ${up.functionalAliases}")
-                    // The provisioning names the aliases, or else the CMS user profile does (TS 24.484 §8.3.2.1 <FunctionalAliasList>).
+                    // The provisioning names the aliases, or else the CMS user profile does (TS 24.484 §8.3.2.1 <FunctionalAliasList>):
+                    // the profile read now replaces the one remembered from before.
                     aliasChannels[McService.MCPTT]?.let { channel ->
-                        if (channel.state.value.available.isEmpty() && up.functionalAliases.isNotEmpty())
-                            channel.state.update { it.copy(available = up.functionalAliases) }
+                        if (mcptt.functionalAliases.isEmpty()) channel.state.update { it.copy(available = up.functionalAliases) }
                     }
                 }
                 .onFailure { event("user profile: ${it.message}") }
@@ -424,6 +495,15 @@ class McxClient(
         return granted
     }
 
+    /** RFC 3261 §10.2.2: remove this registration (its Contact, Expires 0); the final status. */
+    private suspend fun deregister(): Int? {
+        val previous = registration ?: return null
+        val request = ua.newRequest("REGISTER", "sip:${config.domain}", NameAddr(config.sip.publicUserId), from = previous.from,
+            callId = previous.callId, cseq = (ua.lastSent[previous.callId] ?: previous).cseq.number + 1)
+        request.headers.add("Contact", registerContact()).add("Expires", "0")
+        return ua.send(request).status
+    }
+
     // Service authorisation: PUBLISH poc-settings (TS 24.379 §7.2.2, TS 24.282 §7.2.2).
 
     private fun psi(service: McService) = when (service) {
@@ -473,7 +553,11 @@ class McxClient(
             request = serviceRequest(service, "PUBLISH", "poc-settings", parts).also { it.headers.add("Expires", "4294967295") }
             response = ua.send(request)
         }
-        if (!response.isSuccess) throw IllegalStateException("${service.name} service authorisation: ${response.status} ${response.reason}")
+        // §7.2.2: not authorised; the start-up is tried again after a growing delay. A 486 (§7.3.3 steps 3a and 3b,
+        // warning 164, MCVideo 166, MCData 228) means the user is authorised on another client: the retry succeeds
+        // once that one logs off or its authorisation ends.
+        if (!response.isSuccess) throw IllegalStateException("${service.name} service authorisation: ${response.status} ${response.reason}" +
+            (response.headers["Warning"]?.let { " ($it)" } ?: ""))
         response.headers["SIP-ETag"]?.let { authEtags[service] = it }
         updateService(service) { it.copy(authorised = true) }
         event("${service.name} authorised")

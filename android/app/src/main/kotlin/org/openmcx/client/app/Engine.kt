@@ -137,6 +137,7 @@ object Engine {
     }
 
     private const val RING_FIRST = "ring_first"
+    private const val KNOWN_ALIASES = "known_aliases:"
     private val _inCall = MutableStateFlow(false)
     /** True while a call is up: the service then declares the phoneCall and microphone types. */
     val inCall: StateFlow<Boolean> = _inCall
@@ -157,9 +158,15 @@ object Engine {
         }
         val endpoints = Endpoints.of(config.endpoints)
         if (config.endpoints.isNotEmpty()) log.add("endpoints: ${config.endpoints}")
+        // The functional aliases of this user's last user profile, so that Settings shows them while the servers cannot be
+        // reached (the profile read at sign-in replaces them).
+        val settings = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+        val aliasKey = KNOWN_ALIASES + config.sip.publicUserId
+        val known = settings.getString(aliasKey, null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
         val c = McxClient(scope, config, SocketHttpClient(ssl, endpoints), SocketConnector(config.sip.transport, ssl, endpoints = endpoints),
-            log, browser = customTabBrowser(context.applicationContext))
+            log, browser = customTabBrowser(context.applicationContext), knownAliases = known)
         client = c
+        scope.launch { c.aliases.collect { settings.edit().putString(aliasKey, it.available.joinToString("\n")).apply() } }
         val store = HistoryStore(context).also { history = it }
         val notify = Notifications(context).also { notifications = it }
         // Debug builds keep received speech as files for the lab checks; on a real phone (not a redroid

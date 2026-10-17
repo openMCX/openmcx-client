@@ -145,6 +145,8 @@ data class UiState(
     val user: String = "",
     val phase: String = "not provisioned",
     val registered: Boolean = false,
+    /** The user logged off the MC services (TS 24.379 §7.2.1A step 4), until they log on again. */
+    val loggedOff: Boolean = false,
     val groups: List<GroupItem> = emptyList(),
     val privateTargets: List<String> = emptyList(),
     val call: CallItem? = null,
@@ -239,6 +241,9 @@ interface UiActions {
     fun scanProvisioning() {}
     /** Reach the servers at [host] instead of the profile's address; null resets it. */
     fun setServerAddress(host: String?) {}
+    /** Log off every MC service and de-register (TS 24.379 §7.2.1A step 4); [logOn] brings them back. */
+    fun logOff() {}
+    fun logOn() {}
     fun requestBatteryExemption() {}
     fun setSpeaker(on: Boolean) {}
     fun clearLogs() {}
@@ -422,6 +427,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         aliasNote = aliasNote,
         phase = status.phase,
         registered = status.registered,
+        loggedOff = status.loggedOff,
         groups = groups,
         privateTargets = profile?.privateCallTargets ?: emptyList(),
         call = active?.let(::item),
@@ -558,6 +564,8 @@ object EngineActions : UiActions {
     }
     override fun setMuted(muted: Boolean) { Engine.mcptt?.setMuted(muted) }
     override fun setRingFirst(on: Boolean) = Engine.setRingFirst(on)
+    override fun logOff() = launch { runCatching { Engine.client?.logOff() }.onFailure { Engine.log.add("log-off: ${it.message}") } }
+    override fun logOn() { runCatching { Engine.client?.logOn() }.onFailure { Engine.log.add("log-on: ${it.message}") } }
     override fun callAdhoc(targets: List<String>) = place("the ad hoc group") { Engine.mcptt?.adhocCall(targets) }
     override fun answer() { Engine.mcptt?.answer() }
     override fun reject() { Engine.mcptt?.reject() }
