@@ -28,6 +28,13 @@ async function post(url, body, json = true) {
 const act = (body) => post('/api/command', body).catch((e) => log('error: ' + e.message));
 
 // ---- state ----
+// The private call service responses (TS 24.379 annex F.1 <response-type>), as the page names them.
+const OUTCOMES = {
+  'remotely-initiated-private-call-response': 'Asked private call',
+  'remotely-initiated-group-call-response': 'Asked group call',
+  'transfer-private-call-response': 'Transfer',
+  'forward-private-call-response': 'Forwarding',
+};
 let state = {};
 function text(el, value) { el.textContent = value; }
 function item(list, title, detail, buttons = []) {
@@ -105,8 +112,11 @@ function render(s) {
 
   const call = s.call_state || 'idle';
   text($('call-state'), call + (s.call_type ? ' (' + s.call_type + (s.private_peer ? ' ' + s.private_peer : '') + ')' : '') +
-    (call === 'active' && s.floor_control === false ? ' · without floor control' : ''));
-  text($('floor-state'), (s.floor_state || '–') + (s.floor_owner ? ' · ' + s.floor_owner : '') +
+    (call === 'active' && s.floor_control === false ? ' · without floor control' : '') +
+    // Ambient listening (TS 24.379 clause 11.1.6): the listened-to side has no visible call, so it is named here.
+    (s.ambient ? ' · ambient listening: ' + (s.ambient.role === 'listening' ? 'listening to ' : 'listened to by ') +
+      s.ambient.peer : ''));
+  text($('floor-state'), (s.floor_state || '–') + (s.floor_owner && call === 'active' ? ' · ' + s.floor_owner : '') +
     (s.queue_position ? ' · queue ' + s.queue_position : ''));
   const failure = s.last_call_failure;
   text($('call-failure'), failure && call === 'idle' ? (typeof failure === 'string' ? failure : JSON.stringify(failure)) : '');
@@ -147,6 +157,37 @@ function render(s) {
   for (const [who, st] of Object.entries(s.callback_requests_sent || {}))
     item(callbacks, 'Call-back asked of ' + who, st,
          /cancel-pending/.test(st) ? [] : [['Cancel', '', () => act({ action: 'callback-cancel', target: who })]]);
+
+  // The conference event package of the call (TS 24.379 clause 10.1.3.2): who is connected.
+  const participants = s.conference_participants || [];
+  text($('participants'), call === 'active' && participants.length ? 'In the call: ' + participants.join(', ') : '');
+  // MCData emergency alerts by group (TS 24.282 clause 16.2): another user's can be cancelled, with the right to.
+  const mcdataAlerts = $('mcdata-alerts');
+  mcdataAlerts.replaceChildren();
+  if (/^MDEA [234]/.test(s.mcdata_alert_state || '')) item(mcdataAlerts, 'Own MCData alert: ' + s.mcdata_alert_state, '');
+  for (const [group, users] of Object.entries(s.mcdata_alerts_received || {}))
+    for (const [who, a] of Object.entries(users || {}))
+      if (who !== id.mcdata_user)
+        item(mcdataAlerts, 'MCData alert: ' + who, 'in ' + group + (a.organization ? ' · ' + a.organization : ''),
+             [['Cancel', '', () => act({ action: 'mcdata-alert', on: false, user: who, group })]]);
+  // Remotely initiated call requests: the outcome the asked user reported (TS 24.379 clause 11.1.7.2.1).
+  const outcomes = $('outcomes');
+  outcomes.replaceChildren();
+  for (const [kind, outcome] of Object.entries(s.service_outcomes || {}))
+    item(outcomes, (OUTCOMES[kind] || kind) + ': ' + outcome, '');
+  // Transfer (TS 24.379 clause 11.1.8.2) and forwarding (clause 11.1.9.2) need a private call: in progress or ringing.
+  const inPrivate = call === 'active' && s.call_type === 'private';
+  const announcing = s.announced_transfer && s.announced_transfer.state === 'announcing';
+  $('transfer-now').disabled = !inPrivate || !!announcing;
+  $('transfer-announce').disabled = !inPrivate || !!announcing;
+  $('transfer-complete').disabled = !announcing;
+  $('transfer-cancel').disabled = !announcing;
+  $('forward').disabled = !(call === 'ringing' && s.call_type === 'private');
+  text($('transfer-state'), announcing ? 'Announcing the transfer of ' + s.announced_transfer.transferred + ' to ' +
+    s.announced_transfer.target : (s.last_forwarding && s.last_forwarding.by ? 'Last forwarded call: by ' +
+    s.last_forwarding.by + ' to ' + s.last_forwarding.target : ''));
+  const idle = call === 'idle';
+  for (const f of ['fta', 'ambient']) $(f).querySelector('button').disabled = !idle;
 
   const inbox = $('inbox');
   inbox.replaceChildren();
@@ -265,6 +306,40 @@ $('callback-request').onclick = () => {
   if (f.target.reportValidity()) act({ action: 'callback', target: f.target.value.trim(), urgency: f.urgency.value });
 };
 $('chat').onchange = () => { $('broadcast').disabled = $('chat').checked; };
+$('fta').onsubmit = (e) => {
+  e.preventDefault();
+  audio();
+  const f = e.target;
+  act({ action: 'first-to-answer', targets: f.targets.value.trim().split(/[\s,]+/), emergency: f.emergency.checked });
+};
+$('ambient').onsubmit = (e) => {
+  e.preventDefault();
+  audio();
+  act({ action: 'ambient', kind: e.target.kind.value, target: e.target.target.value.trim() });
+};
+$('remote').onsubmit = (e) => {
+  e.preventDefault();
+  const f = e.target, body = { action: f.kind.value, remote: f.remote.value.trim(), target: f.target.value.trim(),
+                               silent: f.silent.checked };
+  if (f.kind.value === 'remote-call' && f.mode.value) body.mode = f.mode.value;
+  act(body);
+};
+$('remote').kind.onchange = (e) => { $('remote').mode.disabled = e.target.value !== 'remote-call'; };
+// The transfer target is the one being announced to, once announcing.
+function transfer(step) {
+  const f = $('transfer');
+  const target = state.announced_transfer && state.announced_transfer.target || f.target.value.trim();
+  if (!target) { f.target.reportValidity(); return; }
+  act(step ? { action: 'transfer', target, step } : { action: 'transfer', target });
+}
+$('transfer-now').onclick = () => transfer('');
+$('transfer-announce').onclick = () => transfer('announced');
+$('transfer-complete').onclick = () => transfer('complete');
+$('transfer-cancel').onclick = () => transfer('cancel');
+$('forward').onclick = () => {
+  const f = $('transfer');
+  if (f.target.reportValidity()) act({ action: 'forward', target: f.target.value.trim() });
+};
 $('private').onsubmit = (e) => {
   e.preventDefault();
   audio();

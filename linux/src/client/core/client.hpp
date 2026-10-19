@@ -1594,6 +1594,9 @@ private:
   std::string mcdata_alert_group_;
   Json mcdata_alerts_received_ = Json::object(), mcdata_alert_last_result_ = nullptr,
        mcdata_alert_receipts_ = Json::array();
+  // Cancellations of other users' alerts (with <originated-by>) awaiting their receipt, by group: the receipt
+  // procedure of TS 24.282 clause 16.2.1.2 is for the client's own alert only.
+  std::map<std::string, int> mcdata_third_party_cancels_;
 
   static const char *mdea_name(int state);
 

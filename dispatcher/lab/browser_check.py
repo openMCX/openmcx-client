@@ -112,6 +112,18 @@ with sync_playwright() as p:
     page.check("#chat")
     check("BRW-10 the chat group option leaves no broadcast call", page.locator("#broadcast").is_disabled())
     page.uncheck("#chat")
+    # Call services: idle, the transfer and forward buttons wait for a private call; first-to-answer and ambient
+    # listening start from the page.
+    check("BRW-11 call services offered, transfer and forward disabled while idle",
+          page.locator("#transfer-now").is_disabled() and page.locator("#forward").is_disabled() and
+          page.locator("#fta button").is_enabled() and page.locator("#ambient button").is_enabled())
+    alice = json.loads((lab / "generated" / "client-a.json").read_text())["mcptt"]["user_id"]
+    page.fill("#ambient input[name=target]", alice)
+    page.click("#ambient button")
+    expect(page.locator("#call-state")).to_contain_text("ambient listening: listening to " + alice, timeout=20000)
+    page.click("button[data-action=hangup]")
+    expect(page.locator("#call-state")).not_to_contain_text("ambient", timeout=15000)
+    check("BRW-12 ambient listening started from the page, shown, and released", True)
     page.screenshot(path=str(lab / "artifacts" / "dispatcher.png"), full_page=True)
     check("BRW-05 no script errors", not errors, "; ".join(errors))
     browser.close()

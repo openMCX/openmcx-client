@@ -50,9 +50,10 @@ void Client::mcdata_alert(bool activate, std::string group, const std::string &o
     mdea_ = 4; // TS 24.282 clause 16.2.1.2 step 7
   }
   const bool third_party = !info.originated_by.empty();
+  if (third_party) ++mcdata_third_party_cancels_[group];
   mcdata_request(
       "", parts, {{"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(mcdata::icsi) + "\";require;explicit"}},
-      [this, activate, third_party, group](const SipResponse &response) {
+      [this, activate, third_party, group, originator](const SipResponse &response) {
         std::optional<bool> alert_state;
         if (response.content_type.starts_with(mcdata::info_mime) && !response.body.empty())
           alert_state = mcdata::parse_info(response.body).alert;
@@ -65,6 +66,14 @@ void Client::mcdata_alert(bool activate, std::string group, const std::string &o
           mdea_ = response.status_code < 300 ? 3 : 1;
         else if (!third_party && response.status_code >= 300 && mdea_ == 4 && alert_state.value_or(true))
           mdea_ = 3;
+        if (third_party && response.status_code >= 200) {
+          // The server sends no receipt for a refused request; an accepted one ends that alert, which this client
+          // lists no longer (the server tells the other members, clause 16.2.3.2 step 2c, not the sender).
+          if (response.status_code >= 300 && --mcdata_third_party_cancels_[group] <= 0)
+            mcdata_third_party_cancels_.erase(group);
+          if (response.status_code < 300 && mcdata_alerts_received_.contains(group))
+            mcdata_alerts_received_[group].erase(originator);
+        }
         if (response.status_code >= 300) failure("MCData emergency alert: " + std::to_string(response.status_code));
       },
       "MESSAGE");
@@ -82,6 +91,11 @@ void Client::mcdata_alert_incoming(const mcdata::Info &info, const std::vector<B
   if (info.alert_received == true) {
     if (info.client_id != client_id()) throw std::runtime_error("emergency alert receipt for another client");
     bounded_push(mcdata_alert_receipts_, {{"group", group}, {"alert_ind", alert}});
+    // TS 24.282 clause 16.2.1.2: the receipt of another user's alert cancellation leaves this client's own state.
+    if (const auto pending = mcdata_third_party_cancels_.find(group); !alert && pending != mcdata_third_party_cancels_.end()) {
+      if (--pending->second <= 0) mcdata_third_party_cancels_.erase(pending);
+      return;
+    }
     if (!alert) {
       mdea_ = 1;
       mcdata_emergency_ = false;

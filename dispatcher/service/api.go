@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -182,6 +183,8 @@ func (a *api) view(r *http.Request) (map[string]any, error) {
 	v := pick("registered", "authorized", "affiliated", "call_state", "call_type", "private_peer", "floor_state",
 		"floor_owner", "talking", "floor_control", "priority", "priority_pending", "alerts", "alert_locations",
 		"last_call_failure", "queue_position", "callback_requests_sent", "callback_requests_received",
+		"first_to_answer", "ambient", "last_ambient", "announced_transfer", "last_forwarding", "service_outcomes",
+		"conference_participants", "mcdata_alert_state", "mcdata_alerts_received", "mcdata_alert_last_result",
 		"private_emergency_state", "profile_groups", "mcdata_authorized", "mcdata_affiliated", "mcdata_inbox",
 		"mcdata_sent", "mcdata_last_result", "mcdata_files", "mcdata_files_sent", "mcdata_fd_last_result")
 	v["session"] = session
@@ -248,6 +251,25 @@ func (a *api) events(w http.ResponseWriter, r *http.Request) {
 var word = regexp.MustCompile(`^[A-Za-z0-9._:@+=/-]{1,256}$`)
 
 // commandLine turns a UI action into one engine command. Only these actions exist.
+// ids reads a list of between min and max single words, each once.
+func ids(value any, min, max int) ([]string, error) {
+	list, _ := value.([]any)
+	var out []string
+	for _, item := range list {
+		s, _ := item.(string)
+		if !word.MatchString(s) {
+			return nil, fmt.Errorf("%q is not a single word", s)
+		}
+		if !slices.Contains(out, s) {
+			out = append(out, s)
+		}
+	}
+	if len(out) < min || len(out) > max {
+		return nil, fmt.Errorf("between %d and %d distinct IDs are needed", min, max)
+	}
+	return out, nil
+}
+
 func commandLine(req map[string]any) (string, error) {
 	str := func(key string) string { s, _ := req[key].(string); return s }
 	flag := func(key string) bool { b, _ := req[key].(bool); return b }
@@ -331,6 +353,95 @@ func commandLine(req map[string]any) (string, error) {
 		default:
 			return "", fmt.Errorf("unknown urgency %q", urgency)
 		}
+	case "first-to-answer":
+		// TS 24.379 clause 11.1.1.2.1.1 steps 10 and 15: a private call to two or more users, the first to answer
+		// takes it (optionally an emergency one, clause 6.2.8.3.2).
+		targets, err := ids(req["targets"], 2, 10)
+		if err != nil {
+			return "", err
+		}
+		line := "first-to-answer " + strings.Join(targets, " ")
+		if flag("emergency") {
+			line += " emergency"
+		}
+		return line, nil
+	case "ambient":
+		// TS 24.379 clause 11.1.6.2.1.1: an ambient listening call, remotely initiated (the dispatcher listens to the
+		// target) or locally initiated (the target listens to the dispatcher).
+		kind := str("kind")
+		if kind != "remote" && kind != "local" {
+			return "", fmt.Errorf("unknown ambient listening kind %q", kind)
+		}
+		target, err := id("target")
+		if err != nil {
+			return "", err
+		}
+		return "ambient " + kind + " " + target, nil
+	case "remote-call", "remote-group-call":
+		// TS 24.379 clauses 11.1.7.2.1 and 10.1.5.2.1: a user asked to place a private call to the target, or a group
+		// call on the group; "silent": the user is not told (<notify-remote-user> false).
+		remote, err := id("remote")
+		if err != nil {
+			return "", err
+		}
+		target, err := id("target")
+		if err != nil {
+			return "", err
+		}
+		line := action + " " + remote + " " + target
+		if action == "remote-call" {
+			switch mode := str("mode"); mode {
+			case "":
+			case "auto", "manual", "force-auto": // <ric-commencement-mode>
+				line += " " + mode
+			default:
+				return "", fmt.Errorf("unknown commencement mode %q", mode)
+			}
+		}
+		if flag("silent") {
+			line += " silent"
+		}
+		return line, nil
+	case "transfer":
+		// TS 24.379 clause 11.1.8.2.1 (unannounced) and 11.1.8.2.3 (announced: hold and call the target, then
+		// complete or cancel): the private call in progress transferred to the target.
+		target, err := id("target")
+		if err != nil {
+			return "", err
+		}
+		switch step := str("step"); step {
+		case "":
+			return "transfer " + target, nil
+		case "announced", "complete", "cancel":
+			return "transfer " + target + " " + step, nil
+		default:
+			return "", fmt.Errorf("unknown transfer step %q", step)
+		}
+	case "forward":
+		// TS 24.379 clause 11.1.9.2.1: the ringing private call forwarded to the target (manual input).
+		target, err := id("target")
+		if err != nil {
+			return "", err
+		}
+		return "forward " + target, nil
+	case "mcdata-alert":
+		// TS 24.282 clauses 16.2.1.1 and 16.2.1.2: the MCData emergency alert on the selected group, sent or
+		// cancelled; "user" and "group": another user's alert cancelled, by an authorised user.
+		if flag("on") {
+			return "mcdata-alert", nil
+		}
+		if str("user") == "" {
+			return "mcdata-alert cancel", nil
+		}
+		user, err := id("user")
+		if err != nil {
+			return "", err
+		}
+		group, err := id("group")
+		if err != nil {
+			return "", err
+		}
+		return "mcdata-alert cancel group=" + group + " " + user, nil
 	case "answer", "reject", "hangup", "release":
 		return action, nil
 	case "ptt":

@@ -56,6 +56,7 @@
       <div>
         <div class="state"><span>Call</span><b id="call-state">idle</b><span>Floor</span><b id="floor-state">–</b></div>
         <div id="call-failure" class="error"></div>
+        <div id="participants" class="note"></div>
         <h3>Group</h3>
         <div class="row"><select id="group-select" aria-label="Group"></select></div>
         <div class="row">
@@ -97,6 +98,62 @@
           <button data-action="alert" data-on="false">Cancel alert</button>
         </div>
         <div id="alerts" class="list"></div>
+        <h3>MCData emergency alert</h3>
+        <div class="row">
+          <button data-action="mcdata-alert" data-on="true" class="stop">Send MCData alert</button>
+          <button data-action="mcdata-alert" data-on="false">Cancel</button>
+        </div>
+        <div id="mcdata-alerts" class="list"></div>
+      </div>
+    </div>
+  </section>
+  <section id="services">
+    <h2>Call services</h2>
+    <div class="band">
+      <div>
+        <h3>First to answer</h3>
+        <form id="fta">
+          <div class="row"><input name="targets" placeholder="two or more MCPTT IDs, separated by spaces" required></div>
+          <div class="row"><label><input type="checkbox" name="emergency"> emergency</label><button>Call</button></div>
+        </form>
+      </div>
+      <div>
+        <h3>Ambient listening</h3>
+        <form id="ambient">
+          <div class="row"><input name="target" placeholder="MCPTT ID" required></div>
+          <div class="row"><select name="kind" aria-label="Ambient listening kind">
+              <option value="remote">listen to the user</option><option value="local">let the user listen</option>
+            </select><button>Start</button></div>
+        </form>
+      </div>
+      <div>
+        <h3>Ask a user to call</h3>
+        <form id="remote">
+          <div class="row"><input name="remote" placeholder="the user who places the call (MCPTT ID)" required></div>
+          <div class="row"><input name="target" placeholder="whom: an MCPTT ID, or a group" required></div>
+          <div class="row"><select name="kind" aria-label="Call kind">
+              <option value="remote-call">private call</option><option value="remote-group-call">group call</option>
+            </select><select name="mode" aria-label="Commencement mode">
+              <option value="">their answer mode</option><option value="auto">automatic</option>
+              <option value="manual">manual</option><option value="force-auto">forced automatic</option>
+            </select></div>
+          <div class="row"><label><input type="checkbox" name="silent"> without telling them</label><button>Ask</button></div>
+        </form>
+        <div id="outcomes" class="list"></div>
+      </div>
+      <div>
+        <h3>Transfer and forward</h3>
+        <form id="transfer">
+          <div class="row"><input name="target" placeholder="to: MCPTT ID" required></div>
+          <div class="row">
+            <button id="transfer-now" type="button" title="The private call in progress, transferred">Transfer</button>
+            <button id="transfer-announce" type="button" title="Hold the call and talk to the target first">Announce</button>
+            <button id="transfer-complete" type="button">Complete</button>
+            <button id="transfer-cancel" type="button">Cancel</button>
+            <button id="forward" type="button" title="The ringing private call, forwarded">Forward</button>
+          </div>
+        </form>
+        <div id="transfer-state" class="note"></div>
       </div>
     </div>
   </section>

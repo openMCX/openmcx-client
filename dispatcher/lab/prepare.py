@@ -78,8 +78,9 @@ def lab_mode(args, compose, generated) -> None:
             members.append(mcdata_id)
     # And the widest MCPTT rights (TS 24.484 user profile, TS 24.481 group document): emergency and imminent peril
     # calls, their cancellation and emergency alerts (also another user's) on every group, private calls to anyone,
-    # emergency ones too, private calls from anyone, call-backs, and broadcast group calls (the MCPTT server's
-    # broadcast_members, a lab policy).
+    # emergency ones too, private calls from anyone, call-backs, first-to-answer calls, ambient listening (both
+    # kinds), remotely initiated private and group calls, transfer and manual forwarding, and broadcast group calls
+    # (the MCPTT server's broadcast_members, a lab policy).
     # client-a may request call-backs too, so that the scenario can ask the dispatcher for one.
     mcptt_id = config["mcptt"]["user_id"]
     peer = json.loads((generated / "client-a.json").read_text())["mcptt"]["user_id"]
@@ -88,11 +89,14 @@ def lab_mode(args, compose, generated) -> None:
             user.setdefault("private_call", {}).update(callback=True, callback_cancel=True)
         if user.get("mcptt_id") == mcptt_id:
             user.setdefault("group_call", {}).update(emergency=True, emergency_cancel=True, imminent=True,
-                                                     imminent_cancel=True, alert=True, alert_cancel=True)
+                                                     imminent_cancel=True, alert=True, alert_cancel=True,
+                                                     remote_init=True)
             user.setdefault("private_call", {}).update(allow=True, automatic_commencement=True,
                                                        manual_commencement=True, any_target=True, emergency=True,
                                                        emergency_any=True, emergency_cancel=True, callback=True,
-                                                       callback_cancel=True, incoming_any=True)
+                                                       callback_cancel=True, incoming_any=True, first_to_answer=True,
+                                                       ambient_remote=True, ambient_local=True, remote_init=True,
+                                                       transfer=True, forward_manual=True)
     for group in site["groups"]:
         policy = group.get("priority_policy")
         for key in ("emergency_users", "emergency_cancel_users", "imminent_users", "imminent_cancel_users",
@@ -105,7 +109,12 @@ def lab_mode(args, compose, generated) -> None:
         members = server.get("mcptt", {}).get("call_policy", {}).get("broadcast_members")
         if members is not None and mcptt_id not in members:
             members.append(mcptt_id)
-            server_file.write_text(json.dumps(server, indent=2) + "\n")
+        # A transferred user keeps its call with the dispatcher while it calls the target (TS 24.379 clause
+        # 11.1.8.2.2), so it is briefly in two private calls; the limit (N10, TS 24.484 <MaxCall>) must allow that.
+        private = server.get("mcptt", {}).get("private_call")
+        if private is not None and private.get("max_calls", 1) < 2:
+            private["max_calls"] = 2
+        server_file.write_text(json.dumps(server, indent=2) + "\n")
 
     inside = f"/config/{args.client}.json"
     for volume in service["volumes"]:

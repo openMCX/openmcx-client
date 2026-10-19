@@ -40,7 +40,8 @@ checked out beside it (`../openmcx-server`).
 |---|---|
 | Group call | the configured group: normal, imminent peril, emergency, broadcast; a chat group's call joined (or started), normal, imminent peril or emergency; during the call, raise it to emergency or imminent peril and back to normal; hold to talk with the browser microphone; received audio played in the browser |
 | Private call | call any MCPTT ID (optionally emergency, optionally without floor control); raise it to emergency and back; incoming calls ring and are answered or rejected; call-back asked of a user (low, normal or high urgency) and cancelled, call-backs asked of the dispatcher listed and fulfilled |
-| Emergency alert | send and cancel its own; cancel another user's (with the right to) |
+| Call services | first-to-answer call to two or more users (optionally emergency); ambient listening, listening to a user or listened to by one; ask a user to place a private call (commencement mode, optionally without telling them) or a group call; transfer the private call in progress, unannounced or announced (complete or cancel); forward a ringing private call; the group call's participants from its conference events |
+| Emergency alert | MCPTT and MCData: send and cancel its own; cancel another user's (with the right to) |
 | SDS | one-to-one and group, inbox |
 | File distribution | send from the browser (optionally mandatory), accept or reject received files, save them |
 | Coming soon | several monitored groups, remote affiliation, video, call recording, map, operator handoff, dynamic regrouping |
@@ -140,7 +141,12 @@ group's call, no broadcast), `{"action":"callback","target":"<MCPTT ID>","urgenc
 `{"action":"private","target":"<MCPTT ID>","emergency":bool,"no_floor":bool}`,
 `{"action":"priority","level":"emergency|imminent","on":bool}` (the call in progress), `{"action":"group","id":"<group>"}`,
 `answer`, `reject`, `hangup`, `ptt` (talk from the audio socket), `release`, `{"action":"alert","on":bool,"user":"<MCPTT ID>"}`
-(`user`: another user's alert to cancel),
+(`user`: another user's alert to cancel), `{"action":"mcdata-alert","on":bool,"user":"<MCData ID>","group":"<group>"}`
+(`user` and `group`: another user's MCData alert to cancel), `{"action":"first-to-answer","targets":["<MCPTT ID>",...],"emergency":bool}`,
+`{"action":"ambient","kind":"remote|local","target":"<MCPTT ID>"}`,
+`{"action":"remote-call|remote-group-call","remote":"<MCPTT ID>","target":"<MCPTT ID or group>","mode":"auto|manual|force-auto","silent":bool}`,
+`{"action":"transfer","target":"<MCPTT ID>","step":"announced|complete|cancel"}` (no `step`: unannounced),
+`{"action":"forward","target":"<MCPTT ID>"}`,
 `{"action":"sds","target":"<MCData ID or group>","group":bool,"text":"..."}`, `{"action":"fd-accept|fd-reject|fd-defer","id":"<message ID>"}`.
 Nothing else reaches the engine.
 
@@ -155,6 +161,7 @@ python3 dispatcher/lab/prepare.py <lab>                       # client-c becomes
 ../openmcx-server/.cache/deps/docker-compose-linux-x86_64 -p disp -f <lab>/compose.json up -d --wait   # openmcx-server's compose binary
 python3 dispatcher/lab/scenario.py <lab> --project disp       # DSP-01..08
 python3 dispatcher/lab/actions_scenario.py <lab> --project disp   # DSP-09..16; the lab with --priority --broadcast --chat
+python3 dispatcher/lab/services_scenario.py <lab> --project disp  # DSP-17..24
 docker run --rm --network host -v playwright-py:/py -v <lab>:/lab -v $PWD/dispatcher/lab:/check -w /check \
   mcr.microsoft.com/playwright/python:v1.55.0-noble sh -c \
   '[ -d /py/playwright ] || pip install -q --break-system-packages --target /py playwright==1.55.0; PYTHONPATH=/py python3 browser_check.py /lab'
