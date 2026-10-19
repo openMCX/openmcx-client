@@ -69,7 +69,7 @@ No server change: the servers treat the position as any activated client.
 
 ## Sign-in on IdMS's page (lab mode)
 
-For an IdMS whose login page the dispatcher cannot fill in, a third-party IdMS at a Plugtest for example, a lab mode
+For an IdMS whose login page the dispatcher cannot fill in, Keycloak for example, a lab mode
 configuration with `"oauth": {"login": "browser", ...}` and no password signs the operator in on IdMS's own page
 (TS 33.180 annex B.4.2, the authorization code grant with PKCE S256 and `acr_values=3gpp:acr:password`):
 
@@ -89,7 +89,7 @@ configuration with `"oauth": {"login": "browser", ...}` and no password signs th
 - The scope names the configured services (`3gpp:mc:ptt_service`, `data_service`, `video_service`, their
   configuration and group management scopes, and key management with `security`); `oauth.scope` overrides it.
 - The engine trusts the IdMS certificate if `tls.ca_file` or the system's CAs (`/etc/ssl/certs`) issued it: an IdMS
-  with a certificate of a public CA needs nothing; for one of a vendor's own CA, add that CA to `tls.ca_file`, and
+  with a certificate of a public CA needs nothing; for one of a private CA, add that CA to `tls.ca_file`, and
   to the trust store of the operator's browser, which opens the IdMS page. The other servers are trusted through
   `tls.ca_file` only.
 - The page names the IdMS (the issuer's host) on the sign-in form and, once signed in, beside the operator.

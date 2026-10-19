@@ -467,7 +467,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
                 "SIP core" to "${c.sip.proxy}:${c.sip.proxyPort} (${c.sip.transport})",
                 "IdMS" to c.idms.issuer,
                 "IdMS sign-in" to (c.idms.username?.let { "automatic as $it" } ?: "interactive (browser)"),
-                // Which IdMS signed this user in (several vendors' IdMSs at a Plugtest), and until when the access token
+                // Which IdMS signed this user in, and until when the access token
                 // holds; it is renewed before then.
                 "Signed in at" to (status.tokenExpiresAt.takeIf { it > 0 }?.let {
                     "${java.net.URI(c.idms.issuer).host}, token until " +

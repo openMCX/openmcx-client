@@ -341,7 +341,7 @@ def create(args) -> None:
         (bundle / "bundle.json").write_text(json.dumps(config, indent=2) + "\n")
         for source, target in (("ca.crt", "ca.crt"), (f"{role}.crt", "client.crt"), (f"{role}.key", "client.key")):
             shutil.copyfile(generated / "tls" / source, bundle / target)
-        # The trusted CAs are the provisioned ones only: another vendor's IdMS (a Plugtest) is trusted through its CA,
+        # The trusted CAs are the provisioned ones only: an external IdMS (Keycloak, for example) is trusted through its CA,
         # or the public root CA of its certificate, added to the lab's.
         for extra in args.extra_ca or []:
             pem = Path(extra).read_text()
@@ -807,7 +807,7 @@ def main() -> None:
     c.add_argument("--keycloak", metavar="IMAGE",
                    help="Keycloak (this image) as IdMS, at the host's address; phones sign in on its page (--phones-only)")
     c.add_argument("--extra-ca", action="append", metavar="PEM",
-                   help="a further CA certificate the phones trust (an IdMS of another vendor), added to the lab's CA")
+                   help="a further CA certificate the phones trust (an external IdMS), added to the lab's CA")
     c.add_argument("--fd-max-bytes", type=int, help="file distribution: the service, one-to-one and group file limit")
     c.add_argument("--mcvideo", action="store_true", help="add the MCVideo server and provision MCVideo (video calls)")
     c.add_argument("--location", action="store_true",

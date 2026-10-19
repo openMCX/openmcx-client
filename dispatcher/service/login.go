@@ -20,7 +20,7 @@ import (
 )
 
 // The sign-in on IdMS's own page (lab mode with oauth.login "browser"), for an IdMS whose
-// login page the dispatcher cannot script, a third-party IdMS at a Plugtest for example:
+// login page the dispatcher cannot script, Keycloak for example:
 // TS 33.180 annex B.4.2, the authorization code grant with PKCE. The engine builds the
 // authorization request (mcx-client --authorization-request); this service sends the
 // operator's browser to it and keeps its state, nonce and code verifier; IdMS sends the

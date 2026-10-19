@@ -51,8 +51,8 @@ object Pem {
     }
 
     /**
-     * A TLS context trusting [ca] and the system's CAs, for IdMS: an IdMS of another vendor may have a certificate of a
-     * public CA, which the system browser that shows its login page trusts too (TS 33.180 annex B.4.2).
+     * A TLS context trusting [ca] and the system's CAs, for IdMS: an external IdMS (Keycloak, for example) may have a
+     * certificate of a public CA, which the system browser that shows its login page trusts too (TS 33.180 annex B.4.2).
      */
     fun sslContextWithSystem(ca: List<X509Certificate>): SSLContext =
         SSLContext.getInstance("TLS").apply { init(null, arrayOf(trustWithSystem(ca)), null) }

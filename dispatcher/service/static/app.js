@@ -93,7 +93,7 @@ function render(s) {
   if (renderSession(s.session || {})) return;
   const id = s.identity || {};
   const operator = s.session.operator && s.session.operator !== id.user ? s.session.operator + ' · ' : '';
-  // The IdMS the operator signed in at (sign-in on IdMS's page): at a Plugtest one of several vendors'.
+  // The IdMS the operator signed in at (sign-in on IdMS's page).
   text($('identity'), operator + (id.user || '?') +
     (id.mcdata_user && id.mcdata_user !== id.user ? ' · ' + id.mcdata_user : '') +
     (s.session.idms ? ' · signed in at ' + s.session.idms : ''));

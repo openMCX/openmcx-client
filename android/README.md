@@ -130,7 +130,7 @@ a server name, while TLS still checks the name. On first start the client key is
 deleted. If the bundle has no IdMS username, sign-in is interactive: the IdMS login page opens in a Custom Tab and the app
 receives the redirect on its loopback redirect URI (RFC 8252 §7.3). The app reaches IdMS trusting the provisioned
 `ca.crt` and the system's CAs, the other servers `ca.crt` only. The Custom Tab is the system browser: it trusts the
-system's CAs and those the user installed, so an IdMS with a certificate of a vendor's own CA needs that CA installed on
+system's CAs and those the user installed, so an IdMS with a certificate of a private CA needs that CA installed on
 the phone (Settings, Encryption & credentials, CA certificate) as well as in `ca.crt`. **Settings** shows the IdMS and,
 once signed in, "Signed in at" its host with the access token's expiry.
 

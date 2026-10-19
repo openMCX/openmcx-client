@@ -98,8 +98,9 @@ inline SipConfig client_sip_config(const Json &cfg, bool disable_tls) {
 class Client {
   Json cfg_, status_;
   HttpClient http_;
-  // IdMS (sign-in, code exchange, refresh): the configured CA and the system's, for an IdMS of another vendor with a
-  // certificate of a public CA (HttpTrust::configured_and_system); the other common services the configured CA only.
+  // IdMS (sign-in, code exchange, refresh): the configured CA and the system's, for an external IdMS (Keycloak, for
+  // example) with a certificate of a public CA (HttpTrust::configured_and_system); the other common services the
+  // configured CA only.
   HttpClient idms_http_;
   Control control_;
   SipEngine sip_;

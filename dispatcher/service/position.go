@@ -39,8 +39,7 @@ type position struct {
 	// browser: lab mode with oauth.login "browser" (login.go): one configured identity, no accounts; the operator
 	// signs in on IdMS's own page and device holds the full configuration.
 	browser bool
-	// idms: the host of the IdMS the operator signs in at (browser), shown on the page: at a Plugtest one of several
-	// vendors' IdMSs.
+	// idms: the host of the IdMS the operator signs in at (browser), shown on the page.
 	idms string
 
 	mu       sync.Mutex // guards the fields below; busy serialises sign-in and activation
