@@ -26,6 +26,16 @@ def check(name, ok, detail=""):
     print(("PASS " if ok else "FAIL ") + name + (f": {detail}" if detail and not ok else ""), flush=True)
 
 
+def waited(predicate, seconds=15):
+    """Whether predicate holds within the seconds."""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.3)
+    return False
+
+
 def client(name):
     try:
         return json.loads((lab / "artifacts" / name / "status.json").read_text())
@@ -58,6 +68,14 @@ with sync_playwright() as p:
     got = client("client-a").get("received_packets", 0) - before
     check("BRW-03 hold to talk sends the browser microphone to client-a", got >= 80, f"packets={got}")
     expect(page.locator("#floor-state")).not_to_contain_text("HasPermission", timeout=10000)
+    # During the call: raised to emergency, then back to normal; client-a follows.
+    page.click("#raise-emergency")
+    expect(page.locator("#priority-off")).to_be_enabled(timeout=15000)
+    raised = waited(lambda: client("client-a").get("priority") == "emergency")
+    page.click("#priority-off")
+    expect(page.locator("#priority-off")).to_be_disabled(timeout=15000)
+    check("BRW-06 the call raised to emergency from the page and back to normal", raised and
+          page.locator("#raise-emergency").is_enabled(), str(client("client-a").get("priority")))
     page.click("button[data-action=hangup]")
     expect(page.locator("#call-state")).to_contain_text("idle", timeout=15000)
 
@@ -72,6 +90,28 @@ with sync_playwright() as p:
         delivered = any(any(q.get("text") == text for q in m.get("payloads", [])) for m in client("client-a").get("mcdata_inbox", []))
         time.sleep(0.3)
     check("BRW-04 SDS sent from the page reaches client-a", delivered)
+    # The dispatcher's own emergency alert, listed by user ID, then cancelled.
+    me = json.loads((lab / "generated" / "client-c.json").read_text())["mcptt"]["user_id"]
+    page.click("button[data-action=alert][data-on=true]")
+    expect(page.locator("#alerts")).to_contain_text("Emergency alert: " + me, timeout=15000)
+    page.click("button[data-action=alert][data-on=false]")
+    expect(page.locator("#alerts")).not_to_contain_text(me, timeout=15000)
+    check("BRW-07 the alert list names the user, and the alert is cancelled", True)
+    check("BRW-08 the call actions are offered: broadcast, the priority buttons idle, no floor control",
+          page.locator("button[data-action=call][data-kind=broadcast]").is_visible() and
+          page.locator("#raise-emergency").is_disabled() and page.locator("#private input[name=no_floor]").count() == 1)
+    # A call-back asked of client-b from the private call field, listed, then cancelled from the list.
+    bob = json.loads((lab / "generated" / "client-b.json").read_text())["mcptt"]["user_id"]
+    page.fill("#private input[name=target]", bob)
+    page.select_option("#private select[name=urgency]", "high")
+    page.click("#callback-request")
+    expect(page.locator("#callbacks")).to_contain_text("Call-back asked of " + bob, timeout=15000)
+    page.locator("#callbacks button", has_text="Cancel").click()
+    expect(page.locator("#callbacks")).not_to_contain_text(bob, timeout=15000)
+    check("BRW-09 call-back requested from the page, listed and cancelled", True)
+    page.check("#chat")
+    check("BRW-10 the chat group option leaves no broadcast call", page.locator("#broadcast").is_disabled())
+    page.uncheck("#chat")
     page.screenshot(path=str(lab / "artifacts" / "dispatcher.png"), full_page=True)
     check("BRW-05 no script errors", not errors, "; ".join(errors))
     browser.close()

@@ -27,8 +27,8 @@ import json
 from pathlib import Path
 
 LIVE = {"listen": "127.0.0.1", "port": 7100, "send_host": "127.0.0.1", "send_port": 7101}
-SESSION_HEALTHCHECK = {"test": ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen("
-                                "'http://127.0.0.1:8080/api/session', timeout=2)"],
+SESSION_HEALTHCHECK = {"test": ["CMD", "python3", "-c", ("import urllib.request; urllib.request.urlopen("
+                                "'http://127.0.0.1:8080/api/session', timeout=2)")],
                        "interval": "3s", "timeout": "3s", "retries": 30, "start_period": "5s"}
 
 
@@ -76,7 +76,36 @@ def lab_mode(args, compose, generated) -> None:
         members = group.get("mcdata", {}).get("transmit_members")
         if members is not None and mcdata_id not in members:
             members.append(mcdata_id)
+    # And the widest MCPTT rights (TS 24.484 user profile, TS 24.481 group document): emergency and imminent peril
+    # calls, their cancellation and emergency alerts (also another user's) on every group, private calls to anyone,
+    # emergency ones too, private calls from anyone, call-backs, and broadcast group calls (the MCPTT server's
+    # broadcast_members, a lab policy).
+    # client-a may request call-backs too, so that the scenario can ask the dispatcher for one.
+    mcptt_id = config["mcptt"]["user_id"]
+    peer = json.loads((generated / "client-a.json").read_text())["mcptt"]["user_id"]
+    for user in site["users"]:
+        if user.get("mcptt_id") == peer:
+            user.setdefault("private_call", {}).update(callback=True, callback_cancel=True)
+        if user.get("mcptt_id") == mcptt_id:
+            user.setdefault("group_call", {}).update(emergency=True, emergency_cancel=True, imminent=True,
+                                                     imminent_cancel=True, alert=True, alert_cancel=True)
+            user.setdefault("private_call", {}).update(allow=True, automatic_commencement=True,
+                                                       manual_commencement=True, any_target=True, emergency=True,
+                                                       emergency_any=True, emergency_cancel=True, callback=True,
+                                                       callback_cancel=True, incoming_any=True)
+    for group in site["groups"]:
+        policy = group.get("priority_policy")
+        for key in ("emergency_users", "emergency_cancel_users", "imminent_users", "imminent_cancel_users",
+                    "alert_users", "alert_cancel_users"):
+            if policy is not None and mcptt_id not in policy.setdefault(key, []):
+                policy[key].append(mcptt_id)
     site_file.write_text(json.dumps(site, indent=2) + "\n")
+    for server_file in generated.glob("mcptt-*.json"):
+        server = json.loads(server_file.read_text())
+        members = server.get("mcptt", {}).get("call_policy", {}).get("broadcast_members")
+        if members is not None and mcptt_id not in members:
+            members.append(mcptt_id)
+            server_file.write_text(json.dumps(server, indent=2) + "\n")
 
     inside = f"/config/{args.client}.json"
     for volume in service["volumes"]:

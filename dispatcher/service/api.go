@@ -180,7 +180,8 @@ func (a *api) view(r *http.Request) (map[string]any, error) {
 		return out
 	}
 	v := pick("registered", "authorized", "affiliated", "call_state", "call_type", "private_peer", "floor_state",
-		"floor_owner", "talking", "priority", "alerts", "alert_locations", "last_call_failure", "queue_position",
+		"floor_owner", "talking", "floor_control", "priority", "priority_pending", "alerts", "alert_locations",
+		"last_call_failure", "queue_position", "callback_requests_sent", "callback_requests_received",
 		"private_emergency_state", "profile_groups", "mcdata_authorized", "mcdata_affiliated", "mcdata_inbox",
 		"mcdata_sent", "mcdata_last_result", "mcdata_files", "mcdata_files_sent", "mcdata_fd_last_result")
 	v["session"] = session
@@ -258,11 +259,22 @@ func commandLine(req map[string]any) (string, error) {
 	}
 	switch action := str("action"); action {
 	case "call":
+		// TS 24.379 clause 10.1.2.2.1.1: a chat group call is joined (and started) by the same request, on the selected
+		// chat group; it has no broadcast form.
+		verb := "call"
+		if flag("chat") {
+			verb = "chat"
+		}
 		switch kind := str("kind"); kind {
 		case "", "normal":
-			return "call", nil
+			return verb, nil
 		case "emergency", "imminent":
-			return "call " + kind, nil
+			return verb + " " + kind, nil
+		case "broadcast":
+			if verb == "chat" {
+				return "", errors.New("a chat group call has no broadcast form")
+			}
+			return "call broadcast", nil
 		default:
 			return "", fmt.Errorf("unknown call kind %q", kind)
 		}
@@ -285,7 +297,40 @@ func commandLine(req map[string]any) (string, error) {
 		if flag("emergency") {
 			line += " emergency"
 		}
+		// TS 24.379 clause 11.1.2.2: a private call without floor control.
+		if flag("no_floor") {
+			line += " no-floor"
+		}
 		return line, nil
+	case "priority":
+		// TS 24.379 clauses 10.1.1.2.1.3 to 10.1.1.2.1.5 and 11.1.1.2.1.4: the call in progress raised to, or brought
+		// back from, emergency or imminent peril.
+		level := str("level")
+		if level != "emergency" && level != "imminent" {
+			return "", fmt.Errorf("unknown priority level %q", level)
+		}
+		if flag("on") {
+			return level + " on", nil
+		}
+		return level + " off", nil
+	case "callback", "callback-cancel", "callback-fulfil":
+		// TS 24.379 clause 11.1.5: a private call call-back requested from a user or cancelled, or one received
+		// fulfilled by calling the requester back.
+		target, err := id("target")
+		if err != nil {
+			return "", err
+		}
+		if action != "callback" {
+			return action + " " + target, nil
+		}
+		switch urgency := str("urgency"); urgency {
+		case "":
+			return "callback " + target, nil
+		case "low", "normal", "high": // <urgency-ind>, TS 24.379 annex F.1
+			return "callback " + target + " " + urgency, nil
+		default:
+			return "", fmt.Errorf("unknown urgency %q", urgency)
+		}
 	case "answer", "reject", "hangup", "release":
 		return action, nil
 	case "ptt":
@@ -293,6 +338,14 @@ func commandLine(req map[string]any) (string, error) {
 	case "alert":
 		if flag("on") {
 			return "alert on", nil
+		}
+		// TS 24.379 clause 12.1.1.2: another user's alert cancelled, by an authorised user.
+		if str("user") != "" {
+			user, err := id("user")
+			if err != nil {
+				return "", err
+			}
+			return "alert off " + user, nil
 		}
 		return "alert off", nil
 	case "sds":

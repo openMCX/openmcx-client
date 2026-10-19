@@ -104,7 +104,8 @@ function render(s) {
   reg.classList.toggle('off', !s.registered);
 
   const call = s.call_state || 'idle';
-  text($('call-state'), call + (s.call_type ? ' (' + s.call_type + (s.private_peer ? ' ' + s.private_peer : '') + ')' : ''));
+  text($('call-state'), call + (s.call_type ? ' (' + s.call_type + (s.private_peer ? ' ' + s.private_peer : '') + ')' : '') +
+    (call === 'active' && s.floor_control === false ? ' · without floor control' : ''));
   text($('floor-state'), (s.floor_state || '–') + (s.floor_owner ? ' · ' + s.floor_owner : '') +
     (s.queue_position ? ' · queue ' + s.queue_position : ''));
   const failure = s.last_call_failure;
@@ -120,7 +121,32 @@ function render(s) {
 
   const alerts = $('alerts');
   alerts.replaceChildren();
-  for (const [who, on] of Object.entries(s.alerts || {})) if (on) item(alerts, 'Emergency alert: ' + who);
+  // Another user's alert can be cancelled from here (TS 24.379 clause 12.1.1.2), by a user with the right to.
+  // The engine lists the users whose emergency alert is active (TS 24.379 clause 12.1.1).
+  for (const who of s.alerts || []) {
+    const others = who !== id.user ? [['Cancel', '', () => act({ action: 'alert', on: false, user: who })]] : [];
+    item(alerts, 'Emergency alert: ' + who, '', others);
+  }
+  // The call in progress raised to emergency or imminent peril, or brought back (TS 24.379 clause 10.1.1.2.1.3).
+  const inCall = call === 'active';
+  // A private call's emergency state is its own (TS 24.379 annex G.11, MEPC 2 requested, MEPC 3 granted).
+  const priority = s.call_type === 'private'
+    ? (/^MEPC [23]/.test(s.private_emergency_state || '') ? 'emergency' : 'normal') : (s.priority || 'normal');
+  state.effectivePriority = priority;
+  $('raise-emergency').disabled = !inCall || priority === 'emergency';
+  $('raise-imminent').disabled = !inCall || priority !== 'normal' || s.call_type === 'private';
+  $('priority-off').disabled = !inCall || priority === 'normal';
+
+  // Call-back requests (TS 24.379 clause 11.1.5, annex G PCCB states): received ones are called back, sent ones
+  // cancelled.
+  const callbacks = $('callbacks');
+  callbacks.replaceChildren();
+  for (const [who, r] of Object.entries(s.callback_requests_received || {}))
+    item(callbacks, 'Call-back requested by ' + who, (r.urgency || 'normal') + ' urgency' + (r.time ? ' · ' + r.time : ''),
+         [['Call back', 'go', () => { audio(); act({ action: 'callback-fulfil', target: who }); }]]);
+  for (const [who, st] of Object.entries(s.callback_requests_sent || {}))
+    item(callbacks, 'Call-back asked of ' + who, st,
+         /cancel-pending/.test(st) ? [] : [['Cancel', '', () => act({ action: 'callback-cancel', target: who })]]);
 
   const inbox = $('inbox');
   inbox.replaceChildren();
@@ -225,15 +251,25 @@ document.querySelectorAll('button[data-action]').forEach((b) => b.addEventListen
   const body = { action: b.dataset.action };
   if (b.dataset.kind) body.kind = b.dataset.kind;
   if (b.dataset.on) body.on = b.dataset.on === 'true';
+  if (b.dataset.level) body.level = b.dataset.level;
+  if (body.action === 'call' && $('chat').checked) body.chat = true;
   act(body);
 }));
 $('answer').onclick = () => { audio(); act({ action: 'answer' }); };
+// Back to normal: the call's emergency or imminent peril condition cancelled.
+$('priority-off').onclick = () => act({ action: 'priority', level: state.effectivePriority === 'imminent' ? 'imminent' : 'emergency', on: false });
 $('reject').onclick = () => act({ action: 'reject' });
+// TS 24.379 clause 11.1.5.2.1: ask the user in the private call field to call the dispatcher back.
+$('callback-request').onclick = () => {
+  const f = $('private');
+  if (f.target.reportValidity()) act({ action: 'callback', target: f.target.value.trim(), urgency: f.urgency.value });
+};
+$('chat').onchange = () => { $('broadcast').disabled = $('chat').checked; };
 $('private').onsubmit = (e) => {
   e.preventDefault();
   audio();
   const f = e.target;
-  act({ action: 'private', target: f.target.value.trim(), emergency: f.emergency.checked });
+  act({ action: 'private', target: f.target.value.trim(), emergency: f.emergency.checked, no_floor: f.no_floor.checked });
 };
 $('sds').onsubmit = (e) => {
   e.preventDefault();

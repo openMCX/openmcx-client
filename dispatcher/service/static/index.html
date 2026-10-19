@@ -62,14 +62,28 @@
           <button data-action="call" data-kind="normal">Group call</button>
           <button data-action="call" data-kind="imminent" class="warn">Imminent peril</button>
           <button data-action="call" data-kind="emergency" class="stop">Emergency call</button>
+          <button id="broadcast" data-action="call" data-kind="broadcast">Broadcast call</button>
+        </div>
+        <div class="row"><label title="TS 24.379 clause 10.1.2: the calls above join the selected chat group's call, or start it">
+          <input type="checkbox" id="chat"> chat group (join)</label></div>
+        <h3>During the call</h3>
+        <div class="row">
+          <button id="raise-emergency" data-action="priority" data-level="emergency" data-on="true" class="stop" disabled>Raise emergency</button>
+          <button id="raise-imminent" data-action="priority" data-level="imminent" data-on="true" class="warn" disabled>Raise imminent peril</button>
+          <button id="priority-off" disabled>Back to normal</button>
         </div>
       </div>
       <div>
         <h3>Private call</h3>
         <form id="private">
           <div class="row"><input name="target" placeholder="MCPTT ID, e.g. sip:bob.mcptt@mcx.test" required></div>
-          <div class="row"><label><input type="checkbox" name="emergency"> emergency</label><button>Call</button></div>
+          <div class="row"><label><input type="checkbox" name="emergency"> emergency</label>
+            <label><input type="checkbox" name="no_floor"> without floor control</label><button>Call</button></div>
+          <div class="row"><select name="urgency" aria-label="Call-back urgency">
+              <option value="low">low</option><option value="normal" selected>normal</option><option value="high">high</option>
+            </select><button type="button" id="callback-request">Request call-back</button></div>
         </form>
+        <div id="callbacks" class="list"></div>
       </div>
       <div class="talk">
         <button id="ptt" class="ptt" disabled>Hold to talk</button>

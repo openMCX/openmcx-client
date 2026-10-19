@@ -38,9 +38,9 @@ checked out beside it (`../openmcx-server`).
 
 | Area | v1 |
 |---|---|
-| Group call | the configured group: normal, imminent peril, emergency; hold to talk with the browser microphone; received audio played in the browser |
-| Private call | call any MCPTT ID (optionally emergency); incoming calls ring and are answered or rejected |
-| Emergency alert | send and cancel |
+| Group call | the configured group: normal, imminent peril, emergency, broadcast; a chat group's call joined (or started), normal, imminent peril or emergency; during the call, raise it to emergency or imminent peril and back to normal; hold to talk with the browser microphone; received audio played in the browser |
+| Private call | call any MCPTT ID (optionally emergency, optionally without floor control); raise it to emergency and back; incoming calls ring and are answered or rejected; call-back asked of a user (low, normal or high urgency) and cancelled, call-backs asked of the dispatcher listed and fulfilled |
+| Emergency alert | send and cancel its own; cancel another user's (with the right to) |
 | SDS | one-to-one and group, inbox |
 | File distribution | send from the browser (optionally mandatory), accept or reject received files, save them |
 | Coming soon | several monitored groups, remote affiliation, video, call recording, map, operator handoff, dynamic regrouping |
@@ -134,8 +134,13 @@ origin.
 | `GET /api/files/{message ID}` | a received file once downloaded |
 | `GET /api/audio` | WebSocket, binary frames of 16 kHz 16-bit little-endian mono PCM, both ways |
 
-Actions: `{"action":"call","kind":"normal|imminent|emergency"}`, `{"action":"private","target":"<MCPTT ID>","emergency":bool}`,
-`{"action":"group","id":"<group>"}`, `answer`, `reject`, `hangup`, `ptt` (talk from the audio socket), `release`, `{"action":"alert","on":bool}`,
+Actions: `{"action":"call","kind":"normal|imminent|emergency|broadcast","chat":bool}` (`chat`: the selected chat
+group's call, no broadcast), `{"action":"callback","target":"<MCPTT ID>","urgency":"low|normal|high"}`,
+`{"action":"callback-cancel|callback-fulfil","target":"<MCPTT ID>"}`,
+`{"action":"private","target":"<MCPTT ID>","emergency":bool,"no_floor":bool}`,
+`{"action":"priority","level":"emergency|imminent","on":bool}` (the call in progress), `{"action":"group","id":"<group>"}`,
+`answer`, `reject`, `hangup`, `ptt` (talk from the audio socket), `release`, `{"action":"alert","on":bool,"user":"<MCPTT ID>"}`
+(`user`: another user's alert to cancel),
 `{"action":"sds","target":"<MCData ID or group>","group":bool,"text":"..."}`, `{"action":"fd-accept|fd-reject|fd-defer","id":"<message ID>"}`.
 Nothing else reaches the engine.
 
@@ -143,10 +148,13 @@ Nothing else reaches the engine.
 
 ```
 python3 ../openmcx-server/tools/prepare-prearranged-test.py --directory <lab> --project disp --private-call --mcdata \
+  --priority --broadcast --chat \
   --image openmcx:<tag> --client-image openmcx-client:dispatcher
-python3 dispatcher/lab/prepare.py <lab>                       # client-c becomes the dispatcher on 127.0.0.1:18080
+python3 dispatcher/lab/prepare.py <lab>                       # client-c becomes the dispatcher on 127.0.0.1:18080,
+                                                              # with the lab's widest MCPTT and MCData rights
 ../openmcx-server/.cache/deps/docker-compose-linux-x86_64 -p disp -f <lab>/compose.json up -d --wait   # openmcx-server's compose binary
 python3 dispatcher/lab/scenario.py <lab> --project disp       # DSP-01..08
+python3 dispatcher/lab/actions_scenario.py <lab> --project disp   # DSP-09..16; the lab with --priority --broadcast --chat
 docker run --rm --network host -v playwright-py:/py -v <lab>:/lab -v $PWD/dispatcher/lab:/check -w /check \
   mcr.microsoft.com/playwright/python:v1.55.0-noble sh -c \
   '[ -d /py/playwright ] || pip install -q --break-system-packages --target /py playwright==1.55.0; PYTHONPATH=/py python3 browser_check.py /lab'

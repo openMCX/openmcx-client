@@ -454,7 +454,10 @@ void Client::chat_join_command(const std::string &cmd) {
       failure("chat join: " + std::to_string(response.status_code));
     } else if (response.status_code >= 200 && !dialog_.empty()) {
       status_["last_call_failure"] = {{"status", response.status_code}, {"warning", ""}};
-      sip_.bye(dialog_);
+      // Not from within PJSIP's handling of the 200 (OK): ending the session there aborts on its reference count.
+      schedule([this, id = dialog_] {
+        if (dialog_ == id) sip_.bye(id);
+      });
     }
   });
   status_["call_state"] = "calling";
