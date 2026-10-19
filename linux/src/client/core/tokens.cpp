@@ -51,18 +51,21 @@ void Client::keep_refresh_state(const Json &tokens) {
 
 //------------------------------------------------------------------------------
 // TS 24.482 clause 6.2.1 and TS 33.180 annex B.4 and annex B.5: obtain tokens with the refresh token when there is
-// one; the password otherwise, or when IdMS refuses
+// one; else with the authorization code of a sign-in in the user's browser (oauth.authorization: the code, the PKCE
+// code verifier and the nonce of its request, used once); the password otherwise, or when IdMS refuses
 // the refresh token and a password is configured (a lab client). A device without a
 // password whose refresh token is refused (suspended, Revoke devices) must sign in
-// again: activation. Any other failure of the refresh grant (IdMS unreachable, a server error) is transient: the
-// refresh token is kept and renew_token() tries again.
+// again: activation, or the browser. Any other failure of the refresh grant (IdMS unreachable, a server error) is
+// transient: the refresh token is kept and renew_token() tries again.
 Json Client::obtain_tokens() {
   if (!refresh_loaded_) load_refresh_state();
-  const auto &oauth = cfg_.at("oauth");
+  const auto oauth = oauth_settings(cfg_);
   const bool has_password = !oauth.value("password", std::string{}).empty();
   if (!refresh_token_.empty()) {
     try {
-      auto tokens = oidc_refresh(http_, oauth, refresh_token_, auth_nonce_);
+      auto tokens = oidc_refresh(idms_http_, oauth, refresh_token_, auth_nonce_);
+      // TS 33.180 table B.5.3-1: IdMS may keep the refresh token instead of issuing another.
+      if (!tokens.contains("refresh_token")) tokens["refresh_token"] = refresh_token_;
       keep_refresh_state(tokens);
       ++token_refreshes_;
       refresh_refusals_ = 0;
@@ -77,8 +80,17 @@ Json Client::obtain_tokens() {
       if (!has_password) throw;
     }
   }
+  if (oauth.contains("authorization")) {
+    const auto authorization = oauth.at("authorization");
+    cfg_["oauth"].erase("authorization");
+    auto tokens = oidc_exchange_code(idms_http_, oauth, authorization.at("code"), authorization.at("code_verifier"),
+                                     authorization.at("nonce"));
+    keep_refresh_state(tokens);
+    ++browser_logins_;
+    return tokens;
+  }
   if (!has_password) throw std::runtime_error("IdMS refused the refresh token, and no password is configured");
-  auto tokens = oidc_login(http_, oauth);
+  auto tokens = oidc_login(idms_http_, oauth);
   keep_refresh_state(tokens);
   ++password_logins_;
 
@@ -90,15 +102,32 @@ Json Client::obtain_tokens() {
 
 //------------------------------------------------------------------------------
 // TS 24.482 clause 6.2.1: user authentication: obtain the tokens and check the identities the claims name
-// (TS 33.180 annex B.2) against the configured MCPTT ID, client ID and SIP URI.
+// (TS 33.180 table B.2.1.3-1) against the configured MCPTT ID, and the MCData and MCVideo IDs where IdMS names
+// them; the client ID and SIP URI too where IdMS names them (the OpenMCX IdMS, an extension). A refresh may give no
+// ID token (TS 33.180 table B.5.3-1): the identity stays the one checked at sign-in.
 void Client::login() {
   auto tokens = obtain_tokens();
-  auto claims = tokens.at("claims");
-  if (claims.at("mcptt_id") != user() || claims.at("client_id") != client_id() ||
-      claims.at("sip_uri") != cfg_.at("sip").at("identity"))
-    throw std::runtime_error("OIDC identity does not match configured MCPTT/SIP client");
+  if (tokens.contains("claims")) {
+    const auto &claims = tokens.at("claims");
+    const auto differs = [&claims](const char *claim, const std::string &configured) {
+      return claims.contains(claim) && claims.at(claim) != configured;
+    };
+    if (claims.at("mcptt_id") != user() || differs("client_id", client_id()) ||
+        differs("sip_uri", cfg_.at("sip").at("identity")) ||
+        (mcdata_enabled() && differs("mcdata_id", mcdata_user())) ||
+        (mcvideo_enabled() && differs("mcvideo_id", mcvideo_user())))
+      throw std::runtime_error("OIDC identity does not match configured MCPTT/SIP client");
+  } else if (token_.empty()) {
+    throw std::runtime_error("IdMS gave no ID token at sign-in");
+  }
   token_ = tokens.at("access_token");
-  expires_ = claims.at("exp");
+  // TS 33.180 annex B.12: the client takes the access token's lifetime from expires_in.
+  if (tokens.contains("expires_in") && tokens.at("expires_in").is_number_integer())
+    expires_ = std::time(nullptr) + tokens.at("expires_in").get<std::int64_t>();
+  else if (tokens.contains("claims"))
+    expires_ = tokens.at("claims").at("exp");
+  else
+    throw std::runtime_error("IdMS gave no expires_in");
 }
 
 //------------------------------------------------------------------------------

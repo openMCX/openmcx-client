@@ -52,12 +52,16 @@ function item(list, title, detail, buttons = []) {
   list.append(div);
 }
 
-// The sign-in screen (position mode): shown whenever this browser has no session.
+// The sign-in screen (position mode, or browser: on IdMS's page): shown whenever this browser has no session.
 function renderSession(session) {
   const out = !session.signed_in;
+  const browser = session.mode === 'browser';
   $('signin').hidden = !out;
-  $('signout').hidden = out || session.mode !== 'position';
+  $('signout').hidden = out || (session.mode !== 'position' && !browser);
   if (!out) return false;
+  $('idms-login').hidden = !browser;
+  text($('idms-host'), session.idms ? ', ' + session.idms : '');
+  $('position-login').hidden = browser;
   if (talking) pttUp();
   text($('signin-reason'), session.reason || '');
   text($('accounts'), (session.accounts || []).join(', ') || 'none');
@@ -88,8 +92,11 @@ function render(s) {
   state = s;
   if (renderSession(s.session || {})) return;
   const id = s.identity || {};
-  text($('identity'), (s.session.operator ? s.session.operator + ' · ' : '') + (id.user || '?') +
-    (id.mcdata_user && id.mcdata_user !== id.user ? ' · ' + id.mcdata_user : ''));
+  const operator = s.session.operator && s.session.operator !== id.user ? s.session.operator + ' · ' : '';
+  // The IdMS the operator signed in at (sign-in on IdMS's page): at a Plugtest one of several vendors'.
+  text($('identity'), operator + (id.user || '?') +
+    (id.mcdata_user && id.mcdata_user !== id.user ? ' · ' + id.mcdata_user : '') +
+    (s.session.idms ? ' · signed in at ' + s.session.idms : ''));
   renderGroups(id.group, s.profile_groups);
   $('group-select').disabled = $('group-select').options.length < 2 || (s.call_state || 'idle') !== 'idle';
   const reg = $('registration');

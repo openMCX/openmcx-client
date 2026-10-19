@@ -11,9 +11,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import org.openmcx.client.security.GroupKeys
 import org.openmcx.client.security.KeyMessage
 import org.openmcx.client.security.KmsDocuments
-import org.openmcx.client.security.Mikey
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
@@ -142,9 +142,9 @@ class McvideoService(
     /** The groups on which this user's own emergency alert is active. */
     val alerting: StateFlow<Set<String>> = _alerting
 
-    /** Each group's current GMK (TS 33.180 5.7), its CSB-ID the GMK-ID; from the GKTP subscriptions. */
-    private val groupKeys = java.util.concurrent.ConcurrentHashMap<String, KeyMessage>()
-    val groupKeyIds: Map<String, Long> get() = groupKeys.mapValues { it.value.csbId }
+    /** Each group's GMKs (TS 33.180 5.7), their CSB-IDs the GMK-IDs; from the GKTP subscriptions. */
+    private val groupKeys = GroupKeys()
+    val groupKeyIds: Map<String, Long> get() = groupKeys.ids
     /** The GKTP subscriptions: Call-ID to group. */
     private val keySubscriptions = java.util.concurrent.ConcurrentHashMap<String, String>()
 
@@ -190,24 +190,24 @@ class McvideoService(
         if (keys == null || gms == null || root == null || request.contentType?.startsWith("application/xcap-diff+xml") != true) { tx.respond(400); return }
         tx.respond(200)
         try {
-            val now = Mikey.nowNtp()
-            val key = keys.openGroupMessage(gms, group, KmsDocuments.parseGktpXcapDiff(String(request.body), group, root, now))
-            groupKeys[group] = key
-            event("group key for $group: GMK %08x".format(key.csbId))
+            val key = keys.openGroupMessage(gms, group, KmsDocuments.parseGktpXcapDiff(String(request.body), group, root))
+            groupKeys.add(group, key)
+            event("group key for $group: GMK %08x".format(key.csbId) + (if (groupKeys.active(group)?.csbId != key.csbId) ", not active yet" else ""))
         } catch (e: Exception) {
             event("group key for $group refused: ${e.message}")
         }
     }
 
     /**
-     * The group's GMK, waiting a little for it: the GMS sends it after start-up (TS 33.180 5.7), and a call placed
-     * just then, a chat group joined at once for instance, would otherwise fail.
+     * The group's active GMK, waiting a little for it: the GMS sends it after start-up (TS 33.180 5.7), and a call placed
+     * just then, a chat group joined at once for instance, would otherwise fail; a GMK held but not yet active (its
+     * Activation Time a moment ahead of this clock) becomes active meanwhile.
      */
     private suspend fun awaitGroupKey(group: String): KeyMessage =
-        groupKeys[group] ?: kotlinx.coroutines.withTimeoutOrNull(GROUP_KEY_WAIT_MS) {
+        groupKeys.active(group) ?: kotlinx.coroutines.withTimeoutOrNull(GROUP_KEY_WAIT_MS) {
             event("waiting for the group key for $group")
-            while (groupKeys[group] == null) kotlinx.coroutines.delay(100)
-            groupKeys[group]
+            while (groupKeys.active(group) == null) kotlinx.coroutines.delay(100)
+            groupKeys.active(group)
         } ?: throw CallError("no group key for $group yet")
 
     private fun event(text: String) = client.event("mcvideo: $text")
@@ -530,10 +530,12 @@ class McvideoService(
         }
         // §10.2.2.2.2 with TS 33.180 7.4: a protected one-to-one offer carries the caller's PCK, which must
         // authenticate as from the calling MCVideo ID; otherwise 488 with warning 136.
-        var pck: org.openmcx.client.security.KeyMessage? = null
+        var pck: KeyMessage? = null
+        var gmk: KeyMessage? = null
         if (remote.protected) {
             if (group != null) {
-                if (groupKeys[group] == null) { tx.respond(488); event("protected call on $group without its group key"); return }
+                gmk = runCatching { awaitGroupKey(group) }.getOrNull()
+                if (gmk == null) { tx.respond(488); event("protected call on $group without its group key"); return }
             } else try {
                 val keys = client.videoKeys ?: throw CallError("no MCVideo keys")
                 pck = keys.acceptPck(info.callingUserId ?: throw CallError("no caller"), remote.keyMgmt ?: throw CallError("protected call without a PCK"))
@@ -583,7 +585,7 @@ class McvideoService(
         }
         val media = newMedia(call, ports, local)
         media.protection = try {
-            protection(pck, localInitiator = false, gmk = if (remote.protected && group != null) groupKeys[group] else null, call = call)
+            protection(pck, localInitiator = false, gmk = gmk, call = call)
         } catch (e: CallError) {
             tx.respond(480); release(call, e.message ?: "no keys"); return
         }

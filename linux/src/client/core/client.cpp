@@ -191,6 +191,7 @@ void Client::save_status(std::uint64_t now) {
   status_["token_refreshes"] = token_refreshes_;
   status_["token_refresh_refusals"] = refresh_refusals_;
   status_["password_logins"] = password_logins_;
+  status_["browser_logins"] = browser_logins_;
   status_["location"] = location_status();
   status_["group_documents"] = group_documents_;
   if (mcdata_enabled()) status_["mcdata_location"] = mcdata_location_status();
@@ -240,6 +241,10 @@ Client::Client(Json cfg, bool disable_tls)
             HttpTimeouts{cfg_.value("http", Json::object()).value("connect_timeout_ms", 2000L),
                          cfg_.value("http", Json::object()).value("timeout_ms", 15000L)},
             address_map(cfg_)),
+      idms_http_(cfg_.at("tls").at("ca_file"),
+                 HttpTimeouts{cfg_.value("http", Json::object()).value("connect_timeout_ms", 2000L),
+                              cfg_.value("http", Json::object()).value("timeout_ms", 15000L)},
+                 address_map(cfg_), HttpTrust::configured_and_system),
       control_(cfg_.at("control_fifo")),
       sip_(client_sip_config(cfg_, disable_tls),
            {[this](const SipMessage &message) { return incoming(message); },

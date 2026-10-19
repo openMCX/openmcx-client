@@ -31,6 +31,8 @@ type api struct {
 func (a *api) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/session", a.session)
 	mux.HandleFunc("POST /api/login", a.login)
+	mux.HandleFunc("GET /api/login/browser", a.browserLogin)
+	mux.HandleFunc("GET "+callbackPath, a.browserCallback)
 	mux.HandleFunc("POST /api/activate", a.activate)
 	mux.HandleFunc("POST /api/logout", a.logout)
 	mux.HandleFunc("GET /api/events", a.events)
@@ -112,6 +114,10 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if a.pos.browser {
+		fail(w, http.StatusNotFound, errors.New("this dispatcher signs in on IdMS's own page: use Sign in with IdMS"))
+		return
+	}
 	if req["username"] == "" || req["password"] == "" {
 		fail(w, http.StatusBadRequest, errors.New("give the login and the password"))
 		return
@@ -126,6 +132,10 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 func (a *api) activate(w http.ResponseWriter, r *http.Request) {
 	req, ok := a.credentials(w, r)
 	if !ok {
+		return
+	}
+	if a.pos.browser {
+		fail(w, http.StatusNotFound, errors.New("this dispatcher has a configured identity: nothing to activate"))
 		return
 	}
 	if req["url"] == "" || req["password"] == "" {

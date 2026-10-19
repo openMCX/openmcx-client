@@ -21,9 +21,13 @@ import java.security.interfaces.RSAPublicKey
 
 /** A fake IdMS with the lab's endpoints (docs/android/wire/phase1-startup.md §1). */
 private class FakeIdms(var nonceOverride: String? = null, var stateOverride: String? = null) : HttpClient {
+    /** What a refresh answers with: an ID token (with the nonce) and a new refresh token, each optional. */
+    var refreshIdToken = true
+    var refreshNonce = true
+    var rotate = true
     val issuer = "https://idms:8443"
     private val keys = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
-    private var pending: Map<String, String> = emptyMap()
+    var pending: Map<String, String> = emptyMap()
     private var code: String? = null
     var refresh = 0 // the current refresh token is "RT$refresh"; each use rotates it
 
@@ -54,18 +58,21 @@ private class FakeIdms(var nonceOverride: String? = null, var stateOverride: Str
                 val form = query(String(body!!))
                 if (form["grant_type"] == "refresh_token") {
                     if (form["refresh_token"] != "RT$refresh") return HttpResponse(400, emptyMap(), """{"error":"invalid_grant"}""".toByteArray())
-                    refresh++
+                    if (rotate) refresh++
                     val now = System.currentTimeMillis() / 1000
+                    val nonce = if (refreshNonce) """"nonce":"${pending["nonce"]}",""" else ""
                     val id = jwt("""{"iss":"$issuer","aud":"mcx-lab-client","sub":"sip:alice.mcptt@mcx.test","exp":${now + 3600},
-                        "nonce":"${pending["nonce"]}","mcptt_id":"sip:alice.mcptt@mcx.test","client_id":"urn:uuid:1"}""")
-                    return ok("""{"access_token":"AT$refresh","expires_in":3600,"id_token":"$id","refresh_token":"RT$refresh","token_type":"Bearer"}""")
+                        $nonce"mcptt_id":"sip:alice.mcptt@mcx.test","client_id":"urn:uuid:1"}""")
+                    val idPart = if (refreshIdToken) ""","id_token":"$id"""" else ""
+                    val refreshPart = if (rotate) ""","refresh_token":"RT$refresh"""" else ""
+                    return ok("""{"access_token":"AT$refresh","expires_in":1800$idPart$refreshPart,"token_type":"Bearer"}""")
                 }
                 val challenge = b64urlEncode(MessageDigest.getInstance("SHA-256").digest(form["code_verifier"]!!.toByteArray()))
                 if (form["code"] != code || challenge != pending["code_challenge"]) return HttpResponse(400, emptyMap(), ByteArray(0))
                 val now = System.currentTimeMillis() / 1000
                 val id = jwt("""{"iss":"$issuer","aud":"mcx-lab-client","sub":"sip:alice.mcptt@mcx.test","exp":${now + 3600},
                     "nonce":"${nonceOverride ?: pending["nonce"]}","mcptt_id":"sip:alice.mcptt@mcx.test","mcdata_id":"sip:alice.mcdata@mcx.test",
-                    "sip_uri":"sip:alice@mcx.test","client_id":"urn:uuid:1"}""")
+                    "mcvideo_id":"sip:alice.mcvideo@mcx.test","sip_uri":"sip:alice@mcx.test","client_id":"urn:uuid:1"}""")
                 ok("""{"access_token":"AT","expires_in":3600,"id_token":"$id","refresh_token":"RT$refresh","token_type":"Bearer"}""")
             }
             "/jwks" -> {
@@ -87,6 +94,29 @@ class IdmsTest {
         assertEquals("AT", tokens.accessToken)
         assertEquals("sip:alice.mcptt@mcx.test", tokens.mcpttId)
         assertEquals("urn:uuid:1", tokens.clientId)
+        assertEquals("sip:alice.mcvideo@mcx.test", tokens.mcvideoId)
+    }
+
+    @Test
+    fun authorizationRequestCarriesTheRequiredParameters() = runTest {
+        // TS 33.180 table B.4.2.2-1.
+        val idms = FakeIdms()
+        client(idms).loginDirect("alice", "secret")
+        assertEquals("code", idms.pending["response_type"])
+        assertEquals("3gpp:acr:password", idms.pending["acr_values"])
+        assertEquals("S256", idms.pending["code_challenge_method"])
+    }
+
+    @Test
+    fun scopeFollowsTheConfiguredServices() {
+        assertEquals("openid 3gpp:mc:ptt_service 3gpp:mc:ptt_config_management_service 3gpp:mc:ptt_group_management_service",
+            IdmsClient.scope(listOf("ptt")))
+        assertEquals("openid" +
+            " 3gpp:mc:ptt_service 3gpp:mc:ptt_config_management_service 3gpp:mc:ptt_group_management_service" +
+            " 3gpp:mc:data_service 3gpp:mc:data_config_management_service 3gpp:mc:data_group_management_service" +
+            " 3gpp:mc:video_service 3gpp:mc:video_config_management_service 3gpp:mc:video_group_management_service" +
+            " 3gpp:mc:ptt_key_management_service 3gpp:mc:video_key_management_service",
+            IdmsClient.scope(listOf("ptt", "data", "video"), listOf("ptt", "video")))
     }
 
     @Test
@@ -95,14 +125,32 @@ class IdmsTest {
         val client = client(idms)
         val first = client.loginDirect("alice", "secret")
         assertEquals("RT0", first.refreshToken)
-        val second = client.refresh(first.refreshToken!!, first.nonce)
+        val second = client.refresh(first)
         assertEquals("AT1", second.accessToken)
         assertEquals("RT1", second.refreshToken)
         assertEquals("sip:alice.mcptt@mcx.test", second.mcpttId)
         // The used token was rotated away: IdMS refuses it.
-        assertThrows(IdmsRefused::class.java) { kotlinx.coroutines.runBlocking { client.refresh("RT0", first.nonce) } }
+        assertThrows(IdmsRefused::class.java) { kotlinx.coroutines.runBlocking { client.refresh(first) } }
         // An ID token whose nonce is not the authentication's is refused.
-        assertThrows(IdmsError::class.java) { kotlinx.coroutines.runBlocking { client.refresh(second.refreshToken!!, "other") } }
+        assertThrows(IdmsError::class.java) { kotlinx.coroutines.runBlocking { client.refresh(second.copy(nonce = "other")) } }
+    }
+
+    @Test
+    fun refreshAnswerWithoutIdTokenNonceOrNewRefreshToken() = runTest {
+        // TS 33.180 table B.5.3-1 and OIDC Core §12.2: the ID token, its nonce and a new refresh token are optional.
+        val idms = FakeIdms()
+        val client = client(idms)
+        val first = client.loginDirect("alice", "secret")
+        idms.refreshNonce = false
+        val second = client.refresh(first)
+        assertEquals("sip:alice.mcptt@mcx.test", second.mcpttId)
+        idms.refreshIdToken = false
+        idms.rotate = false
+        val third = client.refresh(second)
+        assertEquals("AT1", third.accessToken)
+        assertEquals("RT1", third.refreshToken)
+        assertEquals(second.idToken, third.idToken)
+        assertEquals("sip:alice.mcptt@mcx.test", third.mcpttId)
     }
 
     @Test

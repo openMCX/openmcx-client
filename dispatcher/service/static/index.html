@@ -19,6 +19,11 @@
     <h2>Sign in to this position</h2>
     <p id="signin-reason" class="error"></p>
     <p id="signin-error" class="error" role="alert"></p>
+    <form id="idms-login" method="get" action="/api/login/browser" hidden>
+      <p class="note">You sign in on the page of this system's identity management server (IdMS)<span id="idms-host"></span>.</p>
+      <button>Sign in with IdMS</button>
+    </form>
+    <div id="position-login">
     <form id="login">
       <label>Login <input name="username" autocomplete="username" required></label>
       <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
@@ -35,6 +40,7 @@
         <button>Activate and sign in</button>
       </form>
     </details>
+    </div>
     <p id="signin-busy" class="note"></p>
   </section>
 </div>

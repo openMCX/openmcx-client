@@ -33,12 +33,13 @@ data class Tokens(
     val expiresAt: Long,
     val mcpttId: String?,
     val mcdataId: String?,
+    val mcvideoId: String?,
     val sipUri: String?,
     /** The MC service client ID the IdMS bound into the token. */
     val clientId: String?,
     /** The refresh token (TS 33.180 B.5), when the IdMS issues one. */
     val refreshToken: String? = null,
-    /** The nonce of the authentication; the ID tokens of later refreshes repeat it (OIDC Core §12.2). */
+    /** The nonce of the authentication; an ID token of a later refresh repeats it, if it has one (OIDC Core §12.2). */
     val nonce: String = "",
 )
 
@@ -83,7 +84,10 @@ class IdmsClient(
         val nonce = token(16)
         val query = HttpClient.formEncode(linkedMapOf(
             "response_type" to "code", "client_id" to clientId, "redirect_uri" to redirectUri, "scope" to scope,
-            "state" to state, "nonce" to nonce, "code_challenge" to challenge, "code_challenge_method" to "S256",
+            "state" to state, "nonce" to nonce,
+            // TS 33.180 table B.4.2.2-1: REQUIRED, the password-based ACR value.
+            "acr_values" to "3gpp:acr:password",
+            "code_challenge" to challenge, "code_challenge_method" to "S256",
         ))
         return AuthorizationRequest("$endpoint?$query", state, nonce, verifier)
     }
@@ -120,34 +124,47 @@ class IdmsClient(
     }
 
     /**
-     * New tokens from the refresh token (TS 33.180 B.6, RFC 6749 §6), without the user's
-     * password; the IdMS returns the next refresh token too. A refusal throws [IdmsRefused].
+     * New tokens from the refresh token of [current] (TS 33.180 B.5, RFC 6749 §6), without the user's
+     * password. A refusal throws [IdmsRefused]. The answer's ID token and next refresh token are optional
+     * (TS 33.180 table B.5.3-1): without them the identity and the refresh token stay those of [current].
      */
-    suspend fun refresh(refreshToken: String, nonce: String): Tokens {
+    suspend fun refresh(current: Tokens): Tokens {
+        val refreshToken = current.refreshToken ?: throw IdmsError("no refresh token")
         val endpoint = discover().str("token_endpoint") ?: throw IdmsError("no token endpoint")
         val r = http.postForm(endpoint, mapOf("grant_type" to "refresh_token", "client_id" to clientId, "refresh_token" to refreshToken))
         if (r.status == 400 || r.status == 401) throw IdmsRefused("IdMS refused the refresh token")
         if (r.status != 200) throw IdmsError("token refresh: HTTP ${r.status} ${r.text}")
-        return tokens(r.text, nonce)
+        return tokens(r.text, current.nonce, current)
     }
 
-    private suspend fun tokens(text: String, nonce: String): Tokens {
+    private suspend fun tokens(text: String, nonce: String, previous: Tokens? = null): Tokens {
         val body = Json.parseToJsonElement(text).jsonObject
         val access = body.str("access_token") ?: throw IdmsError("no access token")
-        val id = body.str("id_token") ?: throw IdmsError("no ID token")
-        val claims = verifyIdToken(id, nonce)
+        // TS 33.180 annex B.12: the client takes the access token's lifetime from expires_in.
         val expiresIn = (body["expires_in"] as? JsonPrimitive)?.longOrNull
+        val refreshToken = body.str("refresh_token") ?: previous?.refreshToken
+        val id = body.str("id_token")
+        if (id == null) {
+            if (previous == null) throw IdmsError("no ID token")
+            return previous.copy(accessToken = access, refreshToken = refreshToken,
+                expiresAt = clock() + (expiresIn ?: throw IdmsError("no expires_in")))
+        }
+        val claims = verifyIdToken(id, nonce, refreshed = previous != null)
         return Tokens(
             accessToken = access, idToken = id,
             expiresAt = expiresIn?.let { clock() + it } ?: (claims["exp"] as? JsonPrimitive)?.longOrNull ?: (clock() + 3600),
-            mcpttId = claims.str("mcptt_id"), mcdataId = claims.str("mcdata_id"),
+            // TS 33.180 table B.2.1.3-1: the MCX claims of the ID token.
+            mcpttId = claims.str("mcptt_id"), mcdataId = claims.str("mcdata_id"), mcvideoId = claims.str("mcvideo_id"),
             sipUri = claims.str("sip_uri"), clientId = claims.str("client_id"),
-            refreshToken = body.str("refresh_token"), nonce = nonce,
+            refreshToken = refreshToken, nonce = nonce,
         )
     }
 
-    /** Verify the ID token (OIDC Core §3.1.3.7): signature, issuer, audience, nonce and lifetime. */
-    private suspend fun verifyIdToken(token: String, nonce: String): JsonObject {
+    /**
+     * Verify the ID token (OIDC Core §3.1.3.7): signature, issuer, audience, nonce and lifetime. The ID token of a
+     * refresh may leave the nonce out (OIDC Core §12.2).
+     */
+    private suspend fun verifyIdToken(token: String, nonce: String, refreshed: Boolean = false): JsonObject {
         val jwt = Jwt.parse(token)
         val header = Json.parseToJsonElement(jwt.headerJson).jsonObject
         val jwksUri = discover().str("jwks_uri") ?: throw IdmsError("no JWKS URI")
@@ -161,11 +178,24 @@ class IdmsClient(
         val aud = claims["aud"]
         val audiences = if (aud is JsonPrimitive) listOf(aud.content) else aud?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
         if (clientId !in audiences) throw IdmsError("ID token audience $audiences")
-        if (claims.str("nonce") != nonce) throw IdmsError("ID token nonce mismatch")
+        if (claims.str("nonce") != nonce && !(refreshed && claims["nonce"] == null)) throw IdmsError("ID token nonce mismatch")
         val exp = (claims["exp"] as? JsonPrimitive)?.longOrNull ?: throw IdmsError("ID token without exp")
         if (exp < clock() - 60) throw IdmsError("ID token expired")
         return claims
     }
 
     private fun JsonObject.str(key: String): String? = (this[key] as? JsonPrimitive)?.content
+
+    companion object {
+        /**
+         * The scope of the authentication request (TS 33.180 table B.4.2.2-1): "openid" and, for each configured
+         * service ("ptt", "data", "video"), the service itself and the CMS and GMS that serve its documents, plus
+         * the KMS of each protected service.
+         */
+        fun scope(services: List<String>, protectedServices: List<String> = emptyList()): String =
+            (listOf("openid") +
+                services.flatMap { listOf("3gpp:mc:${it}_service", "3gpp:mc:${it}_config_management_service",
+                    "3gpp:mc:${it}_group_management_service") } +
+                protectedServices.map { "3gpp:mc:${it}_key_management_service" }).joinToString(" ")
+    }
 }

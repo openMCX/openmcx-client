@@ -4,7 +4,7 @@
 
 // Small rules of the MC client without client state, kept apart from the Client class so that
 // tests/test_client_rules.cpp can check them: the notifiers of MCData disposition notifications, the warn-codes of a
-// Warning header field, when a refused refresh token is dropped, the percent-decoding of an XCAP selector and the
+// Warning header field, when a refused refresh token is dropped, the scope of the authentication request, the percent-decoding of an XCAP selector and the
 // groups of an MCPTT user profile, and the retry delay of a refused initial service authorisation.
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19),
@@ -79,6 +79,22 @@ inline bool has_warning(std::string_view header, unsigned code) {
 // client with a password signs in with it at once.
 inline bool refresh_refusal_final(unsigned refusals, bool has_password, std::int64_t now, std::int64_t expires) {
   return has_password || refusals >= 2 || now >= expires;
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 table B.4.2.2-1 and clause B.4.2.2: the scope of the authentication request: openid, and for MCPTT and
+// each further configured service (MCData, MCVideo) its service, configuration management and group management
+// scopes, with the key management scope where the client is provisioned with keys (security configured).
+inline std::string oidc_scope(bool data, bool video, bool keys) {
+  std::string scope = "openid";
+  for (const auto &[service, configured] :
+       {std::pair<const char *, bool>{"ptt", true}, {"data", data}, {"video", video}}) {
+    if (!configured) continue;
+    for (const char *kind : {"_service", "_config_management_service", "_group_management_service"})
+      scope += std::string(" 3gpp:mc:") + service + kind;
+    if (keys) scope += std::string(" 3gpp:mc:") + service + "_key_management_service";
+  }
+  return scope;
 }
 
 //------------------------------------------------------------------------------

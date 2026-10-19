@@ -168,6 +168,9 @@ void Client::authorize() {
     auth_etag_ = get_header(response.headers, "SIP-ETag");
     authorization_retry_.attempts = 0;
     authorized_ = true;
+    // TS 33.180 clause 5.4: the server holds the CSK now; the renewals of the authorisation carry none (the server
+    // refuses a CSK it already has), and a new authorisation makes a new one (authorize).
+    csk_upload_.clear();
     event("service_authorized");
     // The InitialLogOn trigger fires once the configuration it belongs to arrives (TS 24.379 clause 13.2.2).
     location_logon_pending_ = !location_.configured();

@@ -82,6 +82,8 @@ class DebugControl(private val context: Context) {
         // log-off, log-on: the user's log-off of every MC service (TS 24.379 §7.2.1A step 4), and back.
         "log-off" -> { Engine.client!!.logOff(); status() }
         "log-on" -> { Engine.client!!.logOn(); "logging on" }
+        "retry" -> { Engine.client!!.retryNow(); "retrying" }
+        "sign-in" -> { Engine.client!!.signIn(); "signing in" }
         // The process ends as on a crash (SIGKILL, as kill -9) just after the reply, so that the tests can check that
         // Android restarts the sticky service without root on the phone.
         "die" -> "dying".also { Thread { Thread.sleep(300); android.os.Process.killProcess(android.os.Process.myPid()) }.start() }
@@ -495,6 +497,8 @@ class DebugControl(private val context: Context) {
             .put("token_expires_at", s.tokenExpiresAt).put("token_refreshes", s.tokenRefreshes).put("password_logins", s.passwordLogins)
             .put("last_error", s.lastError)
             .put("logged_off", s.loggedOff).put("log_off", JSONObject(s.logOff)).put("deregistered", s.deregistered ?: JSONObject.NULL)
+            .put("offline_since", s.offlineSince ?: JSONObject.NULL).put("next_retry_at", s.nextRetryAt ?: JSONObject.NULL)
+            .put("signed_out", s.signedOut ?: JSONObject.NULL)
             .put("flow", client.ua.flow?.connection?.let { "${it.localHost}:${it.localPort}" })
             .put("pid", android.os.Process.myPid())
             // The service's foreground types as the app sees them: Android 13's dumpsys does not print them.

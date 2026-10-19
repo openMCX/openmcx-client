@@ -110,6 +110,9 @@ class BrowserLoginTest {
             val redirect = withTimeout(60_000) { loopback.await() }
             val tokens = client.complete(request, redirect)
             assertEquals(true, browserVisited)
+            // TS 33.180 table B.4.2.2-1, as the browser delivered it.
+            assertEquals("3gpp:acr:password", authorize["acr_values"])
+            assertEquals("S256", authorize["code_challenge_method"])
             assertEquals("AT", tokens.accessToken)
             assertEquals("sip:alice.mcptt@mcx.test", tokens.mcpttId)
         }

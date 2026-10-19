@@ -8,7 +8,8 @@
 // OpenMCX servers implement; nothing on the servers is specific to it.
 //
 // Two modes:
-//   - lab mode (--config): the engine runs for good with a full configuration, as a lab client;
+//   - lab mode (--config): the engine runs for good with a full configuration, as a lab client; or,
+//     with oauth.login "browser", only while an operator is signed in on IdMS's own page (login.go);
 //   - position mode (--device, --data): accounts are activated on the position from MCX Admin
 //     activation links, an operator signs in with an activated account, and the engine runs
 //     only while someone is signed in (see position.go).
@@ -56,11 +57,18 @@ func main() {
 		log.Fatal(err)
 	}
 	var pos *position
-	if *device != "" {
+	browser, err := browserSignIn(*config)
+	if err != nil {
+		log.Fatal(err)
+	}
+	switch {
+	case *device != "":
 		if pos, err = newPosition(e, *device, *data, *idle); err != nil {
 			log.Fatal(err)
 		}
-	} else {
+	case browser:
+		pos = newBrowserPosition(e, *config, *idle)
+	default:
 		go e.supervise()
 	}
 	audio, err := newAudioBridge(e.liveIn, e.liveOut)

@@ -11,7 +11,8 @@ checked out beside it (`../openmcx-server`).
 - **Engine**: `mcx-client` in `linux/`, one per dispatcher position. The dispatcher uses these client settings, all
   off unless configured, so a plain client behaves as without them: `media.live` (live 16 kHz PCM audio in and out
   over UDP instead of WAV files), `sip.register_expires` (a shorter registration expiry), `mcptt.group_from_profile`
-  (the user profile's groups, `profile_groups` in the status) and `oauth.forget_password`.
+  (the user profile's groups, `profile_groups` in the status), `oauth.forget_password`, and `oauth.authorization` with
+  `--authorization-request` (sign-in on IdMS's page, below).
 - **Web service** (`service/`, Go, with an embedded UI): runs the engine as a child, sends it whitelisted commands
   through its control FIFO, streams its status as server-sent events and bridges the browser's audio (WebSocket) to
   `media.live`. It includes no client code. Audio is PCM over the WebSocket; the engine encodes AMR-WB.
@@ -66,6 +67,33 @@ settings (no identity, no certificate) plus `media.live`, `sip.register_expires`
 
 No server change: the servers treat the position as any activated client.
 
+## Sign-in on IdMS's page (lab mode)
+
+For an IdMS whose login page the dispatcher cannot fill in, a third-party IdMS at a Plugtest for example, a lab mode
+configuration with `"oauth": {"login": "browser", ...}` and no password signs the operator in on IdMS's own page
+(TS 33.180 annex B.4.2, the authorization code grant with PKCE S256 and `acr_values=3gpp:acr:password`):
+
+- The page shows **Sign in with IdMS**. The service runs `mcx-client --authorization-request`, which builds the
+  authorization request from the IdMS discovery document, keeps its state, nonce and code verifier, and sends the
+  browser to IdMS. A cookie binds the request to that browser (5 minutes, used once).
+- IdMS sends the browser back to `oauth.redirect_uri`, which must be this service's `/api/login/callback` at the
+  address the browser opens (for example `http://127.0.0.1:8080/api/login/callback`), registered at IdMS. The service
+  checks the state and starts the engine with the code in `oauth.authorization`; the engine exchanges it and verifies
+  the ID token (signature, issuer, audience, nonce; `mcptt_id`, and `mcdata_id` and `mcvideo_id` where IdMS gives
+  them, against the configuration).
+- Renewals use the refresh token alone, held in memory. IdMS refusing it, sign-out, the engine ending or no open
+  page for `--idle-signout` end the session, as in position mode. An IdMS that issues no refresh token ends the
+  session when the first access token expires. A refresh answer may have no ID token, and its ID token no nonce
+  (TS 33.180 table B.5.3-1, OpenID Connect Core 1.0 section 12.2), as Keycloak's; the access token lives for
+  `expires_in` (annex B.12).
+- The scope names the configured services (`3gpp:mc:ptt_service`, `data_service`, `video_service`, their
+  configuration and group management scopes, and key management with `security`); `oauth.scope` overrides it.
+- The engine trusts the IdMS certificate if `tls.ca_file` or the system's CAs (`/etc/ssl/certs`) issued it: an IdMS
+  with a certificate of a public CA needs nothing; for one of a vendor's own CA, add that CA to `tls.ca_file`, and
+  to the trust store of the operator's browser, which opens the IdMS page. The other servers are trusted through
+  `tls.ca_file` only.
+- The page names the IdMS (the issuer's host) on the sign-in form and, once signed in, beside the operator.
+
 ## Build and run
 
 ```
@@ -96,7 +124,8 @@ origin.
 
 | Method and path | Purpose |
 |---|---|
-| `GET /api/session` | position mode: signed in or not, the operator, why the last session ended, the activated accounts |
+| `GET /api/session` | position mode (`mode` position or browser): signed in or not, the operator, why the last session ended, the activated accounts |
+| `GET /api/login/browser`, `GET /api/login/callback` | sign-in on IdMS's page: to IdMS, and IdMS's redirect back (`code`, `state` or `error`) |
 | `POST /api/activate`, `/api/login`, `/api/logout` | position mode: `{url, password}`, `{username, password}` |
 | `GET /api/state` | the engine's state: registration, call and floor state, alerts, SDS inbox, files, identity |
 | `GET /api/events` | the same, as server-sent events whenever it changes |
@@ -122,6 +151,21 @@ docker run --rm --network host -v playwright-py:/py -v <lab>:/lab -v $PWD/dispat
   mcr.microsoft.com/playwright/python:v1.55.0-noble sh -c \
   '[ -d /py/playwright ] || pip install -q --break-system-packages --target /py playwright==1.55.0; PYTHONPATH=/py python3 browser_check.py /lab'
 ```
+
+Sign-in on IdMS's page: `prepare.py <lab> --browser-login` (the lab's IdMS registers the callback), then, with the
+browser mapping the issuer host to IdMS's container:
+
+```
+docker run --rm --network host --add-host idms:$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' disp-idms-1) \
+  -v playwright-py:/py -v <lab>:/lab -v $PWD/dispatcher/lab:/check -w /check mcr.microsoft.com/playwright/python:v1.55.0-noble \
+  sh -c 'PYTHONPATH=/py python3 browser_idms.py /lab'                # BL-01..07; with token_ttl_seconds 90 in site.json,
+                                                                     # add "http://127.0.0.1:18080/ client-c 120" for BL-05b
+```
+
+With Keycloak as IdMS (openmcx-server `prepare-prearranged-test.py --keycloak <image>`, which docs/USAGE.md of
+openmcx-server describes), the same check runs on Keycloak's login page: `prepare.py --browser-login` registers the
+callback at Keycloak's client too, and the dispatcher is left out of `keycloak-sign-in.py` (`client-a client-b
+client-d`). Keycloak keeps the browser on its page after a wrong password (BL-03).
 
 Tear the lab down afterwards (`down -v`).
 

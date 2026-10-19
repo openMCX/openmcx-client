@@ -15,6 +15,11 @@ client-e's slot becomes an unactivated dispatcher position: the device settings 
 activation client (no identity, no certificate) plus media.live; accounts are activated on
 it from MCX Admin activation links and operators sign in on the page.
 
+With --browser-login (lab mode), the operator signs in on IdMS's own page: the configuration
+keeps no password (oauth.login "browser"), its redirect URI is the dispatcher's callback on
+127.0.0.1:<port>, and the lab's IdMS (OpenMCX's, or Keycloak's client in a --keycloak lab) registers that
+redirect URI.
+
 Either way the web UI is published on 127.0.0.1:<port> of the host.
 """
 import argparse
@@ -22,6 +27,9 @@ import json
 from pathlib import Path
 
 LIVE = {"listen": "127.0.0.1", "port": 7100, "send_host": "127.0.0.1", "send_port": 7101}
+SESSION_HEALTHCHECK = {"test": ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen("
+                                "'http://127.0.0.1:8080/api/session', timeout=2)"],
+                       "interval": "3s", "timeout": "3s", "retries": 30, "start_period": "5s"}
 
 
 def lab_mode(args, compose, generated) -> None:
@@ -35,13 +43,28 @@ def lab_mode(args, compose, generated) -> None:
         # With a lab whose MCPTT server offers media at the host's address (phones on the LAN), the client checks
         # against that address.
         config["server_address"] = server_address
+    site_file = generated / "site.json"
+    site = json.loads(site_file.read_text())
+    if args.browser_login:
+        callback = f"http://127.0.0.1:{args.port}/api/login/callback"
+        for key in ("username", "password", "refresh_token_file", "forget_password"):
+            config["oauth"].pop(key, None)
+        config["oauth"].update(login="browser", redirect_uri=callback)
+        if callback not in site["oauth_redirect_uris"]:
+            site["oauth_redirect_uris"].append(callback)
+        # A Keycloak lab (prepare-prearranged-test.py --keycloak): Keycloak's client registers it too.
+        realm_file = generated / "keycloak" / "openmcx.json"
+        if realm_file.exists():
+            realm = json.loads(realm_file.read_text())
+            for client in realm["clients"]:
+                if client["clientId"] == config["oauth"]["client_id"] and callback not in client["redirectUris"]:
+                    client["redirectUris"].append(callback)
+            realm_file.write_text(json.dumps(realm, indent=2) + "\n")
     target = generated / f"{args.client}-dispatcher.json"
     target.write_text(json.dumps(config, indent=2) + "\n")
 
     # A dispatcher is an MC user with more rights (TS 23.280): give it the lab's widest
     # MCData rights and let it transmit on every MCData group it belongs to.
-    site_file = generated / "site.json"
-    site = json.loads(site_file.read_text())
     mcdata_id = config["mcdata"]["user_id"]
     for user in site["users"]:
         if user.get("mcdata_id") == mcdata_id:
@@ -63,6 +86,9 @@ def lab_mode(args, compose, generated) -> None:
     service["entrypoint"] = ["/usr/local/bin/dispatcher"]
     service["command"] = ["--listen", "0.0.0.0:8080", "--config", inside, "--outbox", "/run/mcx/outbox"]
     service["ports"] = [f"127.0.0.1:{args.port}:8080"]
+    if args.browser_login:
+        # Nothing registers before an operator signs in: healthy is the page answering.
+        service["healthcheck"] = SESSION_HEALTHCHECK
 
 
 def position_mode(args, compose, generated) -> None:
@@ -95,9 +121,7 @@ def position_mode(args, compose, generated) -> None:
                           "--outbox", "/run/mcx/outbox"] + (["--engine-args", " ".join(command)] if command else [])
     service["ports"] = [f"127.0.0.1:{args.port}:8080"]
     service.pop("profiles", None)
-    service["healthcheck"] = {"test": ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen("
-                                       "'http://127.0.0.1:8080/api/session', timeout=2)"],
-                              "interval": "3s", "timeout": "3s", "retries": 30, "start_period": "5s"}
+    service["healthcheck"] = SESSION_HEALTHCHECK
 
 
 def main() -> None:
@@ -108,6 +132,7 @@ def main() -> None:
     parser.add_argument("--image", default="openmcx-dispatcher:disp")
     parser.add_argument("--client", default="client-c", help="lab mode: the client that becomes the dispatcher")
     parser.add_argument("--position", action="store_true", help="position mode, in an MCX Admin lab (client-e's slot)")
+    parser.add_argument("--browser-login", action="store_true", help="lab mode: the operator signs in on IdMS's page")
     parser.add_argument("--register-expires", type=int, default=120, help="position mode: SIP registration expiry (s)")
     parser.add_argument("--port", type=int, default=18080, help="host port of the web UI (on 127.0.0.1)")
     parser.add_argument("--server-address", help="lab mode: the address the MCPTT server advertises for media, when it"

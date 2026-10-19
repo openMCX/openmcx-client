@@ -45,7 +45,8 @@ supports, and what not, in the [feature list](docs/FEATURES.md).
 ### Settings for the dispatcher
 
 The [dispatcher](../dispatcher) uses the client as its engine, through settings that are off unless configured:
-`media.live` (live audio over UDP), `sip.register_expires`, `mcptt.group_from_profile` and `oauth.forget_password`.
+`media.live` (live audio over UDP), `sip.register_expires`, `mcptt.group_from_profile`, `oauth.forget_password`, and
+`oauth.authorization` with `--authorization-request` (sign-in on IdMS's page).
 Without them the client behaves as a plain client.
 
 ### Debug log

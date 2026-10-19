@@ -48,7 +48,7 @@ class KeyingInteropTest {
 
     @Test fun opensTheServersGmkMessage() {
         val bob = keys("bob", "sip:bob.mcvideo@mcx.test")
-        val message = KmsDocuments.parseGktp(v.getString("gktp_document"), v.getString("group"), now)
+        val message = KmsDocuments.parseGktp(v.getString("gktp_document"), v.getString("group"))
         val key = Mikey.open(kms, bob, "sip:gms@mcx.test", message, now, profile)
         assertArrayEquals(hex(v.getString("gmk_hex")), key.key)
         assertArrayEquals(hex(v.getString("gmk_random_hex")), key.random)
@@ -70,10 +70,10 @@ class KeyingInteropTest {
         val root = "https://gms:8443/xcap-root/"
         val diff = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><xcap-diff xmlns=\"urn:ietf:params:xml:ns:xcap-diff\" xcap-root=\"$root\">" +
             "<element sel=\"" + KmsDocuments.gktpSelector(group).replace("&", "&amp;") + "\" exists=\"true\">$gktps</element></xcap-diff>"
-        val message = KmsDocuments.parseGktpXcapDiff(diff, group, root, now)
+        val message = KmsDocuments.parseGktpXcapDiff(diff, group, root)
         val key = Mikey.open(kms, bob, "sip:gms@mcx.test", message, now, profile)
         assertEquals(v.getLong("gmk_id"), SrtpKeys.gukId(key.key, key.csbId, bob.uri))
-        assertTrue(runCatching { KmsDocuments.parseGktpXcapDiff(diff, "sip:other@mcx.test", root, now) }.isFailure)
+        assertTrue(runCatching { KmsDocuments.parseGktpXcapDiff(diff, "sip:other@mcx.test", root) }.isFailure)
         assertEquals("org.3gpp.MCPTT-GKTP/global/byGroupID/sip%3Aoperations%40mcx.test/~~/group/list-service/mgktp:GKTPs?xmlns(mgktp=urn:3gpp:ns:mcpttGKTP:1.0)",
             KmsDocuments.gktpSelector(group))
     }

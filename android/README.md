@@ -87,7 +87,7 @@ lab/androidlab.py create --name a1          # the OpenMCX fixture, provisioning 
 lab/androidlab.py up a1                     # servers and three redroid clients; installs and provisions the APK
 lab/androidlab.py exec a1 client-a status
 tests/scenarios.py a1               # S1-S11; results in lab/run/a1/android-scenarios.json
-lab/androidlab.py down a1
+lab/androidlab.py down a1                   # logs the phones off first, then removes the lab
 ```
 
 In the lab, `client-a` is alice, `client-b` is bob and `client-c` is client-c. All three are members of
@@ -128,7 +128,11 @@ For a phone on your Wi-Fi against the lab, see [PHONE.md](docs/PHONE.md). Provis
 imports a single `.mcxprov` file on the **Logs** tab. An optional `endpoints` map tells the client where to connect for
 a server name, while TLS still checks the name. On first start the client key is imported into the Android Keystore and the PEM file is
 deleted. If the bundle has no IdMS username, sign-in is interactive: the IdMS login page opens in a Custom Tab and the app
-receives the redirect on its loopback redirect URI (RFC 8252 §7.3).
+receives the redirect on its loopback redirect URI (RFC 8252 §7.3). The app reaches IdMS trusting the provisioned
+`ca.crt` and the system's CAs, the other servers `ca.crt` only. The Custom Tab is the system browser: it trusts the
+system's CAs and those the user installed, so an IdMS with a certificate of a vendor's own CA needs that CA installed on
+the phone (Settings, Encryption & credentials, CA certificate) as well as in `ca.crt`. **Settings** shows the IdMS and,
+once signed in, "Signed in at" its host with the access token's expiry.
 
 Speech uses the microphone through `AudioRecord` (`VOICE_COMMUNICATION`) and plays through `AudioTrack` (voice
 communication usage). Calls are registered with Android telecom as a self-managed account. PTT comes from:

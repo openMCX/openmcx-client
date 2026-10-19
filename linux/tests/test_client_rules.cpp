@@ -77,6 +77,21 @@ void test_refresh_refusal() {
 }
 
 //------------------------------------------------------------------------------
+// TS 33.180 table B.4.2.2-1: the scopes follow the configured services, key management only with keys.
+void test_oidc_scope() {
+  using mcx::client_rules::oidc_scope;
+  check(oidc_scope(false, false, false) ==
+            "openid 3gpp:mc:ptt_service 3gpp:mc:ptt_config_management_service 3gpp:mc:ptt_group_management_service",
+        "MCPTT alone");
+  const auto all = oidc_scope(true, true, true);
+  for (const char *scope : {"3gpp:mc:data_service", "3gpp:mc:video_service", "3gpp:mc:ptt_key_management_service",
+                            "3gpp:mc:data_key_management_service", "3gpp:mc:video_key_management_service",
+                            "3gpp:mc:video_group_management_service"})
+    check(all.find(scope) != std::string::npos, scope);
+  check(oidc_scope(true, false, false).find("video") == std::string::npos, "no MCVideo scope without MCVideo");
+}
+
+//------------------------------------------------------------------------------
 // RFC 3986 section 2.1: percent-decoding without throwing on a bad escape.
 void test_percent_decode() {
   using mcx::client_rules::percent_decode;
@@ -184,6 +199,7 @@ int main() {
   test_notifiers();
   test_has_warning();
   test_refresh_refusal();
+  test_oidc_scope();
   test_percent_decode();
   test_profile_groups();
   test_floor_and_audio();

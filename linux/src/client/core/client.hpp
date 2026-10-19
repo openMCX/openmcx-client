@@ -98,6 +98,9 @@ inline SipConfig client_sip_config(const Json &cfg, bool disable_tls) {
 class Client {
   Json cfg_, status_;
   HttpClient http_;
+  // IdMS (sign-in, code exchange, refresh): the configured CA and the system's, for an IdMS of another vendor with a
+  // certificate of a public CA (HttpTrust::configured_and_system); the other common services the configured CA only.
+  HttpClient idms_http_;
   Control control_;
   SipEngine sip_;
   std::unique_ptr<KeyClient> keys_;
@@ -1807,7 +1810,7 @@ public:
   // restarts, and the configuration need not hold the password.
   std::string refresh_token_, auth_nonce_;
   bool refresh_loaded_ = false;
-  unsigned token_refreshes_ = 0, password_logins_ = 0;
+  unsigned token_refreshes_ = 0, password_logins_ = 0, browser_logins_ = 0;
   // Refusals of the refresh grant in a row; the second is final (client_rules::refresh_refusal_final).
   unsigned refresh_refusals_ = 0;
 

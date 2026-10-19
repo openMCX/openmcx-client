@@ -98,8 +98,9 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
                 "proxy": "sip-core", "proxy_port": 5060 if debug else 5061, "transport": "TCP" if debug else "TLS",
                 "register_expires": 3600},
         "tls": {"ca": "ca.crt", "cert": "client.crt", "key": "client.key"},
+        # No username or password where the lab's IdMS signs users in on its own page (a Keycloak lab).
         "idms": {"issuer": oauth["issuer"], "client_id": oauth["client_id"], "redirect_uri": oauth["redirect_uri"],
-                 "username": oauth["username"], "password": oauth["password"]},
+                 **{key: oauth[key] for key in ("username", "password") if key in oauth}},
         "cms": ref["endpoints"]["cms"],
         "gms": ref["endpoints"]["gms"],
         "mcptt": {"user_id": mcptt["user_id"], "psi": mcptt["service_uri"], "groups": [mcptt["group_id"]],
@@ -210,6 +211,40 @@ def phone_devices(args) -> dict[str, dict]:
     return phones
 
 
+def keycloak_at_host(fixture: Path, compose: dict, hostip: str, port: int) -> None:
+    """A Keycloak lab for phones: the phone's browser opens Keycloak's login page, so Keycloak answers at the host's
+    address (the issuer https://<host>:<port>/realms/openmcx, for the servers too, which reach it through the
+    published port), with a certificate of the lab CA that names that address. The phone's browser trusts the lab CA
+    once it is installed on the phone (Settings, Encryption & credentials, CA certificate): the provisioned CA covers
+    the app's own connections only."""
+    generated = fixture / "generated"
+    issuer = f"https://{hostip}:{port}/realms/openmcx"
+    for path in generated.glob("*.json"):
+        cfg = json.loads(path.read_text())
+        if not isinstance(cfg, dict):
+            continue
+        if path.name == "site.json":
+            cfg["issuer"] = issuer
+        elif "common" in cfg:
+            cfg["common"]["issuer"] = issuer
+        elif "oauth" in cfg:
+            cfg["oauth"]["issuer"] = issuer
+        else:
+            continue
+        path.write_text(json.dumps(cfg, indent=2) + "\n")
+    idms = compose["services"]["idms"]
+    idms["command"] = [f"--hostname=https://{hostip}:{port}" if arg.startswith("--hostname=") else arg
+                       for arg in idms["command"]]
+    tls = generated / "tls"
+    (tls / "idms-host.ext").write_text(f"subjectAltName=DNS:idms,IP:{hostip}\nextendedKeyUsage=serverAuth\n"
+                                       "basicConstraints=CA:FALSE\nkeyUsage=digitalSignature,keyEncipherment\n")
+    subprocess.run(["openssl", "req", "-new", "-key", str(tls / "idms.key"), "-subj", "/CN=idms",
+                    "-out", str(tls / "idms-host.csr")], check=True, capture_output=True)
+    subprocess.run(["openssl", "x509", "-req", "-in", str(tls / "idms-host.csr"), "-CA", str(tls / "ca.crt"),
+                    "-CAkey", str(tls / "ca.key"), "-CAcreateserial", "-days", "30", "-extfile",
+                    str(tls / "idms-host.ext"), "-out", str(tls / "idms.crt")], check=True, capture_output=True)
+
+
 def create(args) -> None:
     openmcx = Path(args.openmcx).resolve()
     lab = RUNS / args.name
@@ -255,6 +290,12 @@ def create(args) -> None:
             sys.exit("a reference client cannot also be a phone")
     if args.client_image:
         command += ["--client-image", args.client_image]
+    if args.keycloak:
+        # Keycloak as the lab's IdMS (openmcx-server tools/prepare-prearranged-test.py --keycloak): an IdMS of another
+        # vendor, whose own login page the phones' browser opens.
+        if not phones or not args.phones_only or args.admin:
+            sys.exit("--keycloak needs --phones-only phones (their users sign in on Keycloak's page) and no --admin")
+        command += ["--keycloak", args.keycloak]
     if args.admin:
         # MCX Admin manages the accounts (openmcx-server tools/prepare-prearranged-test.py --admin); phones activate from its codes.
         if not args.admin_image:
@@ -278,6 +319,8 @@ def create(args) -> None:
         if role not in (args.reference_client or []):
             compose["services"].pop(role, None)
     hostip = args.host_ip or (host_ip() if phones else None)
+    if args.keycloak:
+        keycloak_at_host(fixture, compose, hostip, args.idms_port)
     fd = None
     if args.fd_max_bytes:
         users = [json.loads((generated / f"{r}.json").read_text())["mcdata"]["user_id"] for r in phones]
@@ -298,6 +341,14 @@ def create(args) -> None:
         (bundle / "bundle.json").write_text(json.dumps(config, indent=2) + "\n")
         for source, target in (("ca.crt", "ca.crt"), (f"{role}.crt", "client.crt"), (f"{role}.key", "client.key")):
             shutil.copyfile(generated / "tls" / source, bundle / target)
+        # The trusted CAs are the provisioned ones only: another vendor's IdMS (a Plugtest) is trusted through its CA,
+        # or the public root CA of its certificate, added to the lab's.
+        for extra in args.extra_ca or []:
+            pem = Path(extra).read_text()
+            if "-----BEGIN CERTIFICATE-----" not in pem:
+                sys.exit(f"{extra}: no PEM certificate")
+            with (bundle / "ca.crt").open("a") as out:
+                out.write("\n" + pem.strip() + "\n")
         if role in phones:
             phone = lab / "phone"
             phone.mkdir(exist_ok=True)
@@ -391,7 +442,7 @@ def create(args) -> None:
                 "server_image": args.server_image, "mcvideo": args.mcvideo, "protected": args.protected, "location": args.location,
                 "priority": args.priority, "floor_queue": args.floor_queue,
                 "reference_clients": args.reference_client or [], "client_image": args.client_image,
-                "admin": args.admin, "admin_image": args.admin_image,
+                "admin": args.admin, "admin_image": args.admin_image, "keycloak": args.keycloak,
                 "mcptt_server": mcptt_server_name(compose["services"]),
                 "clients": [] if args.phones_only else [c for c in CLIENTS if c not in phones]}
     if phones:
@@ -701,6 +752,22 @@ def admin_activate(name: str, role: str | None, user: str, qr_code: bool = False
     print(f"{role}: {json.dumps(result)}")
 
 
+def log_off_phones(name: str) -> None:
+    """Before the lab goes: log each phone off (TS 24.379 clause 7.2.1A step 4), so that it shows "Logged off" and stops
+    trying to reach servers that will not come back; Log on in the app, or the next lab's install, starts it again. A
+    phone that is not connected, or already logged off, is left as it is."""
+    for role, phone in (meta(name).get("phones") or {}).items():
+        if not phone.get("serial"):
+            continue
+        try:
+            answer = Device(name, role).control("log-off", timeout=40)
+            result = answer.get("result") or {}
+            print(f"{role}: logged off (servers {result.get('log_off')}, de-REGISTER {result.get('deregistered')})"
+                  if answer.get("ok") else f"{role}: not logged off: {answer.get('error', answer)}")
+        except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as e:
+            print(f"{role}: not logged off ({e})")
+
+
 def install(name: str) -> None:
     if not meta(name)["clients"]:
         return
@@ -737,6 +804,10 @@ def main() -> None:
     c.add_argument("--sip-port", type=int, default=PHONE_SIP_PORT, help="host port published for the SIP core")
     c.add_argument("--idms-port", type=int, default=PHONE_IDMS_PORT, help="host port published for the IdMS")
     c.add_argument("--proxy-port", type=int, default=PHONE_PROXY_PORT, help="host port published for the HTTP proxy")
+    c.add_argument("--keycloak", metavar="IMAGE",
+                   help="Keycloak (this image) as IdMS, at the host's address; phones sign in on its page (--phones-only)")
+    c.add_argument("--extra-ca", action="append", metavar="PEM",
+                   help="a further CA certificate the phones trust (an IdMS of another vendor), added to the lab's CA")
     c.add_argument("--fd-max-bytes", type=int, help="file distribution: the service, one-to-one and group file limit")
     c.add_argument("--mcvideo", action="store_true", help="add the MCVideo server and provision MCVideo (video calls)")
     c.add_argument("--location", action="store_true",
@@ -802,6 +873,7 @@ def main() -> None:
             if phone.get("serial"):
                 install_phone(args.name, None, role)
     elif args.action == "down":
+        log_off_phones(args.name)
         for client in meta(args.name)["clients"]:
             try:
                 subprocess.run([str(ADB), "disconnect", Device(args.name, client).serial], capture_output=True)

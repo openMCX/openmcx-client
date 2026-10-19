@@ -7,6 +7,7 @@
 //
 // Specifications: TS 24.482 V19.1.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).
 #pragma once
+#include "client_rules.hpp"
 #include "mcx/http.hpp"
 
 #include <nlohmann/json.hpp>
@@ -14,6 +15,16 @@
 #include <string>
 
 namespace mcx {
+// TS 33.180 clause B.4.2.2: the IdMS settings of the authentication request: the configured oauth, with the scope of
+// the configured services (client_rules::oidc_scope) unless oauth.scope names one.
+inline nlohmann::json oauth_settings(const nlohmann::json &cfg) {
+  auto oauth = cfg.at("oauth");
+  if (!oauth.contains("scope"))
+    oauth["scope"] =
+        client_rules::oidc_scope(cfg.contains("mcdata"), cfg.contains("mcvideo"), cfg.contains("security"));
+  return oauth;
+}
+
 // The configuration's address map ("address_map", from the activation package): "host:port" as the package names a
 // server -> "address:port" where this client reaches it; empty without one.
 HttpAddressMap address_map(const nlohmann::json &cfg);

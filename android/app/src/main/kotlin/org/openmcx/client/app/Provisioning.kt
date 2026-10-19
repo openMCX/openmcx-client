@@ -92,4 +92,7 @@ class Provisioning(context: Context) {
         }
         return ClientCredentials.sslContext(File(dir, "ca.crt").readText())
     }
+
+    /** The TLS context for IdMS: the provisioned CA and the system's (Pem.sslContextWithSystem). */
+    fun idmsSslContext(): SSLContext = Pem.sslContextWithSystem(Pem.certificates(File(dir, "ca.crt").readText()))
 }

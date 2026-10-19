@@ -241,8 +241,10 @@ In a lab created with `androidlab.py create --protected`, video calls are protec
 - **Recording and playback** (push to and pull from the server) stay in the clear, as the server requires.
 - **Group and chat calls**: once authorised, the phone subscribes at the MCVideo server to each of its groups'
   and chat groups' GMK (SUBSCRIBE `xcap-diff` with the GKTP selector, TS 33.180 5.7). The GMS's I_MESSAGE in the
-  NOTIFY is authenticated as from the GMS (`gms_uri`) and must name the group and be active. Its CSB-ID, the
-  user's GUK-ID, gives the GMK-ID (F.1.3). A group call's audio and video are RTP/SAVP under the GMK:
+  NOTIFY is authenticated as from the GMS (`gms_uri`) and must name the group and be neither revoked nor expired.
+  A GMK whose Activation Time is still to come (sent ahead of a key change, or a phone clock a little behind the
+  GMS's) is kept and used from that time; of the active GMKs the one with the most recent Activation Time is used
+  (TS 33.180 5.7, E.6.4; `GroupKeys`). Its CSB-ID, the user's GUK-ID, gives the GMK-ID (F.1.3). A group call's audio and video are RTP/SAVP under the GMK:
   - Each sender's streams are keyed by its GUK-ID (CS-ID 5), with MKI GMK-ID ‖ GUK-ID and the ROC in every packet.
   - A receiver finds the sender by matching the MKI's GUK-ID against the transmitter and the call's participants.
 

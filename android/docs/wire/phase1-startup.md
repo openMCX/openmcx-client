@@ -98,9 +98,10 @@ There is no `refresh_token` grant, no `userinfo_endpoint` and no `end_session_en
 | `response_type` | = `code` | `code` |
 | `client_id` | = `oauth_client_id` | `mcx-lab-client` |
 | `redirect_uri` | exact match in `oauth_redirect_uris` | `http://127.0.0.1:8900/callback` |
-| `scope` | must contain the word `openid`; nothing else is checked | `openid 3gpp:mc:ptt_service 3gpp:mc:data_service` (add `3gpp:mc:ptt_key_management_service` only for protected groups) |
+| `scope` | must contain the word `openid`; nothing else is checked | `openid`, then for each configured service (`ptt`, `data`, `video`) `3gpp:mc:<s>_service`, `3gpp:mc:<s>_config_management_service` and `3gpp:mc:<s>_group_management_service`; when protected, `3gpp:mc:ptt_key_management_service` and `3gpp:mc:video_key_management_service` (TS 33.180 table B.4.2.2-1) |
 | `state` | non-empty, ≤1024 | random |
 | `nonce` | non-empty, ≤1024 (**mandatory**, stricter than OIDC for code flow) | random |
+| `acr_values` | accepted, not checked | `3gpp:acr:password` (REQUIRED by TS 33.180 table B.4.2.2-1) |
 | `code_challenge` | exactly 43 base64url chars | `BASE64URL(SHA256(verifier))` |
 | `code_challenge_method` | = `S256` (**mandatory**) | `S256` |
 

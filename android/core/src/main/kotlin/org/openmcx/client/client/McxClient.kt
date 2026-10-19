@@ -101,6 +101,11 @@ data class ClientStatus(
     val loggedOff: Boolean = false,
     val logOff: Map<String, Int> = emptyMap(),
     val deregistered: Int? = null,
+    /** Since when (seconds since the epoch) the client has had no service, and when it tries again; null when up. */
+    val offlineSince: Long? = null,
+    val nextRetryAt: Long? = null,
+    /** Why IdMS signed the user out (it refused the refresh token, and there is no password): null when signed in. */
+    val signedOut: String? = null,
 )
 
 /**
@@ -119,6 +124,8 @@ class McxClient(
     private val browser: BrowserLauncher? = null,
     /** The MCPTT functional aliases of the last user profile this user had, shown until the profile is read again. */
     knownAliases: List<String> = emptyList(),
+    /** HTTP to IdMS, which may trust more CAs than the other servers ([http] by default). */
+    idmsHttp: HttpClient = http,
 ) {
     val scope = CoroutineScope(parent.coroutineContext + SupervisorJob())
     private val _status = MutableStateFlow(ClientStatus())
@@ -126,10 +133,13 @@ class McxClient(
 
     val ua = UserAgent(scope, UaIdentity(config.sip.publicUserId, config.sip.privateUserId, config.sip.password,
         config.domain, config.clientId))
-    private val idms = IdmsClient(http, config.idms.issuer, config.idms.clientId, config.idms.redirectUri,
-        // TS 33.180 5.3: a protected client also asks for its key management services.
-        scope = "openid 3gpp:mc:ptt_service 3gpp:mc:data_service" +
-            (if (config.security != null) " 3gpp:mc:ptt_key_management_service 3gpp:mc:video_key_management_service" else ""),
+    private val idms = IdmsClient(idmsHttp, config.idms.issuer, config.idms.clientId, config.idms.redirectUri,
+        // TS 33.180 5.3: a protected client also asks for its key management services (MCPTT and MCVideo here).
+        scope = IdmsClient.scope(
+            listOfNotNull("ptt".takeIf { config.mcptt != null }, "data".takeIf { config.mcdata != null },
+                "video".takeIf { config.mcvideo != null }),
+            if (config.security == null) emptyList()
+            else listOfNotNull("ptt".takeIf { config.mcptt != null }, "video".takeIf { config.mcvideo != null })),
         clock = clock)
 
     /**
@@ -158,7 +168,7 @@ class McxClient(
     private val documents = DocumentClient(http, config.cms, config.gms)
 
     @Volatile var tokens: Tokens? = null
-        private set
+        internal set // set by the module's tests too
     @Volatile var profile: UserProfile? = null
     /** The Resource-Priority values of the service configuration documents, by service and level (TS 24.484 §8.4). */
     @Volatile var serviceResourcePriorities: Map<String, Map<String, String>> = emptyMap()
@@ -215,8 +225,9 @@ class McxClient(
         scope.launch {
             var backoff = 2_000L
             while (isActive) {
-                // Logged off: nothing starts again until the user logs on.
+                // Logged off: nothing starts again until the user logs on. Signed out by IdMS: until the user signs in.
                 if (loggedOff) logOnRequest.await()
+                if (signedOut) signInRequest.await()
                 try {
                     run()
                     backoff = 2_000L
@@ -224,10 +235,15 @@ class McxClient(
                     throw e
                 } catch (e: Exception) {
                     if (loggedOff) { setPhase("logged-off"); continue }
+                    if (signedOut) { setPhase("signed-out"); continue }
                     event("start-up failed: ${e.message}")
-                    _status.update { it.copy(lastError = e.message, registered = false) }
+                    // No service: the client keeps trying (a mission critical client recovers by itself when the
+                    // network or the servers come back); the user sees since when and when the next attempt is.
+                    val now = clock()
+                    _status.update { it.copy(lastError = e.message, registered = false, offlineSince = it.offlineSince ?: now,
+                        nextRetryAt = now + backoff / 1000) }
                     ua.flow?.close(e)
-                    // Back off, unless told to reconnect now (a new network).
+                    // Back off, unless told to reconnect now (a new network, or the user's Retry now).
                     if (!reconnectNow.isCompleted) withTimeoutOrNull(backoff) { reconnectNow.await() }
                     backoff = if (reconnectNow.isCompleted) 2_000L else (backoff * 2).coerceAtMost(60_000)
                     reconnectNow = CompletableDeferred()
@@ -244,6 +260,37 @@ class McxClient(
     @Volatile private var reconnectNow = CompletableDeferred<Unit>()
     @Volatile private var loggedOff = false
     @Volatile private var logOnRequest = CompletableDeferred<Unit>()
+    @Volatile private var signedOut = false
+    @Volatile private var signInRequest = CompletableDeferred<Unit>()
+
+    /** Try to reach the servers now instead of at the end of the back-off (the user's Retry now). */
+    fun retryNow() {
+        reconnectNow.complete(Unit)
+    }
+
+    /**
+     * IdMS refused the refresh token (account suspended, devices revoked, a system that no longer knows the device) and
+     * there is no password: the client stops trying and waits for the user to sign in again ([signIn]), instead of
+     * opening IdMS's page at every attempt.
+     */
+    private fun signedOutByIdms(reason: String) {
+        signedOut = true
+        signInRequest = CompletableDeferred()
+        tokens = null
+        housekeeping?.cancel()
+        _status.update { it.copy(signedOut = reason, registered = false, offlineSince = null, nextRetryAt = null) }
+        setPhase("signed-out")
+        ua.flow?.close()
+    }
+
+    /** Sign in again after [signedOutByIdms]: IdMS's page opens once. */
+    fun signIn() {
+        if (!signedOut) throw IllegalStateException("not signed out")
+        signedOut = false
+        _status.update { it.copy(signedOut = null) }
+        event("signing in again")
+        signInRequest.complete(Unit)
+    }
 
     /**
      * Log off every MC service (TS 24.379, TS 24.281 and TS 24.282 §7.2.1A step 4 and NOTE 3): the calls end and the
@@ -282,9 +329,11 @@ class McxClient(
         videoCsk = null; videoCskUpload = null
         val deregistered = runCatching { withTimeoutOrNull(10_000) { deregister() } }.getOrNull()
         registration = null
-        _status.update { it.copy(loggedOff = true, logOff = answers, deregistered = deregistered, registered = false) }
+        _status.update { it.copy(loggedOff = true, logOff = answers, deregistered = deregistered, registered = false,
+            offlineSince = null, nextRetryAt = null) }
         event("logged off: $answers, de-REGISTER $deregistered")
         ua.flow?.close()
+        setPhase("logged-off")
     }
 
     /** After [logOff]: register again and authorise the services with the tokens kept (new CSKs), as at start-up. */
@@ -336,12 +385,15 @@ class McxClient(
         // TS 33.180 B.6: with the refresh token, not the password. The password sign-in is
         // the fallback when IdMS refuses the refresh token and the profile has a password.
         val refreshed = tokens?.let { current ->
-            current.refreshToken?.let { token ->
+            current.refreshToken?.let {
                 try {
-                    idms.refresh(token, current.nonce)
+                    idms.refresh(current)
                 } catch (e: IdmsRefused) {
                     event("IdMS refused the refresh token")
-                    if (config.idms.username == null || config.idms.password.isNullOrEmpty()) throw e
+                    if (config.idms.username == null || config.idms.password.isNullOrEmpty()) {
+                        signedOutByIdms("IdMS refused the refresh token: sign in again")
+                        throw e
+                    }
                     null
                 }
             }
@@ -373,7 +425,7 @@ class McxClient(
         config.mcdata?.let { bringUp(McService.MCDATA, it.groups) }
         config.mcvideo?.let { bringUp(McService.MCVIDEO, it.groups) }
         setPhase("ready")
-        _status.update { it.copy(lastError = null) }
+        _status.update { it.copy(lastError = null, offlineSince = null, nextRetryAt = null) }
         housekeeping?.cancel()
         housekeeping = scope.launch { housekeeping() }
         val cause = flow.closed.await()
@@ -441,6 +493,8 @@ class McxClient(
     private fun adopt(t: Tokens) {
         if (t.clientId != null && t.clientId != config.clientId) throw IllegalStateException("token client_id ${t.clientId} is not ${config.clientId}")
         config.mcptt?.let { if (t.mcpttId != null && t.mcpttId != it.userId) throw IllegalStateException("token MCPTT ID ${t.mcpttId}") }
+        config.mcdata?.let { if (t.mcdataId != null && t.mcdataId != it.userId) throw IllegalStateException("token MCData ID ${t.mcdataId}") }
+        config.mcvideo?.let { if (t.mcvideoId != null && t.mcvideoId != it.userId) throw IllegalStateException("token MCVideo ID ${t.mcvideoId}") }
         tokens = t
         tokenLifetime = (t.expiresAt - clock()).coerceAtLeast(0)
         _status.update { it.copy(tokenExpiresAt = t.expiresAt) }
@@ -542,23 +596,30 @@ class McxClient(
         }
         if (service == McService.MCVIDEO && config.security != null) provisionVideoKeys(token)
         // TS 24.281 7.2.5: the MCVideo CSK goes to the MCVideo server with the authorisation, in application/mikey.
-        val parts = listOfNotNull(infoPart(service, token = token), Part(PocSettings.CONTENT_TYPE, PocSettings.encode(config.clientId, answerMode).toByteArray()),
-            videoCskUpload?.takeIf { service == McService.MCVIDEO }?.let { Part("application/mikey", it.toByteArray()) })
-        var request = serviceRequest(service, "PUBLISH", "poc-settings", parts).also { it.headers.add("Expires", "4294967295") }
+        // TS 33.180 9.2.1.2 and 9.2.1.3: it is uploaded at the initial connection and stays in use for the session, so a
+        // later authorisation (a renewed access token) carries none; the server keeps it with the publication.
+        val parts = { listOfNotNull(infoPart(service, token = token), Part(PocSettings.CONTENT_TYPE, PocSettings.encode(config.clientId, answerMode).toByteArray()),
+            videoCskUpload?.takeIf { service == McService.MCVIDEO }?.let { Part("application/mikey", it.toByteArray()) }) }
+        var request = serviceRequest(service, "PUBLISH", "poc-settings", parts()).also { it.headers.add("Expires", "4294967295") }
         authEtags[service]?.let { request.headers.add("SIP-If-Match", it) }
         var response = ua.send(request)
         if (response.status == 412) {
-            // The server lost our publication (a restart): authorise afresh, then everything after it again.
+            // The server lost our publication (a restart): authorise afresh, then everything after it again. Its CSK
+            // went with it, and an I_MESSAGE is accepted once only (RFC 3830 replay protection): upload a new CSK.
             authEtags.remove(service); affiliationEtags.remove(service)
-            request = serviceRequest(service, "PUBLISH", "poc-settings", parts).also { it.headers.add("Expires", "4294967295") }
+            if (service == McService.MCVIDEO && config.security != null) { videoCsk = null; provisionVideoKeys(token) }
+            request = serviceRequest(service, "PUBLISH", "poc-settings", parts()).also { it.headers.add("Expires", "4294967295") }
             response = ua.send(request)
         }
         // §7.2.2: not authorised; the start-up is tried again after a growing delay. A 486 (§7.3.3 steps 3a and 3b,
         // warning 164, MCVideo 166, MCData 228) means the user is authorised on another client: the retry succeeds
-        // once that one logs off or its authorisation ends.
+        // once that one logs off or its authorisation ends. A refused request may still have spent its CSK upload (the
+        // server opens it first): the retry uploads a new CSK.
+        if (!response.isSuccess && service == McService.MCVIDEO && videoCskUpload != null) videoCsk = null
         if (!response.isSuccess) throw IllegalStateException("${service.name} service authorisation: ${response.status} ${response.reason}" +
             (response.headers["Warning"]?.let { " ($it)" } ?: ""))
         response.headers["SIP-ETag"]?.let { authEtags[service] = it }
+        if (service == McService.MCVIDEO) videoCskUpload = null // the server has the CSK
         updateService(service) { it.copy(authorised = true) }
         event("${service.name} authorised")
     }

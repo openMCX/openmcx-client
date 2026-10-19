@@ -107,7 +107,7 @@ object KmsDocuments {
         "<resource-lists xmlns=\"urn:ietf:params:xml:ns:resource-lists\"><list><entry uri=\"" + Xml.escape(gktpSelector(group)) + "\"/></list></resource-lists>"
 
     /** The I_MESSAGE in an xcap-diff NOTIFY (RFC 5874) of [group]'s GKTPs under [xcapRoot]. */
-    fun parseGktpXcapDiff(xml: String, group: String, xcapRoot: String, nowNtp: Long): ByteArray {
+    fun parseGktpXcapDiff(xml: String, group: String, xcapRoot: String): ByteArray {
         if (xml.contains("<!DOCTYPE")) throw KeyError("forbidden DTD")
         val root = Xml.parse(xml)
         if (root.localName != "xcap-diff" || root.getAttribute("xcap-root") != xcapRoot) throw KeyError("XCAP diff root binding mismatch")
@@ -116,18 +116,20 @@ object KmsDocuments {
         if (element.getAttribute("sel") != gktpSelector(group) || (exists.isNotEmpty() && exists != "true" && exists != "1")) throw KeyError("XCAP diff selector mismatch")
         val gktp = element.child("GKTPs")?.child("GMK-GKTPs")?.child("GKTP") ?: throw KeyError("missing GKTP")
         if (gktp.getAttribute("id").isEmpty()) throw KeyError("missing GKTP id")
-        gktp.getAttribute("activationtime").takeIf { it.isNotEmpty() }?.let { if (time(it) > nowNtp) throw KeyError("GKTP not active") }
         return unhex(gktp.text())
     }
 
-    /** The GKTP document's I_MESSAGE for [group] (TS 33.180 5.7), its activation time passed. */
-    fun parseGktp(xml: String, group: String, nowNtp: Long): ByteArray {
+    /**
+     * The GKTP document's I_MESSAGE for [group] (TS 33.180 5.7). A GKTP whose activation time is still to come is
+     * kept too (TS 24.481 7.7.8: the GMS may send the next key ahead of a key change): its GMK's own Activation Time
+     * (TS 33.180 E.6.4) says from when it is used.
+     */
+    fun parseGktp(xml: String, group: String): ByteArray {
         val root = Xml.parse(xml)
         val list = root.child("list-service") ?: throw KeyError("invalid GKTP document")
         if (root.localName != "group" || list.getAttribute("uri") != group) throw KeyError("GKTP group mismatch")
         val gktp = list.child("GKTPs")?.child("GMK-GKTPs")?.child("GKTP") ?: throw KeyError("missing GKTP")
         if (gktp.getAttribute("id").isEmpty()) throw KeyError("missing GKTP id")
-        gktp.getAttribute("activationtime").takeIf { it.isNotEmpty() }?.let { if (time(it) > nowNtp) throw KeyError("GKTP not active") }
         return unhex(gktp.text())
     }
 }
@@ -214,7 +216,7 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
 
     /** Open the GMK of [group] from the GMS [gms] in a GKTP document (TS 33.180 5.7). */
     suspend fun openGroup(gms: String, group: String, xml: String): KeyMessage =
-        openGroupMessage(gms, group, KmsDocuments.parseGktp(xml, group, Mikey.nowNtp()))
+        openGroupMessage(gms, group, KmsDocuments.parseGktp(xml, group))
 
     /**
      * Open [group]'s GMK from the GMS [gms] (TS 33.180 5.7). The I_MESSAGE's CSB-ID is this user's GUK-ID;
@@ -226,9 +228,8 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
         val key = Mikey.open(k, id, gms, message, now, profile)
         val p = key.properties ?: throw KeyError("missing key properties")
         if (key.purpose != 0 || p.type != 0) throw KeyError("received key is not a GMK")
-        val unix = now - Mikey.NTP_EPOCH
-        val activation = if (p.activation != 0L) p.activation else key.ntpSeconds - Mikey.NTP_EPOCH
-        if (p.status and 1L == 0L || unix < activation || (p.expiry != 0L && unix >= p.expiry)) throw KeyError("key inactive, expired or revoked")
+        // A GMK not yet active is kept for its Activation Time (TS 33.180 E.6.4): GroupKeys picks the key to use.
+        if (p.status and 1L == 0L || (p.expiry != 0L && now - Mikey.NTP_EPOCH >= p.expiry)) throw KeyError("key expired or revoked")
         if (group !in p.groups) throw KeyError("key not authorised for the group")
         return KeyMessage(key.key, key.random, SrtpKeys.gukId(key.key, key.csbId, identity), key.ntpSeconds, p)
     }
@@ -245,4 +246,35 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
 
         fun decode(encoded: String): ByteArray = try { java.util.Base64.getDecoder().decode(encoded) } catch (e: IllegalArgumentException) { throw KeyError("invalid MIKEY base64") }
     }
+}
+
+/**
+ * Each group's GMKs (TS 33.180 5.7): a client may hold several active GMKs for a group and uses the one with the most
+ * recent Activation Time (E.6.4; 0 means the I_MESSAGE's timestamp); one still to become active waits for its time.
+ */
+class GroupKeys(private val clock: () -> Long = { Mikey.nowNtp() - Mikey.NTP_EPOCH }) {
+    private val keys = java.util.concurrent.ConcurrentHashMap<String, List<KeyMessage>>()
+
+    /** Keep [key] for [group], dropping the expired ones and an earlier copy of the same GMK. */
+    fun add(group: String, key: KeyMessage) {
+        val now = clock()
+        keys.compute(group) { _, held -> (held.orEmpty().filter { it.csbId != key.csbId && !expired(it, now) } + key) }
+    }
+
+    /** The GMK [group] uses now, or null when none is active yet. */
+    fun active(group: String): KeyMessage? {
+        val now = clock()
+        return keys[group].orEmpty().filter { activation(it) <= now && !expired(it, now) }.maxByOrNull { activation(it) }
+    }
+
+    /** Whether a GMK of [group] is held, active or not. */
+    fun held(group: String): Boolean = keys[group].orEmpty().any { !expired(it, clock()) }
+
+    /** Each group's GMK-ID in use. */
+    val ids: Map<String, Long> get() = keys.keys.mapNotNull { g -> active(g)?.let { g to it.csbId } }.toMap()
+
+    private fun activation(key: KeyMessage): Long =
+        key.properties?.activation?.takeIf { it != 0L } ?: (key.ntpSeconds - Mikey.NTP_EPOCH)
+
+    private fun expired(key: KeyMessage, now: Long): Boolean = key.properties?.expiry?.let { it != 0L && now >= it } ?: false
 }

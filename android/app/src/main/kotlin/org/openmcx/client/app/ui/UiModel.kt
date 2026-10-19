@@ -145,6 +145,10 @@ data class UiState(
     val user: String = "",
     val phase: String = "not provisioned",
     val registered: Boolean = false,
+    /** No service since (seconds since the epoch), the next attempt, and why IdMS signed the user out. */
+    val offlineSince: Long? = null,
+    val nextRetryAt: Long? = null,
+    val signedOut: String? = null,
     /** The user logged off the MC services (TS 24.379 §7.2.1A step 4), until they log on again. */
     val loggedOff: Boolean = false,
     val groups: List<GroupItem> = emptyList(),
@@ -244,6 +248,9 @@ interface UiActions {
     /** Log off every MC service and de-register (TS 24.379 §7.2.1A step 4); [logOn] brings them back. */
     fun logOff() {}
     fun logOn() {}
+    /** No service: try to reach the servers now. Signed out by IdMS: sign in again (IdMS's page opens). */
+    fun retryNow() {}
+    fun signIn() {}
     fun requestBatteryExemption() {}
     fun setSpeaker(on: Boolean) {}
     fun clearLogs() {}
@@ -428,6 +435,9 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         phase = status.phase,
         registered = status.registered,
         loggedOff = status.loggedOff,
+        offlineSince = status.offlineSince,
+        nextRetryAt = status.nextRetryAt,
+        signedOut = status.signedOut,
         groups = groups,
         privateTargets = profile?.privateCallTargets ?: emptyList(),
         call = active?.let(::item),
@@ -457,6 +467,13 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
                 "SIP core" to "${c.sip.proxy}:${c.sip.proxyPort} (${c.sip.transport})",
                 "IdMS" to c.idms.issuer,
                 "IdMS sign-in" to (c.idms.username?.let { "automatic as $it" } ?: "interactive (browser)"),
+                // Which IdMS signed this user in (several vendors' IdMSs at a Plugtest), and until when the access token
+                // holds; it is renewed before then.
+                "Signed in at" to (status.tokenExpiresAt.takeIf { it > 0 }?.let {
+                    "${java.net.URI(c.idms.issuer).host}, token until " +
+                        java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
+                            .format(java.time.Instant.ofEpochSecond(it).atZone(java.time.ZoneId.systemDefault()))
+                } ?: "not signed in"),
             )
         },
         speaker = Engine.telecom?.speaker?.value,
@@ -566,6 +583,8 @@ object EngineActions : UiActions {
     override fun setRingFirst(on: Boolean) = Engine.setRingFirst(on)
     override fun logOff() = launch { runCatching { Engine.client?.logOff() }.onFailure { Engine.log.add("log-off: ${it.message}") } }
     override fun logOn() { runCatching { Engine.client?.logOn() }.onFailure { Engine.log.add("log-on: ${it.message}") } }
+    override fun retryNow() { Engine.client?.retryNow() }
+    override fun signIn() { runCatching { Engine.client?.signIn() }.onFailure { Engine.log.add("sign-in: ${it.message}") } }
     override fun callAdhoc(targets: List<String>) = place("the ad hoc group") { Engine.mcptt?.adhocCall(targets) }
     override fun answer() { Engine.mcptt?.answer() }
     override fun reject() { Engine.mcptt?.reject() }

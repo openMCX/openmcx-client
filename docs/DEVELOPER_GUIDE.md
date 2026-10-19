@@ -401,7 +401,8 @@ sequenceDiagram
 
 Four settings exist for the dispatcher and are off unless configured: `media.live` (live 16 kHz PCM over local UDP
 instead of WAV files, `mcptt/live_audio.cpp`), `sip.register_expires` (default 3600 s, `register_expires()`),
-`mcptt.group_from_profile` (`group_from_profile()`) and `oauth.forget_password`.
+`mcptt.group_from_profile` (`group_from_profile()`), `oauth.forget_password`, and `oauth.authorization` with
+`--authorization-request` (sign-in on IdMS's page, `obtain_tokens()`).
 
 ## 3. State machines
 
@@ -595,6 +596,10 @@ With `--device <settings> --data <dir>` (`position.go`) the position has no iden
 - **Sign-in** (`position.signIn`): the operator's password is put in a runtime configuration on the tmpfs with
   `oauth.forget_password`, the engine is started and `waitReady` waits for authorisation; the password is then removed
   from the runtime configuration.
+- **Sign-in on IdMS's page** (`login.go`, lab mode with `oauth.login` "browser"): `startBrowserLogin` runs the engine
+  with `--authorization-request` and sends the browser to IdMS with a binding cookie; `finishBrowserLogin` checks the
+  state and cookie and starts the engine with `oauth.authorization`. The session is a `position` with `browser` set
+  and no accounts.
 - **Session end** (`position.watch`, `keepAlive`, `watchIdle`): a `client_error` event whose reason matches a token
   renewal refusal or a 401/403/404 to the registration or authorisation renewal ends the session; so do sign-out, the
   engine ending, and no open page for `--idle-signout`.

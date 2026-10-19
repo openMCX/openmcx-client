@@ -176,8 +176,9 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
   }
   if (boot.contains("endpoints")) cfg["endpoints"] = boot.at("endpoints");
 
-  // Sign in (TS 24.482 clause 6.2.1) and ask the Credential Service for the SIP credential.
-  const auto tokens = oidc_login(http, cfg.at("oauth"));
+  // Sign in (TS 24.482 clause 6.2.1), with the scope of the services of the package, and ask the Credential Service
+  // for the SIP credential.
+  const auto tokens = oidc_login(http, oauth_settings(cfg));
   const auto token = tokens.at("access_token").get<std::string>();
   const auto issued = http.request("POST", boot.at("credentials_url").get<std::string>() + "/v1/sip-credential", {},
                                    {{"Authorization", "Bearer " + token}});

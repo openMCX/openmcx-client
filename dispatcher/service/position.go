@@ -36,13 +36,21 @@ type position struct {
 
 	idle time.Duration // a session no page has used for this long ends (a browser closed without signing out)
 
+	// browser: lab mode with oauth.login "browser" (login.go): one configured identity, no accounts; the operator
+	// signs in on IdMS's own page and device holds the full configuration.
+	browser bool
+	// idms: the host of the IdMS the operator signs in at (browser), shown on the page: at a Plugtest one of several
+	// vendors' IdMSs.
+	idms string
+
 	mu       sync.Mutex // guards the fields below; busy serialises sign-in and activation
 	busy     sync.Mutex
 	cookie   string
 	operator string
 	reason   string
 	ending   bool
-	seen     time.Time // the session's page was last heard from (its event stream asks every 250 ms)
+	seen     time.Time     // the session's page was last heard from (its event stream asks every 250 ms)
+	pending  *pendingLogin // a sign-in on IdMS's page under way (browser)
 }
 
 const sessionCookie = "dispatcher_session"
@@ -72,6 +80,9 @@ func (p *position) watchIdle() {
 // accounts maps each login activated on this position to its directory.
 func (p *position) accounts() map[string]string {
 	out := map[string]string{}
+	if p.browser {
+		return out
+	}
 	if raw, err := os.ReadFile(filepath.Join(p.data, "accounts.json")); err == nil {
 		_ = json.Unmarshal(raw, &out)
 	}
@@ -113,7 +124,14 @@ func (p *position) info(r *http.Request) map[string]any {
 	in := p.signedIn(r)
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	out := map[string]any{"mode": "position", "signed_in": in, "busy": p.cookie != "" && !in, "reason": p.reason, "accounts": logins}
+	mode := "position"
+	if p.browser {
+		mode = "browser"
+	}
+	out := map[string]any{"mode": mode, "signed_in": in, "busy": p.cookie != "" && !in, "reason": p.reason, "accounts": logins}
+	if p.idms != "" {
+		out["idms"] = p.idms
+	}
 	if in {
 		out["operator"] = p.operator
 	}

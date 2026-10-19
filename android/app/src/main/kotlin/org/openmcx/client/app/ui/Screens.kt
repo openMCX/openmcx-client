@@ -196,8 +196,11 @@ object Tags {
     const val SERVER_ADDRESS_EDIT = "server-address-edit"
     const val LOG_OFF = "log-off"
     const val LOG_OFF_CONFIRM = "log-off-confirm"
-    const val LOGGED_OFF_BANNER = "logged-off-banner"
-    const val LOG_ON = "log-on"
+    const val LOGGED_OFF_STATUS = "logged-off-status"
+    const val OFFLINE_BANNER = "offline-banner"
+    const val RETRY_NOW = "retry-now"
+    const val SIGNED_OUT_BANNER = "signed-out-banner"
+    const val SIGN_IN = "sign-in"
     const val SERVER_ADDRESS_FIELD = "server-address-field"
     const val SERVER_ADDRESS_SAVE = "server-address-save"
     const val SERVER_ADDRESS_RESET = "server-address-reset"
@@ -242,13 +245,29 @@ fun McxApp(state: UiState, actions: UiActions, initialTab: Int = 0) {
                     TextButton(onClick = actions::dismissVideoFailure) { Text("Dismiss") }
                 }
             }
-            // Logged off (Settings › Log off): nothing reaches this phone, which must be plain to see.
-            if (state.loggedOff) Row(Modifier.fillMaxWidth().background(Mcx.Stop).padding(horizontal = 12.dp, vertical = 8.dp)
-                .testTag(Tags.LOGGED_OFF_BANNER), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                WarningIcon(Color.White, 24.dp)
-                Text("Logged off: no calls or messages reach this phone", color = Color.White, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f))
-                TextButton(onClick = actions::logOn, modifier = Modifier.testTag(Tags.LOG_ON)) { Text("Log on", color = Color.White) }
+            // Signed out by IdMS: nothing is tried again until the user signs in.
+            state.signedOut?.let { reason ->
+                Row(Modifier.fillMaxWidth().background(Mcx.Stop).padding(horizontal = 12.dp, vertical = 8.dp)
+                    .testTag(Tags.SIGNED_OUT_BANNER), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    WarningIcon(Color.White, 24.dp)
+                    Text("Signed out: $reason", color = Color.White, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                    TextButton(onClick = actions::signIn, modifier = Modifier.testTag(Tags.SIGN_IN)) { Text("Sign in", color = Color.White) }
+                }
+            }
+            // No service: since when, why, and the next attempt; the client keeps trying by itself.
+            if (state.offlineSince != null && !state.loggedOff && state.signedOut == null) {
+                Row(Modifier.fillMaxWidth().background(Mcx.WarnBg).padding(horizontal = 12.dp, vertical = 6.dp)
+                    .testTag(Tags.OFFLINE_BANNER), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("No service since ${clockTime(state.offlineSince)}", color = Mcx.WarnInk, fontWeight = FontWeight.Bold)
+                        Text((state.error?.let { "$it. " } ?: "") +
+                            (state.nextRetryAt?.let { "Next attempt at ${clockTime(it)}." } ?: ""),
+                            color = Mcx.WarnInk, fontSize = 12.sp, maxLines = 2)
+                    }
+                    TextButton(onClick = actions::retryNow, modifier = Modifier.testTag(Tags.RETRY_NOW)) { Text("Retry now") }
+                    TextButton(onClick = actions::logOff) { Text("Log off") }
+                }
             }
             state.incoming?.let { IncomingCall(it, actions) }
             if (!state.provisioned) Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -281,6 +300,8 @@ fun McxApp(state: UiState, actions: UiActions, initialTab: Int = 0) {
 @Composable
 private fun StatusBar(state: UiState, openSettings: () -> Unit) {
     val ready = state.phase == "ready"
+    // Logged off (Settings › Log off, Log on there too): the status says so in red, as nothing reaches this phone.
+    val off = state.loggedOff
     // Edge to edge (Android 15+): the strip runs up behind the status bar, and its content keeps clear of the
     // status bar icons and the camera cutout.
     Column(Modifier.background(Mcx.Strip).windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal))) {
@@ -296,13 +317,14 @@ private fun StatusBar(state: UiState, openSettings: () -> Unit) {
                 GearIcon(Mcx.Ink, 22.dp)
             }
             Row(
-                Modifier.background(if (ready) Mcx.OkBg else Mcx.WarnBg, RoundedCornerShape(50)).padding(horizontal = 10.dp, vertical = 4.dp),
+                Modifier.background(if (off) Mcx.Stop else if (ready) Mcx.OkBg else Mcx.WarnBg, RoundedCornerShape(50))
+                    .padding(horizontal = 10.dp, vertical = 4.dp).testTag(if (off) Tags.LOGGED_OFF_STATUS else "status"),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                Box(Modifier.size(7.dp).background(if (ready) Mcx.OkDot else Mcx.Requesting, CircleShape))
-                Text(state.phase, color = if (ready) Mcx.OkInk else Mcx.WarnInk, fontSize = 12.sp,
-                    fontWeight = FontWeight.SemiBold, modifier = Modifier.testTag(Tags.PHASE))
+                Box(Modifier.size(7.dp).background(if (off) Color.White else if (ready) Mcx.OkDot else Mcx.Requesting, CircleShape))
+                Text(if (off) "logged off" else state.phase, color = if (off) Color.White else if (ready) Mcx.OkInk else Mcx.WarnInk,
+                    fontSize = 12.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.testTag(Tags.PHASE))
             }
         }
         HorizontalDivider(color = Mcx.Line)
@@ -1383,3 +1405,7 @@ private fun HistoryContent(state: UiState, actions: UiActions) {
         }
     }
 }
+
+/** Seconds since the epoch as the local time of day (HH:mm:ss). */
+private fun clockTime(epochSeconds: Long): String = java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
+    .format(java.time.Instant.ofEpochSecond(epochSeconds).atZone(java.time.ZoneId.systemDefault()))

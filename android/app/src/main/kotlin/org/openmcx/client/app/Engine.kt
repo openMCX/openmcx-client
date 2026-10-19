@@ -164,7 +164,8 @@ object Engine {
         val aliasKey = KNOWN_ALIASES + config.sip.publicUserId
         val known = settings.getString(aliasKey, null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
         val c = McxClient(scope, config, SocketHttpClient(ssl, endpoints), SocketConnector(config.sip.transport, ssl, endpoints = endpoints),
-            log, browser = customTabBrowser(context.applicationContext), knownAliases = known)
+            log, browser = customTabBrowser(context.applicationContext), knownAliases = known,
+            idmsHttp = SocketHttpClient(provisioning.idmsSslContext(), endpoints))
         client = c
         scope.launch { c.aliases.collect { settings.edit().putString(aliasKey, it.available.joinToString("\n")).apply() } }
         val store = HistoryStore(context).also { history = it }
