@@ -76,6 +76,62 @@ function renderRegroups(s) {
     x && x.method && /^(POST|DELETE)$/.test(x.method) ? 'Group management ' + x.method + ': ' + (x.status || 'pending') : '']
     .filter(Boolean).join(' — '));
 }
+// The MCData message store (TS 24.282 clause 21.2): the objects the engine knows from synchronisation, with their
+// flags and folder, the folder hierarchy, the last search, the payload read, the notification channel and the
+// storage of the dispatcher's communications (clause 21.3.2).
+let storeFoldersShown = '';
+function renderStore(m) {
+  const folders = m.folders || {};
+  if (JSON.stringify(folders) !== storeFoldersShown) {
+    storeFoldersShown = JSON.stringify(folders);
+    const chosen = $('store-folder').value;
+    $('store-folder').replaceChildren(Object.assign(document.createElement('option'), { value: '', textContent: 'no folder chosen' }),
+      ...Object.entries(folders).map(([path, fid]) =>
+      Object.assign(document.createElement('option'), { value: fid, textContent: path || '/', selected: fid === chosen })));
+    const list = $('store-folder-list');
+    list.replaceChildren();
+    for (const [path, fid] of Object.entries(folders))
+      item(list, path || '/', '', [['Open', '', () => storeAct({ op: 'folder', id: fid })],
+        ...(path && path !== '/' ? [['Delete', '', () => storeAct({ op: 'folder-delete', id: fid })]] : [])]);
+  }
+  const found = new Set(m.search || []);
+  const shown = new Set(m.folder && m.folder.objects ? m.folder.objects : []);
+  const list = $('store-objects');
+  list.replaceChildren();
+  for (const [oid, o] of Object.entries(m.objects || {})) {
+    if ($('store-only-found').checked && !found.has(oid)) continue;
+    const flags = o.flags || [];
+    const seen = flags.includes('\\Seen'), flagged = flags.includes('\\Flagged');
+    const toggle = (flag, on) => storeAct({ op: on ? 'unflag' : 'flag', ids: [oid], flag });
+    const target = () => $('store-folder').value;
+    // The stored object's attributes (TS 24.282 clause 21.2.5A: Text, From, To, Direction, Date, Request-Type...).
+    const peer = o.Direction === 'Out' ? 'to ' + (o.To || '?') : 'from ' + (o.From || '?');
+    item(list, (flagged ? '★ ' : '') + (o.Text || o.Subject || oid) + (seen ? '' : ' (unread)'),
+      [o['Request-Type'] || '', o.From || o.To ? peer : '', o.Date, 'in ' + (o.folder || '/'), flags.join(' '),
+       found.has(oid) ? 'search result' : '', shown.has(oid) ? 'in the folder opened' : ''].filter(Boolean).join(' · '),
+      [['Read', 'go', () => { storeAct({ op: 'payload', id: oid }); if (!seen) toggle('\\Seen', false); }],
+       [seen ? 'Mark unread' : 'Mark read', '', () => toggle('\\Seen', seen)],
+       [flagged ? 'Unflag' : 'Flag', '', () => toggle('\\Flagged', flagged)],
+       ['Move to folder', '', () => target() && storeAct({ op: 'move', folder: target(), ids: [oid] })],
+       ['Copy to folder', '', () => target() && storeAct({ op: 'copy', folder: target(), ids: [oid] })],
+       ['Delete', 'stop', () => storeAct({ op: 'delete', ids: [oid] })]]);
+  }
+  const payload = m.payload;
+  text($('store-view'), [m.folder && m.folder.path !== undefined ? 'Folder ' + (m.folder.path || '/') + ': ' +
+    (m.folder.objects || []).length + ' object(s)' : '', m.search ? 'Search: ' + m.search.length + ' found' : '',
+    payload && payload.object ? 'Payload of ' + payload.object + ': ' + payload.bytes + ' bytes' +
+      (payload.content_type ? ', ' + payload.content_type.split(';')[0] : '') : '']
+    .filter(Boolean).join(' — '));
+  const subscribed = !!(m.subscription && m.subscription.resourceURL);
+  $('store-subscribe').disabled = subscribed;
+  $('store-unsubscribe').disabled = !subscribed;
+  text($('store-channel'), subscribed ? 'Notifications: ' + (m.events || 0) + ' change(s) received' : '');
+  const c = m.control, l = m.last;
+  text($('store-last'), [c && c.action ? 'Storage ' + c.action + ': ' + c.status + (c.warning ? ' · ' + c.warning : '') : '',
+    l && l.method ? 'Last request: ' + l.method + ' ' + String(l.url || '').replace(/^https?:\/\/[^/]+/, '') + ' → ' + l.status : '']
+    .filter(Boolean).join(' — '));
+}
+const storeAct = (body) => act({ action: 'msgstore', ...body });
 // The dispatcher's functional aliases (TS 24.379 clause 9A.2.1.3, from its status subscription): activated (one of
 // them presented on its calls), offered for take-over, asked for.
 function renderAliases(s) {
@@ -256,6 +312,7 @@ function render(s) {
   for (const f of ['fta', 'ambient']) $(f).querySelector('button').disabled = !idle;
   renderAliases(s);
   renderRegroups(s);
+  renderStore(s.msgstore || {});
 
   const inbox = $('inbox');
   inbox.replaceChildren();
@@ -444,6 +501,30 @@ $('regroup').onsubmit = (e) => {
     act({ action: 'regroup', op: f.kind.value, tgi, preconfigured: f.preconfigured.value.trim(), members });
   }
 };
+$('store-sync').onclick = () => storeAct({ op: 'sync' });
+$('store-folders').onclick = () => storeAct({ op: 'folders' });
+$('store-subscribe').onclick = () => storeAct({ op: 'subscribe' });
+$('store-unsubscribe').onclick = () => storeAct({ op: 'unsubscribe' });
+$('store-only-found').onchange = () => renderStore(state.msgstore || {});
+$('store-new-folder').onsubmit = (e) => {
+  e.preventDefault();
+  const parent = $('store-folder').value;
+  storeAct(parent ? { op: 'folder-create', name: e.target.name.value.trim(), parent } : { op: 'folder-create', name: e.target.name.value.trim() });
+  e.target.name.value = '';
+};
+$('store-search').onsubmit = (e) => {
+  e.preventDefault();
+  storeAct({ op: 'search', criteria: e.target.criteria.value.trim().split(/\s+/) });
+};
+$('store-upload').onsubmit = (e) => {
+  e.preventDefault();
+  const f = e.target, body = new FormData();
+  body.append('file', f.file.files[0]);
+  if ($('store-folder').value) body.append('folder', $('store-folder').value);
+  post('/api/msgstore/upload', body, false).then(() => { f.file.value = ''; }).catch((err) => log('error: ' + err.message));
+};
+for (const [id, op] of [['store-enable', 'enable'], ['store-disable', 'disable']])
+  $(id).onclick = () => act({ action: 'msgstore-ctrl', op, all_private: $('store-private').checked, all_group: $('store-group').checked });
 $('fa-activate').onclick = () => aliasChange('activate');
 $('fa').onsubmit = (e) => { e.preventDefault(); aliasChange('activate'); };
 $('fa-takeover').onclick = () => aliasChange('takeover');

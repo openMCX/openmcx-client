@@ -71,7 +71,11 @@ def lab_mode(args, compose, generated) -> None:
             user["mcdata"] = dict(user.get("mcdata", {}), transmit_data=True, incoming_any=True, emergency_alert=True,
                                   alert_cancel=True, alert_cancel_any_user=True, emergency_group=True,
                                   emergency_group_cancel=True, emergency_private=True, emergency_private_cancel=True,
-                                  imminent_peril=True, imminent_peril_cancel=True)
+                                  imminent_peril=True, imminent_peril_cancel=True,
+                                  # The storage of its communications in a message store (--msgstore, TS 24.282
+                                  # clause 21.3): private ones and those of every group.
+                                  store_comms=True, store_private_comms=True,
+                                  store_group_comms=[group["id"] for group in site["groups"]])
     for group in site["groups"]:
         members = group.get("mcdata", {}).get("transmit_members")
         if members is not None and mcdata_id not in members:

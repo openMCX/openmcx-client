@@ -193,6 +193,46 @@
       </div>
     </div>
   </section>
+  <section id="store">
+    <h2>Message store</h2>
+    <div class="band">
+      <div>
+        <h3>Stored objects</h3>
+        <div class="row"><button id="store-sync" class="go">Synchronise</button>
+          <label><input type="checkbox" id="store-only-found"> only search results</label></div>
+        <div id="store-objects" class="list"></div>
+      </div>
+      <div>
+        <h3>Folders</h3>
+        <div class="row"><button id="store-folders">Refresh folders</button></div>
+        <div class="row"><select id="store-folder" aria-label="Folder"></select></div>
+        <form id="store-new-folder">
+          <div class="row"><input name="name" placeholder="new folder name" pattern="[A-Za-z0-9._\-]{1,64}" required>
+            <button>Create</button></div>
+        </form>
+        <div id="store-folder-list" class="list"></div>
+      </div>
+      <div>
+        <h3>Search and upload</h3>
+        <form id="store-search">
+          <div class="row"><input name="criteria" placeholder="e.g. Direction=In flag=\Seen" required><button>Search</button></div>
+        </form>
+        <form id="store-upload">
+          <div class="row"><input type="file" name="file" required><button>Store file</button></div>
+        </form>
+        <div id="store-view" class="note"></div>
+      </div>
+      <div>
+        <h3>Notifications and storage</h3>
+        <div class="row"><button id="store-subscribe">Subscribe</button><button id="store-unsubscribe">Unsubscribe</button></div>
+        <div id="store-channel" class="note"></div>
+        <div class="row"><label><input type="checkbox" id="store-private"> all private</label>
+          <label><input type="checkbox" id="store-group"> all group</label></div>
+        <div class="row"><button id="store-enable">Store my communications</button><button id="store-disable">Stop storing</button></div>
+        <div id="store-last" class="note"></div>
+      </div>
+    </div>
+  </section>
   <section id="data">
     <div class="band two">
       <div>

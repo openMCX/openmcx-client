@@ -40,6 +40,7 @@ func (a *api) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/state", a.guard(a.getState))
 	mux.HandleFunc("POST /api/command", a.guard(a.command))
 	mux.HandleFunc("POST /api/fd", a.guard(a.sendFile))
+	mux.HandleFunc("POST /api/msgstore/upload", a.guard(a.storeFile))
 	mux.HandleFunc("GET /api/files/{id}", a.guard(a.receivedFile))
 	mux.Handle("GET /api/audio", websocket.Server{Handshake: a.audioHandshake, Handler: a.audioSocket})
 }
@@ -188,7 +189,7 @@ func (a *api) view(r *http.Request) (map[string]any, error) {
 		"private_emergency_state", "functional_alias", "requested_functional_aliases", "active_functional_aliases",
 		"takeover_possible_functional_aliases", "last_fa_result", "functional_alias_subscription_result",
 		"calling_functional_alias", "called_functional_alias", "functional_alias_redirect", "regroups",
-		"regroup_result", "xcap_last", "profile_groups",
+		"regroup_result", "xcap_last", "msgstore", "profile_groups",
 		"mcdata_authorized", "mcdata_affiliated", "mcdata_inbox",
 		"mcdata_sent", "mcdata_last_result", "mcdata_files", "mcdata_files_sent", "mcdata_fd_last_result")
 	v["session"] = session
@@ -275,6 +276,106 @@ func ids(value any, min, max int) ([]string, error) {
 }
 
 var documentName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// Message store flags (TS 24.282 clause 21.2.3.1, OMA NMS system flags such as \Seen and \Flagged, or keywords) and
+// search criteria (name=value attributes, flag=<flag>).
+var (
+	storeFlag      = regexp.MustCompile(`^\\?[A-Za-z][A-Za-z0-9$_-]{0,31}$`)
+	storeCriterion = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9-]{0,31}=\\?[A-Za-z0-9._:@+/-]{1,256}$`)
+)
+
+// msgstoreLine turns a message store action into one "mcdata-msgstore" engine command (TS 24.282 clause 21.2).
+func msgstoreLine(req map[string]any, str func(string) string, id func(string) (string, error)) (string, error) {
+	op := str("op")
+	switch op {
+	case "sync", "folders", "subscribe", "unsubscribe":
+		// Synchronisation (clause 21.2.17.1), the folder hierarchy (clause 21.2.23.1), the notification channel and
+		// the store's subscription (clauses 21.2.19.1, 21.2.12A.1 and 21.2.22.1).
+		return "mcdata-msgstore " + op, nil
+	case "get", "payload", "retrieve", "folder", "folder-delete":
+		// An object (clause 21.2.1.1), its payload, its retrieval (clause 21.2.24.1); a folder's objects (clause
+		// 21.2.18.1) or its deletion (clause 21.2.7.1).
+		target, err := id("id")
+		if err != nil {
+			return "", err
+		}
+		return "mcdata-msgstore " + op + " " + target, nil
+	case "delete":
+		// One object, or several in bulk (clause 21.2.4.1).
+		targets, err := ids(req["ids"], 1, 20)
+		if err != nil {
+			return "", err
+		}
+		return "mcdata-msgstore delete " + strings.Join(targets, " "), nil
+	case "flag", "unflag", "bulk-flag":
+		// Flags set or removed (clause 21.2.3.1).
+		flag := str("flag")
+		if !storeFlag.MatchString(flag) {
+			return "", fmt.Errorf("%q is not a message store flag", flag)
+		}
+		targets, err := ids(req["ids"], 1, 20)
+		if err != nil {
+			return "", err
+		}
+		if op == "bulk-flag" {
+			return "mcdata-msgstore bulk-flag " + flag + " " + strings.Join(targets, " "), nil
+		}
+		if len(targets) != 1 {
+			return "", errors.New("one object at a time; bulk-flag sets a flag on several")
+		}
+		return "mcdata-msgstore " + op + " " + targets[0] + " " + flag, nil
+	case "search":
+		// Objects by attribute and flag (clause 21.2.2.1).
+		list, _ := req["criteria"].([]any)
+		var criteria []string
+		for _, item := range list {
+			c, _ := item.(string)
+			if !storeCriterion.MatchString(c) {
+				return "", fmt.Errorf("%q is not a name=value or flag=<flag> criterion", c)
+			}
+			criteria = append(criteria, c)
+		}
+		if len(criteria) == 0 || len(criteria) > 5 {
+			return "", errors.New("between 1 and 5 criteria are needed")
+		}
+		return "mcdata-msgstore search " + strings.Join(criteria, " "), nil
+	case "folder-search", "folder-create":
+		// Folders by name (clause 21.2.11.1); a new folder, optionally in a parent (clause 21.2.8.1).
+		name := str("name")
+		if !documentName.MatchString(name) {
+			return "", fmt.Errorf("%q is not a folder name", name)
+		}
+		line := "mcdata-msgstore " + op + " " + name
+		if op == "folder-create" && str("parent") != "" {
+			parent, err := id("parent")
+			if err != nil {
+				return "", err
+			}
+			line += " " + parent
+		}
+		return line, nil
+	case "move", "copy", "move-folder", "copy-folder":
+		// Objects or folders moved or copied into a folder (clauses 21.2.6.1 and 21.2.10.1).
+		folder, err := id("folder")
+		if err != nil {
+			return "", err
+		}
+		targets, err := ids(req["ids"], 1, 20)
+		if err != nil {
+			return "", err
+		}
+		return "mcdata-msgstore " + op + " " + folder + " " + strings.Join(targets, " "), nil
+	case "restart":
+		// The notification stream restarted from an index (clause 21.2.14A.1).
+		index, ok := req["index"].(float64)
+		if !ok || index < 0 || index != float64(int64(index)) {
+			return "", errors.New("index must be a whole number, 0 or more")
+		}
+		return fmt.Sprintf("mcdata-msgstore restart %d", int64(index)), nil
+	default:
+		return "", fmt.Errorf("unknown message store operation %q", op)
+	}
+}
 
 // temporaryDocument names the group management document of a temporary group after the user part of its ID.
 func temporaryDocument(tgi string) string {
@@ -559,6 +660,35 @@ func commandLine(req map[string]any) (string, error) {
 		default:
 			return "", fmt.Errorf("unknown temporary group operation %q", op)
 		}
+	case "msgstore":
+		return msgstoreLine(req, str, id)
+	case "msgstore-ctrl":
+		// TS 24.282 clauses 21.3.2.2 and 21.3.2.3: the storage of the user's communications in the message store,
+		// enabled or disabled for all private, all group, or the users and groups named.
+		op := str("op")
+		if op != "enable" && op != "disable" {
+			return "", fmt.Errorf("unknown storage control %q", op)
+		}
+		line := "mcdata-msgstore-ctrl " + op
+		if flag("all_private") {
+			line += " all-private"
+		}
+		if flag("all_group") {
+			line += " all-group"
+		}
+		for _, key := range []string{"private", "group"} {
+			if list, _ := req[key].([]any); len(list) > 0 {
+				named, err := ids(list, 1, 20)
+				if err != nil {
+					return "", err
+				}
+				line += " " + key + "=" + strings.Join(named, ",")
+			}
+		}
+		if line == "mcdata-msgstore-ctrl "+op {
+			return "", errors.New("name all private, all group, users or groups")
+		}
+		return line, nil
 	case "answer", "reject", "hangup", "release":
 		return action, nil
 	case "ptt":
@@ -636,37 +766,14 @@ func (a *api) sendFile(w http.ResponseWriter, r *http.Request) {
 	if !fromUI(w, r) {
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<20)
-	file, header, err := r.FormFile("file")
-	if err != nil {
-		fail(w, http.StatusBadRequest, err)
+	path, ok := a.saveUpload(w, r, "fd-")
+	if !ok {
 		return
 	}
-	defer file.Close()
 	target := r.FormValue("target")
 	if !word.MatchString(target) {
+		_ = os.RemoveAll(filepath.Dir(path))
 		fail(w, http.StatusBadRequest, errors.New("target is missing or not a single word"))
-		return
-	}
-	name := strings.Trim(unsafeName.ReplaceAllString(filepath.Base(header.Filename), "_"), "._")
-	if name == "" {
-		name = "file"
-	}
-	dir, err := os.MkdirTemp(a.outbox, "fd-")
-	if err != nil {
-		fail(w, http.StatusInternalServerError, err)
-		return
-	}
-	path := filepath.Join(dir, name)
-	out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err == nil {
-		_, err = io.Copy(out, file)
-		if cerr := out.Close(); err == nil {
-			err = cerr
-		}
-	}
-	if err != nil {
-		fail(w, http.StatusBadRequest, err)
 		return
 	}
 	line := "fd-send "
@@ -682,6 +789,66 @@ func (a *api) sendFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"sent": line})
+}
+
+// storeFile stores a file from the browser in the message store as a new object, optionally in a folder (TS 24.282
+// clause 21.2.15.1).
+func (a *api) storeFile(w http.ResponseWriter, r *http.Request) {
+	if !fromUI(w, r) {
+		return
+	}
+	path, ok := a.saveUpload(w, r, "store-")
+	if !ok {
+		return
+	}
+	line := "mcdata-msgstore upload " + path
+	if folder := r.FormValue("folder"); folder != "" {
+		if !word.MatchString(folder) {
+			_ = os.RemoveAll(filepath.Dir(path))
+			fail(w, http.StatusBadRequest, errors.New("folder is not a single word"))
+			return
+		}
+		line += " " + folder
+	}
+	if err := a.engine.command(line); err != nil {
+		fail(w, http.StatusServiceUnavailable, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"sent": line})
+}
+
+// saveUpload saves the "file" field of a form from the browser in a directory of its own in the outbox, for the
+// engine to read; on failure it answers the request.
+func (a *api) saveUpload(w http.ResponseWriter, r *http.Request, prefix string) (string, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<20)
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return "", false
+	}
+	defer file.Close()
+	name := strings.Trim(unsafeName.ReplaceAllString(filepath.Base(header.Filename), "_"), "._")
+	if name == "" {
+		name = "file"
+	}
+	dir, err := os.MkdirTemp(a.outbox, prefix)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err)
+		return "", false
+	}
+	path := filepath.Join(dir, name)
+	out, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err == nil {
+		_, err = io.Copy(out, file)
+		if cerr := out.Close(); err == nil {
+			err = cerr
+		}
+	}
+	if err != nil {
+		fail(w, http.StatusBadRequest, err)
+		return "", false
+	}
+	return path, true
 }
 
 // receivedFile serves a file the engine downloaded, found by its message ID.

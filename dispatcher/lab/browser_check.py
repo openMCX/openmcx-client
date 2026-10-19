@@ -143,6 +143,22 @@ with sync_playwright() as p:
         check("BRW-13 functional alias activated, used on calls and deactivated from the page; no emergency call "
               "to an alias", page.locator("#private input[name=emergency]").is_disabled())
         page.uncheck("#private input[name=to_alias]")
+    # The message store (a lab with --msgstore): synchronised, a folder created and deleted from the page.
+    dispatcher = json.loads((lab / "generated" / "client-c-dispatcher.json").read_text())
+    if "msgstore" in dispatcher.get("endpoints", {}):
+        page.click("#store-sync")
+        expect(page.locator("#store-last")).to_contain_text("objects/operations/search", timeout=20000)
+        name = "brw-" + uuid.uuid4().hex[:6]
+        page.fill("#store-new-folder input[name=name]", name)
+        page.click("#store-new-folder button")
+        page.click("#store-folders")
+        entry = page.locator("#store-folder-list .item", has_text=name)
+        expect(entry).to_be_visible(timeout=20000)
+        listed = page.locator("#store-folder option", has_text=name).count() == 1
+        entry.locator("button", has_text="Delete").click()
+        page.click("#store-folders")
+        expect(entry).to_have_count(0, timeout=20000)
+        check("BRW-18 message store synchronised; a folder created, offered and deleted from the page", listed)
     page.screenshot(path=str(lab / "artifacts" / "dispatcher.png"), full_page=True)
     check("BRW-05 no script errors", not errors, "; ".join(errors))
     browser.close()

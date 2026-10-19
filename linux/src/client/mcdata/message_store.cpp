@@ -428,14 +428,14 @@ void Client::msgstore_restart(const std::vector<std::string> &args) {
 
 //------------------------------------------------------------------------------
 // TS 24.282 clauses 21.3.2.2 and 21.3.2.3: mcdata-msgstore-ctrl enable|disable [all-private] [all-group]
-// [private=<ID>,...] [group=<ID>,...].
-// Deviation from TS 24.282 clause 21.3.2.2: the <allow-store-comms-in-msgstore> check of
-// the user profile is left to the participating function (warning 234).
+// [private=<ID>,...] [group=<ID>,...]; without <allow-store-comms-in-msgstore> in the MCData user profile the user
+// is told and nothing is sent.
 void Client::msgstore_control_command(std::istringstream &words) {
   if (!mcdata_authorized_) throw std::runtime_error("MCData service authorisation required");
   std::string action;
   words >> action;
   if (action != "enable" && action != "disable") throw std::runtime_error("mcdata-msgstore-ctrl enable|disable ...");
+  require_mcdata_profile({"allow-store-comms-in-msgstore"});
   const bool enable = action == "enable";
   mcdata::Info info;
   info.request_type = "store-comms-in-msgstore-ctrl-req";

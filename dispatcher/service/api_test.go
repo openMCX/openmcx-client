@@ -55,6 +55,16 @@ func TestCommandLine(t *testing.T) {
 		{map[string]any{"action": "regroup", "op": "remove", "tgi": "sip:rg1@example.org"}, "regroup remove sip:rg1@example.org"},
 		{map[string]any{"action": "temporary", "op": "create", "tgi": "sip:ops-temp-1@example.org", "groups": []any{"sip:north@example.org", "sip:south@example.org"}, "chat": true}, "temporary-create ops-temp-1 sip:ops-temp-1@example.org sip:north@example.org,sip:south@example.org chat"},
 		{map[string]any{"action": "temporary", "op": "delete", "tgi": "sip:ops-temp-1@example.org"}, "temporary-delete ops-temp-1"},
+		{map[string]any{"action": "msgstore", "op": "sync"}, "mcdata-msgstore sync"},
+		{map[string]any{"action": "msgstore", "op": "payload", "id": "obj-1"}, "mcdata-msgstore payload obj-1"},
+		{map[string]any{"action": "msgstore", "op": "delete", "ids": []any{"obj-1", "obj-2"}}, "mcdata-msgstore delete obj-1 obj-2"},
+		{map[string]any{"action": "msgstore", "op": "flag", "ids": []any{"obj-1"}, "flag": `\Seen`}, `mcdata-msgstore flag obj-1 \Seen`},
+		{map[string]any{"action": "msgstore", "op": "bulk-flag", "ids": []any{"obj-1", "obj-2"}, "flag": `\Flagged`}, `mcdata-msgstore bulk-flag \Flagged obj-1 obj-2`},
+		{map[string]any{"action": "msgstore", "op": "search", "criteria": []any{"Direction=In", `flag=\Seen`}}, `mcdata-msgstore search Direction=In flag=\Seen`},
+		{map[string]any{"action": "msgstore", "op": "folder-create", "name": "incidents", "parent": "f-1"}, "mcdata-msgstore folder-create incidents f-1"},
+		{map[string]any{"action": "msgstore", "op": "move", "folder": "f-2", "ids": []any{"obj-1"}}, "mcdata-msgstore move f-2 obj-1"},
+		{map[string]any{"action": "msgstore", "op": "restart", "index": float64(0)}, "mcdata-msgstore restart 0"},
+		{map[string]any{"action": "msgstore-ctrl", "op": "enable", "all_private": true, "group": []any{"sip:g1@example.org"}}, "mcdata-msgstore-ctrl enable all-private group=sip:g1@example.org"},
 	}
 	for _, c := range good {
 		got, err := commandLine(c.req)
@@ -64,6 +74,13 @@ func TestCommandLine(t *testing.T) {
 	}
 	bad := []map[string]any{
 		{"action": "quit"},
+		{"action": "msgstore", "op": "upload", "id": "x"},
+		{"action": "msgstore", "op": "flag", "ids": []any{"obj-1", "obj-2"}, "flag": `\Seen`},
+		{"action": "msgstore", "op": "flag", "ids": []any{"obj-1"}, "flag": "Seen quit"},
+		{"action": "msgstore", "op": "search", "criteria": []any{"Subject=a b"}},
+		{"action": "msgstore", "op": "folder-create", "name": "a/b"},
+		{"action": "msgstore", "op": "restart", "index": float64(-1)},
+		{"action": "msgstore-ctrl", "op": "enable"},
 		{"action": "regroup", "op": "create", "tgi": "sip:rg1@example.org", "preconfigured": "sip:pre@example.org", "members": []any{}},
 		{"action": "regroup", "op": "create", "tgi": "sip:rg1@example.org", "members": []any{"sip:north@example.org"}},
 		{"action": "regroup", "op": "merge", "tgi": "sip:rg1@example.org"},

@@ -45,6 +45,7 @@ checked out beside it (`../openmcx-server`).
 | Emergency alert | MCPTT and MCData: send and cancel its own; cancel another user's (with the right to) |
 | SDS | one-to-one and group, inbox |
 | File distribution | send from the browser (optionally mandatory), accept or reject received files, save them |
+| Message store | storage of its private and group communications enabled and disabled; the stored objects synchronised, read, flagged (read, flagged), moved or copied into folders, searched, deleted; folders created, opened and deleted; files from the browser stored; notifications of changes |
 | Regroup | group regroup and user regroup using a preconfigured group, created and removed; temporary groups formed and torn down at the group management server; calls on them from the group picker |
 | Coming soon | several monitored groups, remote affiliation, video, call recording, map, operator handoff |
 
@@ -135,6 +136,7 @@ origin.
 | `POST /api/command` | one action, JSON (below) |
 | `POST /api/fd` | multipart: `file`, `target`, `group` (true/false), `mandatory` (true/false); sends the file |
 | `GET /api/files/{message ID}` | a received file once downloaded |
+| `POST /api/msgstore/upload` | multipart form: `file`, optional `folder` (folder ID); stored in the message store as a new object |
 | `GET /api/audio` | WebSocket, binary frames of 16 kHz 16-bit little-endian mono PCM, both ways |
 
 Actions: `{"action":"call","kind":"normal|imminent|emergency|broadcast","chat":bool}` (`chat`: the selected chat
@@ -153,6 +155,14 @@ target is a functional alias; not with `emergency`),
 `{"action":"regroup","op":"remove","tgi":"<group ID>"}`,
 `{"action":"temporary","op":"create","tgi":"<new group ID>","groups":["<group>",...],"chat":bool,"protected":bool}`,
 `{"action":"temporary","op":"delete","tgi":"<group ID>"}` (the document is named after the group ID's user part),
+`{"action":"msgstore","op":"sync|folders|subscribe|unsubscribe"}`,
+`{"action":"msgstore","op":"get|payload|retrieve|folder|folder-delete","id":"<object or folder ID>"}`,
+`{"action":"msgstore","op":"delete","ids":[...]}`, `{"action":"msgstore","op":"flag|unflag|bulk-flag","ids":[...],"flag":"\\Seen"}`,
+`{"action":"msgstore","op":"search","criteria":["<name>=<value>","flag=<flag>"]}`,
+`{"action":"msgstore","op":"folder-search|folder-create","name":"<name>","parent":"<folder ID>"}`,
+`{"action":"msgstore","op":"move|copy|move-folder|copy-folder","folder":"<folder ID>","ids":[...]}`,
+`{"action":"msgstore","op":"restart","index":<n>}`,
+`{"action":"msgstore-ctrl","op":"enable|disable","all_private":bool,"all_group":bool,"private":[...],"group":[...]}`,
 `{"action":"ambient","kind":"remote|local","target":"<MCPTT ID>"}`,
 `{"action":"remote-call|remote-group-call","remote":"<MCPTT ID>","target":"<MCPTT ID or group>","mode":"auto|manual|force-auto","silent":bool}`,
 `{"action":"transfer","target":"<MCPTT ID>","step":"announced|complete|cancel"}` (no `step`: unannounced),
@@ -164,7 +174,7 @@ Nothing else reaches the engine.
 
 ```
 python3 ../openmcx-server/tools/prepare-prearranged-test.py --directory <lab> --project disp --private-call --mcdata \
-  --priority --broadcast --chat --functional-alias \
+  --priority --broadcast --chat --functional-alias --msgstore \
   --image openmcx:<tag> --client-image openmcx-client:dispatcher
 python3 dispatcher/lab/prepare.py <lab>                       # client-c becomes the dispatcher on 127.0.0.1:18080,
                                                               # with the lab's widest MCPTT and MCData rights
@@ -174,6 +184,7 @@ python3 dispatcher/lab/scenario.py <lab> --project disp       # DSP-01..08
 python3 dispatcher/lab/actions_scenario.py <lab> --project disp   # DSP-09..16; the lab with --priority --broadcast --chat
 python3 dispatcher/lab/services_scenario.py <lab> --project disp  # DSP-17..24
 python3 dispatcher/lab/fa_scenario.py <lab> --project disp        # DSP-25..30; the lab with --functional-alias
+python3 dispatcher/lab/store_scenario.py <lab> --project disp     # DSP-36..45; the lab with --msgstore
 docker run --rm --network host -v playwright-py:/py -v <lab>:/lab -v $PWD/dispatcher/lab:/check -w /check \
   mcr.microsoft.com/playwright/python:v1.55.0-noble sh -c \
   '[ -d /py/playwright ] || pip install -q --break-system-packages --target /py playwright==1.55.0; PYTHONPATH=/py python3 browser_check.py /lab'
