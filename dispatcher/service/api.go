@@ -185,7 +185,10 @@ func (a *api) view(r *http.Request) (map[string]any, error) {
 		"last_call_failure", "queue_position", "callback_requests_sent", "callback_requests_received",
 		"first_to_answer", "ambient", "last_ambient", "announced_transfer", "last_forwarding", "service_outcomes",
 		"conference_participants", "mcdata_alert_state", "mcdata_alerts_received", "mcdata_alert_last_result",
-		"private_emergency_state", "profile_groups", "mcdata_authorized", "mcdata_affiliated", "mcdata_inbox",
+		"private_emergency_state", "functional_alias", "requested_functional_aliases", "active_functional_aliases",
+		"takeover_possible_functional_aliases", "last_fa_result", "functional_alias_subscription_result",
+		"calling_functional_alias", "called_functional_alias", "functional_alias_redirect", "profile_groups",
+		"mcdata_authorized", "mcdata_affiliated", "mcdata_inbox",
 		"mcdata_sent", "mcdata_last_result", "mcdata_files", "mcdata_files_sent", "mcdata_fd_last_result")
 	v["session"] = session
 	if raw, err := os.ReadFile(a.engine.configPath()); err == nil {
@@ -313,6 +316,14 @@ func commandLine(req map[string]any) (string, error) {
 			return "", err
 		}
 		line := "private " + target
+		// TS 24.379 clause 11.1.1.2.1.1 step 14c: a private call to a functional alias, resolved by the server to a
+		// user who activated it; the engine has no emergency call to an alias.
+		if flag("to_alias") {
+			if flag("emergency") {
+				return "", errors.New("no emergency private call to a functional alias")
+			}
+			line = "private-fa " + target
+		}
 		if flag("manual") {
 			line += " manual"
 		}
@@ -355,7 +366,18 @@ func commandLine(req map[string]any) (string, error) {
 		}
 	case "first-to-answer":
 		// TS 24.379 clause 11.1.1.2.1.1 steps 10 and 15: a private call to two or more users, the first to answer
-		// takes it (optionally an emergency one, clause 6.2.8.3.2).
+		// takes it (optionally an emergency one, clause 6.2.8.3.2); or to one functional alias, every user who
+		// activated it invited.
+		if str("alias") != "" {
+			alias, err := id("alias")
+			if err != nil {
+				return "", err
+			}
+			if flag("emergency") {
+				return "", errors.New("no emergency first-to-answer call to a functional alias")
+			}
+			return "first-to-answer-fa " + alias, nil
+		}
 		targets, err := ids(req["targets"], 2, 10)
 		if err != nil {
 			return "", err
@@ -442,6 +464,30 @@ func commandLine(req map[string]any) (string, error) {
 			return "", err
 		}
 		return "mcdata-alert cancel group=" + group + " " + user, nil
+	case "fa":
+		// TS 24.379 clause 9A.2.1.2: the functional alias status changed: activated, taken over from its holder
+		// (offered as take-over-possible, clause 9A.2.1.3) or deactivated; the engine first subscribes to the
+		// user's functional alias status (clause 9A.2.1.1).
+		op := str("op")
+		if op != "activate" && op != "takeover" && op != "deactivate" {
+			return "", fmt.Errorf("unknown functional alias operation %q", op)
+		}
+		aliases, err := ids(req["aliases"], 1, 10)
+		if err != nil {
+			return "", err
+		}
+		return "fa " + op + " " + strings.Join(aliases, " "), nil
+	case "fa-use":
+		// The functional alias the next calls present (TS 24.379 clause 10.1.1.2.1.1, clause 11.1.1.2.1.1:
+		// <functional-alias-URI>); "" stops.
+		if str("alias") == "" {
+			return "fa use none", nil
+		}
+		alias, err := id("alias")
+		if err != nil {
+			return "", err
+		}
+		return "fa use " + alias, nil
 	case "answer", "reject", "hangup", "release":
 		return action, nil
 	case "ptt":

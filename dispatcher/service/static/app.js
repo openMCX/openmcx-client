@@ -36,6 +36,35 @@ const OUTCOMES = {
   'forward-private-call-response': 'Forwarding',
 };
 let state = {};
+// The functional aliases of the call (TS 24.379 clause 10.1.1.3.1.1, clause 11.1.1.3.1.1): the caller's, and the one
+// called (a private call to an alias, clause 11.1.1.4.1).
+function aliasesOfCall(s) {
+  return (s.calling_functional_alias ? ' · as ' + s.calling_functional_alias : '') +
+    (s.called_functional_alias ? ' · to ' + s.called_functional_alias : '');
+}
+// The dispatcher's functional aliases (TS 24.379 clause 9A.2.1.3, from its status subscription): activated (one of
+// them presented on its calls), offered for take-over, asked for.
+function renderAliases(s) {
+  const list = $('fa-list'), active = s.active_functional_aliases || [], using = s.functional_alias || '';
+  list.replaceChildren();
+  for (const alias of active)
+    item(list, alias, 'activated' + (alias === using ? ' · presented on calls' : ''), [
+      alias === using ? ['Stop using', '', () => act({ action: 'fa-use', alias: '' })]
+        : ['Use on calls', 'go', () => act({ action: 'fa-use', alias })],
+      ['Deactivate', '', () => act({ action: 'fa', op: 'deactivate', aliases: [alias] })]]);
+  for (const alias of s.takeover_possible_functional_aliases || [])
+    item(list, alias, 'held by another user, can be taken over',
+         [['Take over', 'warn', () => act({ action: 'fa', op: 'takeover', aliases: [alias] })]]);
+  // The calls present the alias only while it is activated (TS 24.379 clause 10.1.1.2.1.1).
+  text($('fa-using'), using ? 'Calls present ' + using + (active.includes(using) ? '' : ' (not activated: not presented)') : '');
+  const last = s.last_fa_result;
+  if (last && last.aliases && last.aliases.length) {
+    const outcomes = Object.entries(last.outcomes || {}).map(([a, o]) => a + ': ' + o).join(', ');
+    item(list, 'Last change: ' + last.action + ' ' + last.aliases.join(' '),
+         (last.status ? String(last.status) : 'pending') + (last.warning ? ' · ' + last.warning : '') +
+         (outcomes ? ' · ' + outcomes : ''));
+  }
+}
 function text(el, value) { el.textContent = value; }
 function item(list, title, detail, buttons = []) {
   const div = document.createElement('div');
@@ -115,7 +144,7 @@ function render(s) {
     (call === 'active' && s.floor_control === false ? ' · without floor control' : '') +
     // Ambient listening (TS 24.379 clause 11.1.6): the listened-to side has no visible call, so it is named here.
     (s.ambient ? ' · ambient listening: ' + (s.ambient.role === 'listening' ? 'listening to ' : 'listened to by ') +
-      s.ambient.peer : ''));
+      s.ambient.peer : '') + (call !== 'idle' ? aliasesOfCall(s) : ''));
   text($('floor-state'), (s.floor_state || '–') + (s.floor_owner && call === 'active' ? ' · ' + s.floor_owner : '') +
     (s.queue_position ? ' · queue ' + s.queue_position : ''));
   const failure = s.last_call_failure;
@@ -127,7 +156,8 @@ function render(s) {
   $('ptt').classList.toggle('busy', busy);
   if (!talking) $('ptt').textContent = busy ? 'Floor busy · ' + owner.replace(/^sips?:/, '').split('@')[0].replace(/\.mcptt$/, '') + ' is talking' : 'Hold to talk';
   $('incoming').hidden = call !== 'ringing';
-  text($('incoming-text'), 'Incoming ' + (s.call_type || '') + ' call' + (s.private_peer ? ' from ' + s.private_peer : ''));
+  text($('incoming-text'), 'Incoming ' + (s.call_type || '') + ' call' + (s.private_peer ? ' from ' + s.private_peer : '') +
+    aliasesOfCall(s));
 
   const alerts = $('alerts');
   alerts.replaceChildren();
@@ -188,6 +218,7 @@ function render(s) {
     s.last_forwarding.by + ' to ' + s.last_forwarding.target : ''));
   const idle = call === 'idle';
   for (const f of ['fta', 'ambient']) $(f).querySelector('button').disabled = !idle;
+  renderAliases(s);
 
   const inbox = $('inbox');
   inbox.replaceChildren();
@@ -310,7 +341,8 @@ $('fta').onsubmit = (e) => {
   e.preventDefault();
   audio();
   const f = e.target;
-  act({ action: 'first-to-answer', targets: f.targets.value.trim().split(/[\s,]+/), emergency: f.emergency.checked });
+  act(f.to_alias.checked ? { action: 'first-to-answer', alias: f.targets.value.trim(), emergency: f.emergency.checked }
+    : { action: 'first-to-answer', targets: f.targets.value.trim().split(/[\s,]+/), emergency: f.emergency.checked });
 };
 $('ambient').onsubmit = (e) => {
   e.preventDefault();
@@ -344,8 +376,22 @@ $('private').onsubmit = (e) => {
   e.preventDefault();
   audio();
   const f = e.target;
-  act({ action: 'private', target: f.target.value.trim(), emergency: f.emergency.checked, no_floor: f.no_floor.checked });
+  act({ action: 'private', target: f.target.value.trim(), emergency: f.emergency.checked, no_floor: f.no_floor.checked,
+        to_alias: f.to_alias.checked });
 };
+// The engine has no emergency call to a functional alias.
+for (const form of ['private', 'fta']) {
+  const f = $(form);
+  f.to_alias.onchange = () => { f.emergency.disabled = f.to_alias.checked; if (f.to_alias.checked) f.emergency.checked = false; };
+}
+function aliasChange(op) {
+  const f = $('fa');
+  if (f.alias.reportValidity()) act({ action: 'fa', op, aliases: [f.alias.value.trim()] });
+}
+$('fa-activate').onclick = () => aliasChange('activate');
+$('fa').onsubmit = (e) => { e.preventDefault(); aliasChange('activate'); };
+$('fa-takeover').onclick = () => aliasChange('takeover');
+$('fa-deactivate').onclick = () => aliasChange('deactivate');
 $('sds').onsubmit = (e) => {
   e.preventDefault();
   const f = e.target;

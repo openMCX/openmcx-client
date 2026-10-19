@@ -124,6 +124,25 @@ with sync_playwright() as p:
     page.click("button[data-action=hangup]")
     expect(page.locator("#call-state")).not_to_contain_text("ambient", timeout=15000)
     check("BRW-12 ambient listening started from the page, shown, and released", True)
+    # Functional aliases (a lab with --functional-alias): one activated from the page, used on calls, deactivated.
+    site = json.loads((lab / "generated" / "site.json").read_text())
+    car = next((a["id"] for a in site.get("functional_aliases", []) if "patrol-car-12" in a["id"]), None)
+    if car:
+        page.fill("#fa input[name=alias]", car)
+        page.click("#fa-activate")
+        entry = page.locator("#fa-list .item", has_text=car).filter(has_text="activated").first
+        expect(entry).to_be_visible(timeout=20000)
+        entry.locator("button", has_text="Use on calls").click()
+        expect(page.locator("#fa-using")).to_contain_text("Calls present " + car, timeout=15000)
+        entry.locator("button", has_text="Stop using").click()
+        expect(page.locator("#fa-using")).to_have_text("", timeout=15000)
+        entry.locator("button", has_text="Deactivate").click()
+        expect(page.locator("#fa-list .item", has_text=car).filter(has_text="presented")).to_have_count(0)
+        expect(page.locator("#fa-list")).to_contain_text(car + ": deactivated", timeout=20000)
+        page.check("#private input[name=to_alias]")
+        check("BRW-13 functional alias activated, used on calls and deactivated from the page; no emergency call "
+              "to an alias", page.locator("#private input[name=emergency]").is_disabled())
+        page.uncheck("#private input[name=to_alias]")
     page.screenshot(path=str(lab / "artifacts" / "dispatcher.png"), full_page=True)
     check("BRW-05 no script errors", not errors, "; ".join(errors))
     browser.close()

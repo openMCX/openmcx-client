@@ -97,6 +97,16 @@ def lab_mode(args, compose, generated) -> None:
                                                        callback_cancel=True, incoming_any=True, first_to_answer=True,
                                                        ambient_remote=True, ambient_local=True, remote_init=True,
                                                        transfer=True, forward_manual=True)
+    # In a lab with functional aliases (--functional-alias), the dispatcher may activate each of them (TS 24.379
+    # clause 9A.2.2.2.3: the alias's user list) and take one over from its holder
+    # (<allow-takeover-functional-alias-other-user>).
+    for alias in site.get("functional_aliases", []):
+        if mcptt_id not in alias.setdefault("users", []):
+            alias["users"].append(mcptt_id)
+    if site.get("functional_aliases"):
+        for user in site["users"]:
+            if user.get("mcptt_id") == mcptt_id:
+                user["functional_alias_takeover"] = True
     for group in site["groups"]:
         policy = group.get("priority_policy")
         for key in ("emergency_users", "emergency_cancel_users", "imminent_users", "imminent_cancel_users",

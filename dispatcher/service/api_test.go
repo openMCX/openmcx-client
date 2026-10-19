@@ -43,6 +43,13 @@ func TestCommandLine(t *testing.T) {
 		{map[string]any{"action": "mcdata-alert", "on": false, "user": "sip:bob@example.org", "group": "sip:g1@example.org"}, "mcdata-alert cancel group=sip:g1@example.org sip:bob@example.org"},
 		{map[string]any{"action": "sds", "target": "sip:g1@example.org", "group": true, "text": "all units report"}, "sds-group sip:g1@example.org all units report"},
 		{map[string]any{"action": "fd-accept", "id": "3f2a-11"}, "fd-accept 3f2a-11"},
+		{map[string]any{"action": "fa", "op": "activate", "aliases": []any{"sip:duty.alias@example.org"}}, "fa activate sip:duty.alias@example.org"},
+		{map[string]any{"action": "fa", "op": "takeover", "aliases": []any{"sip:duty.alias@example.org"}}, "fa takeover sip:duty.alias@example.org"},
+		{map[string]any{"action": "fa", "op": "deactivate", "aliases": []any{"sip:a.alias@example.org", "sip:b.alias@example.org"}}, "fa deactivate sip:a.alias@example.org sip:b.alias@example.org"},
+		{map[string]any{"action": "fa-use", "alias": "sip:duty.alias@example.org"}, "fa use sip:duty.alias@example.org"},
+		{map[string]any{"action": "fa-use", "alias": ""}, "fa use none"},
+		{map[string]any{"action": "private", "target": "sip:duty.alias@example.org", "to_alias": true, "manual": true}, "private-fa sip:duty.alias@example.org manual"},
+		{map[string]any{"action": "first-to-answer", "alias": "sip:car.alias@example.org"}, "first-to-answer-fa sip:car.alias@example.org"},
 	}
 	for _, c := range good {
 		got, err := commandLine(c.req)
@@ -52,6 +59,12 @@ func TestCommandLine(t *testing.T) {
 	}
 	bad := []map[string]any{
 		{"action": "quit"},
+		{"action": "fa", "op": "use", "aliases": []any{"sip:duty.alias@example.org"}},
+		{"action": "fa", "op": "activate", "aliases": []any{}},
+		{"action": "fa", "op": "activate", "aliases": []any{"duty quit"}},
+		{"action": "fa-use", "alias": "none quit"},
+		{"action": "private", "target": "sip:duty.alias@example.org", "to_alias": true, "emergency": true},
+		{"action": "first-to-answer", "alias": "sip:car.alias@example.org", "emergency": true},
 		{"action": "call", "kind": "force"},
 		{"action": "priority", "level": "alert", "on": true},
 		{"action": "alert", "on": false, "user": "bob quit"},

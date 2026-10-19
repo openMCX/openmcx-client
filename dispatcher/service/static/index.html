@@ -79,7 +79,9 @@
         <form id="private">
           <div class="row"><input name="target" placeholder="MCPTT ID, e.g. sip:bob.mcptt@mcx.test" required></div>
           <div class="row"><label><input type="checkbox" name="emergency"> emergency</label>
-            <label><input type="checkbox" name="no_floor"> without floor control</label><button>Call</button></div>
+            <label><input type="checkbox" name="no_floor"> without floor control</label>
+            <label title="TS 24.379 clause 11.1.1.2.1.1: the server picks a user who activated the alias">
+              <input type="checkbox" name="to_alias"> to a functional alias</label><button>Call</button></div>
           <div class="row"><select name="urgency" aria-label="Call-back urgency">
               <option value="low">low</option><option value="normal" selected>normal</option><option value="high">high</option>
             </select><button type="button" id="callback-request">Request call-back</button></div>
@@ -113,8 +115,10 @@
       <div>
         <h3>First to answer</h3>
         <form id="fta">
-          <div class="row"><input name="targets" placeholder="two or more MCPTT IDs, separated by spaces" required></div>
-          <div class="row"><label><input type="checkbox" name="emergency"> emergency</label><button>Call</button></div>
+          <div class="row"><input name="targets" placeholder="two or more MCPTT IDs, separated by spaces, or one functional alias" required></div>
+          <div class="row"><label><input type="checkbox" name="emergency"> emergency</label>
+            <label title="Every user who activated the alias is invited"><input type="checkbox" name="to_alias"> to a functional alias</label>
+            <button>Call</button></div>
         </form>
       </div>
       <div>
@@ -154,6 +158,19 @@
           </div>
         </form>
         <div id="transfer-state" class="note"></div>
+      </div>
+      <div>
+        <h3>Functional aliases</h3>
+        <form id="fa">
+          <div class="row"><input name="alias" placeholder="functional alias, e.g. sip:duty-officer.alias@mcx.test" required></div>
+          <div class="row">
+            <button id="fa-activate" type="button">Activate</button>
+            <button id="fa-takeover" type="button" title="Take the alias over from the user who holds it, where allowed">Take over</button>
+            <button id="fa-deactivate" type="button">Deactivate</button>
+          </div>
+        </form>
+        <div id="fa-using" class="note"></div>
+        <div id="fa-list" class="list"></div>
       </div>
     </div>
   </section>
