@@ -187,7 +187,8 @@ func (a *api) view(r *http.Request) (map[string]any, error) {
 		"conference_participants", "mcdata_alert_state", "mcdata_alerts_received", "mcdata_alert_last_result",
 		"private_emergency_state", "functional_alias", "requested_functional_aliases", "active_functional_aliases",
 		"takeover_possible_functional_aliases", "last_fa_result", "functional_alias_subscription_result",
-		"calling_functional_alias", "called_functional_alias", "functional_alias_redirect", "profile_groups",
+		"calling_functional_alias", "called_functional_alias", "functional_alias_redirect", "regroups",
+		"regroup_result", "xcap_last", "profile_groups",
 		"mcdata_authorized", "mcdata_affiliated", "mcdata_inbox",
 		"mcdata_sent", "mcdata_last_result", "mcdata_files", "mcdata_files_sent", "mcdata_fd_last_result")
 	v["session"] = session
@@ -271,6 +272,23 @@ func ids(value any, min, max int) ([]string, error) {
 		return nil, fmt.Errorf("between %d and %d distinct IDs are needed", min, max)
 	}
 	return out, nil
+}
+
+var documentName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// temporaryDocument names the group management document of a temporary group after the user part of its ID.
+func temporaryDocument(tgi string) string {
+	name := tgi
+	if i := strings.Index(name, ":"); i >= 0 {
+		name = name[i+1:]
+	}
+	if i := strings.Index(name, "@"); i >= 0 {
+		name = name[:i]
+	}
+	if !documentName.MatchString(name) {
+		return ""
+	}
+	return name
 }
 
 func commandLine(req map[string]any) (string, error) {
@@ -488,6 +506,59 @@ func commandLine(req map[string]any) (string, error) {
 			return "", err
 		}
 		return "fa use " + alias, nil
+	case "regroup":
+		// TS 24.379 clause 16.2.1.1 (groups), clause 16.3.1.1 (users) and clause 16.2.1.2 (removal): a regroup using
+		// a preconfigured group, whose configuration it takes, asked of the participating function.
+		op := str("op")
+		if op != "create" && op != "users" && op != "remove" {
+			return "", fmt.Errorf("unknown regroup operation %q", op)
+		}
+		tgi, err := id("tgi")
+		if err != nil {
+			return "", err
+		}
+		if op == "remove" {
+			return "regroup remove " + tgi, nil
+		}
+		preconfigured, err := id("preconfigured")
+		if err != nil {
+			return "", err
+		}
+		members, err := ids(req["members"], 1, 20)
+		if err != nil {
+			return "", err
+		}
+		return "regroup " + op + " " + tgi + " " + preconfigured + " " + strings.Join(members, ","), nil
+	case "temporary":
+		// TS 24.481 clause 6.3.14.2 (formation) and clause 6.3.15.2 (tear down): a temporary group of groups, a
+		// document of the dispatcher's own tree at the group management server, named after the group's ID.
+		tgi, err := id("tgi")
+		if err != nil {
+			return "", err
+		}
+		document := temporaryDocument(tgi)
+		if document == "" {
+			return "", fmt.Errorf("%q has no name for a document", tgi)
+		}
+		switch op := str("op"); op {
+		case "delete":
+			return "temporary-delete " + document, nil
+		case "create":
+			groups, err := ids(req["groups"], 1, 20)
+			if err != nil {
+				return "", err
+			}
+			line := "temporary-create " + document + " " + tgi + " " + strings.Join(groups, ",")
+			if flag("chat") {
+				line += " chat"
+			}
+			if flag("protected") {
+				line += " protected"
+			}
+			return line, nil
+		default:
+			return "", fmt.Errorf("unknown temporary group operation %q", op)
+		}
 	case "answer", "reject", "hangup", "release":
 		return action, nil
 	case "ptt":

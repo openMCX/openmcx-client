@@ -50,6 +50,11 @@ func TestCommandLine(t *testing.T) {
 		{map[string]any{"action": "fa-use", "alias": ""}, "fa use none"},
 		{map[string]any{"action": "private", "target": "sip:duty.alias@example.org", "to_alias": true, "manual": true}, "private-fa sip:duty.alias@example.org manual"},
 		{map[string]any{"action": "first-to-answer", "alias": "sip:car.alias@example.org"}, "first-to-answer-fa sip:car.alias@example.org"},
+		{map[string]any{"action": "regroup", "op": "create", "tgi": "sip:rg1@example.org", "preconfigured": "sip:pre@example.org", "members": []any{"sip:north@example.org", "sip:south@example.org"}}, "regroup create sip:rg1@example.org sip:pre@example.org sip:north@example.org,sip:south@example.org"},
+		{map[string]any{"action": "regroup", "op": "users", "tgi": "sip:rg2@example.org", "preconfigured": "sip:pre@example.org", "members": []any{"sip:bob@example.org"}}, "regroup users sip:rg2@example.org sip:pre@example.org sip:bob@example.org"},
+		{map[string]any{"action": "regroup", "op": "remove", "tgi": "sip:rg1@example.org"}, "regroup remove sip:rg1@example.org"},
+		{map[string]any{"action": "temporary", "op": "create", "tgi": "sip:ops-temp-1@example.org", "groups": []any{"sip:north@example.org", "sip:south@example.org"}, "chat": true}, "temporary-create ops-temp-1 sip:ops-temp-1@example.org sip:north@example.org,sip:south@example.org chat"},
+		{map[string]any{"action": "temporary", "op": "delete", "tgi": "sip:ops-temp-1@example.org"}, "temporary-delete ops-temp-1"},
 	}
 	for _, c := range good {
 		got, err := commandLine(c.req)
@@ -59,6 +64,11 @@ func TestCommandLine(t *testing.T) {
 	}
 	bad := []map[string]any{
 		{"action": "quit"},
+		{"action": "regroup", "op": "create", "tgi": "sip:rg1@example.org", "preconfigured": "sip:pre@example.org", "members": []any{}},
+		{"action": "regroup", "op": "create", "tgi": "sip:rg1@example.org", "members": []any{"sip:north@example.org"}},
+		{"action": "regroup", "op": "merge", "tgi": "sip:rg1@example.org"},
+		{"action": "temporary", "op": "create", "tgi": "sip:a%2Fb@example.org", "groups": []any{"sip:north@example.org"}},
+		{"action": "temporary", "op": "create", "tgi": "sip:t@example.org", "groups": []any{"g quit"}},
 		{"action": "fa", "op": "use", "aliases": []any{"sip:duty.alias@example.org"}},
 		{"action": "fa", "op": "activate", "aliases": []any{}},
 		{"action": "fa", "op": "activate", "aliases": []any{"duty quit"}},

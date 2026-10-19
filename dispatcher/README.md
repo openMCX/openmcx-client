@@ -23,7 +23,7 @@ checked out beside it (`../openmcx-server`).
 
 - One engine, one call at a time: the engine keeps one MCPTT call (and one MCVideo call) in one dialog. Several
   monitored groups, simultaneous group calls with a private or emergency call on top, remote affiliation, video,
-  recording, a map, operator handoff and dynamic regrouping are not in v1 (greyed in the UI).
+  recording, a map and operator handoff are not in v1 (greyed in the UI).
 - One operator per position at a time. A sign-out does not remove the SIP registration (the shared SIP library has
   no unregister): it lapses within `register_expires`. Suspension in MCX Admin ends a session within the token
   lifetime, Revoke devices within `register_expires`.
@@ -45,7 +45,8 @@ checked out beside it (`../openmcx-server`).
 | Emergency alert | MCPTT and MCData: send and cancel its own; cancel another user's (with the right to) |
 | SDS | one-to-one and group, inbox |
 | File distribution | send from the browser (optionally mandatory), accept or reject received files, save them |
-| Coming soon | several monitored groups, remote affiliation, video, call recording, map, operator handoff, dynamic regrouping |
+| Regroup | group regroup and user regroup using a preconfigured group, created and removed; temporary groups formed and torn down at the group management server; calls on them from the group picker |
+| Coming soon | several monitored groups, remote affiliation, video, call recording, map, operator handoff |
 
 ## Position mode (M3): bound to MCX Admin
 
@@ -148,6 +149,10 @@ target is a functional alias; not with `emergency`),
 (or `"alias":"<functional alias>"` in place of `targets`, not with `emergency`),
 `{"action":"fa","op":"activate|takeover|deactivate","aliases":["<functional alias>",...]}`,
 `{"action":"fa-use","alias":"<functional alias>"}` (`""`: none),
+`{"action":"regroup","op":"create|users","tgi":"<new group ID>","preconfigured":"<group>","members":["<group or MCPTT ID>",...]}`,
+`{"action":"regroup","op":"remove","tgi":"<group ID>"}`,
+`{"action":"temporary","op":"create","tgi":"<new group ID>","groups":["<group>",...],"chat":bool,"protected":bool}`,
+`{"action":"temporary","op":"delete","tgi":"<group ID>"}` (the document is named after the group ID's user part),
 `{"action":"ambient","kind":"remote|local","target":"<MCPTT ID>"}`,
 `{"action":"remote-call|remote-group-call","remote":"<MCPTT ID>","target":"<MCPTT ID or group>","mode":"auto|manual|force-auto","silent":bool}`,
 `{"action":"transfer","target":"<MCPTT ID>","step":"announced|complete|cancel"}` (no `step`: unannounced),
@@ -173,6 +178,9 @@ docker run --rm --network host -v playwright-py:/py -v <lab>:/lab -v $PWD/dispat
   mcr.microsoft.com/playwright/python:v1.55.0-noble sh -c \
   '[ -d /py/playwright ] || pip install -q --break-system-packages --target /py playwright==1.55.0; PYTHONPATH=/py python3 browser_check.py /lab'
 ```
+
+Regroups need their own lab, whose groups are the regroup's constituents: `--private-call --mcdata --regroup`, then
+`regroup_scenario.py` (DSP-31..35) and `browser_regroup.py` in place of `browser_check.py`.
 
 Sign-in on IdMS's page: `prepare.py <lab> --browser-login` (the lab's IdMS registers the callback), then, with the
 browser mapping the issuer host to IdMS's container:

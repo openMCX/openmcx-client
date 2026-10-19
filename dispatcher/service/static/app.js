@@ -42,6 +42,40 @@ function aliasesOfCall(s) {
   return (s.calling_functional_alias ? ' · as ' + s.calling_functional_alias : '') +
     (s.called_functional_alias ? ' · to ' + s.called_functional_alias : '');
 }
+// Regroups using a preconfigured group (TS 24.379 clause 16) and temporary groups (TS 24.481 clause 6.3.14): the ones
+// the dispatcher was told of, each selectable for a call and removable; those it formed at the group management
+// server are deleted there (clause 6.3.15). The page remembers which ones it formed.
+const formed = new Set((() => { try { return JSON.parse(localStorage.getItem('formed-temporary') || '[]'); } catch { return []; } })());
+function keepFormed() { try { localStorage.setItem('formed-temporary', JSON.stringify([...formed])); } catch { /* none */ } }
+let regroupGroupsShown = '';
+const announced = new Set();
+function renderRegroups(s) {
+  const groups = s.profile_groups || [];
+  if (JSON.stringify(groups) !== regroupGroupsShown) {
+    regroupGroupsShown = JSON.stringify(groups);
+    $('regroup-groups').replaceChildren(...groups.map((g) => Object.assign(document.createElement('option'), { value: g })));
+  }
+  const list = $('regroup-list');
+  list.replaceChildren();
+  const current = (s.identity || {}).group;
+  for (const [tgi, r] of Object.entries(s.regroups || {})) {
+    const members = (r.groups && r.groups.length ? r.groups : r.users || []).join(', ');
+    const buttons = [];
+    if (tgi !== current) buttons.push(['Select', 'go', () => act({ action: 'group', id: tgi })]);
+    buttons.push(formed.has(tgi) ? ['Delete', '', () => act({ action: 'temporary', op: 'delete', tgi })]
+      : ['Remove', '', () => act({ action: 'regroup', op: 'remove', tgi })]);
+    item(list, tgi, (r.users && r.users.length ? 'users: ' : 'groups: ') + members +
+         (r.preconfigured ? ' · as ' + r.preconfigured : ''), buttons);
+  }
+  // A temporary group it formed that was announced and is gone again is forgotten.
+  for (const tgi of formed) if (announced.has(tgi) && !(s.regroups || {})[tgi]) { formed.delete(tgi); announced.delete(tgi); keepFormed(); }
+  for (const tgi of Object.keys(s.regroups || {})) announced.add(tgi);
+  const r = s.regroup_result, x = s.xcap_last;
+  text($('regroup-result'), [r && r.regroup ? 'Regroup ' + r.action + ' ' + r.regroup + ': ' +
+    (r.status || 'pending') + (r.warning ? ' · ' + r.warning : '') : '',
+    x && x.method && /^(POST|DELETE)$/.test(x.method) ? 'Group management ' + x.method + ': ' + (x.status || 'pending') : '']
+    .filter(Boolean).join(' — '));
+}
 // The dispatcher's functional aliases (TS 24.379 clause 9A.2.1.3, from its status subscription): activated (one of
 // them presented on its calls), offered for take-over, asked for.
 function renderAliases(s) {
@@ -106,10 +140,11 @@ function renderSession(session) {
   return true;
 }
 
-// The group picker: the groups of the user profile, and the group in use.
+// The group picker: the groups of the user profile, the regroups and temporary groups the dispatcher was told of
+// (TS 24.379 clause 16.2.1.3), and the group in use.
 let groupsShown = '';
-function renderGroups(current, groups) {
-  const list = [...new Set([...(groups || []), ...(current ? [current] : [])])];
+function renderGroups(current, groups, regroups) {
+  const list = [...new Set([...(groups || []), ...Object.keys(regroups || {}), ...(current ? [current] : [])])];
   const key = JSON.stringify([list, current]);
   if (key === groupsShown) return;
   groupsShown = key;
@@ -117,7 +152,8 @@ function renderGroups(current, groups) {
   select.replaceChildren(...list.map((g) => {
     const option = document.createElement('option');
     option.value = g;
-    option.textContent = g + (groups && !groups.includes(g) ? ' (no longer in your profile)' : '');
+    option.textContent = g + (regroups && regroups[g] ? ' (regroup)'
+      : groups && !groups.includes(g) ? ' (no longer in your profile)' : '');
     option.selected = g === current;
     return option;
   }));
@@ -133,7 +169,7 @@ function render(s) {
   text($('identity'), operator + (id.user || '?') +
     (id.mcdata_user && id.mcdata_user !== id.user ? ' · ' + id.mcdata_user : '') +
     (s.session.idms ? ' · signed in at ' + s.session.idms : ''));
-  renderGroups(id.group, s.profile_groups);
+  renderGroups(id.group, s.profile_groups, s.regroups);
   $('group-select').disabled = $('group-select').options.length < 2 || (s.call_state || 'idle') !== 'idle';
   const reg = $('registration');
   reg.textContent = s.registered ? (s.affiliated ? 'registered, affiliated' : 'registered') : 'offline';
@@ -219,6 +255,7 @@ function render(s) {
   const idle = call === 'idle';
   for (const f of ['fta', 'ambient']) $(f).querySelector('button').disabled = !idle;
   renderAliases(s);
+  renderRegroups(s);
 
   const inbox = $('inbox');
   inbox.replaceChildren();
@@ -388,6 +425,25 @@ function aliasChange(op) {
   const f = $('fa');
   if (f.alias.reportValidity()) act({ action: 'fa', op, aliases: [f.alias.value.trim()] });
 }
+$('regroup').kind.onchange = (e) => {
+  const f = $('regroup'), temporary = e.target.value === 'temporary';
+  f.preconfigured.disabled = temporary;
+  f.chat.disabled = f.protected.disabled = !temporary;
+  f.members.placeholder = e.target.value === 'users' ? 'MCPTT IDs, separated by spaces' : 'groups, separated by spaces';
+};
+$('regroup').onsubmit = (e) => {
+  e.preventDefault();
+  const f = e.target, tgi = f.tgi.value.trim(), members = f.members.value.trim().split(/[\s,]+/);
+  if (f.kind.value === 'temporary') {
+    formed.add(tgi);
+    keepFormed();
+    act({ action: 'temporary', op: 'create', tgi, groups: members, chat: f.chat.checked, protected: f.protected.checked });
+  } else {
+    if (!f.preconfigured.value.trim()) { f.preconfigured.setCustomValidity('a preconfigured group is needed');
+      f.preconfigured.reportValidity(); f.preconfigured.setCustomValidity(''); return; }
+    act({ action: 'regroup', op: f.kind.value, tgi, preconfigured: f.preconfigured.value.trim(), members });
+  }
+};
 $('fa-activate').onclick = () => aliasChange('activate');
 $('fa').onsubmit = (e) => { e.preventDefault(); aliasChange('activate'); };
 $('fa-takeover').onclick = () => aliasChange('takeover');

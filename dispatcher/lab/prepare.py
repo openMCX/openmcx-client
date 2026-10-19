@@ -107,6 +107,13 @@ def lab_mode(args, compose, generated) -> None:
         for user in site["users"]:
             if user.get("mcptt_id") == mcptt_id:
                 user["functional_alias_takeover"] = True
+    # In a lab with regroups (--regroup), the dispatcher may create and remove regroups (TS 24.484 <allow-regroup>)
+    # and form temporary groups (TS 24.481 clause 6.3.14.3.1, a group management right).
+    if any(group.get("preconfigured_use_only") for group in site["groups"]):
+        for user in site["users"]:
+            if user.get("mcptt_id") == mcptt_id:
+                user["regroup"] = True
+                user.setdefault("group_management", {})["temporary"] = True
     for group in site["groups"]:
         policy = group.get("priority_policy")
         for key in ("emergency_users", "emergency_cancel_users", "imminent_users", "imminent_cancel_users",

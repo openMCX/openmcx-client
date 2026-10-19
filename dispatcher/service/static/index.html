@@ -172,6 +172,25 @@
         <div id="fa-using" class="note"></div>
         <div id="fa-list" class="list"></div>
       </div>
+      <div>
+        <h3>Regroup</h3>
+        <form id="regroup">
+          <div class="row"><select name="kind" aria-label="Regroup kind">
+              <option value="create">groups, preconfigured</option><option value="users">users, preconfigured</option>
+              <option value="temporary">temporary group</option>
+            </select></div>
+          <div class="row"><input name="tgi" placeholder="ID of the new group, e.g. sip:ops-rg-1@mcx.test" required></div>
+          <div class="row"><input name="preconfigured" list="regroup-groups"
+              placeholder="preconfigured group whose configuration it takes"></div>
+          <div class="row"><input name="members" list="regroup-groups" required
+              placeholder="groups (or MCPTT IDs), separated by spaces"></div>
+          <div class="row"><label><input type="checkbox" name="chat" disabled> chat</label>
+            <label><input type="checkbox" name="protected" disabled> protected</label><button>Create</button></div>
+          <datalist id="regroup-groups"></datalist>
+        </form>
+        <div id="regroup-result" class="note"></div>
+        <div id="regroup-list" class="list"></div>
+      </div>
     </div>
   </section>
   <section id="data">
@@ -210,7 +229,6 @@
     <button disabled title="Coming soon">Call recording</button>
     <button disabled title="Coming soon">Map and location</button>
     <button disabled title="Coming soon">Operator handoff</button>
-    <button disabled title="Coming soon">Dynamic regrouping</button>
     <h2>Log</h2>
     <ol id="log"></ol>
   </section>

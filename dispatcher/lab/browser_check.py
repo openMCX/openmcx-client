@@ -52,7 +52,7 @@ with sync_playwright() as p:
     page.goto(url)
     expect(page.locator("#registration")).to_contain_text("registered", timeout=30000)
     check("BRW-01 page shows the dispatcher registered", True)
-    check("BRW-02 coming-soon options are shown disabled", page.locator("#soon button:disabled").count() == 7)
+    check("BRW-02 coming-soon options are shown disabled", page.locator("#soon button:disabled").count() == 6)
 
     page.click("button[data-action=call][data-kind=normal]")
     expect(page.locator("#call-state")).to_contain_text("active", timeout=20000)
