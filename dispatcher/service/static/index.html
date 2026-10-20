@@ -177,6 +177,9 @@
         <h3>Functional aliases</h3>
         <form id="fa">
           <div class="row"><input name="alias" placeholder="functional alias, e.g. sip:duty-officer.alias@mcx.test" required></div>
+          <div class="row"><select name="service" aria-label="Service of the alias">
+              <option value="mcptt">for calls (MCPTT)</option><option value="mcdata">for data (MCData)</option>
+            </select></div>
           <div class="row">
             <button id="fa-activate" type="button">Activate</button>
             <button id="fa-takeover" type="button" title="Take the alias over from the user who holds it, where allowed">Take over</button>
@@ -204,6 +207,21 @@
         </form>
         <div id="regroup-result" class="note"></div>
         <div id="regroup-list" class="list"></div>
+      </div>
+      <div>
+        <h3>Location</h3>
+        <form id="location">
+          <div class="row"><input name="targets" required
+              placeholder="MCPTT IDs separated by spaces, or one functional alias"></div>
+          <div class="row"><label title="TS 24.379 clause 13.3.3.2: the user who activated the alias">
+              <input type="checkbox" name="to_alias"> functional alias</label>
+            <label title="Ask for a fresh report rather than the last one stored"><input type="checkbox" name="refresh"> fresh</label>
+            <button>Locate</button></div>
+          <div class="row"><input name="periodic" type="number" min="1" max="3600" value="30" aria-label="Report interval in seconds"> s <button id="location-configure" type="button"
+              title="TS 24.379 clause 13.3.2.2: the users report their position at this interval">Set reporting</button></div>
+        </form>
+        <div id="location-result" class="note"></div>
+        <div id="location-list" class="list"></div>
       </div>
     </div>
   </section>
@@ -255,6 +273,8 @@
           <div class="row">
             <input name="target" placeholder="MCData ID (sip:bob.mcdata@mcx.test) or, with group ticked, group ID (sip:operations@mcx.test)" required>
             <label><input type="checkbox" name="group"> group</label>
+            <label title="TS 24.282 clause 9.2.1.1: the server picks a user who activated the alias">
+              <input type="checkbox" name="to_alias"> functional alias</label>
           </div>
           <div class="row"><input name="text" placeholder="Message" maxlength="1000" required><button>Send</button></div>
         </form>
@@ -287,6 +307,7 @@
           <div class="row">
             <input name="target" placeholder="MCData ID (sip:bob.mcdata@mcx.test) or, with group ticked, group ID (sip:operations@mcx.test)" required>
             <label><input type="checkbox" name="group"> group</label>
+            <label><input type="checkbox" name="to_alias"> functional alias</label>
             <label><input type="checkbox" name="mandatory"> mandatory</label>
           </div>
           <div class="row"><input type="file" name="file" required><button>Send file</button></div>
@@ -309,7 +330,7 @@
     <button disabled title="Coming soon">Remote affiliation</button>
     <button disabled title="Coming soon">Video</button>
     <button disabled title="Coming soon">Call recording</button>
-    <button disabled title="Coming soon">Map and location</button>
+    <button disabled title="Coming soon">Map</button>
     <button disabled title="Coming soon">Operator handoff</button>
     <h2>Log</h2>
     <ol id="log"></ol>

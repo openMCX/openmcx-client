@@ -41,12 +41,13 @@ checked out beside it (`../openmcx-server`).
 | Group call | the configured group: normal, imminent peril, emergency, broadcast; a chat group's call joined (or started), normal, imminent peril or emergency; during the call, raise it to emergency or imminent peril and back to normal; hold to talk with the browser microphone; received audio played in the browser |
 | Private call | call any MCPTT ID (optionally emergency, optionally without floor control); raise it to emergency and back; incoming calls ring and are answered or rejected; call-back asked of a user (low, normal or high urgency) and cancelled, call-backs asked of the dispatcher listed and fulfilled |
 | Call services | first-to-answer call to two or more users (optionally emergency); ambient listening, listening to a user or listened to by one; ask a user to place a private call (commencement mode, optionally without telling them) or a group call; transfer the private call in progress, unannounced or announced (complete or cancel); forward a ringing private call; ad hoc group call to the users listed (normal, broadcast, imminent peril or emergency), users added and removed during it; the group call's participants from its conference events |
-| Functional aliases | activate, take over (where allowed) and deactivate; one presented on the dispatcher's calls; private and first-to-answer calls to an alias; the caller's alias, and the alias called, shown on calls |
+| Functional aliases | MCPTT and MCData: activate, take over (where allowed) and deactivate; one presented on the dispatcher's calls, another on its messages and files; private and first-to-answer calls, SDS and files to an alias; the caller's or sender's alias, and the alias called, shown |
 | Emergency alert | MCPTT and MCData: send and cancel its own; cancel another user's (with the right to) |
 | SDS | one-to-one and group, inbox; SDS sessions (one-to-one, group or ad hoc group, the first two optionally emergency or imminent peril) opened, used (delivery or read notification asked) and closed, an ad hoc one for every participant; sessions offered to the dispatcher joined; enhanced status: a group's operational values sent, received ones listed |
 | File distribution | send from the browser (optionally mandatory), accept or reject received files, save them |
 | Message store | storage of its private and group communications enabled and disabled; the stored objects synchronised, read, flagged (read, flagged), moved or copied into folders, searched, deleted; folders created, opened and deleted; files from the browser stored; notifications of changes |
 | Regroup | group regroup and user regroup using a preconfigured group, created and removed; temporary groups formed and torn down at the group management server; calls on them from the group picker |
+| Location | the location of users, or of the user holding a functional alias, asked (optionally a fresh report); the last report of each user listed with its position, linked to a map; users told to report every so many seconds |
 | Coming soon | several monitored groups, remote affiliation, video, call recording, map, operator handoff |
 
 ## Position mode (M3): bound to MCX Admin
@@ -134,7 +135,7 @@ origin.
 | `GET /api/state` | the engine's state: registration, call and floor state, alerts, SDS inbox, files, identity |
 | `GET /api/events` | the same, as server-sent events whenever it changes |
 | `POST /api/command` | one action, JSON (below) |
-| `POST /api/fd` | multipart: `file`, `target`, `group` (true/false), `mandatory` (true/false); sends the file |
+| `POST /api/fd` | multipart: `file`, `target`, `group` (true/false), `to_alias` (true/false), `mandatory` (true/false); sends the file |
 | `GET /api/files/{message ID}` | a received file once downloaded |
 | `POST /api/msgstore/upload` | multipart form: `file`, optional `folder` (folder ID); stored in the message store as a new object |
 | `GET /api/audio` | WebSocket, binary frames of 16 kHz 16-bit little-endian mono PCM, both ways |
@@ -150,7 +151,10 @@ target is a functional alias; not with `emergency`),
 (`user` and `group`: another user's MCData alert to cancel), `{"action":"first-to-answer","targets":["<MCPTT ID>",...],"emergency":bool}`
 (or `"alias":"<functional alias>"` in place of `targets`, not with `emergency`),
 `{"action":"fa","op":"activate|takeover|deactivate","aliases":["<functional alias>",...]}`,
-`{"action":"fa-use","alias":"<functional alias>"}` (`""`: none),
+`{"action":"fa-use","alias":"<functional alias>"}` (`""`: none), `{"action":"mcdata-fa","op":"activate|takeover|deactivate","aliases":[...]}`,
+`{"action":"mcdata-fa-use","alias":"<functional alias>"}` (`""`: none),
+`{"action":"location-request","targets":["<MCPTT ID>",...],"refresh":bool}` (or `"alias":"<functional alias>"`),
+`{"action":"location-configure","targets":[...],"periodic":<seconds>}`,
 `{"action":"regroup","op":"create|users","tgi":"<new group ID>","preconfigured":"<group>","members":["<group or MCPTT ID>",...]}`,
 `{"action":"regroup","op":"remove","tgi":"<group ID>"}`,
 `{"action":"temporary","op":"create","tgi":"<new group ID>","groups":["<group>",...],"chat":bool,"protected":bool}`,
@@ -169,7 +173,7 @@ target is a functional alias; not with `emergency`),
 `{"action":"forward","target":"<MCPTT ID>"}`,
 `{"action":"adhoc","targets":["<MCPTT ID>",...],"kind":"normal|broadcast|imminent|emergency"}`,
 `{"action":"adhoc-modify","add":[...],"remove":[...]}` (the ad hoc group call in progress),
-`{"action":"sds","target":"<MCData ID or group>","group":bool,"text":"..."}`,
+`{"action":"sds","target":"<MCData ID, group or functional alias>","group":bool,"to_alias":bool,"text":"..."}`,
 `{"action":"sds-session","op":"open","target":"<MCData ID or group>","group":bool,"priority":"normal|emergency|imminent"}`
 (or `"adhoc":true,"targets":[...]`, normal only), `{"action":"sds-session","op":"send","text":"...","disposition":"delivery|read"}`,
 `{"action":"sds-session","op":"close","all":bool}` (`all`: an ad hoc group communication, for every participant),
@@ -195,13 +199,16 @@ python3 dispatcher/lab/fa_scenario.py <lab> --project disp        # DSP-25..30; 
 python3 dispatcher/lab/store_scenario.py <lab> --project disp     # DSP-36..45; the lab with --msgstore
 python3 dispatcher/lab/adhoc_scenario.py <lab> --project disp     # DSP-46..48; the lab with --adhoc
 python3 dispatcher/lab/session_scenario.py <lab> --project disp   # DSP-49..52
+python3 dispatcher/lab/mcdata_fa_scenario.py <lab> --project disp # DSP-53..56
 docker run --rm --network host -v playwright-py:/py -v <lab>:/lab -v $PWD/dispatcher/lab:/check -w /check \
   mcr.microsoft.com/playwright/python:v1.55.0-noble sh -c \
   '[ -d /py/playwright ] || pip install -q --break-system-packages --target /py playwright==1.55.0; PYTHONPATH=/py python3 browser_check.py /lab'
 ```
 
 Regroups need their own lab, whose groups are the regroup's constituents: `--private-call --mcdata --regroup`, then
-`regroup_scenario.py` (DSP-31..35) and `browser_regroup.py` in place of `browser_check.py`.
+`regroup_scenario.py` (DSP-31..35) and `browser_regroup.py` in place of `browser_check.py`. Location likewise, as its
+group areas move affiliations: `--private-call --mcdata --location`, then `location_scenario.py` (DSP-57..59) and
+`browser_location.py`.
 
 Sign-in on IdMS's page: `prepare.py <lab> --browser-login` (the lab's IdMS registers the callback), then, with the
 browser mapping the issuer host to IdMS's container:

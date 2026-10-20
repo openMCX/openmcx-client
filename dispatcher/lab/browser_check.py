@@ -143,6 +143,19 @@ with sync_playwright() as p:
         check("BRW-13 functional alias activated, used on calls and deactivated from the page; no emergency call "
               "to an alias", page.locator("#private input[name=emergency]").is_disabled())
         page.uncheck("#private input[name=to_alias]")
+    # An MCData functional alias (a lab with --mcdata): activated and deactivated from the page.
+    data_car = next((a["id"] for a in site.get("functional_aliases", []) if "mcdata_users" in a and "patrol-car-12" in a["id"]), None)
+    if data_car:
+        page.fill("#fa input[name=alias]", data_car)
+        page.select_option("#fa select[name=service]", "mcdata")
+        page.click("#fa-activate")
+        entry = page.locator("#fa-list .item", has_text=data_car + " (MCData)").filter(has_text="activated").first
+        expect(entry).to_be_visible(timeout=20000)
+        offered = entry.locator("button", has_text="Use on messages").count() == 1
+        entry.locator("button", has_text="Deactivate").click()
+        expect(page.locator("#fa-list")).to_contain_text(data_car + ": deactivated", timeout=20000)
+        page.select_option("#fa select[name=service]", "mcptt")
+        check("BRW-22 an MCData functional alias activated from the page, offered for messages, deactivated", offered)
     # The message store (a lab with --msgstore): synchronised, a folder created and deleted from the page.
     dispatcher = json.loads((lab / "generated" / "client-c-dispatcher.json").read_text())
     if "msgstore" in dispatcher.get("endpoints", {}):

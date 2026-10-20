@@ -113,12 +113,32 @@ def lab_mode(args, compose, generated) -> None:
         for user in site["users"]:
             if user.get("mcptt_id") == mcptt_id:
                 user["functional_alias_takeover"] = True
+    # The MCData aliases (--mcdata) likewise (TS 24.282 clause 22.2.1, the alias's MCData users), with the MCData
+    # take-over right.
+    mcdata_aliases = [alias for alias in site.get("functional_aliases", []) if "mcdata_users" in alias]
+    for alias in mcdata_aliases:
+        if mcdata_id not in alias["mcdata_users"]:
+            alias["mcdata_users"].append(mcdata_id)
+    if mcdata_aliases:
+        for user in site["users"]:
+            if user.get("mcdata_id") == mcdata_id:
+                user["mcdata"]["functional_alias_takeover"] = True
     # In a lab with ad hoc group calls (--adhoc), the dispatcher may start them, emergency and imminent peril ones
     # too, and change their participants (TS 24.484 <allow-adhoc-group-call>,
     # <allow-to-modify-adhoc-group-call-participants-info>).
     for user in site["users"]:
         if user.get("mcptt_id") == mcptt_id and "adhoc_call" in user:
             user["adhoc_call"].update(allow=True, participation=True, emergency=True, imminent=True, modify=True)
+    # In a lab with location (--location), the dispatcher may ask for others' location and change their reporting
+    # (TS 24.379 clauses 13.3.3.2 and 13.3.2.2; the rights are the lab's user profile "location" object).
+    # client-a shares its location with client-b only (every user by default), so that the dispatcher meets a user
+    # who does not share it.
+    for user in site["users"]:
+        if user.get("mcptt_id") == mcptt_id and "location" in user:
+            user["location"].update(request=True, configure=True)
+        if user.get("mcptt_id") == peer and "location" in user:
+            bob = json.loads((generated / "client-b.json").read_text())["mcptt"]["user_id"]
+            user["location"]["share_with"] = [bob]
     # In a lab with regroups (--regroup), the dispatcher may create and remove regroups (TS 24.484 <allow-regroup>)
     # and form temporary groups (TS 24.481 clause 6.3.14.3.1, a group management right).
     if any(group.get("preconfigured_use_only") for group in site["groups"]):

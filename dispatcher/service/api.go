@@ -192,6 +192,9 @@ func (a *api) view(r *http.Request) (map[string]any, error) {
 		"regroup_result", "xcap_last", "msgstore", "profile_groups", "call_group", "adhoc_priority", "adhoc_broadcast",
 		"last_modify_result", "mcdata_media_result", "mcdata_media_session", "mcdata_media_received",
 		"mcdata_media_sent", "mcdata_session_group", "mcdata_enhanced_status", "mcdata_enhanced_status_values",
+		"mcdata_functional_aliases", "mcdata_functional_alias_in_use", "mcdata_fa_last_result",
+		"mcdata_functional_alias_subscription_result", "mcdata_functional_aliases_take_over_possible",
+		"location", "location_last_request", "location_last_result",
 		"mcdata_authorized", "mcdata_affiliated", "mcdata_inbox",
 		"mcdata_sent", "mcdata_last_result", "mcdata_files", "mcdata_files_sent", "mcdata_fd_last_result")
 	v["session"] = session
@@ -701,6 +704,29 @@ func commandLine(req map[string]any) (string, error) {
 			return "", err
 		}
 		return "fa " + op + " " + strings.Join(aliases, " "), nil
+	case "mcdata-fa":
+		// TS 24.282 clause 22.2.1.2: the MCData functional alias status changed, as for MCPTT (TS 24.379 clause
+		// 9A.2.1.2), at the MCData server.
+		op := str("op")
+		if op != "activate" && op != "takeover" && op != "deactivate" {
+			return "", fmt.Errorf("unknown functional alias operation %q", op)
+		}
+		aliases, err := ids(req["aliases"], 1, 10)
+		if err != nil {
+			return "", err
+		}
+		return "mcdata-fa " + op + " " + strings.Join(aliases, " "), nil
+	case "mcdata-fa-use":
+		// The functional alias the next MCData communications present (TS 24.282 clause 9.2.1.1, <functional-alias-URI>);
+		// "" stops.
+		if str("alias") == "" {
+			return "mcdata-fa use none", nil
+		}
+		alias, err := id("alias")
+		if err != nil {
+			return "", err
+		}
+		return "mcdata-fa use " + alias, nil
 	case "fa-use":
 		// The functional alias the next calls present (TS 24.379 clause 10.1.1.2.1.1, clause 11.1.1.2.1.1:
 		// <functional-alias-URI>); "" stops.
@@ -820,12 +846,54 @@ func commandLine(req map[string]any) (string, error) {
 		if err != nil {
 			return "", err
 		}
+		// TS 24.282 clause 9.2.1.1: an SDS to a functional alias, resolved by the MCData server to a user who
+		// activated it.
+		if flag("to_alias") {
+			if flag("group") {
+				return "", errors.New("a functional alias is not a group")
+			}
+			return "sds-fa " + target + " " + text, nil
+		}
 		if flag("group") {
 			return "sds-group " + target + " " + text, nil
 		}
 		return "sds " + target + " " + text, nil
 	case "sds-session":
 		return sessionLine(req, str, flag, id)
+	case "location-request":
+		// TS 24.379 clause 13.3.3.2: the location of the users listed, or of the user who activated a functional
+		// alias, asked of the participating function; "refresh": a fresh report, not the stored one.
+		line := "location request"
+		if flag("refresh") {
+			line += " refresh"
+		}
+		if str("alias") != "" {
+			alias, err := id("alias")
+			if err != nil {
+				return "", err
+			}
+			return line + " fa " + alias, nil
+		}
+		targets, err := ids(req["targets"], 1, 10)
+		if err != nil {
+			return "", err
+		}
+		return line + " " + strings.Join(targets, " "), nil
+	case "location-configure":
+		// TS 24.379 clause 13.3.2.2: the users listed told to report their coordinate every so many seconds, at most
+		// once a second, in an emergency too (a full configuration, Annex F.3).
+		targets, err := ids(req["targets"], 1, 10)
+		if err != nil {
+			return "", err
+		}
+		seconds, _ := req["periodic"].(float64)
+		if seconds != float64(int(seconds)) || seconds < 1 || seconds > 3600 {
+			return "", errors.New("the report interval must be 1 to 3600 seconds")
+		}
+		requested := `{"coordinate":true,"minimum_interval":1}`
+		trigger := fmt.Sprintf(`[{"periodic":%d}]`, int(seconds))
+		return "location configure " + strings.Join(targets, ",") + ` {"non_emergency":` + requested + `,"emergency":` +
+			requested + `,"triggers":` + trigger + `,"emergency_triggers":` + trigger + `}`, nil
 	case "status":
 		// TS 24.282 clause 14.2.1.1: an enhanced status, one of the group's operational values, sent to the group.
 		group, err := id("group")
@@ -905,8 +973,18 @@ func (a *api) sendFile(w http.ResponseWriter, r *http.Request) {
 	if r.FormValue("mandatory") == "true" {
 		line += "mandatory "
 	}
-	if r.FormValue("group") == "true" {
+	group, alias := r.FormValue("group") == "true", r.FormValue("to_alias") == "true"
+	if group && alias {
+		_ = os.RemoveAll(filepath.Dir(path))
+		fail(w, http.StatusBadRequest, errors.New("a functional alias is not a group"))
+		return
+	}
+	if group {
 		line += "group="
+	}
+	// TS 24.282 clause 10.2.4.2.1: a file to a functional alias.
+	if alias {
+		line += "fa="
 	}
 	line += target + " " + path
 	if err := a.engine.command(line); err != nil {

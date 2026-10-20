@@ -134,26 +134,37 @@ function renderStore(m) {
 const storeAct = (body) => act({ action: 'msgstore', ...body });
 // The dispatcher's functional aliases (TS 24.379 clause 9A.2.1.3, from its status subscription): activated (one of
 // them presented on its calls), offered for take-over, asked for.
+// The MCData ones (TS 24.282 clause 22.2.1) the same way, presented on SDS, files and IP connectivity.
+const ALIAS_SERVICES = [
+  { action: 'fa', use: 'fa-use', active: 'active_functional_aliases', using: 'functional_alias', possible: 'takeover_possible_functional_aliases',
+    last: 'last_fa_result', label: '', on: 'calls' },
+  { action: 'mcdata-fa', use: 'mcdata-fa-use', active: 'mcdata_functional_aliases', using: 'mcdata_functional_alias_in_use',
+    possible: 'mcdata_functional_aliases_take_over_possible', last: 'mcdata_fa_last_result', label: ' (MCData)', on: 'messages' },
+];
 function renderAliases(s) {
-  const list = $('fa-list'), active = s.active_functional_aliases || [], using = s.functional_alias || '';
+  const list = $('fa-list'), notes = [];
   list.replaceChildren();
-  for (const alias of active)
-    item(list, alias, 'activated' + (alias === using ? ' · presented on calls' : ''), [
-      alias === using ? ['Stop using', '', () => act({ action: 'fa-use', alias: '' })]
-        : ['Use on calls', 'go', () => act({ action: 'fa-use', alias })],
-      ['Deactivate', '', () => act({ action: 'fa', op: 'deactivate', aliases: [alias] })]]);
-  for (const alias of s.takeover_possible_functional_aliases || [])
-    item(list, alias, 'held by another user, can be taken over',
-         [['Take over', 'warn', () => act({ action: 'fa', op: 'takeover', aliases: [alias] })]]);
-  // The calls present the alias only while it is activated (TS 24.379 clause 10.1.1.2.1.1).
-  text($('fa-using'), using ? 'Calls present ' + using + (active.includes(using) ? '' : ' (not activated: not presented)') : '');
-  const last = s.last_fa_result;
-  if (last && last.aliases && last.aliases.length) {
-    const outcomes = Object.entries(last.outcomes || {}).map(([a, o]) => a + ': ' + o).join(', ');
-    item(list, 'Last change: ' + last.action + ' ' + last.aliases.join(' '),
-         (last.status ? String(last.status) : 'pending') + (last.warning ? ' · ' + last.warning : '') +
-         (outcomes ? ' · ' + outcomes : ''));
+  for (const k of ALIAS_SERVICES) {
+    const active = s[k.active] || [], using = s[k.using] || '';
+    for (const alias of active)
+      item(list, alias + k.label, 'activated' + (alias === using ? ' · presented on ' + k.on : ''), [
+        alias === using ? ['Stop using', '', () => act({ action: k.use, alias: '' })]
+          : ['Use on ' + k.on, 'go', () => act({ action: k.use, alias })],
+        ['Deactivate', '', () => act({ action: k.action, op: 'deactivate', aliases: [alias] })]]);
+    for (const alias of s[k.possible] || [])
+      item(list, alias + k.label, 'held by another user, can be taken over',
+           [['Take over', 'warn', () => act({ action: k.action, op: 'takeover', aliases: [alias] })]]);
+    // The alias is presented only while it is activated (TS 24.379 clause 10.1.1.2.1.1, TS 24.282 clause 9.2.1.1).
+    if (using) notes.push((k.on === 'calls' ? 'Calls' : 'Messages') + ' present ' + using + (active.includes(using) ? '' : ' (not activated: not presented)'));
+    const last = s[k.last];
+    if (last && last.aliases && last.aliases.length) {
+      const outcomes = Object.entries(last.outcomes || {}).map(([a, o]) => a + ': ' + o).join(', ');
+      item(list, 'Last change' + k.label + ': ' + last.action + ' ' + last.aliases.join(' '),
+           (last.status ? String(last.status) : 'pending') + (last.warning ? ' · ' + last.warning : '') +
+           (outcomes ? ' · ' + outcomes : ''));
+    }
   }
+  text($('fa-using'), notes.join(' · '));
 }
 // An ad hoc group call (TS 24.379 clause 17.2): the group the server named, its priority, the last participant change
 // (clause 17.2.6.1.1), which needs the call in progress.
@@ -197,6 +208,23 @@ function renderStatus(s) {
   got.replaceChildren();
   for (const e of [...(s.mcdata_enhanced_status || [])].reverse()) item(got, 'Status: ' + e.value, 'from ' + (e.from || '?') + ' in ' + e.group);
 }
+// Location (TS 24.379 clause 13.3): the last report received for each user, with a link to the position on a map,
+// and the answer to the last request or configuration.
+function renderLocation(s) {
+  const latest = {};
+  for (const r of (s.location || {}).received || []) if (r.reporting_uri) latest[r.reporting_uri] = r;
+  const list = $('location-list');
+  list.replaceChildren();
+  for (const [who, r] of Object.entries(latest)) {
+    const c = r.coordinate;
+    const where = c ? c.latitude.toFixed(5) + ', ' + c.longitude.toFixed(5) : 'no coordinate';
+    item(list, who + (r.emergency ? ' (emergency)' : ''), [where, r.functional_alias ? 'as ' + r.functional_alias : '',
+      r.serving_ecgi ? 'cell ' + r.serving_ecgi : '', r.timestamp || ''].filter(Boolean).join(' · '),
+      c ? [['Map', '', 'https://www.openstreetmap.org/?mlat=' + c.latitude + '&mlon=' + c.longitude + '#map=16/' + c.latitude + '/' + c.longitude]] : []);
+  }
+  const r = s.location_last_result;
+  text($('location-result'), r && r.action ? 'Location ' + r.action + ': ' + r.status + (r.warning ? ' · ' + r.warning : '') : '');
+}
 function text(el, value) { el.textContent = value; }
 function item(list, title, detail, buttons = []) {
   const div = document.createElement('div');
@@ -212,7 +240,8 @@ function item(list, title, detail, buttons = []) {
       const btn = typeof fn === 'string' ? document.createElement('a') : document.createElement('button');
       btn.textContent = label;
       if (cls) btn.className = cls;
-      if (typeof fn === 'string') { btn.href = fn; btn.download = ''; } else btn.onclick = fn;
+      // A received file is saved; another site (a map) opens apart from the page.
+      if (typeof fn === 'string') { btn.href = fn; if (/^https:/.test(fn)) { btn.target = '_blank'; btn.rel = 'noopener'; } else btn.download = ''; } else btn.onclick = fn;
       row.append(btn);
     }
     div.append(row);
@@ -357,13 +386,16 @@ function render(s) {
   renderStatus(s);
   renderAliases(s);
   renderRegroups(s);
+  renderLocation(s);
   renderStore(s.msgstore || {});
 
   const inbox = $('inbox');
   inbox.replaceChildren();
   for (const m of [...(s.mcdata_inbox || [])].reverse()) {
     const words = (m.payloads || []).map((p) => p.text ?? `[${p.bytes} bytes]`).join(' ');
-    item(inbox, words, 'from ' + (m.from || '?') + (m.group ? ' in ' + m.group : ''));
+    // TS 24.282 clause 9.2.1.2 step 6c: the sender's functional alias, and the one the dispatcher was reached through.
+    item(inbox, words, 'from ' + (m.from || '?') + (m.functional_alias ? ' as ' + m.functional_alias : '') +
+         (m.called_functional_alias ? ' to ' + m.called_functional_alias : '') + (m.group ? ' in ' + m.group : ''));
   }
   const files = $('files');
   files.replaceChildren();
@@ -535,8 +567,25 @@ for (const form of ['private', 'fta']) {
 }
 function aliasChange(op) {
   const f = $('fa');
-  if (f.alias.reportValidity()) act({ action: 'fa', op, aliases: [f.alias.value.trim()] });
+  if (f.alias.reportValidity()) act({ action: f.service.value === 'mcdata' ? 'mcdata-fa' : 'fa', op, aliases: [f.alias.value.trim()] });
 }
+// A functional alias is not a group.
+for (const form of ['sds', 'fd']) {
+  const f = $(form);
+  f.to_alias.onchange = () => { f.group.disabled = f.to_alias.checked; if (f.to_alias.checked) f.group.checked = false; };
+  f.group.onchange = () => { f.to_alias.disabled = f.group.checked; if (f.group.checked) f.to_alias.checked = false; };
+}
+$('location').onsubmit = (e) => {
+  e.preventDefault();
+  const f = e.target, targets = f.targets.value.trim();
+  act(f.to_alias.checked ? { action: 'location-request', alias: targets, refresh: f.refresh.checked }
+    : { action: 'location-request', targets: targets.split(/[\s,]+/), refresh: f.refresh.checked });
+};
+$('location-configure').onclick = () => {
+  const f = $('location');
+  if (f.targets.reportValidity() && f.periodic.reportValidity())
+    act({ action: 'location-configure', targets: f.targets.value.trim().split(/[\s,]+/), periodic: Number(f.periodic.value) });
+};
 $('regroup').kind.onchange = (e) => {
   const f = $('regroup'), temporary = e.target.value === 'temporary';
   f.preconfigured.disabled = temporary;
@@ -587,7 +636,8 @@ $('fa-deactivate').onclick = () => aliasChange('deactivate');
 $('sds').onsubmit = (e) => {
   e.preventDefault();
   const f = e.target;
-  post('/api/command', { action: 'sds', target: f.target.value.trim(), group: f.group.checked, text: f.text.value })
+  post('/api/command', { action: 'sds', target: f.target.value.trim(), group: f.group.checked, to_alias: f.to_alias.checked,
+                         text: f.text.value })
     .then(() => { f.text.value = ''; }).catch((err) => log('error: ' + err.message));
 };
 $('session').onsubmit = (e) => {
@@ -618,6 +668,7 @@ $('fd').onsubmit = (e) => {
   body.append('file', f.file.files[0]);
   body.append('target', f.target.value.trim());
   body.append('group', f.group.checked);
+  body.append('to_alias', f.to_alias.checked);
   body.append('mandatory', f.mandatory.checked);
   post('/api/fd', body, false).then(() => f.file.value = '').catch((err) => log('error: ' + err.message));
 };

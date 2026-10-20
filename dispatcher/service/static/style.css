@@ -60,6 +60,7 @@ button:disabled { background: var(--line); color: var(--muted); cursor: not-allo
 .gate form button { margin-top: 8px; width: 100%; padding: 10px; }
 .gate details { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
 .gate summary { cursor: pointer; color: var(--accent); }
+input[type=number] { width: 6em; padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
 select { padding: 7px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; max-width: 100%; }
 button.plain { background: transparent; color: var(--accent); border-color: var(--line); }
 .gate .error:empty { display: none; }

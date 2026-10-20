@@ -78,6 +78,13 @@ func TestCommandLine(t *testing.T) {
 		{map[string]any{"action": "sds-session", "op": "close"}, "sds-session close"},
 		{map[string]any{"action": "status", "group": "sip:g1@example.org", "value": "2"}, "sds-status sip:g1@example.org 2"},
 		{map[string]any{"action": "status-values", "group": "sip:g1@example.org"}, "sds-status-values sip:g1@example.org"},
+		{map[string]any{"action": "mcdata-fa", "op": "takeover", "aliases": []any{"sip:desk.fa@example.org"}}, "mcdata-fa takeover sip:desk.fa@example.org"},
+		{map[string]any{"action": "mcdata-fa-use", "alias": "sip:desk.fa@example.org"}, "mcdata-fa use sip:desk.fa@example.org"},
+		{map[string]any{"action": "mcdata-fa-use", "alias": ""}, "mcdata-fa use none"},
+		{map[string]any{"action": "location-request", "refresh": true, "targets": []any{"sip:a@example.org", "sip:b@example.org"}}, "location request refresh sip:a@example.org sip:b@example.org"},
+		{map[string]any{"action": "location-request", "alias": "sip:car.alias@example.org"}, "location request fa sip:car.alias@example.org"},
+		{map[string]any{"action": "location-configure", "targets": []any{"sip:a@example.org", "sip:b@example.org"}, "periodic": float64(10)}, `location configure sip:a@example.org,sip:b@example.org {"non_emergency":{"coordinate":true,"minimum_interval":1},"emergency":{"coordinate":true,"minimum_interval":1},"triggers":[{"periodic":10}],"emergency_triggers":[{"periodic":10}]}`},
+		{map[string]any{"action": "sds", "target": "sip:desk.fa@example.org", "to_alias": true, "text": "who is on duty"}, "sds-fa sip:desk.fa@example.org who is on duty"},
 	}
 	for _, c := range good {
 		got, err := commandLine(c.req)
@@ -138,6 +145,14 @@ func TestCommandLine(t *testing.T) {
 		{"action": "status", "group": "sip:g1@b", "value": "2 force"},
 		{"action": "status", "group": "", "value": "2"},
 		{"action": "status-values"},
+		{"action": "mcdata-fa", "op": "use", "aliases": []any{"sip:desk.fa@b"}},
+		{"action": "location-request"},
+		{"action": "location-request", "alias": "sip:x@b refresh"},
+		{"action": "location-configure", "targets": []any{"sip:a@b"}, "periodic": float64(0)},
+		{"action": "location-configure", "targets": []any{"sip:a@b"}, "periodic": float64(2.5)},
+		{"action": "location-configure", "targets": []any{"sip:a@b"}},
+		{"action": "mcdata-fa", "op": "activate", "aliases": []any{}},
+		{"action": "sds", "target": "sip:desk.fa@b", "to_alias": true, "group": true, "text": "x"},
 	}
 	for _, req := range bad {
 		if got, err := commandLine(req); err == nil {
