@@ -65,6 +65,19 @@ func TestCommandLine(t *testing.T) {
 		{map[string]any{"action": "msgstore", "op": "move", "folder": "f-2", "ids": []any{"obj-1"}}, "mcdata-msgstore move f-2 obj-1"},
 		{map[string]any{"action": "msgstore", "op": "restart", "index": float64(0)}, "mcdata-msgstore restart 0"},
 		{map[string]any{"action": "msgstore-ctrl", "op": "enable", "all_private": true, "group": []any{"sip:g1@example.org"}}, "mcdata-msgstore-ctrl enable all-private group=sip:g1@example.org"},
+		{map[string]any{"action": "adhoc", "targets": []any{"sip:a@example.org", "sip:b@example.org"}}, "adhoc sip:a@example.org sip:b@example.org"},
+		{map[string]any{"action": "adhoc", "kind": "emergency", "targets": []any{"sip:a@example.org"}}, "adhoc emergency sip:a@example.org"},
+		{map[string]any{"action": "adhoc", "kind": "broadcast", "targets": []any{"sip:a@example.org"}}, "adhoc broadcast sip:a@example.org"},
+		{map[string]any{"action": "adhoc-modify", "add": []any{"sip:c@example.org"}, "remove": []any{"sip:a@example.org"}}, "adhoc-modify add sip:c@example.org remove sip:a@example.org"},
+		{map[string]any{"action": "sds-session", "op": "open", "target": "sip:bob.mcdata@example.org"}, "sds-session sip:bob.mcdata@example.org"},
+		{map[string]any{"action": "sds-session", "op": "open", "target": "sip:g1@example.org", "group": true, "priority": "imminent"}, "sds-session group=sip:g1@example.org imminent"},
+		{map[string]any{"action": "sds-session", "op": "open", "adhoc": true, "targets": []any{"sip:a@example.org", "sip:b@example.org"}}, "sds-session adhoc=sip:a@example.org,sip:b@example.org"},
+		{map[string]any{"action": "sds-session", "op": "send", "text": "units to gate 4"}, "sds-session send units to gate 4"},
+		{map[string]any{"action": "sds-session", "op": "send", "text": "read this", "disposition": "read"}, "sds-session send read read this"},
+		{map[string]any{"action": "sds-session", "op": "close", "all": true}, "sds-session close all"},
+		{map[string]any{"action": "sds-session", "op": "close"}, "sds-session close"},
+		{map[string]any{"action": "status", "group": "sip:g1@example.org", "value": "2"}, "sds-status sip:g1@example.org 2"},
+		{map[string]any{"action": "status-values", "group": "sip:g1@example.org"}, "sds-status-values sip:g1@example.org"},
 	}
 	for _, c := range good {
 		got, err := commandLine(c.req)
@@ -111,6 +124,20 @@ func TestCommandLine(t *testing.T) {
 		{"action": "sds", "target": "sip:a@b", "text": "one\nquit"},
 		{"action": "sds", "target": "sip:a@b", "text": "  "},
 		{"action": "fd-accept", "id": ""},
+		{"action": "adhoc", "targets": []any{}},
+		{"action": "adhoc", "kind": "chat", "targets": []any{"sip:a@b"}},
+		{"action": "adhoc", "targets": []any{"sip:a@b; quit"}},
+		{"action": "adhoc-modify"},
+		{"action": "sds-session", "op": "open", "target": "sip:a@b", "priority": "high"},
+		{"action": "sds-session", "op": "open", "adhoc": true, "targets": []any{"sip:a@b"}, "priority": "emergency"},
+		{"action": "sds-session", "op": "open", "adhoc": true},
+		{"action": "sds-session", "op": "send", "text": "two\nlines"},
+		{"action": "sds-session", "op": "send", "text": "read me"},
+		{"action": "sds-session", "op": "send", "text": "hi", "disposition": "maybe"},
+		{"action": "sds-session", "op": "rename"},
+		{"action": "status", "group": "sip:g1@b", "value": "2 force"},
+		{"action": "status", "group": "", "value": "2"},
+		{"action": "status-values"},
 	}
 	for _, req := range bad {
 		if got, err := commandLine(req); err == nil {

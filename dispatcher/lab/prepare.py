@@ -72,6 +72,8 @@ def lab_mode(args, compose, generated) -> None:
                                   alert_cancel=True, alert_cancel_any_user=True, emergency_group=True,
                                   emergency_group_cancel=True, emergency_private=True, emergency_private_cancel=True,
                                   imminent_peril=True, imminent_peril_cancel=True,
+                                  # Ad hoc group communications (TS 24.282 clause 24): started and joined.
+                                  adhoc=True, adhoc_participation=True,
                                   # The storage of its communications in a message store (--msgstore, TS 24.282
                                   # clause 21.3): private ones and those of every group.
                                   store_comms=True, store_private_comms=True,
@@ -111,6 +113,12 @@ def lab_mode(args, compose, generated) -> None:
         for user in site["users"]:
             if user.get("mcptt_id") == mcptt_id:
                 user["functional_alias_takeover"] = True
+    # In a lab with ad hoc group calls (--adhoc), the dispatcher may start them, emergency and imminent peril ones
+    # too, and change their participants (TS 24.484 <allow-adhoc-group-call>,
+    # <allow-to-modify-adhoc-group-call-participants-info>).
+    for user in site["users"]:
+        if user.get("mcptt_id") == mcptt_id and "adhoc_call" in user:
+            user["adhoc_call"].update(allow=True, participation=True, emergency=True, imminent=True, modify=True)
     # In a lab with regroups (--regroup), the dispatcher may create and remove regroups (TS 24.484 <allow-regroup>)
     # and form temporary groups (TS 24.481 clause 6.3.14.3.1, a group management right).
     if any(group.get("preconfigured_use_only") for group in site["groups"]):

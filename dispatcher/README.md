@@ -40,10 +40,10 @@ checked out beside it (`../openmcx-server`).
 |---|---|
 | Group call | the configured group: normal, imminent peril, emergency, broadcast; a chat group's call joined (or started), normal, imminent peril or emergency; during the call, raise it to emergency or imminent peril and back to normal; hold to talk with the browser microphone; received audio played in the browser |
 | Private call | call any MCPTT ID (optionally emergency, optionally without floor control); raise it to emergency and back; incoming calls ring and are answered or rejected; call-back asked of a user (low, normal or high urgency) and cancelled, call-backs asked of the dispatcher listed and fulfilled |
-| Call services | first-to-answer call to two or more users (optionally emergency); ambient listening, listening to a user or listened to by one; ask a user to place a private call (commencement mode, optionally without telling them) or a group call; transfer the private call in progress, unannounced or announced (complete or cancel); forward a ringing private call; the group call's participants from its conference events |
+| Call services | first-to-answer call to two or more users (optionally emergency); ambient listening, listening to a user or listened to by one; ask a user to place a private call (commencement mode, optionally without telling them) or a group call; transfer the private call in progress, unannounced or announced (complete or cancel); forward a ringing private call; ad hoc group call to the users listed (normal, broadcast, imminent peril or emergency), users added and removed during it; the group call's participants from its conference events |
 | Functional aliases | activate, take over (where allowed) and deactivate; one presented on the dispatcher's calls; private and first-to-answer calls to an alias; the caller's alias, and the alias called, shown on calls |
 | Emergency alert | MCPTT and MCData: send and cancel its own; cancel another user's (with the right to) |
-| SDS | one-to-one and group, inbox |
+| SDS | one-to-one and group, inbox; SDS sessions (one-to-one, group or ad hoc group, the first two optionally emergency or imminent peril) opened, used (delivery or read notification asked) and closed, an ad hoc one for every participant; sessions offered to the dispatcher joined; enhanced status: a group's operational values sent, received ones listed |
 | File distribution | send from the browser (optionally mandatory), accept or reject received files, save them |
 | Message store | storage of its private and group communications enabled and disabled; the stored objects synchronised, read, flagged (read, flagged), moved or copied into folders, searched, deleted; folders created, opened and deleted; files from the browser stored; notifications of changes |
 | Regroup | group regroup and user regroup using a preconfigured group, created and removed; temporary groups formed and torn down at the group management server; calls on them from the group picker |
@@ -167,24 +167,34 @@ target is a functional alias; not with `emergency`),
 `{"action":"remote-call|remote-group-call","remote":"<MCPTT ID>","target":"<MCPTT ID or group>","mode":"auto|manual|force-auto","silent":bool}`,
 `{"action":"transfer","target":"<MCPTT ID>","step":"announced|complete|cancel"}` (no `step`: unannounced),
 `{"action":"forward","target":"<MCPTT ID>"}`,
-`{"action":"sds","target":"<MCData ID or group>","group":bool,"text":"..."}`, `{"action":"fd-accept|fd-reject|fd-defer","id":"<message ID>"}`.
+`{"action":"adhoc","targets":["<MCPTT ID>",...],"kind":"normal|broadcast|imminent|emergency"}`,
+`{"action":"adhoc-modify","add":[...],"remove":[...]}` (the ad hoc group call in progress),
+`{"action":"sds","target":"<MCData ID or group>","group":bool,"text":"..."}`,
+`{"action":"sds-session","op":"open","target":"<MCData ID or group>","group":bool,"priority":"normal|emergency|imminent"}`
+(or `"adhoc":true,"targets":[...]`, normal only), `{"action":"sds-session","op":"send","text":"...","disposition":"delivery|read"}`,
+`{"action":"sds-session","op":"close","all":bool}` (`all`: an ad hoc group communication, for every participant),
+`{"action":"status-values","group":"<group>"}`, `{"action":"status","group":"<group>","value":"<operational value ID>"}`,
+`{"action":"fd-accept|fd-reject|fd-defer","id":"<message ID>"}`.
 Nothing else reaches the engine.
 
 ## Lab test
 
 ```
 python3 ../openmcx-server/tools/prepare-prearranged-test.py --directory <lab> --project disp --private-call --mcdata \
-  --priority --broadcast --chat --functional-alias --msgstore \
+  --priority --broadcast --chat --functional-alias --msgstore --adhoc \
   --image openmcx:<tag> --client-image openmcx-client:dispatcher
 python3 dispatcher/lab/prepare.py <lab>                       # client-c becomes the dispatcher on 127.0.0.1:18080,
                                                               # with the lab's widest MCPTT and MCData rights
-                                                              # (and every functional alias, with take-over)
+                                                              # (and every functional alias, with take-over;
+                                                              # ad hoc group calls, changing their participants)
 ../openmcx-server/.cache/deps/docker-compose-linux-x86_64 -p disp -f <lab>/compose.json up -d --wait   # openmcx-server's compose binary
 python3 dispatcher/lab/scenario.py <lab> --project disp       # DSP-01..08
 python3 dispatcher/lab/actions_scenario.py <lab> --project disp   # DSP-09..16; the lab with --priority --broadcast --chat
 python3 dispatcher/lab/services_scenario.py <lab> --project disp  # DSP-17..24
 python3 dispatcher/lab/fa_scenario.py <lab> --project disp        # DSP-25..30; the lab with --functional-alias
 python3 dispatcher/lab/store_scenario.py <lab> --project disp     # DSP-36..45; the lab with --msgstore
+python3 dispatcher/lab/adhoc_scenario.py <lab> --project disp     # DSP-46..48; the lab with --adhoc
+python3 dispatcher/lab/session_scenario.py <lab> --project disp   # DSP-49..52
 docker run --rm --network host -v playwright-py:/py -v <lab>:/lab -v $PWD/dispatcher/lab:/check -w /check \
   mcr.microsoft.com/playwright/python:v1.55.0-noble sh -c \
   '[ -d /py/playwright ] || pip install -q --break-system-packages --target /py playwright==1.55.0; PYTHONPATH=/py python3 browser_check.py /lab'

@@ -189,7 +189,9 @@ func (a *api) view(r *http.Request) (map[string]any, error) {
 		"private_emergency_state", "functional_alias", "requested_functional_aliases", "active_functional_aliases",
 		"takeover_possible_functional_aliases", "last_fa_result", "functional_alias_subscription_result",
 		"calling_functional_alias", "called_functional_alias", "functional_alias_redirect", "regroups",
-		"regroup_result", "xcap_last", "msgstore", "profile_groups",
+		"regroup_result", "xcap_last", "msgstore", "profile_groups", "call_group", "adhoc_priority", "adhoc_broadcast",
+		"last_modify_result", "mcdata_media_result", "mcdata_media_session", "mcdata_media_received",
+		"mcdata_media_sent", "mcdata_session_group", "mcdata_enhanced_status", "mcdata_enhanced_status_values",
 		"mcdata_authorized", "mcdata_affiliated", "mcdata_inbox",
 		"mcdata_sent", "mcdata_last_result", "mcdata_files", "mcdata_files_sent", "mcdata_fd_last_result")
 	v["session"] = session
@@ -392,6 +394,78 @@ func temporaryDocument(tgi string) string {
 	return name
 }
 
+// oneLine checks the text of an SDS: one line of 1 to 1000 characters.
+func oneLine(text string) (string, error) {
+	text = strings.TrimSpace(text)
+	if text == "" || len(text) > 1000 || strings.ContainsAny(text, "\r\n") {
+		return "", errors.New("the text must be one line of 1 to 1000 characters")
+	}
+	return text, nil
+}
+
+// sessionLine turns an SDS session action into its engine command: TS 24.282 clause 9.2.4.2.3, a one-to-one, group
+// or ad hoc group (clause 24.2.2.1.1) SDS session opened, optionally an emergency or imminent peril communication;
+// a message sent in it, with a disposition asked; and the session closed (clause 13.2.2.2), for all participants of
+// an ad hoc group communication too (clause 13.2.2.2.4.3 step 3A).
+func sessionLine(req map[string]any, str func(string) string, flag func(string) bool,
+	id func(string) (string, error)) (string, error) {
+	switch op := str("op"); op {
+	case "open":
+		var target string
+		if flag("adhoc") {
+			users, err := ids(req["targets"], 1, 10)
+			if err != nil {
+				return "", err
+			}
+			target = "adhoc=" + strings.Join(users, ",")
+		} else {
+			named, err := id("target")
+			if err != nil {
+				return "", err
+			}
+			target = named
+			if flag("group") {
+				target = "group=" + named
+			}
+		}
+		switch priority := str("priority"); priority {
+		case "", "normal":
+			return "sds-session " + target, nil
+		case "emergency", "imminent":
+			if flag("adhoc") {
+				return "", errors.New("no emergency or imminent peril ad hoc group SDS session")
+			}
+			return "sds-session " + target + " " + priority, nil
+		default:
+			return "", fmt.Errorf("unknown priority %q", priority)
+		}
+	case "send":
+		text, err := oneLine(str("text"))
+		if err != nil {
+			return "", err
+		}
+		switch disposition := str("disposition"); disposition {
+		case "":
+			// The engine reads a first word "delivery" or "read" as the disposition asked.
+			if first, _, _ := strings.Cut(text, " "); first == "delivery" || first == "read" {
+				return "", fmt.Errorf("a message starting with %q needs a disposition", first)
+			}
+			return "sds-session send " + text, nil
+		case "delivery", "read":
+			return "sds-session send " + disposition + " " + text, nil
+		default:
+			return "", fmt.Errorf("unknown disposition %q", disposition)
+		}
+	case "close":
+		if flag("all") {
+			return "sds-session close all", nil
+		}
+		return "sds-session close", nil
+	default:
+		return "", fmt.Errorf("unknown SDS session operation %q", op)
+	}
+}
+
 func commandLine(req map[string]any) (string, error) {
 	str := func(key string) string { s, _ := req[key].(string); return s }
 	flag := func(key string) bool { b, _ := req[key].(bool); return b }
@@ -504,6 +578,37 @@ func commandLine(req map[string]any) (string, error) {
 		line := "first-to-answer " + strings.Join(targets, " ")
 		if flag("emergency") {
 			line += " emergency"
+		}
+		return line, nil
+	case "adhoc":
+		// TS 24.379 clause 17.2.2.1.1: an ad hoc group call to the users listed (step 11), optionally broadcast (step
+		// 9), emergency (step 15) or imminent peril (step 16); the server names the ad hoc group in its answer.
+		targets, err := ids(req["targets"], 1, 10)
+		if err != nil {
+			return "", err
+		}
+		switch kind := str("kind"); kind {
+		case "", "normal":
+			return "adhoc " + strings.Join(targets, " "), nil
+		case "broadcast", "emergency", "imminent":
+			return "adhoc " + kind + " " + strings.Join(targets, " "), nil
+		default:
+			return "", fmt.Errorf("unknown ad hoc call kind %q", kind)
+		}
+	case "adhoc-modify":
+		// TS 24.379 clause 17.2.6.1.1: users added to, or removed from, the ad hoc group call in progress.
+		line := "adhoc-modify"
+		for _, key := range []string{"add", "remove"} {
+			if list, _ := req[key].([]any); len(list) > 0 {
+				named, err := ids(list, 1, 10)
+				if err != nil {
+					return "", err
+				}
+				line += " " + key + " " + strings.Join(named, " ")
+			}
+		}
+		if line == "adhoc-modify" {
+			return "", errors.New("name users to add or remove")
 		}
 		return line, nil
 	case "ambient":
@@ -711,14 +816,34 @@ func commandLine(req map[string]any) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		text := strings.TrimSpace(str("text"))
-		if text == "" || len(text) > 1000 || strings.ContainsAny(text, "\r\n") {
-			return "", errors.New("the text must be one line of 1 to 1000 characters")
+		text, err := oneLine(str("text"))
+		if err != nil {
+			return "", err
 		}
 		if flag("group") {
 			return "sds-group " + target + " " + text, nil
 		}
 		return "sds " + target + " " + text, nil
+	case "sds-session":
+		return sessionLine(req, str, flag, id)
+	case "status":
+		// TS 24.282 clause 14.2.1.1: an enhanced status, one of the group's operational values, sent to the group.
+		group, err := id("group")
+		if err != nil {
+			return "", err
+		}
+		value, err := id("value")
+		if err != nil {
+			return "", err
+		}
+		return "sds-status " + group + " " + value, nil
+	case "status-values":
+		// The group's operational values, from its group document (TS 24.282 clause 14.2.1.1).
+		group, err := id("group")
+		if err != nil {
+			return "", err
+		}
+		return "sds-status-values " + group, nil
 	case "fd-accept", "fd-reject", "fd-defer":
 		target, err := id("id")
 		if err != nil {

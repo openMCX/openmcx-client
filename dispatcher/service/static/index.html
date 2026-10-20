@@ -122,6 +122,20 @@
         </form>
       </div>
       <div>
+        <h3>Ad hoc group call</h3>
+        <form id="adhoc">
+          <div class="row"><input name="targets" placeholder="MCPTT IDs, separated by spaces" required></div>
+          <div class="row"><select name="kind" aria-label="Ad hoc call kind">
+              <option value="normal">normal</option><option value="broadcast">broadcast</option>
+              <option value="imminent">imminent peril</option><option value="emergency">emergency</option>
+            </select><button>Call</button></div>
+          <div class="row"><input name="change" placeholder="during the call: MCPTT IDs to add or remove"></div>
+          <div class="row"><button id="adhoc-add" type="button" disabled>Add</button>
+            <button id="adhoc-remove" type="button" disabled>Remove</button></div>
+        </form>
+        <div id="adhoc-state" class="note"></div>
+      </div>
+      <div>
         <h3>Ambient listening</h3>
         <form id="ambient">
           <div class="row"><input name="target" placeholder="MCPTT ID" required></div>
@@ -245,6 +259,27 @@
           <div class="row"><input name="text" placeholder="Message" maxlength="1000" required><button>Send</button></div>
         </form>
         <div id="inbox" class="list"></div>
+        <h3>SDS session</h3>
+        <form id="session">
+          <div class="row"><input name="target" required
+              placeholder="MCData ID, group ID, or MCData IDs separated by spaces for an ad hoc group"></div>
+          <div class="row"><select name="kind" aria-label="Session kind">
+              <option value="private">one-to-one</option><option value="group">group</option><option value="adhoc">ad hoc group</option>
+            </select><select name="priority" aria-label="Session priority">
+              <option value="normal">normal</option><option value="imminent">imminent peril</option><option value="emergency">emergency</option>
+            </select><button>Open</button></div>
+        </form>
+        <form id="session-send">
+          <div class="row"><input name="text" placeholder="Message in the session" maxlength="1000" required>
+            <select name="disposition" aria-label="Notification asked">
+              <option value="">no notification</option><option value="delivery">delivery</option><option value="read">read</option>
+            </select><button disabled>Send</button></div>
+          <div class="row"><button id="session-close" type="button" disabled>Close</button>
+            <button id="session-close-all" type="button" disabled
+              title="Ends the ad hoc group communication for every participant, where allowed">Close for all</button></div>
+        </form>
+        <div id="session-state" class="note"></div>
+        <div id="session-messages" class="list"></div>
       </div>
       <div>
         <h2>Files (FD)</h2>
@@ -257,6 +292,13 @@
           <div class="row"><input type="file" name="file" required><button>Send file</button></div>
         </form>
         <div id="files" class="list"></div>
+        <h3>Enhanced status</h3>
+        <form id="status">
+          <div class="row"><input name="group" placeholder="group ID, e.g. sip:operations@mcx.test" required>
+            <button>Show values</button></div>
+        </form>
+        <div id="status-values" class="list"></div>
+        <div id="statuses" class="list"></div>
       </div>
     </div>
   </section>

@@ -159,6 +159,39 @@ with sync_playwright() as p:
         page.click("#store-folders")
         expect(entry).to_have_count(0, timeout=20000)
         check("BRW-18 message store synchronised; a folder created, offered and deleted from the page", listed)
+    # Ad hoc group calls (a lab with --adhoc): one to client-a from the page, its participants changeable during it.
+    if any("adhoc_call" in user for user in site["users"]):
+        check("BRW-19a ad hoc participant changes wait for the call", page.locator("#adhoc-add").is_disabled())
+        page.fill("#adhoc input[name=targets]", alice)
+        page.click("#adhoc button")
+        expect(page.locator("#adhoc-state")).to_contain_text("Ad hoc group sip:", timeout=20000)
+        expect(page.locator("#adhoc-add")).to_be_enabled(timeout=10000)
+        page.click("button[data-action=hangup]")
+        expect(page.locator("#call-state")).to_contain_text("idle", timeout=15000)
+        check("BRW-19b an ad hoc group call to client-a from the page, named by the server, hung up", True)
+    # An SDS session with client-a and enhanced status on the lab's MCData group (TS 24.282 clauses 9.2.4, 14.2).
+    alice_data = json.loads((lab / "generated" / "client-a.json").read_text())["mcdata"]["user_id"]
+    check("BRW-20a nothing to send before a session is open", page.locator("#session-send button", has_text="Send").is_disabled())
+    page.fill("#session input[name=target]", alice_data)
+    page.click("#session button")
+    expect(page.locator("#session-state")).to_contain_text("open", timeout=20000)
+    word = "brw-" + uuid.uuid4().hex[:6]
+    page.fill("#session-send input[name=text]", word)
+    page.locator("#session-send button", has_text="Send").click()
+    got = waited(lambda: any(word in [x.get("text") for x in m.get("payloads", [])]
+                             for m in client("client-a").get("mcdata_media_received") or []))
+    page.click("#session-close")
+    expect(page.locator("#session-send button", has_text="Send")).to_be_disabled(timeout=15000)
+    check("BRW-20b an SDS session with client-a opened, used and closed from the page", got)
+    group = site["groups"][0]["id"]
+    page.fill("#status input[name=group]", group)
+    page.click("#status button")
+    value = page.locator("#status-values .item", has_text=group).locator("button").first
+    expect(value).to_be_visible(timeout=15000)
+    sent = value.text_content()
+    value.click()
+    check("BRW-21 enhanced status: the group's values offered, one sent to client-a",
+          waited(lambda: any(e.get("value") == sent for e in client("client-a").get("mcdata_enhanced_status") or [])), sent)
     page.screenshot(path=str(lab / "artifacts" / "dispatcher.png"), full_page=True)
     check("BRW-05 no script errors", not errors, "; ".join(errors))
     browser.close()

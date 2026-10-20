@@ -155,6 +155,48 @@ function renderAliases(s) {
          (outcomes ? ' · ' + outcomes : ''));
   }
 }
+// An ad hoc group call (TS 24.379 clause 17.2): the group the server named, its priority, the last participant change
+// (clause 17.2.6.1.1), which needs the call in progress.
+function renderAdhoc(s, call) {
+  const inAdhoc = call === 'active' && s.call_type === 'adhoc';
+  $('adhoc-add').disabled = $('adhoc-remove').disabled = !inAdhoc;
+  const m = s.last_modify_result;
+  text($('adhoc-state'), [s.call_type === 'adhoc' && call !== 'idle' ? 'Ad hoc group ' + (s.call_group || '(being formed)') +
+    (s.adhoc_priority && s.adhoc_priority !== 'normal' ? ' · ' + s.adhoc_priority : '') + (s.adhoc_broadcast ? ' · broadcast' : '') : '',
+    m && m.status ? 'Last change: ' + m.status + (m.warning ? ' · ' + m.warning : '') : ''].filter(Boolean).join(' — '));
+}
+// The SDS session over the media plane (TS 24.282 clause 9.2.4): opened by the dispatcher or offered to it, its state,
+// and the messages sent and received over the media plane.
+function renderSdsSession(s) {
+  const r = s.mcdata_media_result || {}, open = !!s.mcdata_media_session;
+  $('session').querySelector('button').disabled = open;
+  $('session-send').querySelector('button').disabled = !open;
+  $('session-close').disabled = !open;
+  $('session-close-all').disabled = !open || !r.adhoc;
+  const peer = r.target || r.from || '', group = s.mcdata_session_group || r.group || '';
+  text($('session-state'), r.state && (r.session || open) ? 'Session ' + (r.adhoc ? 'ad hoc group ' : group ? 'group ' : '') +
+    (group || peer) + ': ' + r.state + (r.status ? ' · ' + r.status : '') + (r.priority && r.priority !== 'normal' ? ' · ' + r.priority : '') +
+    (r.warning ? ' · ' + r.warning : '') : '');
+  const list = $('session-messages');
+  list.replaceChildren();
+  for (const m of [...(s.mcdata_media_received || [])].reverse())
+    item(list, (m.payloads || []).map((p) => p.text ?? `[${p.bytes} bytes]`).join(' '), 'from ' + (m.from || '?') + (m.group ? ' in ' + m.group : ''));
+  for (const m of [...(s.mcdata_media_sent || [])].reverse()) item(list, m.text || '', 'sent');
+}
+// Enhanced status (TS 24.282 clause 14.2): the operational values of a group, each one sent with a click, and the
+// statuses received.
+function renderStatus(s) {
+  const list = $('status-values');
+  list.replaceChildren();
+  for (const [group, v] of Object.entries(s.mcdata_enhanced_status_values || {})) {
+    if (!v.allowed) { item(list, group, 'enhanced status is not allowed on this group'); continue; }
+    item(list, group, (v.values || []).length ? 'send a status:' : 'no operational values',
+      (v.values || []).map((o) => [o.value, '', () => act({ action: 'status', group, value: o.id })]));
+  }
+  const got = $('statuses');
+  got.replaceChildren();
+  for (const e of [...(s.mcdata_enhanced_status || [])].reverse()) item(got, 'Status: ' + e.value, 'from ' + (e.from || '?') + ' in ' + e.group);
+}
 function text(el, value) { el.textContent = value; }
 function item(list, title, detail, buttons = []) {
   const div = document.createElement('div');
@@ -309,7 +351,10 @@ function render(s) {
     s.announced_transfer.target : (s.last_forwarding && s.last_forwarding.by ? 'Last forwarded call: by ' +
     s.last_forwarding.by + ' to ' + s.last_forwarding.target : ''));
   const idle = call === 'idle';
-  for (const f of ['fta', 'ambient']) $(f).querySelector('button').disabled = !idle;
+  for (const f of ['fta', 'ambient', 'adhoc']) $(f).querySelector('button').disabled = !idle;
+  renderAdhoc(s, call);
+  renderSdsSession(s);
+  renderStatus(s);
   renderAliases(s);
   renderRegroups(s);
   renderStore(s.msgstore || {});
@@ -438,6 +483,16 @@ $('fta').onsubmit = (e) => {
   act(f.to_alias.checked ? { action: 'first-to-answer', alias: f.targets.value.trim(), emergency: f.emergency.checked }
     : { action: 'first-to-answer', targets: f.targets.value.trim().split(/[\s,]+/), emergency: f.emergency.checked });
 };
+$('adhoc').onsubmit = (e) => {
+  e.preventDefault();
+  audio();
+  act({ action: 'adhoc', kind: e.target.kind.value, targets: e.target.targets.value.trim().split(/[\s,]+/) });
+};
+for (const key of ['add', 'remove'])
+  $('adhoc-' + key).onclick = () => {
+    const users = $('adhoc').change.value.trim();
+    if (users) act({ action: 'adhoc-modify', [key]: users.split(/[\s,]+/) });
+  };
 $('ambient').onsubmit = (e) => {
   e.preventDefault();
   audio();
@@ -535,6 +590,28 @@ $('sds').onsubmit = (e) => {
   post('/api/command', { action: 'sds', target: f.target.value.trim(), group: f.group.checked, text: f.text.value })
     .then(() => { f.text.value = ''; }).catch((err) => log('error: ' + err.message));
 };
+$('session').onsubmit = (e) => {
+  e.preventDefault();
+  const f = e.target, kind = f.kind.value, target = f.target.value.trim();
+  act(kind === 'adhoc' ? { action: 'sds-session', op: 'open', adhoc: true, targets: target.split(/[\s,]+/) }
+    : { action: 'sds-session', op: 'open', target, group: kind === 'group', priority: f.priority.value });
+};
+// No emergency or imminent peril ad hoc group SDS session; imminent peril is a group communication.
+$('session').kind.onchange = (e) => {
+  const p = $('session').priority;
+  for (const o of p.options) o.disabled = o.value !== 'normal' && (e.target.value === 'adhoc' || (o.value === 'imminent' && e.target.value === 'private'));
+  if (p.selectedOptions[0].disabled) p.value = 'normal';
+};
+$('session').kind.onchange({ target: $('session').kind });
+$('session-send').onsubmit = (e) => {
+  e.preventDefault();
+  const f = e.target;
+  post('/api/command', { action: 'sds-session', op: 'send', text: f.text.value, disposition: f.disposition.value })
+    .then(() => { f.text.value = ''; }).catch((err) => log('error: ' + err.message));
+};
+$('session-close').onclick = () => act({ action: 'sds-session', op: 'close' });
+$('session-close-all').onclick = () => act({ action: 'sds-session', op: 'close', all: true });
+$('status').onsubmit = (e) => { e.preventDefault(); act({ action: 'status-values', group: e.target.group.value.trim() }); };
 $('fd').onsubmit = (e) => {
   e.preventDefault();
   const f = e.target, body = new FormData();
