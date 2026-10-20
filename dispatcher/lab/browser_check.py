@@ -205,6 +205,18 @@ with sync_playwright() as p:
     value.click()
     check("BRW-21 enhanced status: the group's values offered, one sent to client-a",
           waited(lambda: any(e.get("value") == sent for e in client("client-a").get("mcdata_enhanced_status") or [])), sent)
+    # IP connectivity with client-a (TS 24.282 clause 20): opened, client-a's tunnel address pinged, released.
+    alice_tunnel = json.loads((lab / "generated" / "client-a.json").read_text())["mcdata"]["ipconn"]["address"]
+    check("BRW-24a nothing to ping before a session is open", page.locator("#ipcon-ping button", has_text="Ping").is_disabled())
+    page.fill("#ipcon input[name=target]", alice_data)
+    page.click("#ipcon button")
+    expect(page.locator("#ipcon-state")).to_contain_text("open", timeout=20000)
+    page.fill("#ipcon-ping input[name=address]", alice_tunnel)
+    page.locator("#ipcon-ping button", has_text="Ping").click()
+    expect(page.locator("#ipcon-pings .item", has_text="Reply from " + alice_tunnel)).to_have_count(3, timeout=15000)
+    page.click("#ipcon-close")
+    expect(page.locator("#ipcon-state")).to_contain_text("closed", timeout=15000)
+    check("BRW-24b an IP connectivity session with client-a opened, pinged and released from the page", True)
     page.screenshot(path=str(lab / "artifacts" / "dispatcher.png"), full_page=True)
     check("BRW-05 no script errors", not errors, "; ".join(errors))
     browser.close()

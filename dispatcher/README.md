@@ -48,6 +48,7 @@ checked out beside it (`../openmcx-server`).
 | Message store | storage of its private and group communications enabled and disabled; the stored objects synchronised, read, flagged (read, flagged), moved or copied into folders, searched, deleted; folders created, opened and deleted; files from the browser stored; notifications of changes |
 | Regroup | group regroup and user regroup using a preconfigured group, created and removed; temporary groups formed and torn down at the group management server; calls on them from the group picker |
 | Location | the location of users, or of the user holding a functional alias, asked (optionally a fresh report); the last report of each user listed with its position, linked to a map; users told to report every so many seconds |
+| IP connectivity | a session with a user, or with the user holding a functional alias, opened and released; sessions offered to the dispatcher accepted; the built-in IP application pings the other end's tunnel address and answers its pings, with round-trip times and packet counters |
 | Coming soon | several monitored groups, remote affiliation, video, call recording, map, operator handoff |
 
 ## Position mode (M3): bound to MCX Admin
@@ -178,6 +179,8 @@ target is a functional alias; not with `emergency`),
 (or `"adhoc":true,"targets":[...]`, normal only), `{"action":"sds-session","op":"send","text":"...","disposition":"delivery|read"}`,
 `{"action":"sds-session","op":"close","all":bool}` (`all`: an ad hoc group communication, for every participant),
 `{"action":"status-values","group":"<group>"}`, `{"action":"status","group":"<group>","value":"<operational value ID>"}`,
+`{"action":"ipcon","target":"<MCData ID>"}` (or `"alias":"<functional alias>"`; `"close":true` releases it),
+`{"action":"ipcon-ping","address":"<IPv4 address in the tunnel>","count":1-100,"size":0-1400}`,
 `{"action":"fd-accept|fd-reject|fd-defer","id":"<message ID>"}`.
 Nothing else reaches the engine.
 
@@ -200,6 +203,7 @@ python3 dispatcher/lab/store_scenario.py <lab> --project disp     # DSP-36..45; 
 python3 dispatcher/lab/adhoc_scenario.py <lab> --project disp     # DSP-46..48; the lab with --adhoc
 python3 dispatcher/lab/session_scenario.py <lab> --project disp   # DSP-49..52
 python3 dispatcher/lab/mcdata_fa_scenario.py <lab> --project disp # DSP-53..56
+python3 dispatcher/lab/ipcon_scenario.py <lab> --project disp     # DSP-60..64
 docker run --rm --network host -v playwright-py:/py -v <lab>:/lab -v $PWD/dispatcher/lab:/check -w /check \
   mcr.microsoft.com/playwright/python:v1.55.0-noble sh -c \
   '[ -d /py/playwright ] || pip install -q --break-system-packages --target /py playwright==1.55.0; PYTHONPATH=/py python3 browser_check.py /lab'

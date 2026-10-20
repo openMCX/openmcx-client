@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -195,6 +196,7 @@ func (a *api) view(r *http.Request) (map[string]any, error) {
 		"mcdata_functional_aliases", "mcdata_functional_alias_in_use", "mcdata_fa_last_result",
 		"mcdata_functional_alias_subscription_result", "mcdata_functional_aliases_take_over_possible",
 		"location", "location_last_request", "location_last_result",
+		"mcdata_ipconn", "mcdata_ipconn_pings", "mcdata_ipconn_counters",
 		"mcdata_authorized", "mcdata_affiliated", "mcdata_inbox",
 		"mcdata_sent", "mcdata_last_result", "mcdata_files", "mcdata_files_sent", "mcdata_fd_last_result")
 	v["session"] = session
@@ -894,6 +896,38 @@ func commandLine(req map[string]any) (string, error) {
 		trigger := fmt.Sprintf(`[{"periodic":%d}]`, int(seconds))
 		return "location configure " + strings.Join(targets, ",") + ` {"non_emergency":` + requested + `,"emergency":` +
 			requested + `,"triggers":` + trigger + `,"emergency_triggers":` + trigger + `}`, nil
+	case "ipcon":
+		// TS 24.282 clause 20.2.1: an IP connectivity session with a user, or with the user who activated a
+		// functional alias; "close" releases it (clause 20.4.1).
+		if flag("close") {
+			return "ipcon close", nil
+		}
+		if str("alias") != "" {
+			alias, err := id("alias")
+			if err != nil {
+				return "", err
+			}
+			return "ipcon fa=" + alias, nil
+		}
+		target, err := id("target")
+		if err != nil {
+			return "", err
+		}
+		return "ipcon " + target, nil
+	case "ipcon-ping":
+		// ICMP echo requests (RFC 792) sent into the session's tunnel (TS 24.582 clause 13) by the built-in IP
+		// application.
+		address := net.ParseIP(str("address"))
+		if address == nil || address.To4() == nil {
+			return "", errors.New("the destination must be an IPv4 address")
+		}
+		count, _ := req["count"].(float64)
+		size, _ := req["size"].(float64)
+		if count != float64(int(count)) || count < 1 || count > 100 || size != float64(int(size)) || size < 0 ||
+			size > 1400 {
+			return "", errors.New("send 1 to 100 echoes of 0 to 1400 bytes")
+		}
+		return fmt.Sprintf("ipcon-ping %s %d %d", address.To4(), int(count), int(size)), nil
 	case "status":
 		// TS 24.282 clause 14.2.1.1: an enhanced status, one of the group's operational values, sent to the group.
 		group, err := id("group")

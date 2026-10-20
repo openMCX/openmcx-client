@@ -225,6 +225,25 @@ function renderLocation(s) {
   const r = s.location_last_result;
   text($('location-result'), r && r.action ? 'Location ' + r.action + ': ' + r.status + (r.warning ? ' · ' + r.warning : '') : '');
 }
+// IP connectivity (TS 24.282 clause 20): the session with one user, opened by the dispatcher or offered to it, the
+// tunnel's addresses and counters (TS 24.582 clause 13), and the echo replies to the pings sent into it.
+function renderIpcon(s) {
+  const r = s.mcdata_ipconn || {}, open = r.state === 'open', c = s.mcdata_ipconn_counters || {};
+  $('ipcon').querySelector('button').disabled = open || r.state === 'inviting';
+  $('ipcon-ping').querySelector('button').disabled = !open;
+  $('ipcon-close').disabled = !open && r.state !== 'inviting';
+  const peer = r.target || r.from || '';
+  text($('ipcon-state'), r.state ? 'IP connectivity ' + (r.originating === false ? 'from ' : 'with ') + peer + ': ' + r.state +
+    (r.status ? ' · ' + r.status : '') + (r.warning ? ' · ' + r.warning : '') +
+    (r.selected && r.selected !== peer ? ' · reached ' + r.selected : '') + (r.called_alias ? ' · alias ' + r.called_alias : '') +
+    (r.functional_alias ? ' · as ' + r.functional_alias : '') +
+    (open ? ' · this end ' + r.address + ', tunnel peer ' + r.peer : '') +
+    (c.sent || c.received ? ` · packets sent ${c.sent}, received ${c.received}, dropped ${c.dropped}` : '') : '');
+  const list = $('ipcon-pings');
+  list.replaceChildren();
+  for (const p of [...(s.mcdata_ipconn_pings || [])].reverse())
+    item(list, 'Reply from ' + p.from + ': ' + p.rtt_ms + ' ms', `sequence ${p.sequence} · ${p.bytes} bytes · TTL ${p.ttl}`);
+}
 function text(el, value) { el.textContent = value; }
 function item(list, title, detail, buttons = []) {
   const div = document.createElement('div');
@@ -387,6 +406,7 @@ function render(s) {
   renderAliases(s);
   renderRegroups(s);
   renderLocation(s);
+  renderIpcon(s);
   renderStore(s.msgstore || {});
 
   const inbox = $('inbox');
@@ -661,6 +681,17 @@ $('session-send').onsubmit = (e) => {
 };
 $('session-close').onclick = () => act({ action: 'sds-session', op: 'close' });
 $('session-close-all').onclick = () => act({ action: 'sds-session', op: 'close', all: true });
+$('ipcon').onsubmit = (e) => {
+  e.preventDefault();
+  const f = e.target, target = f.target.value.trim();
+  act(f.to_alias.checked ? { action: 'ipcon', alias: target } : { action: 'ipcon', target });
+};
+$('ipcon-ping').onsubmit = (e) => {
+  e.preventDefault();
+  const f = e.target;
+  act({ action: 'ipcon-ping', address: f.address.value.trim(), count: Number(f.count.value), size: Number(f.size.value) });
+};
+$('ipcon-close').onclick = () => act({ action: 'ipcon', close: true });
 $('status').onsubmit = (e) => { e.preventDefault(); act({ action: 'status-values', group: e.target.group.value.trim() }); };
 $('fd').onsubmit = (e) => {
   e.preventDefault();
