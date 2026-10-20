@@ -244,6 +244,41 @@ function renderIpcon(s) {
   for (const p of [...(s.mcdata_ipconn_pings || [])].reverse())
     item(list, 'Reply from ' + p.from + ': ' + p.rtt_ms + ' ms', `sequence ${p.sequence} · ${p.bytes} bytes · TTL ${p.ttl}`);
 }
+// Monitored groups (TS 24.379 clause 9.2.1.2): the dispatcher's other groups, each ticked to be affiliated besides
+// the selected one, with the server's affiliation status, and the priority and emergency alerts of each.
+let monitorShown = '';
+function renderMonitor(s) {
+  const current = (s.identity || {}).group, monitored = s.monitored_groups || [];
+  const groups = (s.profile_groups || []).filter((g) => g !== current);
+  const affiliations = s.affiliations || {}, states = s.monitored || {};
+  const key = JSON.stringify([groups, monitored, affiliations, states, s.call_group, s.call_state]);
+  if (key === monitorShown) return;
+  monitorShown = key;
+  const list = $('monitor-list');
+  list.replaceChildren();
+  for (const g of groups) {
+    const on = monitored.includes(g), st = states[g] || {}, alerts = st.alerts || [];
+    const div = document.createElement('div');
+    div.className = 'item';
+    const label = document.createElement('label');
+    const box = Object.assign(document.createElement('input'), { type: 'checkbox', checked: on });
+    box.disabled = on && s.call_group === g && (s.call_state || 'idle') !== 'idle'; // the call's group stays
+    box.onchange = () => act({ action: 'monitor', groups: box.checked ? [...monitored, g] : monitored.filter((m) => m !== g) });
+    label.append(box, ' ' + g);
+    div.append(label);
+    const detail = [on ? (affiliations[g] === 'affiliated' ? 'affiliated' : affiliations[g] ? affiliations[g] : 'not affiliated') : '',
+      st.priority && st.priority !== 'normal' ? st.priority : '', alerts.length ? 'emergency alert: ' + alerts.join(', ') : '',
+      s.call_group === g && (s.call_state || 'idle') !== 'idle' ? 'in the call now' : ''].filter(Boolean).join(' · ');
+    if (detail) {
+      const small = document.createElement('small');
+      small.textContent = detail;
+      if (st.priority === 'emergency' || alerts.length) small.className = 'error';
+      div.append(small);
+    }
+    list.append(div);
+  }
+  if (!groups.length) item(list, 'No other group', 'the user profile names no other group');
+}
 function text(el, value) { el.textContent = value; }
 function item(list, title, detail, buttons = []) {
   const div = document.createElement('div');
@@ -346,7 +381,10 @@ function render(s) {
   // Another user's alert can be cancelled from here (TS 24.379 clause 12.1.1.2), by a user with the right to.
   // The engine lists the users whose emergency alert is active (TS 24.379 clause 12.1.1).
   for (const who of s.alerts || []) {
-    const others = who !== id.user ? [['Cancel', '', () => act({ action: 'alert', on: false, user: who })]] : [];
+    // The cancellation names the group the alert is shown for (TS 24.379 clause 12.1.1.2 step 4a).
+    const shownFor = s.alerts_group;
+    const cancel = () => act({ action: 'alert', on: false, user: who, group: shownFor });
+    const others = who !== id.user ? [['Cancel', '', cancel]] : [];
     item(alerts, 'Emergency alert: ' + who, '', others);
   }
   // The call in progress raised to emergency or imminent peril, or brought back (TS 24.379 clause 10.1.1.2.1.3).
@@ -407,6 +445,7 @@ function render(s) {
   renderRegroups(s);
   renderLocation(s);
   renderIpcon(s);
+  renderMonitor(s);
   renderStore(s.msgstore || {});
 
   const inbox = $('inbox');

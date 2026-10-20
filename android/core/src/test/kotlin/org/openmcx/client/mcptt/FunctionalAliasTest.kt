@@ -27,6 +27,36 @@ class FunctionalAliasTest {
     }
 
     @Test
+    fun theStatusChangeListsTheWholeWantedSet() {
+        // TS 24.379 §9A.2.1.2 step 6 a with §9A.2.2.2.3 steps 12 and 13: an activation adds to the set, a deactivation
+        // lists the others, and Expires 0 only when none is left.
+        val reserve = "sip:reserve.alias@mcx.test"
+        assertEquals(setOf(dispatcher, reserve), FunctionalAliasRules.wanted(setOf(dispatcher), "activate", listOf(reserve)))
+        assertEquals(setOf(dispatcher, reserve), FunctionalAliasRules.wanted(setOf(dispatcher), "takeover", listOf(reserve)))
+        assertEquals(setOf(reserve), FunctionalAliasRules.wanted(setOf(dispatcher, reserve), "deactivate", listOf(dispatcher)))
+        assertEquals("4294967295", FunctionalAliasRules.expires(setOf(reserve)))
+        val none = FunctionalAliasRules.wanted(setOf(reserve), "deactivate", listOf(reserve))
+        assertEquals("0", FunctionalAliasRules.expires(none))
+        assertTrue("functionalAliasID" !in FunctionalAliasPidf.request("sip:a@x", "c", none.toList(), takeOver = false))
+    }
+
+    @Test
+    fun theNextChangeStartsFromTheAliasesStanding() {
+        // §9A.2.2.2.5 leaves out only "deactivated": an alias still "activating" is wanted (left out, step 12 b would
+        // cancel it), one "deactivating" was given up (listed again, step 12 a ii would activate it again); the latter
+        // stays usable until it ends.
+        val reserve = "sip:reserve.alias@mcx.test"
+        val commander = "sip:incident-commander.alias@mcx.test"
+        val status = FunctionalAliasPidf.Status("sip:bob.mcptt@mcx.test", null, listOf(
+            FunctionalAliasPidf.Entry(dispatcher, "activated"), FunctionalAliasPidf.Entry(reserve, "activating"),
+            FunctionalAliasPidf.Entry(commander, "deactivating")))
+        val state = FunctionalAliasRules.notified(FunctionalAliasState(), status, null, mutableSetOf()).state
+        assertEquals(setOf(dispatcher, reserve), state.standing)
+        assertEquals(setOf(dispatcher, commander), state.active)
+        assertEquals(setOf(dispatcher), FunctionalAliasRules.wanted(state.standing, "deactivate", listOf(reserve)))
+    }
+
+    @Test
     fun readsTheServersStatusNotification() {
         // The server's per-user notification (openmcx-server functional_alias_status_xml).
         val status = FunctionalAliasPidf.parseStatus("<?xml version=\"1.0\"?><presence xmlns=\"urn:ietf:params:xml:ns:pidf\" " +

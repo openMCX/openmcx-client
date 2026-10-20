@@ -114,31 +114,84 @@ EmergencyLocation Client::configured_emergency_location() const {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.379 clause 6.2.8.1.13, clause 10.1.1.2.1.6 and clause 12.1.1.3: the group's priority (emergency, imminent
-// peril) and the emergency alerts (with their locations) learned from the server.
-void Client::update_priority(const McpttInfo &info, std::optional<EmergencyLocation> location) {
+// TS 24.379 clause 6.2.8.1.13, clause 10.1.1.2.1.6 and clause 12.1.1.3: a group's priority (emergency, imminent
+// peril) and the emergency alerts (with their locations) learned from the server, applied to the group's state
+// {"priority", "alerts", "alert_locations"}.
+void Client::priority_into(Json &state, const McpttInfo &info, std::optional<EmergencyLocation> location) {
+  if (!state.is_object()) state = Json::object(); // a monitored group's first notice
+  const auto priority = state.value("priority", std::string{"normal"});
+  bool emergency = priority == "emergency", imminent = priority == "imminent";
+  auto alerts = state.value("alerts", std::set<std::string>{});
+  auto locations = state.value("alert_locations", Json::object());
   if (info.emergency) {
-    emergency_ = *info.emergency;
-    imminent_ = false;
+    emergency = *info.emergency;
+    imminent = false;
   }
-  if (info.imminent_peril == true && info.emergency != true) emergency_ = false;
-  if (info.imminent_peril && !emergency_) imminent_ = *info.imminent_peril;
+  if (info.imminent_peril == true && info.emergency != true) emergency = false;
+  if (info.imminent_peril && !emergency) imminent = *info.imminent_peril;
   if (info.alert) {
     const auto origin = info.originated_by.empty() ? info.calling_user : info.originated_by;
     if (!origin.empty()) {
       if (*info.alert) {
-        alerts_.insert(origin);
-        if (location)
-          status_["alert_locations"][origin] = {{"latitude", location->latitude}, {"longitude", location->longitude}};
+        alerts.insert(origin);
+        if (location) locations[origin] = {{"latitude", location->latitude}, {"longitude", location->longitude}};
       } else if (info.emergency != true) {
-        alerts_.erase(origin);
-        if (status_.contains("alert_locations")) status_["alert_locations"].erase(origin);
+        alerts.erase(origin);
+        locations.erase(origin);
       }
     }
   }
-  status_["priority"] = emergency_ ? "emergency" : imminent_ ? "imminent" : "normal";
+  state = {{"priority", emergency  ? "emergency"
+                        : imminent ? "imminent"
+                                   : "normal"},
+           {"alerts", alerts},
+           {"alert_locations", locations}};
+}
+
+//------------------------------------------------------------------------------
+// Helper: the live priority state (the selected group's, or the call's on a monitored group), as priority_into
+// takes it, and back.
+Json Client::live_priority() const {
+  return {{"priority", emergency_  ? "emergency"
+                       : imminent_ ? "imminent"
+                                   : "normal"},
+          {"alerts", alerts_},
+          {"alert_locations", status_.value("alert_locations", Json::object())}};
+}
+
+void Client::set_live_priority(const Json &state) {
+  emergency_ = state.at("priority") == "emergency";
+  imminent_ = state.at("priority") == "imminent";
+  alerts_ = state.at("alerts").get<std::set<std::string>>();
+  status_["alert_locations"] = state.at("alert_locations");
+  status_["priority"] = state.at("priority");
   status_["alerts"] = alerts_;
+}
+
+//------------------------------------------------------------------------------
+// The live group's priority and alerts updated from the server (see priority_into).
+void Client::update_priority(const McpttInfo &info, std::optional<EmergencyLocation> location) {
+  auto state = live_priority();
+  priority_into(state, info, location);
+  set_live_priority(state);
   event("priority_status", {{"priority", status_["priority"]}, {"alerts", alerts_}});
+}
+
+//------------------------------------------------------------------------------
+// Helper: a call on a monitored group takes that group's priority and alerts as the live state, the selected group's
+// waiting until the call ends; at its end the call's state goes back to the monitored group.
+void Client::enter_monitored_call(const std::string &monitored) {
+  if (selected_priority_) return;
+  selected_priority_ = live_priority();
+  set_live_priority(monitored_state_.value(
+      monitored, Json{{"priority", "normal"}, {"alerts", Json::array()}, {"alert_locations", Json::object()}}));
+}
+
+void Client::leave_monitored_call() {
+  if (!selected_priority_) return;
+  if (monitoring(call_group_)) monitored_state_[call_group_] = live_priority();
+  set_live_priority(*selected_priority_);
+  selected_priority_.reset();
 }
 
 //------------------------------------------------------------------------------
@@ -267,7 +320,8 @@ void Client::change_priority(bool emergency, bool enabled) {
   if (priority_pending_) throw std::runtime_error("priority update already pending");
   McpttInfo info;
   info.session_type = call_type_ == "chat" ? "chat" : "prearranged";
-  info.request_uri = group();
+  // A call on a monitored group changes that group's priority.
+  info.request_uri = active && selected_priority_ ? call_group_ : group();
   info.client_id = client_id();
   if (emergency) {
     info.emergency = enabled;
@@ -300,13 +354,21 @@ void Client::change_priority(bool emergency, bool enabled) {
 
 //------------------------------------------------------------------------------
 // TS 24.379 clause 12.1.1.1 and clause 12.1.1.2: originate or cancel an emergency alert (SIP MESSAGE with the
-// location of clause 6.2.9.1); origin names the user whose alert is cancelled.
-void Client::change_alert(bool enabled, const std::string &origin) {
+// location of clause 6.2.9.1); origin names the user whose alert is cancelled. The cancellation names the group of
+// the alert (clause 12.1.1.2 step 4a): shown_group when given (the group it was shown for, the selected group or a
+// monitored one); else another user's alert during a call on a monitored group is that group's, the user's own alert
+// the selected group's.
+void Client::change_alert(bool enabled, const std::string &origin, const std::string &shown_group) {
   // Starting an alert may affiliate implicitly (TS 24.379 clause 9.2.2.3.6); cancelling needs affiliation.
   if (!authorized_ || (!affiliated_ && !enabled)) throw std::runtime_error("alert cancellation requires affiliation");
   if (!alert_pending_.empty()) throw std::runtime_error("alert request already pending");
   McpttInfo info;
-  info.request_uri = group();
+  const bool monitored_call = selected_priority_.has_value();
+  const bool shown_for_call =
+      !enabled && monitored_call && !origin.empty() && origin != user() && alerts_.contains(origin);
+  if (!shown_group.empty() && shown_group != group() && !monitoring(shown_group))
+    throw std::runtime_error("alert cancellation: the group is neither the selected nor a monitored one");
+  info.request_uri = !shown_group.empty() ? shown_group : shown_for_call ? call_group_ : group();
   info.client_id = client_id();
   info.alert = enabled;
   info.originated_by = origin;
@@ -315,6 +377,7 @@ void Client::change_alert(bool enabled, const std::string &origin) {
   if (location) parts.push_back({mcptt_location_mime, emergency_location_xml(*location)});
   const auto boundary = "mcx-" + random_id();
   alert_pending_ = enabled ? "start" : "cancel";
+  alert_pending_group_ = info.request_uri;
   const auto [type, body] = message_body(parts, boundary);
   sip_.request(
       "MESSAGE", service(), type, body,

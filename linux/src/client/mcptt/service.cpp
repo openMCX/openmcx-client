@@ -97,7 +97,10 @@ std::pair<std::string, std::string> Client::publish_body(bool affiliation) {
   if (affiliation) {
     info.request_uri = user();
     parts = info_parts(info);
-    Affiliation request{user(), client_id(), random_id(), {group()}, {}};
+    // TS 24.379 clause 9.2.1.2: the selected group and the groups monitored besides it.
+    std::vector<std::string> groups{group()};
+    groups.insert(groups.end(), monitored_groups_.begin(), monitored_groups_.end());
+    Affiliation request{user(), client_id(), random_id(), groups, {}};
     parts.push_back({"application/pidf+xml", affiliation_xml(request, false)});
   } else {
     parts.push_back({"application/poc-settings+xml", poc_settings_xml(client_id())});

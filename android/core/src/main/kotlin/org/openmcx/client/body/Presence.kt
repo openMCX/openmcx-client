@@ -48,13 +48,19 @@ object Affiliation {
             leaf("${service.prefix}:p-id", pId)
         }
 
-    /** A NOTIFY body: group to status, from the tuple of [clientId] (all tuples when it has none of ours). */
+    /**
+     * A NOTIFY body: group to status, from the tuple of [clientId] (§9.3.1.2: one tuple per client of the user; none of
+     * ours is no group). The "status" attribute is optional: a group listed without it is "affiliated".
+     */
     fun parse(body: String, clientId: String): Map<String, String> {
         val root = Xml.parse(body)
-        val tuples = root.children("tuple")
-        val ours = tuples.filter { it.getAttribute("id") == clientId }.ifEmpty { tuples }
-        return ours.flatMap { it.descendants("affiliation") }.associate { it.getAttribute("group") to it.getAttribute("status") }
+        val ours = root.children("tuple").filter { it.getAttribute("id") == clientId }
+        return ours.flatMap { it.descendants("affiliation") }
+            .associate { it.getAttribute("group") to it.getAttribute("status").ifEmpty { "affiliated" } }
     }
+
+    /** §9.2.2.2.11 step 3 (as the participating function determines it): a listed group counts unless given up. */
+    fun counts(status: String?): Boolean = status != null && status != "deaffiliating" && status != "deaffiliated"
 
     /** The p-id of a NOTIFY, if any. */
     fun pId(body: String): String? = Xml.parse(body).descendants("p-id").firstOrNull()?.text()

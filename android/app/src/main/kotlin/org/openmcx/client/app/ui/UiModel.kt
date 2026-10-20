@@ -4,6 +4,7 @@
 
 package org.openmcx.client.app.ui
 
+import org.openmcx.client.body.Affiliation
 import org.openmcx.client.body.McService
 
 import kotlinx.coroutines.launch
@@ -351,7 +352,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     val mcptt = Engine.mcptt
     val profile = client.profile
     val groups = (client.config.mcptt?.groups ?: emptyList()).map {
-        GroupItem(it, status.mcptt.affiliations[it] == "affiliated", Engine.selectedGroup.value == it)
+        GroupItem(it, Affiliation.counts(status.mcptt.affiliations[it]), Engine.selectedGroup.value == it)
     }
     fun item(call: Call): CallItem {
         val floor = call.media?.takeIf { it.isStarted }?.floor

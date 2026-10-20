@@ -183,14 +183,16 @@ func (a *api) view(r *http.Request) (map[string]any, error) {
 		return out
 	}
 	v := pick("registered", "authorized", "affiliated", "call_state", "call_type", "private_peer", "floor_state",
-		"floor_owner", "talking", "floor_control", "priority", "priority_pending", "alerts", "alert_locations",
-		"last_call_failure", "queue_position", "callback_requests_sent", "callback_requests_received",
-		"first_to_answer", "ambient", "last_ambient", "announced_transfer", "last_forwarding", "service_outcomes",
+		"floor_owner", "talking", "floor_control", "priority", "priority_pending", "alert_pending", "alerts",
+		"alerts_group", "alert_locations", "last_call_failure", "queue_position", "callback_requests_sent",
+		"callback_requests_received", "first_to_answer", "ambient", "last_ambient", "announced_transfer",
+		"last_forwarding", "service_outcomes",
 		"conference_participants", "mcdata_alert_state", "mcdata_alerts_received", "mcdata_alert_last_result",
 		"private_emergency_state", "functional_alias", "requested_functional_aliases", "active_functional_aliases",
 		"takeover_possible_functional_aliases", "last_fa_result", "functional_alias_subscription_result",
 		"calling_functional_alias", "called_functional_alias", "functional_alias_redirect", "regroups",
-		"regroup_result", "xcap_last", "msgstore", "profile_groups", "call_group", "adhoc_priority", "adhoc_broadcast",
+		"regroup_result", "xcap_last", "msgstore", "profile_groups", "affiliations", "monitored_groups", "monitored",
+		"call_group", "adhoc_priority", "adhoc_broadcast",
 		"last_modify_result", "mcdata_media_result", "mcdata_media_session", "mcdata_media_received",
 		"mcdata_media_sent", "mcdata_session_group", "mcdata_enhanced_status", "mcdata_enhanced_status_values",
 		"mcdata_functional_aliases", "mcdata_functional_alias_in_use", "mcdata_fa_last_result",
@@ -508,6 +510,19 @@ func commandLine(req map[string]any) (string, error) {
 			return "", err
 		}
 		return "group " + target, nil
+	case "monitor":
+		// TS 24.379 clause 9.2.1.2: the groups affiliated besides the selected one; none stops monitoring.
+		groups, err := ids(req["groups"], 0, 16)
+		if err != nil {
+			return "", err
+		}
+		if len(groups) == 0 {
+			return "monitor none", nil
+		}
+		if slices.Contains(groups, "none") {
+			return "", errors.New(`"none" is not a group`)
+		}
+		return "monitor " + strings.Join(groups, " "), nil
 	case "private":
 		target, err := id("target")
 		if err != nil {
@@ -835,6 +850,15 @@ func commandLine(req map[string]any) (string, error) {
 			user, err := id("user")
 			if err != nil {
 				return "", err
+			}
+			// The group the alert was shown for (the selected group or a monitored one), named by the cancellation
+			// (clause 12.1.1.2 step 4a) even if the call that showed it has ended since.
+			if str("group") != "" {
+				group, err := id("group")
+				if err != nil {
+					return "", err
+				}
+				return "alert off " + user + " " + group, nil
 			}
 			return "alert off " + user, nil
 		}

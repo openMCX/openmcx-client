@@ -233,7 +233,7 @@ SipResponse Client::mcvideo_affiliation_notify(const SipMessage &message) {
   const bool terminated = get_header(message.headers, "Subscription-State").starts_with("terminated");
   Affiliation affiliation;
   try {
-    affiliation = parse_affiliation(message.parts.empty() ? message.body : message.parts.front().body);
+    affiliation = parse_affiliation(message.parts.empty() ? message.body : message.parts.front().body, client_id());
   } catch (const std::exception &error) {
     event("mcvideo_affiliation_notify_refused", {{"reason", error.what()}});
     response.status_code = 400;
@@ -250,9 +250,10 @@ SipResponse Client::mcvideo_affiliation_notify(const SipMessage &message) {
     response.status_code = 403;
     return response;
   }
+  // TS 24.281 clause 8.3.1 (TS 24.379 clause 9.2.2.2.11): the listed groups not being given up.
   std::set<std::string> groups;
   for (std::size_t index = 0; index < affiliation.groups.size(); ++index)
-    if (index < affiliation.statuses.size() && affiliation.statuses[index] == "affiliated")
+    if (client_rules::counts_as_affiliated(index < affiliation.statuses.size() ? affiliation.statuses[index] : ""))
       groups.insert(affiliation.groups[index]);
   mcvideo_groups_ = groups;
   mcvideo_affiliated_ = groups.contains(mcvideo_group());

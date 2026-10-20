@@ -196,6 +196,8 @@ class McxClient(
         @Volatile var request: SipRequest? = null
         @Volatile var dialog: Dialog? = null
         @Volatile var publish: FunctionalAliasRules.Change? = null
+        /** The whole set the last PUBLISH listed, while its NOTIFY is awaited (the base of the next change). */
+        @Volatile var wanted: Set<String>? = null
         /** Aliases the user asked to take over that the server has not offered yet (§9A.2.1.2 step 6 d, NOTE 4). */
         val takeOverWanted: MutableSet<String> = ConcurrentHashMap.newKeySet()
     }
@@ -657,25 +659,27 @@ class McxClient(
         withTimeoutOrNull(5_000) { subscription.firstNotify.await() }
         val body = Affiliation.publish(service, ownId(service), config.clientId, groups)
         val parts = listOf(infoPart(service, requestUri = ownId(service)), Part(Affiliation.CONTENT_TYPE, body.toByteArray()))
-        val request = serviceRequest(service, "PUBLISH", "presence", parts).also { it.headers.add("Expires", "4294967295") }
+        // §9.2.1.2 steps 4 and 5: Expires 0 when no group is wanted.
+        val expires = if (groups.isEmpty()) "0" else "4294967295"
+        val request = serviceRequest(service, "PUBLISH", "presence", parts).also { it.headers.add("Expires", expires) }
         affiliationEtags[service]?.let { request.headers.add("SIP-If-Match", it) }
         subscription.changed = CompletableDeferred()
         var response = ua.send(request)
         if (response.status == 412) {
             affiliationEtags.remove(service)
-            val retry = serviceRequest(service, "PUBLISH", "presence", parts).also { it.headers.add("Expires", "4294967295") }
+            val retry = serviceRequest(service, "PUBLISH", "presence", parts).also { it.headers.add("Expires", expires) }
             response = ua.send(retry)
         }
         if (!response.isSuccess) throw IllegalStateException("${service.name} affiliation: ${response.status} ${response.reason}")
         response.headers["SIP-ETag"]?.let { affiliationEtags[service] = it }
         // Affiliated when a NOTIFY says so for every group (§9.2.1.3); the p-id is not reliable.
         val deadline = System.currentTimeMillis() + 10_000
-        while (groups.any { subscription.affiliations[it] != "affiliated" }) {
+        while (groups.any { !Affiliation.counts(subscription.affiliations[it]) }) {
             val wait = deadline - System.currentTimeMillis()
             if (wait <= 0 || withTimeoutOrNull(wait) { subscription.changed.await() } == null) break
             subscription.changed = CompletableDeferred()
         }
-        val missing = groups.filter { subscription.affiliations[it] != "affiliated" }
+        val missing = groups.filter { !Affiliation.counts(subscription.affiliations[it]) }
         if (missing.isNotEmpty()) throw IllegalStateException("${service.name} not affiliated to $missing")
         event("${service.name} affiliated to $groups")
     }
@@ -763,24 +767,28 @@ class McxClient(
     }
 
     /**
-     * §9A.2.1.2 steps 4 to 6: the PUBLISH of one status change: Expires 4294967295 to activate, 0 to deactivate, the
-     * per-user PIDF with a new <p-id-fa> and <take-over> when [takeOver].
+     * §9A.2.1.2 steps 4 to 6: the PUBLISH of one status change [aliases]: the per-user PIDF listing every alias wanted
+     * active ([FunctionalAliasRules.wanted]), with a new <p-id-fa> and <take-over> when [takeOver]; Expires 4294967295,
+     * or 0 when none is wanted.
      */
     private suspend fun publishAliases(channel: AliasChannel, action: String, aliases: List<String>, takeOver: Boolean) {
         val service = channel.service
         val user = ownId(service)
         val publishId = UUID.randomUUID().toString()
+        val listed = FunctionalAliasRules.wanted(channel.wanted ?: channel.state.value.standing, action, aliases)
+        channel.wanted = listed
         channel.publish = FunctionalAliasRules.Change(action, aliases, publishId)
         val parts = listOf(aliasInfo(service, user),
-            Part(FunctionalAliasPidf.CONTENT_TYPE, FunctionalAliasPidf.request(user, config.clientId, aliases, takeOver, publishId, service).toByteArray()))
+            Part(FunctionalAliasPidf.CONTENT_TYPE, FunctionalAliasPidf.request(user, config.clientId, listed.toList(), takeOver, publishId, service).toByteArray()))
         val request = serviceRequest(service, "PUBLISH", "presence", parts)
-            .also { it.headers.add("Expires", if (action == "deactivate") "0" else "4294967295") }
+            .also { it.headers.add("Expires", FunctionalAliasRules.expires(listed)) }
         channel.state.update { it.copy(lastAction = action, lastStatus = null, lastWarning = null, lastOutcomes = emptyMap()) }
         event("${service.name} functional alias $action $aliases${if (takeOver) " (take-over)" else ""}")
         val response = ua.send(request)
         val warning = response.headers["Warning"]
         channel.state.update { if (channel.publish?.publishId == publishId) it.copy(lastStatus = response.status, lastWarning = warning) else it }
         if (!response.isSuccess) {
+            if (channel.publish?.publishId == publishId) channel.wanted = null // the standing set again
             aliases.forEach { channel.takeOverWanted.remove(it) }
             throw IllegalStateException("${service.name} functional alias $action: ${response.status} ${response.reason}${warning?.let { " ($it)" } ?: ""}")
         }
@@ -799,6 +807,7 @@ class McxClient(
         // Computed once (its take-overs leave the wanted set), then set: NOTIFYs of one subscription arrive in order.
         val result = FunctionalAliasRules.notified(channel.state.value, status, channel.publish, channel.takeOverWanted)
         channel.state.value = result.state
+        if (status.publishId != null && status.publishId == channel.publish?.publishId) channel.wanted = null
         event("${service.name} functional alias status: active ${result.state.active}, take-over possible ${result.state.takeOverPossible}")
         if (result.takeOver.isNotEmpty()) scope.launch {
             runCatching { publishAliases(channel, "takeover", result.takeOver, true) }.onFailure { event("functional alias take-over: ${it.message}") }

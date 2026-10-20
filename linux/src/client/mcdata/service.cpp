@@ -80,6 +80,8 @@ void Client::mcdata_authorize() {
         mcdata_alias_dialog_.clear();
         mcdata_alias_answered_ = false;
         mcdata_aliases_active_.clear();
+        mcdata_aliases_standing_.clear();
+        mcdata_alias_publish_open_.clear();
       }
       if (refresh && response.status_code == 412) {
         schedule([this] { mcdata_authorize(); });
@@ -159,14 +161,18 @@ SipResponse Client::mcdata_affiliation_notify(const SipMessage &request) {
   const bool fetch = request.dialog_id == mcdata_fetch_;
   const bool terminated = get_header(request.headers, "Subscription-State").starts_with("terminated");
   const auto body = request.parts.empty() ? request.body : request.parts.front().body;
-  const auto affiliation = parse_affiliation(body);
+  // TS 24.282 clause 8.4.1: one tuple per client; a subscription reads this client's (none: no group), a fetch of
+  // another user's status the one tuple of the answer.
+  const auto affiliation = fetch ? parse_affiliation(body) : parse_affiliation(body, client_id());
 
   // An empty status has no <affiliation> element to show its namespace.
   if (!affiliation.mcdata && !affiliation.groups.empty())
     throw std::runtime_error("MCData affiliation NOTIFY without the MCData namespace");
+  // TS 24.282 clause 8.4.1 (TS 24.379 clause 9.2.2.2.11): the listed groups not being given up, also the base of the
+  // next whole-set PUBLISH (one still "affiliating", left out, would be deaffiliated).
   std::set<std::string> groups;
   for (std::size_t index = 0; index < affiliation.groups.size(); ++index)
-    if (index < affiliation.statuses.size() && affiliation.statuses[index] == "affiliated")
+    if (client_rules::counts_as_affiliated(index < affiliation.statuses.size() ? affiliation.statuses[index] : ""))
       groups.insert(affiliation.groups[index]);
   if (fetch) {
     mcdata_fetch_result_ = {

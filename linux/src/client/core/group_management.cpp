@@ -168,6 +168,25 @@ void Client::group_documents_subscribe(const std::vector<std::string> &args) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.481 clause 6.3.13.2.1: re-subscribe to a modified list: a re-SUBSCRIBE in each group document subscription with
+// one <entry> for each document to be subscribed to (the whole list, RFC 5875), the groups followed once answered 200.
+void Client::group_documents_resubscribe(const std::vector<std::string> &args) {
+  std::vector<std::string> entries;
+  for (const auto &group_id : args)
+    entries.push_back("org.openmobilealliance.groups/global/byGroupID/" + url_encode(group_id));
+  for (const auto &entry : group_doc_subscriptions_) {
+    const auto dialog = entry.first;
+    sip_.request_in_dialog(
+        dialog, "SUBSCRIBE", resource_lists_mime, xcap_resource_list(entries),
+        {{"Event", "xcap-diff"}, {"Expires", "600"}}, [this, dialog, args](const SipResponse &response) {
+          if (response.status_code < 200) return;
+          status_["group_subscription_result"] = {{"groups", args}, {"status", response.status_code}};
+          if (response.status_code == 200) schedule([this, dialog, args] { group_doc_subscriptions_[dialog] = args; });
+        });
+  }
+}
+
+//------------------------------------------------------------------------------
 // TS 24.481 clause 6.3.13.2.1: end every group document subscription with a re-SUBSCRIBE with Expires 0.
 void Client::group_documents_unsubscribe() {
   // The final NOTIFY (Subscription-State terminated) removes a subscription (group_document_notify); one whose
@@ -194,6 +213,7 @@ void Client::group_documents_unsubscribe() {
 // group-create <document> <group ID> <member>...   group-delete <document>
 // group-member add|remove <group ID> <member>
 // group-subscribe <group ID>...                    group-unsubscribe
+// group-resubscribe <group ID>...
 // temporary-create ...                             temporary-delete <document>
 void Client::group_management_command(const std::string &cmd) {
   std::istringstream in(cmd);
@@ -234,6 +254,9 @@ void Client::group_management_command(const std::string &cmd) {
   } else if (verb == "group-subscribe") { // TS 24.481 clause 6.3.13.2.1
     if (args.empty()) throw std::runtime_error("group-subscribe <group ID>...");
     group_documents_subscribe(args);
+  } else if (verb == "group-resubscribe") { // TS 24.481 clause 6.3.13.2.1, re-SUBSCRIBE with a modified list
+    if (args.empty()) throw std::runtime_error("group-resubscribe <group ID>...");
+    group_documents_resubscribe(args);
   } else if (verb == "group-unsubscribe") { // TS 24.481 clause 6.3.13.2.1, re-SUBSCRIBE with Expires 0
     group_documents_unsubscribe();
   } else

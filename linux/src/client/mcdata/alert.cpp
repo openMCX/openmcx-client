@@ -149,7 +149,7 @@ void Client::mcdata_functional_alias(const std::string &action, const std::vecto
 // when every alias to take over was offered as "take-over-possible" (step 6 d)); a take-over asked earlier goes as an
 // activation and follows once offered. The answer only says the request was taken: the NOTIFY gives the outcome.
 void Client::mcdata_publish_functional_alias(const std::string &action, const std::vector<std::string> &aliases) {
-  auto wanted = mcdata_aliases_active_;
+  auto wanted = mcdata_alias_publish_open_.empty() ? mcdata_aliases_standing_ : mcdata_aliases_wanted_;
   for (const auto &alias : aliases) {
     if (action == "deactivate")
       wanted.erase(alias);
@@ -176,12 +176,15 @@ void Client::mcdata_publish_functional_alias(const std::string &action, const st
                             {"take_over", request.take_over},
                             {"outcomes", Json::object()}};
   mcdata_aliases_wanted_ = wanted;
+  mcdata_alias_publish_open_ = request.publish_id;
   mcdata_request("presence", parts, {{"Expires", wanted.empty() ? "0" : "4294967295"}},
                  [this, action, aliases, pid = request.publish_id](const SipResponse &response) {
                    if (response.status_code < 200) return;
                    if (mcdata_fa_last_result_.value("p_id_fa", "") == pid)
                      mcdata_fa_last_result_["status"] = response.status_code;
                    if (response.status_code != 200) {
+                     // The standing set is the base again.
+                     if (mcdata_alias_publish_open_ == pid) mcdata_alias_publish_open_.clear();
                      for (const auto &alias : aliases) mcdata_takeover_wanted_.erase(alias);
                      failure("MCData functional alias " + action + ": " + std::to_string(response.status_code));
                    }
@@ -243,7 +246,7 @@ SipResponse Client::mcdata_alias_notify(const SipMessage &message) {
       response.status_code = 400;
       return response;
     }
-    std::set<std::string> active, possible;
+    std::set<std::string> active, standing, possible;
     std::map<std::string, std::string> statuses;
     for (const auto &entry : notified.entries) {
       statuses[entry.alias] = entry.status;
@@ -251,8 +254,13 @@ SipResponse Client::mcdata_alias_notify(const SipMessage &message) {
         active.insert(entry.alias);
       else if (entry.status == "take-over-possible")
         possible.insert(entry.alias);
+      if (entry.status == "activated" || entry.status == "activating") standing.insert(entry.alias);
     }
-    mcdata_aliases_active_ = mcdata_aliases_wanted_ = active;
+    mcdata_aliases_active_ = active;
+    mcdata_aliases_standing_ = standing;
+    if (!notified.publish_id.empty() && notified.publish_id == mcdata_alias_publish_open_)
+      mcdata_alias_publish_open_.clear();
+    if (mcdata_alias_publish_open_.empty()) mcdata_aliases_wanted_ = standing;
     mcdata_takeover_possible_ = possible;
     const bool handled = !notified.publish_id.empty() && mcdata_fa_last_result_.is_object() &&
                          mcdata_fa_last_result_.value("p_id_fa", "") == notified.publish_id;

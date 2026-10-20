@@ -74,6 +74,11 @@ object FunctionalAliasPidf {
 data class FunctionalAliasState(
     val available: List<String> = emptyList(),
     val active: Set<String> = emptySet(),
+    /**
+     * The aliases the last NOTIFY lists `activated` or `activating`: the base of the next PUBLISH. One listed
+     * `deactivating` is given up (still [active] until it ends): listing it again activates it (§9A.2.2.2.3 step 12 a).
+     */
+    val standing: Set<String> = emptySet(),
     val takeOverPossible: Set<String> = emptySet(),
     val inUse: String? = null,
     val subscribed: Boolean = false,
@@ -98,18 +103,32 @@ object FunctionalAliasRules {
      */
     fun splitTakeOver(aliases: List<String>, offered: Set<String>): Pair<List<String>, List<String>> = aliases.partition { it in offered }
 
+    /**
+     * §9A.2.1.2 step 6 a (TS 24.282 §22.2.1.2, TS 24.281 §20.2.1.2): the PUBLISH lists every alias the user wants
+     * active, as the participating function takes the list as the user's whole set (§9A.2.2.2.3 steps 12 to 14: one left
+     * out is deactivated, Expires 0 deactivates all). It is [base] (the aliases standing, or the set of a change
+     * still awaiting its NOTIFY) with the change of [action] for [aliases] applied.
+     */
+    fun wanted(base: Set<String>, action: String, aliases: List<String>): Set<String> =
+        if (action == "deactivate") base - aliases.toSet() else base + aliases
+
+    /** §9A.2.1.2 steps 4 and 5: Expires 4294967295 with aliases wanted, 0 when none is (the PIDF then lists none). */
+    fun expires(wanted: Set<String>): String = if (wanted.isEmpty()) "0" else "4294967295"
+
     /** What a status NOTIFY changes: the new state, and the take-overs to send now that they are offered. */
     data class Notified(val state: FunctionalAliasState, val takeOver: List<String>)
 
     /**
      * §9A.2.1.3 (TS 24.282 §22.2.1.3, TS 24.281 §20.2.1.3): a per-user status NOTIFY replaces the aliases known active
-     * (`activated`, or `deactivating` while still active) and those offered for take-over. When its <p-id-fa> is that
+     * (`activated`, or `deactivating` while still active), those standing (`activated` or `activating`) and those
+     * offered for take-over. When its <p-id-fa> is that
      * of [last], each alias of that change gets its outcome: activated, take-over-possible, deactivated, or refused
      * (omitted from the notification); an alias the user wanted to take over and is now offered is taken over.
      * [wanted] loses the aliases of the answered change.
      */
     fun notified(state: FunctionalAliasState, status: FunctionalAliasPidf.Status, last: Change?, wanted: MutableSet<String>): Notified {
         val active = status.entries.filter { it.status == "activated" || it.status == "deactivating" }.map { it.alias }.toSet()
+        val standing = status.entries.filter { it.status == "activated" || it.status == "activating" }.map { it.alias }.toSet()
         val possible = status.entries.filter { it.status == "take-over-possible" }.map { it.alias }.toSet()
         val answered = last != null && status.publishId == last.publishId
         val outcomes = if (!answered) state.lastOutcomes else last!!.aliases.associateWith { alias ->
@@ -121,7 +140,7 @@ object FunctionalAliasRules {
             }
         }
         val takeOver = if (answered) last!!.aliases.filter { wanted.remove(it) && it in possible } else emptyList()
-        return Notified(state.copy(active = active, takeOverPossible = possible, available = (state.available + active + possible).distinct(),
+        return Notified(state.copy(active = active, standing = standing, takeOverPossible = possible, available = (state.available + active + possible).distinct(),
             inUse = state.inUse?.takeIf { it in active }, lastOutcomes = outcomes), takeOver)
     }
 }

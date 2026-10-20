@@ -62,7 +62,11 @@ void Client::run_command(const std::string &cmd) {
   } else if (cmd == "imminent on" || cmd == "imminent off") {
     change_priority(false, cmd.ends_with("on"));
   } else if (cmd == "alert on" || cmd == "alert off" || cmd.starts_with("alert off ")) {
-    change_alert(cmd == "alert on", cmd.starts_with("alert off ") ? cmd.substr(10) : std::string{});
+    // alert off [<user> [<group>]]: the group the alert was shown for (the selected group or a monitored one).
+    std::istringstream words(cmd.size() > 10 ? cmd.substr(10) : std::string{});
+    std::string origin, shown;
+    words >> origin >> shown;
+    change_alert(cmd == "alert on", origin, shown);
   } else if (cmd.starts_with("regroup ")) {
     regroup_request_command(cmd);
   } else if (cmd.starts_with("priority ")) {
@@ -123,6 +127,16 @@ void Client::run_command(const std::string &cmd) {
     ptt_command(cmd);
   } else if (cmd == "release") {
     if (!ambient_hidden()) release();
+  } else if (cmd == "affiliation-subscription end" || cmd == "affiliation-subscription start") {
+    // Test aid: end the MCPTT affiliation status subscription (an in-dialog SUBSCRIBE with Expires 0, the final NOTIFY
+    // ends it here) or start a new one (TS 24.379 clause 9.2.1.3). The affiliations themselves stay (clause 9.2.2.2.4).
+    if (cmd.ends_with("start")) {
+      if (subscription_.empty()) subscribe_affiliation(false);
+    } else if (!subscription_.empty()) {
+      sip_.request_in_dialog(subscription_, "SUBSCRIBE", {}, {},
+                             {{"Event", "presence"}, {"Expires", "0"}, {"P-Preferred-Service", mcptt_icsi}});
+      subscription_refresh_at_ = 0;
+    }
   } else if (cmd == "refresh-affiliation") {
     // Test aid: refresh the MCPTT (and MCVideo) affiliation status subscriptions now, as the timer does before the
     // granted duration ends (TS 24.379 clause 9.2.1.3, TS 24.281 clause 8.2.1.3).
@@ -148,11 +162,14 @@ void Client::run_command(const std::string &cmd) {
     affiliate();
   } else if (cmd == "deaffiliate") {
     deaffiliate_command();
+  } else if (cmd.starts_with("monitor ")) {
+    monitor_command(cmd);
   } else if (cmd.starts_with("profile-revoke ")) {
     profile_command(cmd);
   } else if (cmd.starts_with("group-create ") || cmd.starts_with("group-delete ") || cmd.starts_with("group-member ") ||
-             cmd.starts_with("group-subscribe ") || cmd == "group-unsubscribe" ||
-             cmd.starts_with("temporary-create ") || cmd.starts_with("temporary-delete ")) {
+             cmd.starts_with("group-subscribe ") || cmd.starts_with("group-resubscribe ") ||
+             cmd == "group-unsubscribe" || cmd.starts_with("temporary-create ") ||
+             cmd.starts_with("temporary-delete ")) {
     group_management_command(cmd);
   } else if (cmd.starts_with("seal ")) {
     seal_command(cmd);
@@ -264,6 +281,9 @@ void Client::select_group(const std::string &cmd) {
                     {}, {{"Authorization", "Bearer " + token_}});
   if (document.status != 200) throw std::runtime_error("group authorization retrieval failed");
   cfg_["mcptt"]["group_id"] = selected;
+  // A monitored group selected is affiliated as the selected group from now on.
+  std::erase(monitored_groups_, selected);
+  monitored_state_.erase(selected);
   emergency_ = imminent_ = false;
   alerts_.clear();
   alert_pending_.clear();
@@ -505,6 +525,54 @@ void Client::hangup_command() {
   }
   release();
   if (!dialog_.empty()) sip_.bye(dialog_);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9.2.1.2: "monitor <group>... | monitor none" sets the groups affiliated besides the selected one;
+// the next PUBLISH lists them all (the affiliation status change procedure names every group the client wants).
+// Each must be one this client may select. With protected media a call needs its group's GMK (TS 33.180),
+// which this client holds for the selected group only, so groups are not monitored then.
+void Client::monitor_command(const std::string &cmd) {
+  if (!authorized_) throw std::runtime_error("authorization required");
+  std::istringstream words(cmd.substr(8));
+  std::vector<std::string> groups;
+  bool none = false;
+  const auto allowed = cfg_.at("mcptt").value("allowed_groups", std::vector<std::string>{group()});
+  for (std::string candidate; words >> candidate;) {
+    if (candidate == "none") {
+      none = true;
+      continue;
+    }
+    if (candidate == group() || std::find(groups.begin(), groups.end(), candidate) != groups.end()) continue;
+    if (std::find(allowed.begin(), allowed.end(), candidate) == allowed.end() &&
+        std::find(profile_groups_.begin(), profile_groups_.end(), candidate) == profile_groups_.end())
+      throw std::runtime_error("group is not provisioned for selection: " + candidate);
+    groups.push_back(candidate);
+  }
+  if (none && !groups.empty()) throw std::runtime_error("usage: monitor <group>... | monitor none");
+  if (!groups.empty() && protected_media())
+    throw std::runtime_error("groups are not monitored with protected media: a call needs its own group key");
+  if (groups.size() > 16) throw std::runtime_error("at most 16 groups are monitored");
+  if (selected_priority_ && std::find(groups.begin(), groups.end(), call_group_) == groups.end())
+    throw std::runtime_error("the call's group stays monitored until the call ends");
+  monitored_groups_ = groups;
+  for (auto entry = monitored_state_.begin(); entry != monitored_state_.end();)
+    entry = std::find(groups.begin(), groups.end(), entry.key()) == groups.end() ? monitored_state_.erase(entry)
+                                                                                 : std::next(entry);
+  event("monitored_groups", {{"groups", monitored_groups_}});
+  if (desired_affiliation_) affiliate();
+}
+
+//------------------------------------------------------------------------------
+// Helper: a group monitored besides the selected one, and one the server has affiliated (TS 24.379 clause 9.2.1.3).
+bool Client::monitoring(const std::string &candidate) const {
+  return !candidate.empty() && candidate != group() &&
+         std::find(monitored_groups_.begin(), monitored_groups_.end(), candidate) != monitored_groups_.end();
+}
+
+bool Client::monitored_affiliated(const std::string &candidate) const {
+  return monitoring(candidate) && affiliation_statuses_.contains(candidate) &&
+         client_rules::counts_as_affiliated(affiliation_statuses_.value(candidate, std::string{}));
 }
 
 //------------------------------------------------------------------------------

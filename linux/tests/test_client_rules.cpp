@@ -195,6 +195,17 @@ void test_alias_outcome() {
   check(alias_outcome("activated", true) == "activated", "a deactivation the server kept active");
 }
 
+//------------------------------------------------------------------------------
+// TS 24.379 clauses 9.3.1.2 and 9.2.2.2.11: which listed groups of an affiliation NOTIFY count as affiliated.
+void test_counts_as_affiliated() {
+  using mcx::client_rules::counts_as_affiliated;
+  check(counts_as_affiliated("affiliated"), "an affiliated group");
+  check(counts_as_affiliated("affiliating"), "an affiliating group counts, as at the participating function");
+  check(counts_as_affiliated(""), "a group without status counts (the attribute is optional)");
+  check(!counts_as_affiliated("deaffiliating"), "a deaffiliating group does not");
+  check(!counts_as_affiliated("deaffiliated"), "nor a deaffiliated one");
+}
+
 int main() {
   test_notifiers();
   test_has_warning();
@@ -205,6 +216,7 @@ int main() {
   test_floor_and_audio();
   test_authorization_retry();
   test_alias_outcome();
+  test_counts_as_affiliated();
   if (failures) std::fprintf(stderr, "%d check(s) failed\n", failures);
   return failures ? 1 : 0;
 }

@@ -100,6 +100,8 @@ void Client::finish_log_off() {
   mcdata_affiliation_etag_.clear();
   mcdata_alias_answered_ = false;
   mcdata_aliases_active_.clear();
+  mcdata_aliases_standing_.clear();
+  mcdata_alias_publish_open_.clear();
   protection_ = ProtectedCall{};
   mcvideo_protection_ = ProtectedCall(true);
   csk_.reset();

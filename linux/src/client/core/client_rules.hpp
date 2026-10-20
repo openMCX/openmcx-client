@@ -237,4 +237,13 @@ inline std::optional<std::string> alias_outcome(std::string_view status, bool de
   return deactivation ? "deactivated" : "refused";
 }
 
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9.3.1.2 (TS 24.282 clause 8.4.1, TS 24.281 clause 8.3.1): whether a group listed in this client's
+// affiliation NOTIFY counts as affiliated, as the participating function determines it (clause 9.2.2.2.11 step 3):
+// "affiliating" or "affiliated", or no "status" (the attribute is optional), not "deaffiliating" ("deaffiliated"
+// entries are left out, clause 9.2.2.2.5 step 3b).
+inline bool counts_as_affiliated(std::string_view status) {
+  return status != "deaffiliating" && status != "deaffiliated";
+}
+
 } // namespace mcx::client_rules

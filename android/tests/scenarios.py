@@ -837,8 +837,17 @@ class Lab:
         duty_officer, incident_commander = alias(A, "duty-officer"), alias(A, "incident-commander")
         if not self.check("alice may use duty-officer and incident-commander", bool(duty_officer and incident_commander), available=fa(A)["available"]):
             return
-        self.cmd(A, "fa", "activate", duty_officer, incident_commander)
+        # Each PUBLISH lists every alias wanted active (9A.2.1.2 step 6 a; the server replaces the set, 9A.2.2.2.3
+        # steps 12 to 14): a second activation keeps the first, a deactivation lists the alias that stays.
+        self.cmd(A, "fa", "activate", duty_officer)
+        self.wait("alice holds duty-officer", lambda: duty_officer in fa(A)["active"])
+        self.cmd(A, "fa", "activate", incident_commander)
         self.wait("alice holds duty-officer and incident-commander", lambda: {duty_officer, incident_commander} <= set(fa(A)["active"]))
+        self.cmd(A, "fa", "deactivate", duty_officer)
+        self.wait("alice gives duty-officer up and keeps incident-commander",
+                  lambda: duty_officer not in fa(A)["active"] and incident_commander in fa(A)["active"])
+        self.cmd(A, "fa", "activate", duty_officer)
+        self.wait("alice holds both again", lambda: {duty_officer, incident_commander} <= set(fa(A)["active"]))
         self.check("alice's activation is answered 200, the outcome by NOTIFY", fa(A)["last_status"] == 200, last=fa(A))
         self.cmd(B, "fa", "activate", duty_officer)
         self.wait("bob is offered duty-officer for take-over", lambda: duty_officer in fa(B)["take_over_possible"])

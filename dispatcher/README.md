@@ -49,7 +49,8 @@ checked out beside it (`../openmcx-server`).
 | Regroup | group regroup and user regroup using a preconfigured group, created and removed; temporary groups formed and torn down at the group management server; calls on them from the group picker |
 | Location | the location of users, or of the user holding a functional alias, asked (optionally a fresh report); the last report of each user listed with its position, linked to a map; users told to report every so many seconds |
 | IP connectivity | a session with a user, or with the user holding a functional alias, opened and released; sessions offered to the dispatcher accepted; the built-in IP application pings the other end's tunnel address and answers its pings, with round-trip times and packet counters |
-| Coming soon | several monitored groups, remote affiliation, video, call recording, map, operator handoff |
+| Monitored groups | other groups of the user profile affiliated besides the selected one; their calls reach the dispatcher, named by their group; each group's affiliation status, priority and emergency alerts shown; a call on one at a time; not with protected media (a call needs its own group key) |
+| Coming soon | remote affiliation, video, call recording, map, operator handoff |
 
 ## Position mode (M3): bound to MCX Admin
 
@@ -147,6 +148,7 @@ group's call, no broadcast), `{"action":"callback","target":"<MCPTT ID>","urgenc
 `{"action":"private","target":"<MCPTT ID>","emergency":bool,"no_floor":bool,"to_alias":bool}` (`to_alias`: the
 target is a functional alias; not with `emergency`),
 `{"action":"priority","level":"emergency|imminent","on":bool}` (the call in progress), `{"action":"group","id":"<group>"}`,
+`{"action":"monitor","groups":["<group>",...]}` (the groups affiliated besides the selected one; `[]` stops),
 `answer`, `reject`, `hangup`, `ptt` (talk from the audio socket), `release`, `{"action":"alert","on":bool,"user":"<MCPTT ID>"}`
 (`user`: another user's alert to cancel), `{"action":"mcdata-alert","on":bool,"user":"<MCData ID>","group":"<group>"}`
 (`user` and `group`: another user's MCData alert to cancel), `{"action":"first-to-answer","targets":["<MCPTT ID>",...],"emergency":bool}`
@@ -204,6 +206,7 @@ python3 dispatcher/lab/adhoc_scenario.py <lab> --project disp     # DSP-46..48; 
 python3 dispatcher/lab/session_scenario.py <lab> --project disp   # DSP-49..52
 python3 dispatcher/lab/mcdata_fa_scenario.py <lab> --project disp # DSP-53..56
 python3 dispatcher/lab/ipcon_scenario.py <lab> --project disp     # DSP-60..64
+python3 dispatcher/lab/monitor_scenario.py <lab> --project disp   # DSP-65..68
 docker run --rm --network host -v playwright-py:/py -v <lab>:/lab -v $PWD/dispatcher/lab:/check -w /check \
   mcr.microsoft.com/playwright/python:v1.55.0-noble sh -c \
   '[ -d /py/playwright ] || pip install -q --break-system-packages --target /py playwright==1.55.0; PYTHONPATH=/py python3 browser_check.py /lab'

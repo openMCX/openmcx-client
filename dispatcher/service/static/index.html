@@ -67,6 +67,9 @@
         </div>
         <div class="row"><label title="TS 24.379 clause 10.1.2: the calls above join the selected chat group's call, or start it">
           <input type="checkbox" id="chat"> chat group (join)</label></div>
+        <h3>Monitored groups</h3>
+        <div id="monitor-note" class="note">Calls on the groups ticked reach this position too; select a group to call it.</div>
+        <div id="monitor-list" class="list"></div>
         <h3>During the call</h3>
         <div class="row">
           <button id="raise-emergency" data-action="priority" data-level="emergency" data-on="true" class="stop" disabled>Raise emergency</button>
@@ -342,7 +345,6 @@
   <section id="soon">
     <h2>Coming soon</h2>
     <p class="note">Not in this version. The dispatcher uses only what the OpenMCX servers already offer.</p>
-    <button disabled title="Coming soon">Monitor several groups</button>
     <button disabled title="Coming soon">Remote affiliation</button>
     <button disabled title="Coming soon">Video</button>
     <button disabled title="Coming soon">Call recording</button>

@@ -19,6 +19,8 @@ namespace mcx {
 // "take-over-possible" (clause 9A.2.1.2 step 6 d) and NOTE 4); the others are asked for as activations and taken over
 // once offered. Command:
 //   fa activate|takeover|deactivate <alias>...   fa use <alias>|none
+// Test aid: "fa publish 0|4294967295 [<alias>...]" sends exactly the aliases and the Expires given, as another
+// client would, so that the server's handling of the whole set (clause 9A.2.2.2.3 steps 12 and 13) can be exercised.
 void Client::functional_alias_command(const std::string &arguments) {
   std::istringstream words(arguments);
   std::string action, alias;
@@ -29,6 +31,12 @@ void Client::functional_alias_command(const std::string &arguments) {
     if (aliases.size() != 1) throw std::runtime_error("usage: fa use <alias>|none");
     functional_alias_ = aliases.front() == "none" ? std::string{} : aliases.front();
     return;
+  }
+  if (action == "publish") {
+    if (aliases.empty() || (aliases.front() != "0" && aliases.front() != "4294967295") || !authorized_)
+      throw std::runtime_error("usage: fa publish 0|4294967295 [<alias>...]");
+    const std::set<std::string> listed(aliases.begin() + 1, aliases.end());
+    return send_alias_publish("publish", {aliases.begin() + 1, aliases.end()}, listed, aliases.front(), false);
   }
   if ((action != "activate" && action != "takeover" && action != "deactivate") || aliases.empty() || !authorized_)
     throw std::runtime_error("usage: fa activate|takeover|deactivate <alias>...");
@@ -56,11 +64,30 @@ void Client::functional_alias_command(const std::string &arguments) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.379 clause 9A.2.1.2: the SIP PUBLISH of one status change: Expires 4294967295 to activate (step 4), 0 to
-// deactivate (step 5), the per-user PIDF with a new <p-id-fa> (step 6 e)) and <take-over> when `take_over`.
+// TS 24.379 clause 9A.2.1.2: the SIP PUBLISH of one status change. The participating function takes the aliases
+// listed as the user's whole set (clause 9A.2.2.2.3 steps 12 to 14: one left out is deactivated, Expires 0
+// deactivates all), so the PUBLISH lists every alias wanted active (step 6 a): those the last NOTIFY lists "activated" or
+// "activating", or the set of a change still awaiting its NOTIFY, with this change applied; Expires 4294967295 (step 4), or 0 when none is wanted
+// (step 5; the PIDF then lists no alias, clause 9A.3.1.2 item 7).
 void Client::publish_functional_alias(const std::string &action, const std::vector<std::string> &aliases,
                                       bool take_over) {
-  FunctionalAliasRequest request{user(), client_id(), random_id(), aliases, take_over};
+  auto wanted = alias_publish_open_.empty() ? standing_aliases_ : aliases_wanted_;
+  for (const auto &alias : aliases)
+    if (action == "deactivate")
+      wanted.erase(alias);
+    else
+      wanted.insert(alias);
+  send_alias_publish(action, aliases, wanted, wanted.empty() ? "0" : "4294967295", take_over);
+}
+
+//------------------------------------------------------------------------------
+// Helper: the PUBLISH listing `listed`, the per-user PIDF with a new <p-id-fa> (step 6 e)) and <take-over> when
+// `take_over`; `aliases` are the ones the change is about, whose outcome the NOTIFY gives.
+void Client::send_alias_publish(const std::string &action, const std::vector<std::string> &aliases,
+                                const std::set<std::string> &listed, const std::string &expires, bool take_over) {
+  FunctionalAliasRequest request{user(), client_id(), random_id(), {listed.begin(), listed.end()}, take_over};
+  aliases_wanted_ = listed;
+  alias_publish_open_ = request.publish_id;
   McpttInfo info;
   info.request_uri = user();
   info.client_id = client_id();
@@ -74,9 +101,7 @@ void Client::publish_functional_alias(const std::string &action, const std::vect
                                {"p_id_fa", request.publish_id},
                                {"outcomes", Json::object()}};
   sip_.publish(service(), "multipart/mixed; boundary=" + boundary, body,
-               {{"Event", "presence"},
-                {"Expires", action == "deactivate" ? "0" : "4294967295"},
-                {"P-Preferred-Service", mcptt_icsi}},
+               {{"Event", "presence"}, {"Expires", expires}, {"P-Preferred-Service", mcptt_icsi}},
                [this, action, aliases, pid = request.publish_id](const SipResponse &response) {
                  if (response.status_code < 200) return;
                  if (status_["last_fa_result"].value("p_id_fa", "") == pid) {
@@ -89,6 +114,7 @@ void Client::publish_functional_alias(const std::string &action, const std::vect
                      if (action != "deactivate") requested_aliases_.push_back(requested);
                    }
                  } else {
+                   if (alias_publish_open_ == pid) alias_publish_open_.clear(); // the standing set again
                    for (const auto &requested : aliases) takeover_wanted_.erase(requested);
                    failure("functional alias " + action + ": " + std::to_string(response.status_code));
                  }
@@ -122,8 +148,9 @@ void Client::alias_status_subscribe() {
 
 //------------------------------------------------------------------------------
 // TS 24.379 clause 9A.2.1.3 and clause 9A.3.1.2: the NOTIFY with this user's functional alias status. It replaces the
-// aliases known active ("activated", or "deactivating" while still active) and those that may be taken over; the
-// <p-id-fa> of the last status change gives its outcome per alias. A change fires the location trigger
+// aliases known active ("activated", or "deactivating" while still active), those standing ("activated" or "activating":
+// the base of the next PUBLISH) and those that may be taken over; the <p-id-fa> of the last status change gives its
+// outcome per alias. A change fires the location trigger
 // (<FunctionalAliasActivation> or <FunctionalAliasDeactivation>).
 SipResponse Client::alias_status_notify(const SipMessage &message) {
   SipResponse response;
@@ -146,7 +173,7 @@ SipResponse Client::alias_status_notify(const SipMessage &message) {
       response.status_code = 400;
       return response;
     }
-    std::set<std::string> active, possible;
+    std::set<std::string> active, standing, possible;
     std::map<std::string, std::string> statuses;
     for (const auto &entry : notified.entries) {
       statuses[entry.alias] = entry.status;
@@ -154,6 +181,7 @@ SipResponse Client::alias_status_notify(const SipMessage &message) {
         active.insert(entry.alias);
       else if (entry.status == "take-over-possible")
         possible.insert(entry.alias);
+      if (entry.status == "activated" || entry.status == "activating") standing.insert(entry.alias);
     }
     for (const auto &alias : active)
       if (!active_aliases_.contains(alias)) {
@@ -166,10 +194,12 @@ SipResponse Client::alias_status_notify(const SipMessage &message) {
         location_signal(location::Event::FunctionalAliasDeactivation);
       }
     active_aliases_ = active;
+    standing_aliases_ = standing;
     takeover_possible_aliases_ = possible;
     auto &last = status_["last_fa_result"];
     const bool handled =
         !notified.publish_id.empty() && last.is_object() && last.value("p_id_fa", "") == notified.publish_id;
+    if (!notified.publish_id.empty() && notified.publish_id == alias_publish_open_) alias_publish_open_.clear();
     // The take-over the user asked for, once the alias is offered; a refused one is dropped.
     const auto take_over = settle_alias_outcomes(last, statuses, handled, takeover_wanted_);
     if (!take_over.empty()) schedule([this, take_over] { publish_functional_alias("takeover", take_over, true); });

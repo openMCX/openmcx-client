@@ -198,6 +198,9 @@ void Client::save_status(std::uint64_t now) {
   if (mcdata_enabled()) status_["msgstore"] = store_status_;
   status_["affiliated"] = affiliated_;
   status_["desired_affiliation"] = desired_affiliation_;
+  status_["affiliations"] = affiliation_statuses_;
+  status_["monitored_groups"] = monitored_groups_;
+  status_["monitored"] = monitored_state_;
   status_["media_ready"] = remote_.has_value();
   status_["conference_subscription"] = conference_subscription_;
   status_["talking"] = talking_ && !hidden;
@@ -222,6 +225,9 @@ void Client::floor_and_priority_status() {
   }
   status_["priority"] = emergency_ ? "emergency" : imminent_ ? "imminent" : "normal";
   status_["alerts"] = alerts_;
+  // The group whose emergency alerts "alerts" lists: during a call on a monitored group that call's, else the
+  // selected group's (a cancellation names it, TS 24.379 clause 12.1.1.2 step 4a).
+  status_["alerts_group"] = selected_priority_.has_value() ? call_group_ : group();
   status_["alert_pending"] = alert_pending_;
   status_["priority_pending"] = priority_pending_;
   status_["negotiated_floor_priority"] =

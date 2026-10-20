@@ -195,7 +195,13 @@ SipResponse Client::priority_notice(const SipMessage &message) {
     return response;
   }
   const auto info = message_info(message);
-  if (info.request_uri != user() || info.calling_group != group()) {
+  // The selected group's notices update the live state, or, during a call on a monitored group, that call's; the
+  // selected group's then waits in selected_priority_, and other monitored groups keep their own.
+  const bool monitored_call = selected_priority_.has_value();
+  const bool live = info.calling_group == (monitored_call ? call_group_ : group());
+  const bool waiting = !live && monitored_call && info.calling_group == group();
+  const bool other = !live && !waiting && monitoring(info.calling_group);
+  if (info.request_uri != user() || (!live && !waiting && !other)) {
     response.status_code = 403;
     return response;
   }
@@ -207,10 +213,18 @@ SipResponse Client::priority_notice(const SipMessage &message) {
     response.status_code = 403;
     return response;
   }
+  // TS 24.379 clause 12.1.1.2: the receipt completes the pending alert request of its group, whichever state the
+  // group's notices update.
+  if (info.alert_received == true && info.alert && info.calling_group == alert_pending_group_) alert_pending_.clear();
+  if (!live) {
+    auto &state = waiting ? *selected_priority_ : monitored_state_[info.calling_group];
+    priority_into(state, info, message_location(message));
+    event("monitored_priority", {{"group", info.calling_group}, {"state", state}});
+    return response;
+  }
   update_priority(info, message_location(message));
   if (message.method == "INFO")
     status_["priority_corrections_received"] = status_.value("priority_corrections_received", 0u) + 1;
-  if (info.alert_received == true && info.alert) alert_pending_.clear();
   return response;
 }
 
@@ -467,7 +481,16 @@ SipResponse Client::affiliation_notify(const SipMessage &message) {
   }
   auto substate = get_header(message.headers, "Subscription-State");
   if (!substate.starts_with("active")) {
-    affiliated_ = false;
+    // The subscription ended: this client no longer learns its affiliation status, which stays as last notified (the
+    // server keeps the affiliations, clause 9.2.2.2.4), unless the server ended it for want of the resource (RFC 6665
+    // section 4.1.3, "noresource" or "rejected": the service authorisation ended).
+    if (substate.find("reason=noresource") != std::string_view::npos ||
+        substate.find("reason=rejected") != std::string_view::npos)
+      affiliated_ = false;
+    if (substate.starts_with("terminated")) {
+      subscription_.clear();
+      event("affiliation_subscription_ended", {{"state", std::string(substate)}});
+    }
     response.status_code = 200;
     return response;
   }
@@ -475,14 +498,17 @@ SipResponse Client::affiliation_notify(const SipMessage &message) {
     response.status_code = 489;
     return response;
   }
-  auto affiliation = parse_affiliation(message.body);
-  if (affiliation.user_id != user() || affiliation.client_id != client_id())
-    throw std::runtime_error("notification identity mismatch");
+  // TS 24.379 clause 9.3.1.2: one tuple per client of the user; this client's is read (none: no group).
+  auto affiliation = parse_affiliation(message.body, client_id());
+  if (affiliation.user_id != user()) throw std::runtime_error("notification identity mismatch");
   affiliated_ = false;
-  for (size_t index = 0; index < affiliation.groups.size(); index++)
-    if (affiliation.groups[index] == group() && index < affiliation.statuses.size() &&
-        affiliation.statuses[index] == "affiliated")
-      affiliated_ = true;
+  affiliation_statuses_ = Json::object();
+  for (size_t index = 0; index < affiliation.groups.size(); index++) {
+    auto state = index < affiliation.statuses.size() ? affiliation.statuses[index] : std::string{};
+    if (state.empty()) state = "affiliated"; // the "status" attribute is optional (clause 9.3.1.2)
+    affiliation_statuses_[affiliation.groups[index]] = state;
+    if (affiliation.groups[index] == group() && client_rules::counts_as_affiliated(state)) affiliated_ = true;
+  }
   event("affiliation_status", {{"affiliated", affiliated_}});
   return response;
 }
@@ -566,7 +592,8 @@ SipResponse Client::group_call_reinvite(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
   auto info = message_info(message);
-  if (!message.remote_media || !remote_ || info.request_uri != user() || info.calling_group != group() ||
+  if (!message.remote_media || !remote_ || info.request_uri != user() ||
+      info.calling_group != (selected_priority_ ? call_group_ : group()) ||
       (info.session_type != "prearranged" && info.session_type != "chat") ||
       (info.broadcast == true && call_type_ != "broadcast") || (!info.emergency && !info.imminent_peril)) {
     response.status_code = 488;
@@ -599,7 +626,10 @@ SipResponse Client::incoming_group(const SipMessage &message) {
   // TS 24.379 clause 16.2.1.3 step 4 (clause 16.3.1.3 for a user regroup): a client told of a regroup is
   // affiliated with it and takes its calls without selecting it first.
   const bool via_regroup = regroups_.contains(info.calling_group) && info.calling_group != group();
-  if (!authorized_ || (!affiliated_ && !via_regroup) || !dialog_.empty() || std::time(nullptr) >= expires_) {
+  // TS 24.379 clause 10.1.1.2.1.2: a call on any group this client is affiliated to, a monitored one too.
+  const bool via_monitor = !via_regroup && monitored_affiliated(info.calling_group);
+  if (!authorized_ || (!affiliated_ && !via_regroup && !via_monitor) || !dialog_.empty() ||
+      std::time(nullptr) >= expires_) {
     response.status_code = 486;
     return response;
   }
@@ -608,7 +638,7 @@ SipResponse Client::incoming_group(const SipMessage &message) {
   const bool via_hierarchy = info.broadcast == true && !info.associated_group.empty() &&
                              info.associated_group == group() && info.calling_group != group();
   if ((info.session_type != "prearranged" && info.session_type != "chat") || info.request_uri != user() ||
-      (info.calling_group != group() && !via_hierarchy && !via_regroup) || !message.remote_media) {
+      (info.calling_group != group() && !via_hierarchy && !via_regroup && !via_monitor) || !message.remote_media) {
     response.status_code = 488;
     return response;
   }
@@ -623,13 +653,14 @@ SipResponse Client::incoming_group(const SipMessage &message) {
   check_remote(*message.remote_media);
   local_.queueing = local_.queueing && message.remote_media->queueing;
   local_.floor_priority = message.remote_media->floor_priority;
+  if (via_monitor) enter_monitored_call(info.calling_group);
   update_priority(info, message_location(message));
   local_.floor_ssrc = random_ssrc();
   dialog_ = message.dialog_id;
   local_.payload_type = message.remote_media->payload_type;
   local_.octet_aligned = message.remote_media->octet_aligned;
   call_type_ = info.session_type == "chat" ? "chat" : info.broadcast == true ? "broadcast" : "prearranged";
-  call_group_ = via_hierarchy || via_regroup ? info.calling_group : std::string{};
+  call_group_ = via_hierarchy || via_regroup || via_monitor ? info.calling_group : std::string{};
   status_["calling_functional_alias"] = info.functional_alias;
   response.local_media = local_;
   remember_session(message.headers);

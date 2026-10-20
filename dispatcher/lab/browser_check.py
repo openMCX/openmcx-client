@@ -52,7 +52,7 @@ with sync_playwright() as p:
     page.goto(url)
     expect(page.locator("#registration")).to_contain_text("registered", timeout=30000)
     check("BRW-01 page shows the dispatcher registered", True)
-    check("BRW-02 coming-soon options are shown disabled", page.locator("#soon button:disabled").count() == 6)
+    check("BRW-02 coming-soon options are shown disabled", page.locator("#soon button:disabled").count() == 5)
 
     page.click("button[data-action=call][data-kind=normal]")
     expect(page.locator("#call-state")).to_contain_text("active", timeout=20000)
@@ -217,6 +217,14 @@ with sync_playwright() as p:
     page.click("#ipcon-close")
     expect(page.locator("#ipcon-state")).to_contain_text("closed", timeout=15000)
     check("BRW-24b an IP connectivity session with client-a opened, pinged and released from the page", True)
+    # Monitored groups (TS 24.379 clause 9.2.1.2): a second group ticked is affiliated, then unticked again.
+    parallel = "sip:operations-parallel@" + alice.split("@", 1)[1]
+    entry = page.locator("#monitor-list .item", has_text=parallel)
+    entry.locator("input[type=checkbox]").check()
+    expect(entry.locator("small")).to_contain_text("affiliated", timeout=20000)
+    entry.locator("input[type=checkbox]").uncheck()
+    expect(entry.locator("small")).to_have_count(0, timeout=20000)
+    check("BRW-25 a group monitored from the page is affiliated, and no longer when unticked", True)
     page.screenshot(path=str(lab / "artifacts" / "dispatcher.png"), full_page=True)
     check("BRW-05 no script errors", not errors, "; ".join(errors))
     browser.close()

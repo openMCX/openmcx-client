@@ -234,7 +234,7 @@ Where each step lives:
 | Configuration subscription | `subscribe_configuration`, `configuration_notified` (`core/group_management.cpp`) | TS 24.484 clause 6.3.13.2.2 |
 | Affiliation status subscription | `subscribe_affiliation`, body from `affiliation_subscribe_body`; refreshed by `refresh_affiliation_subscription` | TS 24.379 clause 9.2.1.3, RFC 6665 section 4.1.2.1 |
 | Group key | `subscribe_keys`, `group_key_notify` | TS 24.481 clause 6.3.13.2.1, TS 33.180 clause 5.7 |
-| Affiliation | `Client::affiliate` | TS 24.379 clause 9.2.1.2 |
+| Affiliation | `Client::affiliate`; the selected group and the monitored ones (`monitor_command`), each group's status in `affiliation_notify` | TS 24.379 clause 9.2.1.2, clause 9.2.1.3 |
 
 Token renewal (`schedule_token_renewal`, `renew_token`) signs in again ten minutes before the token expires (halfway
 for a token that lives less than 20 minutes) and sends the MCPTT, MCData and MCVideo authorisation PUBLISH again with

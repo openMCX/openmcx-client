@@ -139,6 +139,7 @@ void Client::clear_call_state() {
   local_.direction = "sendrecv";
   local_.implicit_request = false;
   local_.control = MediaControl::floor;
+  leave_monitored_call();
   last_call_type_ = call_type_;
   last_call_group_ = call_group_;
   call_type_.clear();

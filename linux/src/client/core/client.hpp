@@ -216,11 +216,16 @@ class Client {
   // TS 24.379 clause 9A.2.1.3: the subscription to this user's functional alias status (its dialog, set up before
   // the first status change, clause 9A.2.1.1), whether it was answered, the status changes waiting for that answer,
   // the aliases the last NOTIFY listed active and those it offered for take-over, and the aliases the user asked to
-  // take over before they were offered.
+  // take over before they were offered. Every PUBLISH lists the whole set wanted active (clause 9A.2.1.2 step 6 a):
+  // aliases_wanted_ is the last one sent, the base of the next change until the NOTIFY of alias_publish_open_
+  // (its p-id-fa) says what became of it; then the base is standing_aliases_, those the last NOTIFY lists "activated"
+  // or "activating" (one listed "deactivating" is given up: listing it again activates it, clause 9A.2.2.2.3 step 12 a).
   std::string alias_status_dialog_;
   bool alias_status_answered_ = false;
   std::vector<std::string> pending_alias_commands_;
-  std::set<std::string> active_aliases_, takeover_possible_aliases_, takeover_wanted_;
+  std::set<std::string> active_aliases_, takeover_possible_aliases_, takeover_wanted_, aliases_wanted_,
+      standing_aliases_;
+  std::string alias_publish_open_;
   // Private call call-back entries (TS 24.379 clause 11.1.5, tables G.13-1 and G.13-2): requesting
   // side MCPTT ID -> "PCCB-I2/3/4" state, target side MCPTT ID -> request data.
   Json pccb_requesting_ = Json::object(), pccb_target_ = Json::object();
@@ -368,6 +373,32 @@ class Client {
 
   std::set<std::string> alerts_;
   std::string alert_pending_;
+  // The group of the pending alert request (its <mcptt-request-uri>), whose receipt completes it.
+  std::string alert_pending_group_;
+
+  // TS 24.379 clause 9.2.1.2: the groups monitored besides the selected one ("monitor"), affiliated in the same
+  // PUBLISH, with each group's affiliation status from the server (clause 9.2.1.3) and the priority and emergency
+  // alerts of each monitored group (clause 12.1.1.3), kept apart from the selected group's. During a call on a
+  // monitored group the call's state is the live one and the selected group's waits in selected_priority_.
+  std::vector<std::string> monitored_groups_;
+  Json affiliation_statuses_ = Json::object(), monitored_state_ = Json::object();
+  std::optional<Json> selected_priority_;
+
+  bool monitoring(const std::string &group) const;
+
+  bool monitored_affiliated(const std::string &group) const;
+
+  void monitor_command(const std::string &cmd);
+
+  Json live_priority() const;
+
+  void set_live_priority(const Json &state);
+
+  static void priority_into(Json &state, const McpttInfo &info, std::optional<EmergencyLocation> location);
+
+  void enter_monitored_call(const std::string &group);
+
+  void leave_monitored_call();
 
   static std::optional<EmergencyLocation> message_location(const SipMessage &message);
 
@@ -399,7 +430,7 @@ class Client {
 
   void change_priority(bool emergency, bool enabled);
 
-  void change_alert(bool enabled, const std::string &origin = {});
+  void change_alert(bool enabled, const std::string &origin = {}, const std::string &shown_group = {});
 
   // ---- MCPTT service authorisation, affiliation and helpers (mcptt/service.cpp) ----
   std::string user() const { return cfg_.at("mcptt").at("user_id"); }
@@ -531,6 +562,8 @@ class Client {
                                                  bool protect);
 
   void group_documents_subscribe(const std::vector<std::string> &args);
+
+  void group_documents_resubscribe(const std::vector<std::string> &args);
 
   void group_documents_unsubscribe();
 
@@ -794,6 +827,9 @@ private:
 
   void functional_alias_command(const std::string &arguments);
   void publish_functional_alias(const std::string &action, const std::vector<std::string> &aliases, bool take_over);
+
+  void send_alias_publish(const std::string &action, const std::vector<std::string> &aliases,
+                          const std::set<std::string> &listed, const std::string &expires, bool take_over);
   std::vector<std::string> settle_alias_outcomes(Json &last, const std::map<std::string, std::string> &statuses,
                                                  bool handled, std::set<std::string> &wanted);
   void alias_status_subscribe();
@@ -1045,6 +1081,12 @@ private:
   // ---- MCVideo functional aliases, mcvideo/functional_alias.cpp (TS 24.281 clause 20). The aliases the server confirmed
   // active for this user, the one presented in calls, and the last change's result.
   std::set<std::string> mcvideo_aliases_;
+  // TS 24.281 clause 20.2.1.2 step 6 a): every PUBLISH lists the whole set wanted active; the last one sent is the base
+  // of the next change until the NOTIFY with its p-id-fa (or, without a status subscription, its answer) arrives; then
+  // the base is mcvideo_aliases_standing_, those the last NOTIFY lists "activated" or "activating" (one listed
+  // "deactivating" is given up: listing it again activates it, clause 20.2.2.2.3 step 12 a).
+  std::set<std::string> mcvideo_aliases_wanted_, mcvideo_aliases_standing_;
+  std::string mcvideo_alias_publish_open_;
   // TS 24.281 clause 20.2.1.2 step 6 d): the aliases this user's status NOTIFY offered as "take-over-possible", and
   // those the user asked to take over before they were offered.
   std::set<std::string> mcvideo_takeover_possible_, mcvideo_takeover_wanted_;
@@ -1605,8 +1647,13 @@ private:
   void mcdata_alert_incoming(const mcdata::Info &info, const std::vector<BodyPart> &parts);
 
   // TS 24.282 clause 22.2.1.2: functional alias status change. The published list is the full set
-  // of aliases wanted active; an empty set is Expires 0.
-  std::set<std::string> mcdata_aliases_wanted_, mcdata_aliases_active_;
+  // of aliases wanted active; an empty set is Expires 0. Its base is mcdata_aliases_standing_, those the last NOTIFY
+  // lists "activated" or "activating" (one listed "deactivating" is given up: listing it again activates it, clause
+  // 22.2.2.2.3 step 12 a); mcdata_aliases_active_ are those usable ("activated", or "deactivating" while still active).
+  // While a change awaits its NOTIFY (mcdata_alias_publish_open_, its p-id-fa), the base of the next one is the set it
+  // listed, mcdata_aliases_wanted_ (TS 24.282 clause 22.2.1.2 step 6 a).
+  std::set<std::string> mcdata_aliases_wanted_, mcdata_aliases_active_, mcdata_aliases_standing_;
+  std::string mcdata_alias_publish_open_;
   std::string mcdata_alias_in_use_;
   Json mcdata_fa_last_result_ = nullptr;
   // TS 24.282 clause 22.2.1.3: the subscription to this user's functional alias status (its dialog, whether it was
