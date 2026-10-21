@@ -59,6 +59,10 @@ void Client::mcdata_discover_content_server(const std::string &group) {
   mcdata_request(
       "", {{mcdata::info_mime, mcdata::info_xml(info)}}, mcdata_fd_headers(),
       [this, group](const SipResponse &response) {
+        // The discovery response MESSAGE (clause 10.2.1.3) may arrive before this 200: its URI is kept.
+        if (response.status_code < 300 && mcdata_discovery_result_.is_object() &&
+            !mcdata_discovery_result_["uri"].is_null())
+          return;
         mcdata_discovery_result_ = {{"group", group},
                                     {"status", response.status_code},
                                     {"warning", std::string(get_header(response.headers, "Warning"))},
