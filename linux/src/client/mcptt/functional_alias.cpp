@@ -18,7 +18,7 @@ namespace mcx {
 // first. A take-over asked by the user carries <take-over> only for the aliases the NOTIFY offered as
 // "take-over-possible" (clause 9A.2.1.2 step 6 d) and NOTE 4); the others are asked for as activations and taken over
 // once offered. Command:
-//   fa activate|takeover|deactivate <alias>...   fa use <alias>|none
+//   fa activate|takeover|deactivate <alias>...   fa use <alias>|none   fa bind|unbind <alias> <group>[,<group>...]
 // Test aid: "fa publish 0|4294967295 [<alias>...]" sends exactly the aliases and the Expires given, as another
 // client would, so that the server's handling of the whole set (clause 9A.2.2.2.3 steps 12 and 13) can be exercised.
 void Client::functional_alias_command(const std::string &arguments) {
@@ -31,6 +31,14 @@ void Client::functional_alias_command(const std::string &arguments) {
     if (aliases.size() != 1) throw std::runtime_error("usage: fa use <alias>|none");
     functional_alias_ = aliases.front() == "none" ? std::string{} : aliases.front();
     return;
+  }
+  if (action == "bind" || action == "unbind") {
+    if (aliases.size() != 2 || !authorized_)
+      throw std::runtime_error("usage: fa bind|unbind <alias> <group>[,<group>...]");
+    std::vector<std::string> groups;
+    for (std::istringstream list(aliases[1]); std::getline(list, alias, ',');)
+      if (!alias.empty()) groups.push_back(alias);
+    return alias_binding(action == "bind", aliases[0], groups);
   }
   if (action == "publish") {
     if (aliases.empty() || (aliases.front() != "0" && aliases.front() != "4294967295") || !authorized_)
@@ -243,6 +251,42 @@ std::vector<std::string> Client::settle_alias_outcomes(Json &last, const std::ma
   }
   last["pending"] = pending;
   return take_over;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clauses 9A.4.2.1.2 (binding) and 9A.4.2.1.3 (unbinding): the MCPTT client sends a SIP MESSAGE with
+// <request-type> "fa-group-binding-req", the <binding-ind> and the functional alias, and the groups in a resource-lists
+// body. The user profile must allow it (<allow-functional-alias-binding-with-group>), and a binding names an alias this
+// client activated. The result, with any Warning, is kept in alias_binding_result.
+void Client::alias_binding(bool bind, const std::string &alias, const std::vector<std::string> &groups) {
+  if (groups.empty()) throw std::runtime_error("usage: fa bind|unbind <alias> <group>[,<group>...]");
+  require_profile({"allow-functional-alias-binding-with-group"});
+  if (bind && !active_aliases_.contains(alias))
+    throw std::runtime_error("a functional alias must be activated to be bound");
+  McpttInfo info;
+  info.client_id = client_id();
+  info.functional_alias = functional_alias_;
+  info.service["request-type"] = "fa-group-binding-req";
+  info.service["binding-ind"] = bind ? "true" : "false";
+  info.service[bind ? "binding-fa-uri" : "unbinding-fa-uri"] = alias;
+  const std::vector<BodyPart> parts{{mcptt_mime, mcptt_info_xml(info)},
+                                    {resource_lists_mime, resource_list_xml(groups)}};
+  const auto boundary = "mcx-" + random_id();
+  const auto action = bind ? "bind" : "unbind";
+  status_["alias_binding_result"] = {{"action", action}, {"alias", alias}, {"groups", groups},
+                                     {"status", 0},      {"warning", ""},  {"request", ++alias_binding_requests_}};
+  sip_.request("MESSAGE", service(), "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
+               {{"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"},
+                {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(mcptt_icsi) + "\";require;explicit"},
+                {"P-Preferred-Service", mcptt_icsi}},
+               [this](const SipResponse &response) {
+                 if (response.status_code < 200) return;
+                 auto &result = status_["alias_binding_result"];
+                 result["status"] = response.status_code;
+                 result["warning"] = std::string(get_header(response.headers, "Warning"));
+                 event("functional_alias_binding_result", result);
+               });
+  event("functional_alias_binding_requested", {{"action", action}, {"alias", alias}, {"groups", groups}});
 }
 
 } // namespace mcx

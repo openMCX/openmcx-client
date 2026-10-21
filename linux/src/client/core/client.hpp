@@ -232,6 +232,10 @@ class Client {
   std::set<std::string> active_aliases_, takeover_possible_aliases_, takeover_wanted_, aliases_wanted_,
       standing_aliases_;
   std::string alias_publish_open_;
+  // TS 24.379 clauses 9A.4.2.1.2 and 9A.4.2.1.3: the binding requests sent (status alias_binding_result).
+  unsigned alias_binding_requests_ = 0;
+
+  void alias_binding(bool bind, const std::string &alias, const std::vector<std::string> &groups);
   // Private call call-back entries (TS 24.379 clause 11.1.5, tables G.13-1 and G.13-2): requesting
   // side MCPTT ID -> "PCCB-I2/3/4" state, target side MCPTT ID -> request data.
   Json pccb_requesting_ = Json::object(), pccb_target_ = Json::object();
