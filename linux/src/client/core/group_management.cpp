@@ -157,13 +157,18 @@ void Client::group_documents_subscribe(const std::vector<std::string> &args) {
     entries.push_back("org.openmobilealliance.groups/global/byGroupID/" + url_encode(group_id));
   parts.push_back({resource_lists_mime, xcap_resource_list(entries)});
   const auto boundary = "mcx-" + random_id();
+  // A refused SUBSCRIBE (403 when no group of the list may be followed, clause 6.3.13.3.2.2) creates no subscription
+  // (RFC 6665 section 4.1.2.1), so it is not kept for a later re-SUBSCRIBE.
+  auto created = std::make_shared<std::string>();
   const auto dialog = sip_.subscribe(
       service(), "xcap-diff", 600, {{"P-Preferred-Service", mcptt_icsi}},
-      [this, args](const SipResponse &response) {
+      [this, args, created](const SipResponse &response) {
         if (response.status_code < 200) return;
         status_["group_subscription_result"] = {{"groups", args}, {"status", response.status_code}};
+        if (response.status_code >= 300) schedule([this, created] { group_doc_subscriptions_.erase(*created); });
       },
       "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary));
+  *created = dialog;
   group_doc_subscriptions_[dialog] = args;
 }
 
@@ -174,16 +179,25 @@ void Client::group_documents_resubscribe(const std::vector<std::string> &args) {
   std::vector<std::string> entries;
   for (const auto &group_id : args)
     entries.push_back("org.openmobilealliance.groups/global/byGroupID/" + url_encode(group_id));
+  // A subscription whose dialog is gone is dropped; the others are still re-subscribed.
+  std::vector<std::string> failed;
   for (const auto &entry : group_doc_subscriptions_) {
     const auto dialog = entry.first;
-    sip_.request_in_dialog(
-        dialog, "SUBSCRIBE", resource_lists_mime, xcap_resource_list(entries),
-        {{"Event", "xcap-diff"}, {"Expires", "600"}}, [this, dialog, args](const SipResponse &response) {
-          if (response.status_code < 200) return;
-          status_["group_subscription_result"] = {{"groups", args}, {"status", response.status_code}};
-          if (response.status_code == 200) schedule([this, dialog, args] { group_doc_subscriptions_[dialog] = args; });
-        });
+    try {
+      sip_.request_in_dialog(
+          dialog, "SUBSCRIBE", resource_lists_mime, xcap_resource_list(entries),
+          {{"Event", "xcap-diff"}, {"Expires", "600"}}, [this, dialog, args](const SipResponse &response) {
+            if (response.status_code < 200) return;
+            status_["group_subscription_result"] = {{"groups", args}, {"status", response.status_code}};
+            if (response.status_code == 200)
+              schedule([this, dialog, args] { group_doc_subscriptions_[dialog] = args; });
+          });
+    } catch (const std::exception &error) {
+      event("group_resubscribe_failed", {{"reason", error.what()}});
+      failed.push_back(dialog);
+    }
   }
+  for (const auto &dialog : failed) group_doc_subscriptions_.erase(dialog);
 }
 
 //------------------------------------------------------------------------------
