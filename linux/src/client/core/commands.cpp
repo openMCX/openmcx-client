@@ -452,8 +452,12 @@ void Client::pre_establish_command() {
 // the selected group (TS 24.379 clause 10.1.2.2.1.1), to exercise the server's
 // implicit affiliation checks such as the N2 limit (486, warning 102). An
 // accepted join is released at once; the outcome is last_call_failure.
+// "chat-join <group> emergency|imminent" makes it an emergency or imminent peril request (clause 10.1.2.2.1.1),
+// which the N2 limit spares only when authorised (clause 10.1.2.3.1.1 NOTE 5).
 void Client::chat_join_command(const std::string &cmd) {
-  const auto target_group = cmd.substr(10);
+  auto target_group = cmd.substr(10);
+  const bool emergency = target_group.ends_with(" emergency"), imminent = target_group.ends_with(" imminent");
+  if (emergency || imminent) target_group = target_group.substr(0, target_group.rfind(' '));
   const auto allowed = cfg_.at("mcptt").value("allowed_groups", std::vector<std::string>{group()});
   if (std::find(allowed.begin(), allowed.end(), target_group) == allowed.end())
     throw std::runtime_error("group is not provisioned for selection");
@@ -462,24 +466,33 @@ void Client::chat_join_command(const std::string &cmd) {
   info.session_type = "chat";
   info.request_uri = target_group;
   info.client_id = client_id();
+  if (emergency) {
+    info.emergency = true;
+    info.alert = false;
+  }
+  if (imminent) info.imminent_peril = true;
+  const auto headers = priority_headers(info);
   local_.floor_priority.reset();
   local_.floor_ssrc = random_ssrc();
   floor_sequence_.reset();
   floor_timers_ = participant_timers();
   status_["last_call_failure"] = nullptr;
-  dialog_ = sip_.invite(service(), local_, info_parts(info), [this](const SipResponse &response) {
-    if (response.status_code >= 300) {
-      status_["last_call_failure"] = {{"status", response.status_code},
-                                      {"warning", std::string(get_header(response.headers, "Warning"))}};
-      failure("chat join: " + std::to_string(response.status_code));
-    } else if (response.status_code >= 200 && !dialog_.empty()) {
-      status_["last_call_failure"] = {{"status", response.status_code}, {"warning", ""}};
-      // Not from within PJSIP's handling of the 200 (OK): ending the session there aborts on its reference count.
-      schedule([this, id = dialog_] {
-        if (dialog_ == id) sip_.bye(id);
-      });
-    }
-  });
+  dialog_ = sip_.invite(
+      service(), local_, info_parts(info),
+      [this](const SipResponse &response) {
+        if (response.status_code >= 300) {
+          status_["last_call_failure"] = {{"status", response.status_code},
+                                          {"warning", std::string(get_header(response.headers, "Warning"))}};
+          failure("chat join: " + std::to_string(response.status_code));
+        } else if (response.status_code >= 200 && !dialog_.empty()) {
+          status_["last_call_failure"] = {{"status", response.status_code}, {"warning", ""}};
+          // Not from within PJSIP's handling of the 200 (OK): ending the session there aborts on its reference count.
+          schedule([this, id = dialog_] {
+            if (dialog_ == id) sip_.bye(id);
+          });
+        }
+      },
+      headers);
   status_["call_state"] = "calling";
 }
 

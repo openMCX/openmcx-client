@@ -703,16 +703,22 @@ void Client::mcdata_ipcon_ping_command(std::istringstream &words) {
 }
 
 //------------------------------------------------------------------------------
-// sds-media <MCData ID|group=<id>|adhoc=<ad hoc group>> <text>   (standalone SDS over the media plane, TS 24.282 clause 9.2.3)
+// sds-media [priority=<n>] <MCData ID|group=<id>|adhoc=<ad hoc group>> <text>   (standalone SDS over the media plane,
+// TS 24.282 clause 9.2.3; priority=<n> is the <user-requested-priority> of clause 9.2.3.2.1).
 // An ad hoc group is adhoc=ID,ID,..., adhoc=criteria=<criteria> or adhoc=group=<ad hoc group>.
 void Client::mcdata_sds_media_command(std::istringstream &words) {
   std::string target, text;
+  std::optional<unsigned> priority;
   words >> target;
+  if (target.starts_with("priority=")) {
+    priority = static_cast<unsigned>(std::stoul(target.substr(9)));
+    words >> target;
+  }
   std::getline(words, text);
   if (!text.empty() && text.front() == ' ') text.erase(0, 1);
   if (target.empty() || text.empty()) throw std::runtime_error("usage: sds-media <MCData ID|group=<id>> <text>");
   const bool group = target.starts_with("group=");
-  return mcdata_send_media_sds(group ? target.substr(6) : target, text, group);
+  return mcdata_send_media_sds(group ? target.substr(6) : target, text, group, priority);
 }
 
 //------------------------------------------------------------------------------

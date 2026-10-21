@@ -497,7 +497,8 @@ void Client::mcdata_send_file_media(const std::string &target, bool group, const
 //------------------------------------------------------------------------------
 // TS 24.282 clause 9.2.3.2.3 with TS 24.582 clause 6.1.1.2: a standalone SDS message whose payload travels over the
 // media plane; the payload is sent once the MSRP connection is bound.
-void Client::mcdata_send_media_sds(const std::string &target, const std::string &text, bool group) {
+void Client::mcdata_send_media_sds(const std::string &target, const std::string &text, bool group,
+                                   std::optional<unsigned> priority) {
   if (!mcdata_authorized_) throw std::runtime_error("SDS requires MCData service authorisation");
   require_mcdata_profile({"allow-transmit-data"});
   if (mcdata_media_) throw std::runtime_error("an MCData media plane session is already open");
@@ -506,6 +507,8 @@ void Client::mcdata_send_media_sds(const std::string &target, const std::string 
   info.request_type = adhoc ? "adhoc-group-sds-session" : group ? "group-sds" : "one-to-one-sds";
   info.client_id = client_id();
   if (group) info.request_uri = target; // TS 24.282 clause 9.2.3.2.3: the group, with no resource-lists
+  // TS 24.282 clause 9.2.3.2.1: the application priority requested.
+  info.user_requested_priority = priority;
   const auto participants = adhoc ? mcdata_adhoc_target(target.substr(6), info) : std::vector<std::string>{};
   mcdata::SdsSignalling signalling;
   signalling.date_time = static_cast<std::uint64_t>(std::time(nullptr));

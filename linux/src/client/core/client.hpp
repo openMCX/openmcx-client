@@ -1536,7 +1536,8 @@ private:
   void mcdata_send_file_media(const std::string &target, bool group, const std::string &path, bool mandatory,
                               bool completion);
 
-  void mcdata_send_media_sds(const std::string &target, const std::string &text, bool group = false);
+  void mcdata_send_media_sds(const std::string &target, const std::string &text, bool group = false,
+                             std::optional<unsigned> priority = std::nullopt);
 
   // ---- MCData communication release (mcdata/release.cpp) ----
   // TS 24.282 clause 13 over the media plane: what this client learned about the release of
