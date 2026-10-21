@@ -122,17 +122,21 @@ void Client::mcvideo_result(const std::string &action, const SipResponse &respon
 
 //------------------------------------------------------------------------------
 // TS 24.281 clause 7.2.2: service authorisation and MCVideo service settings by PUBLISH; token replaces the access
-// token (a test aid for the 101 refusal of TS 24.281 clause 7.3.3 step 6).
+// token (a test aid for the 101 refusal of TS 24.281 clause 7.3.3 step 6). With mcptt.authorise_by_register, clause
+// 7.2.1: the mcvideo-info (and the CSK upload) in a REGISTER of its own, which the SIP core passes to the MCVideo
+// server in a third-party REGISTER (clause 7.3.2); a REGISTER while authorised renews the authorisation. The test
+// aid stays a PUBLISH.
 void Client::mcvideo_authorize(const std::string &token) {
   if (!mcvideo_enabled() || token_.empty() || logged_off_) return;
+  const bool by_register = authorise_by_register() && token.empty();
   McpttInfo info;
   info.access_token = token.empty() ? token_ : token;
   info.client_id = client_id();
   std::vector<SipHeader> headers{{"Expires", "4294967295"}};
-  const bool refresh = !mcvideo_auth_etag_.empty() && token.empty();
-  if (refresh) headers.push_back({"SIP-If-Match", mcvideo_auth_etag_});
-  std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
-                              {"application/poc-settings+xml", poc_settings_xml(client_id())}};
+  const bool refresh = by_register ? mcvideo_authorized_ : !mcvideo_auth_etag_.empty() && token.empty();
+  if (refresh && !by_register) headers.push_back({"SIP-If-Match", mcvideo_auth_etag_});
+  std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}};
+  if (!by_register) parts.push_back({"application/poc-settings+xml", poc_settings_xml(client_id())});
   // TS 33.180 clause 5.4 (TS 24.281 clause 4.7): the CSK in a new authorisation only, a new one after an ended
   // authorisation; a renewal carries none, the server holding it.
   if (!refresh && token.empty() && mcvideo_keys_ && mcvideo_csk_upload_.empty() && mcvideo_csk_) {
@@ -145,55 +149,61 @@ void Client::mcvideo_authorize(const std::string &token) {
   const bool uploading = !refresh && !mcvideo_csk_upload_.empty();
   if (uploading) parts.push_back({"application/mikey", mcvideo_csk_upload_});
   if (token.empty()) ++mcvideo_authorization_retry_.generation;
-  mcvideo_request("poc-settings", parts, headers,
-                  [this, probe = !token.empty(), refresh, uploading](const SipResponse &response) {
-                    mcvideo_result("authorize", response);
-                    if (probe) return; // the real authorisation stays as it was
-                    if (response.status_code != 200) {
-                      // TS 24.281 clause 7.2.2: not authorised, and so not affiliated.
-                      mcvideo_authorized_ = mcvideo_affiliated_ = false;
-                      failure("MCVideo service authorisation: " + std::to_string(response.status_code));
-                      // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew; the affiliation
-                      // status subscription and the affiliation follow the new authorisation.
-                      // A refresh refused for a reason that can be transient (the SIP core answering while the server restarts, for
-                      // example) is handled alike, the initial publication following after a growing delay.
-                      const bool transient = client_rules::transient_authorization_refusal(response.status_code);
-                      if (refresh && (response.status_code == 412 || transient)) {
-                        mcvideo_auth_etag_.clear();
-                        mcvideo_affiliation_etag_.clear();
-                        mcvideo_subscription_.clear();
-                      }
-                      if (refresh && response.status_code == 412) {
-                        schedule([this] { mcvideo_authorize(); });
-                      } else if (!refresh || transient) {
-                        // A refused publication is published again when the refusal can be transient.
-                        retry_authorization(mcvideo_authorization_retry_, "mcvideo", response, [this] {
-                          if (!mcvideo_authorized_) mcvideo_authorize();
-                        });
-                      }
-                      return;
-                    }
-                    mcvideo_auth_etag_ = get_header(response.headers, "SIP-ETag");
-                    mcvideo_authorization_retry_.attempts = 0;
-                    if (uploading) mcvideo_csk_upload_.clear();
-                    // A refresh (the renewed access token) changes nothing else: no new log-on, subscriptions or affiliation.
-                    if (refresh && mcvideo_authorized_) {
-                      event("mcvideo_service_authorization_renewed");
-                      return;
-                    }
-                    mcvideo_authorized_ = true;
-                    event("mcvideo_service_authorized");
-                    // TS 24.281 clause 18.3.4.1: the initial log-on trigger, once a configuration is held.
-                    mcvideo_location_logon_pending_ = !mcvideo_location_.configured();
-                    mcvideo_location_.signal(location::Event::InitialLogOn, monotonic_ms());
-                    // TS 24.281 clause 8.2.1.3: learn the affiliation status first; the affiliation
-                    // PUBLISH follows the first NOTIFY.
-                    if (mcvideo_subscription_.empty()) schedule([this] { mcvideo_subscribe(); });
-                    if (mcvideo_key_subscription_.empty())
-                      schedule([this] { mcvideo_subscribe_keys(); });
-                    else if (mcvideo_desired_affiliation_)
-                      schedule([this] { mcvideo_affiliate(true); });
-                  });
+  auto answered = [this, probe = !token.empty(), refresh, uploading](const SipResponse &response) {
+    mcvideo_result("authorize", response);
+    if (probe) return; // the real authorisation stays as it was
+    if (response.status_code != 200) {
+      // TS 24.281 clause 7.2.2: not authorised, and so not affiliated.
+      mcvideo_authorized_ = mcvideo_affiliated_ = false;
+      failure("MCVideo service authorisation: " + std::to_string(response.status_code));
+      // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew; the affiliation
+      // status subscription and the affiliation follow the new authorisation.
+      // A refresh refused for a reason that can be transient (the SIP core answering while the server restarts, for
+      // example) is handled alike, the initial publication following after a growing delay.
+      const bool transient = client_rules::transient_authorization_refusal(response.status_code);
+      if (refresh && (response.status_code == 412 || transient)) {
+        mcvideo_auth_etag_.clear();
+        mcvideo_affiliation_etag_.clear();
+        mcvideo_subscription_.clear();
+      }
+      if (refresh && response.status_code == 412) {
+        schedule([this] { mcvideo_authorize(); });
+      } else if (!refresh || transient) {
+        // A refused publication is published again when the refusal can be transient.
+        retry_authorization(mcvideo_authorization_retry_, "mcvideo", response, [this] {
+          if (!mcvideo_authorized_) mcvideo_authorize();
+        });
+      }
+      return;
+    }
+    mcvideo_auth_etag_ = get_header(response.headers, "SIP-ETag");
+    mcvideo_authorization_retry_.attempts = 0;
+    if (uploading) mcvideo_csk_upload_.clear();
+    // A refresh (the renewed access token) changes nothing else: no new log-on, subscriptions or affiliation.
+    if (refresh && mcvideo_authorized_) {
+      event("mcvideo_service_authorization_renewed");
+      return;
+    }
+    mcvideo_authorized_ = true;
+    event("mcvideo_service_authorized");
+    // TS 24.281 clause 18.3.4.1: the initial log-on trigger, once a configuration is held.
+    mcvideo_location_logon_pending_ = !mcvideo_location_.configured();
+    mcvideo_location_.signal(location::Event::InitialLogOn, monotonic_ms());
+    // TS 24.281 clause 8.2.1.3: learn the affiliation status first; the affiliation
+    // PUBLISH follows the first NOTIFY.
+    if (mcvideo_subscription_.empty()) schedule([this] { mcvideo_subscribe(); });
+    if (mcvideo_key_subscription_.empty())
+      schedule([this] { mcvideo_subscribe_keys(); });
+    else if (mcvideo_desired_affiliation_)
+      schedule([this] { mcvideo_affiliate(true); });
+  };
+  if (by_register) {
+    const auto [type, body] = message_body(parts, "mcvideo-" + random_id());
+    queue_register(type, body, answered);
+    event("mcvideo_service_authorization_by_register");
+  } else {
+    mcvideo_request("poc-settings", parts, headers, answered);
+  }
 }
 
 //------------------------------------------------------------------------------

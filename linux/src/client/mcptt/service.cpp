@@ -226,8 +226,38 @@ std::pair<std::string, std::string> Client::register_body() {
 // TS 24.379 clause 7.2.1: a REGISTER on the existing registration, carrying the service authorisation body.
 void Client::register_authorization(std::function<void(const SipResponse &)> handler) {
   auto [type, body] = register_body();
-  sip_.register_account(register_expires(), type, body, std::move(handler));
+  queue_register(std::move(type), std::move(body), std::move(handler));
   event("service_authorization_by_register");
+}
+
+//------------------------------------------------------------------------------
+// Helper: a REGISTER with a service authorisation body, sent once the one before it is answered.
+void Client::queue_register(std::string type, std::string body, std::function<void(const SipResponse &)> handler) {
+  register_queue_.push_back([this, type = std::move(type), body = std::move(body), handler = std::move(handler)] {
+    sip_.register_account(register_expires(), type, body, [this, handler](const SipResponse &response) {
+      if (response.status_code < 200) return;
+      register_busy_ = false;
+      handler(response);
+      schedule([this] { next_register(); });
+    });
+  });
+  next_register();
+}
+
+//------------------------------------------------------------------------------
+// Helper: send the next queued REGISTER; one the registration cannot send yet (a refresh in progress) is tried again
+// a second later.
+void Client::next_register() {
+  if (register_busy_ || register_queue_.empty()) return;
+  register_busy_ = true;
+  try {
+    register_queue_.front()();
+    register_queue_.pop_front();
+  } catch (const std::exception &error) {
+    register_busy_ = false;
+    event("register_deferred", {{"reason", error.what()}});
+    schedule_after(1000, [this] { next_register(); });
+  }
 }
 
 //------------------------------------------------------------------------------

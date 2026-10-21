@@ -482,6 +482,12 @@ class Client {
   [[nodiscard]] bool authorise_by_register() const;
   [[nodiscard]] std::pair<std::string, std::string> register_body();
   void register_authorization(std::function<void(const SipResponse &)> handler);
+  // TS 24.282 and TS 24.281 clause 7.2.1: each MC service authorises in a REGISTER of its own on the one registration,
+  // with its own information and CSK upload; the REGISTERs go one at a time (a registration has one transaction).
+  void queue_register(std::string type, std::string body, std::function<void(const SipResponse &)> handler);
+  void next_register();
+  std::deque<std::function<void()>> register_queue_;
+  bool register_busy_ = false;
   // The steps after a successful service authorisation (clause 7.2.2 or 7.2.1).
   void service_authorized();
 

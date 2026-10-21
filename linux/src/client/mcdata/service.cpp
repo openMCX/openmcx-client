@@ -43,17 +43,20 @@ void Client::mcdata_request(const std::string &event_name, std::vector<BodyPart>
 }
 
 //------------------------------------------------------------------------------
-// TS 24.282 clause 7.2.2: service authorisation and MCData service settings by PUBLISH.
+// TS 24.282 clause 7.2.2: service authorisation and MCData service settings by PUBLISH; with
+// mcptt.authorise_by_register, clause 7.2.1: the mcdata-info (and the CSK upload) in a REGISTER of its own, which the
+// SIP core passes to the MCData server in a third-party REGISTER (clause 7.3.2).
 void Client::mcdata_authorize() {
   if (!mcdata_enabled() || token_.empty() || logged_off_) return;
+  const bool by_register = authorise_by_register();
   mcdata::Info info;
   info.access_token = token_;
   info.client_id = client_id();
   std::vector<SipHeader> headers{{"Expires", "4294967295"}};
   const bool refresh = !mcdata_auth_etag_.empty();
   if (refresh) headers.push_back({"SIP-If-Match", mcdata_auth_etag_});
-  std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)},
-                              {"application/poc-settings+xml", poc_settings_xml(client_id())}};
+  std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
+  if (!by_register) parts.push_back({"application/poc-settings+xml", poc_settings_xml(client_id())});
   // TS 24.282 clause 7.2.2 step 3: the CSK, once, in the first service authorisation.
   const bool uploading = !mcdata_csk_accepted_ && !mcdata_csk_upload_.empty();
   if (uploading) {
@@ -62,7 +65,7 @@ void Client::mcdata_authorize() {
     parts.push_back({"application/mikey", mcdata_csk_upload_});
   }
   ++mcdata_authorization_retry_.generation;
-  mcdata_request("poc-settings", parts, headers, [this, uploading, refresh](const SipResponse &response) {
+  auto answered = [this, uploading, refresh](const SipResponse &response) {
     if (response.status_code != 200) {
       // TS 24.282 clause 7.2.2: not authorised, and so not affiliated.
       mcdata_authorized_ = mcdata_affiliated_ = false;
@@ -109,7 +112,14 @@ void Client::mcdata_authorize() {
       schedule([this] { mcdata_subscribe(); });
     else if (mcdata_desired_affiliation_)
       schedule([this] { mcdata_affiliate(true); });
-  });
+  };
+  if (by_register) {
+    const auto [type, body] = message_body(mcdata_seal_signalling(std::move(parts)), "mcdata-" + random_id());
+    queue_register(type, body, answered);
+    event("mcdata_service_authorization_by_register");
+  } else {
+    mcdata_request("poc-settings", parts, headers, answered);
+  }
 }
 
 //------------------------------------------------------------------------------
