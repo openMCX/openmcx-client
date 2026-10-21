@@ -31,6 +31,20 @@ class ConferenceInfoTest {
         assertTrue(ConferenceInfo.parse(deleted).applyTo(participants).isEmpty())
     }
 
+    @Test fun aDeletedUserAndTheVersionRule() {
+        // RFC 4575 §5.6: state="deleted" removes the user (no endpoint); §4.6: a partial document applies only as the
+        // next version, a full one when newer.
+        val partial = ConferenceInfo.parse("<conference-info xmlns=\"urn:ietf:params:xml:ns:conference-info\" " +
+            "entity=\"sip:operations@mcx.test\" version=\"4\" state=\"partial\"><users>" +
+            "<user entity=\"sip:bob.mcvideo@mcx.test\" state=\"deleted\"/></users></conference-info>")
+        assertEquals(listOf("sip:alice.mcvideo@mcx.test"),
+            partial.applyTo(mapOf("sip:alice.mcvideo@mcx.test" to "connected", "sip:bob.mcvideo@mcx.test" to "connected")).keys.toList())
+        assertTrue(partial.follows(3L))
+        assertTrue(!partial.follows(2L) && !partial.follows(null) && !partial.follows(4L))
+        val full = ConferenceInfo.parse(doc("full"))
+        assertTrue(full.follows(null) && full.follows(1L) && !full.follows(3L))
+    }
+
     @Test fun otherDocumentsAreRefused() {
         assertTrue(runCatching { ConferenceInfo.parse("<presence xmlns=\"urn:ietf:params:xml:ns:pidf\"/>") }.isFailure)
         assertTrue(runCatching { ConferenceInfo.parse(doc("sideways")) }.isFailure)

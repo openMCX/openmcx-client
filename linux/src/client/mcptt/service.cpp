@@ -321,6 +321,7 @@ void Client::subscribe_conference(bool force) {
   info.request_uri = active_group();
   info.client_id = client_id();
   conference_version_.reset();
+  conference_members_.clear();
   const auto generation = ++conference_generation_;
   conference_subscription_ = sip_.subscribe(
       session_uri_, "conference", 4294967295u,

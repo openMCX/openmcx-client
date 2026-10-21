@@ -149,6 +149,16 @@ class LocationTest {
         assertTrue(!rep.configured && rep.poll(90000) == null)
     }
 
+    @Test fun anUpdateAddsTheRequestedElements() {
+        // TS 24.379 annex F.3.3: "Update" adds to the previous configuration; "Full" replaces it.
+        val rep = Reporter()
+        rep.configure(Configuration(nonEmergency = Requested(coordinate = true, minimumInterval = 10)), 0)
+        rep.configure(Configuration(full = false, nonEmergency = Requested(servingEcgi = true, minimumInterval = 5)), 1000)
+        assertEquals(Requested(coordinate = true, servingEcgi = true, minimumInterval = 5), rep.configuration.nonEmergency)
+        rep.configure(Configuration(nonEmergency = Requested(servingEcgi = true)), 2000)
+        assertEquals(Requested(servingEcgi = true), rep.configuration.nonEmergency)
+    }
+
     @Test fun adaptiveTrigger() {
         val rep = Reporter()
         rep.position(Point.at(0.0, 0.0))

@@ -176,6 +176,9 @@ class Client {
   std::string token_, dialog_, subscription_, auth_etag_, affiliation_etag_, wav_path_, session_uri_,
       conference_subscription_;
   std::optional<std::uint32_t> conference_version_;
+  // RFC 4575: the participants of the conference notifications (MCPTT ID -> endpoint status), a partial notification
+  // applied on top of them.
+  std::map<std::string, std::string> conference_members_;
   std::uint64_t conference_generation_ = 0;
   std::map<std::string, std::string> retired_conferences_;
   std::optional<SipResponse> pending_answer_;
@@ -208,6 +211,9 @@ class Client {
   bool fta_not_selected_ = false;
   // Ad hoc group call priority learned at setup: "normal", "emergency" or "imminent".
   std::string adhoc_priority_ = "normal";
+  // TS 24.379 clause 17.2.6.1.1 step 1: the participant criteria of the ad hoc call this client originated (or last
+  // set), sent again with a change of its participant list.
+  std::string adhoc_criteria_;
   bool adhoc_broadcast_ = false;
   // Functional aliases (TS 24.379 clause 9A): the alias presented on outgoing calls,
   // the last status-change request, and the alias a redirected call was made to.
@@ -1015,6 +1021,7 @@ private:
     // TS 24.281 clause 9.2.3: the session's focus URI and the conference event subscription to it.
     std::string session_uri, conference_subscription;
     std::map<std::string, std::string> participants; // MCVideo ID -> RFC 4575 status
+    std::optional<std::uint32_t> conference_version; // RFC 4575 section 4.6: of the last notification applied
     // Reception control (TS 24.581 clause 4.1.1.2): transmissions announced by Media Transmission Notification
     // (on-network) or Media Reception Notification, and whether this client receives the current one.
     unsigned reception_notifications = 0;

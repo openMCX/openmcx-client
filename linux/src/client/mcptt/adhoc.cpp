@@ -76,6 +76,7 @@ void Client::adhoc_call(const std::string &arguments) {
     headers = priority_headers(level);
   }
   adhoc_priority_ = priority;
+  adhoc_criteria_ = criteria;
   info.participant_criteria = criteria; // TS 24.379 clause 17.2.2.1.1 step 12
   auto parts = info_parts(info);
   if (!targets.empty()) parts.push_back({resource_lists_mime, resource_list_xml(targets)});
@@ -193,13 +194,19 @@ void Client::adhoc_modify(const std::string &arguments) {
   }
   if (entries.empty() == info.participant_criteria.empty())
     throw std::runtime_error("modify either the participant list or the criteria");
+  // Step 1: the mcptt-info as the session is established: a list change of a call by criteria carries its criteria
+  // (unchanged, so not a criteria change).
+  const bool new_criteria = entries.empty();
+  if (!new_criteria) info.participant_criteria = adhoc_criteria_;
   auto parts = info_parts(info);
   if (!entries.empty()) parts.push_back({resource_lists_mime, resource_list_xml(entries)});
   priority_pending_ = true;
   try {
-    sip_.reinvite(dialog_, local_, parts, [this](const SipResponse &response) {
+    sip_.reinvite(dialog_, local_, parts, [this, new_criteria, criteria = info.participant_criteria](
+                                              const SipResponse &response) {
       if (response.status_code < 200) return;
       priority_pending_ = false;
+      if (new_criteria && response.status_code < 300) adhoc_criteria_ = criteria;
       status_["last_modify_result"] = {{"status", response.status_code},
                                        {"warning", std::string(get_header(response.headers, "Warning"))}};
       if (response.status_code >= 300) failure("ad hoc modification: " + std::to_string(response.status_code));

@@ -464,13 +464,27 @@ SipResponse Client::mcvideo_conference_notify(const SipMessage &message) {
        message.parts.empty() ? std::vector<BodyPart>{{message.content_type, message.body}} : message.parts) {
     if (part.content_type != "application/conference-info+xml") continue;
     const auto info = parse_conference_info(part.body);
+    // RFC 4575 section 4.6: a partial notification applies only with the next version; after a gap (or an old one)
+    // the current state is fetched again by refreshing the subscription.
+    const bool partial = !info.full && !info.deleted;
+    if (call.conference_version && info.version <= *call.conference_version) continue;
+    if (partial && (!call.conference_version || info.version != *call.conference_version + 1)) {
+      event("mcvideo_conference_version_gap", {{"version", info.version}});
+      if (!call.conference_subscription.empty())
+        sip_.request_in_dialog(call.conference_subscription, "SUBSCRIBE", {}, {},
+                               {{"Event", "conference"}, {"Expires", "4294967295"},
+                                {"Accept", "application/conference-info+xml"}});
+      continue;
+    }
+    call.conference_version = info.version;
     if (info.full) {
       call.participants.clear();
       call.participant_aliases.clear();
     }
     for (const auto &user : info.users) {
       call.participant_aliases.erase(user.user_id);
-      if (user.status == "disconnected")
+      // RFC 4575 section 5.6: a user "deleted" from a partial notification leaves.
+      if (user.state == "deleted" || user.status == "disconnected")
         call.participants.erase(user.user_id);
       else {
         call.participants[user.user_id] = user.status;

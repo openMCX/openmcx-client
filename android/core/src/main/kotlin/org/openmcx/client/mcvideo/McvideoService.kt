@@ -79,6 +79,8 @@ class VideoCall internal constructor(
     internal var toAlias: Boolean = false
     /** Group calls: who is in the call, MC ID to endpoint status, from the conference event package (§9.2.3). */
     @Volatile var participants: Map<String, String> = emptyMap()
+    /** RFC 4575 §4.6: the version of the last conference notification applied. */
+    @Volatile var conferenceVersion: Long? = null
     /** The conference subscription: its Call-ID (NOTIFYs may beat its 200) and, once answered, its dialog. */
     @Volatile internal var conferenceCallId: String? = null
     @Volatile internal var conference: Dialog? = null
@@ -623,11 +625,26 @@ class McvideoService(
         call.conference = Dialog.fromResponse(ua.lastSent[subscribe.callId] ?: subscribe, response)
     }
 
+    /** RFC 6665 §4.1.2.2: refresh the conference subscription in its dialog; the NOTIFY after it has the full state. */
+    private suspend fun refreshConference(call: VideoCall) {
+        val dialog = call.conference ?: return
+        val request = ua.inDialog(dialog, "SUBSCRIBE")
+        request.headers.add("Contact", client.contactFor(McService.MCVIDEO)).add("Event", "conference")
+            .add("Accept", ConferenceInfo.CONTENT_TYPE).add("Expires", "4294967295")
+        event("call ${call.id}: conference subscription refreshed ${runCatching { ua.send(request, dialog) }.getOrNull()?.status}")
+    }
+
     /** A conference NOTIFY (RFC 4575): update the call's participants. */
     private fun conferenceNotify(call: VideoCall, request: SipRequest) {
         for (part in Multipart.parse(request.contentType, request.body)) {
             if (part.mediaType != ConferenceInfo.CONTENT_TYPE) continue
             val info = runCatching { ConferenceInfo.parse(part.text) }.getOrElse { event("call ${call.id}: bad conference-info: ${it.message}"); continue }
+            if (!info.follows(call.conferenceVersion)) {
+                // RFC 4575 §4.6: a partial notification after a gap; the subscription refreshed brings the full state.
+                if (!info.full && !info.deleted && (call.conferenceVersion ?: -1) < info.version) scope.launch { refreshConference(call) }
+                continue
+            }
+            call.conferenceVersion = info.version
             call.participants = info.applyTo(call.participants)
         }
         if (request.headers["Subscription-State"]?.startsWith("terminated") == true) { call.conference = null; call.conferenceCallId = null }

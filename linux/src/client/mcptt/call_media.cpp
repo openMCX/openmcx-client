@@ -121,6 +121,7 @@ void Client::clear_call_state() {
   }
   conference_subscription_.clear();
   conference_version_.reset();
+  conference_members_.clear();
   ++conference_generation_;
   status_["conference_active"] = false;
   status_["conference_participants"] = Json::array();
@@ -156,6 +157,7 @@ void Client::clear_call_state() {
   first_to_answer_ = false;
   mepc_ = mepp_ = mpea_ = 1;
   adhoc_priority_ = "normal";
+  adhoc_criteria_.clear();
   adhoc_broadcast_ = false;
   private_alerts_.clear();
   for (const auto *key : {"permission_to_request", "floor_indicator", "last_floor_reject_cause"}) status_.erase(key);

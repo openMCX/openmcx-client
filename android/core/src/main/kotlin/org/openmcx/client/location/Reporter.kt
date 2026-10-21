@@ -34,7 +34,8 @@ class Reporter {
             configuration = c
             areaState.clear(); periodic.clear(); detected.clear(); fired.clear()
         } else {
-            // "Update": in addition to the previous one; a trigger with an existing TriggerId replaces it.
+            // "Update": in addition to the previous one (its requested elements added to those requested before); a
+            // trigger with an existing TriggerId replaces it.
             fun merge(into: List<Trigger>, from: List<Trigger>): List<Trigger> {
                 val out = into.toMutableList()
                 for (t in from) {
@@ -44,8 +45,9 @@ class Reporter {
                 }
                 return out
             }
-            configuration = configuration.copy(full = true, nonEmergency = c.nonEmergency ?: configuration.nonEmergency,
-                emergency = c.emergency ?: configuration.emergency, triggers = merge(configuration.triggers, c.triggers),
+            fun added(stored: Requested?, update: Requested?) = if (update == null) stored else stored?.plus(update) ?: update
+            configuration = configuration.copy(full = true, nonEmergency = added(configuration.nonEmergency, c.nonEmergency),
+                emergency = added(configuration.emergency, c.emergency), triggers = merge(configuration.triggers, c.triggers),
                 emergencyTriggers = merge(configuration.emergencyTriggers, c.emergencyTriggers))
         }
         configured = !configuration.cancels

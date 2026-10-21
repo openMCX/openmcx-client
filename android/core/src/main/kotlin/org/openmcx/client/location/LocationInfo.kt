@@ -167,7 +167,17 @@ data class Trigger(val kind: Kind, val id: String, val dimension: Dimension = Di
 data class Requested(val servingEcgi: Boolean = false, val neighbouringEcgi: Boolean = false, val mbmsSa: Boolean = false,
                      val mbsfn: Boolean = false, val coordinate: Boolean = false, val servingNcgi: Boolean = false,
                      val neighbouringNcgi: Boolean = false, val mbsfsa: Boolean = false, val bearingSpeed: Boolean = false,
-                     val minimumInterval: Long = 1)
+                     val minimumInterval: Long = 1) {
+    /**
+     * TS 24.379 annex F.3.3: an "Update" is "in addition to any previous location configuration" (removing an element
+     * needs a "Full" one): the elements of [update] are added to these, and its minimumIntervalLength applies.
+     */
+    fun plus(update: Requested) = update.copy(servingEcgi = update.servingEcgi || servingEcgi,
+        neighbouringEcgi = update.neighbouringEcgi || neighbouringEcgi, mbmsSa = update.mbmsSa || mbmsSa,
+        mbsfn = update.mbsfn || mbsfn, coordinate = update.coordinate || coordinate, servingNcgi = update.servingNcgi || servingNcgi,
+        neighbouringNcgi = update.neighbouringNcgi || neighbouringNcgi, mbsfsa = update.mbsfsa || mbsfsa,
+        bearingSpeed = update.bearingSpeed || bearingSpeed)
+}
 
 data class Configuration(val full: Boolean = true, val nonEmergency: Requested? = null, val emergency: Requested? = null,
                          val triggers: List<Trigger> = emptyList(), val emergencyTriggers: List<Trigger> = emptyList()) {

@@ -9,8 +9,11 @@ import org.openmcx.client.body.child
 import org.openmcx.client.body.children
 import org.openmcx.client.body.text
 
-/** One participant of a conference-info document: its MC ID and endpoint status (`connected`, `disconnected`, …). */
-data class ConferenceUser(val id: String, val status: String)
+/**
+ * One participant of a conference-info document: its MC ID and endpoint status (`connected`, `disconnected`, …), and
+ * whether a partial document removes it (RFC 4575 §5.6, `state="deleted"`, no endpoint needed).
+ */
+data class ConferenceUser(val id: String, val status: String, val deleted: Boolean = false)
 
 /**
  * A conference-info document (RFC 4575) as the MC servers send it for a group session
@@ -22,9 +25,15 @@ data class ConferenceInfo(val group: String, val version: Long, val full: Boolea
     fun applyTo(participants: Map<String, String>): Map<String, String> {
         if (deleted) return emptyMap()
         val next = if (full) linkedMapOf() else LinkedHashMap(participants)
-        for (user in users) if (user.status == "disconnected") next.remove(user.id) else next[user.id] = user.status
+        for (user in users) if (user.deleted || user.status == "disconnected") next.remove(user.id) else next[user.id] = user.status
         return next
     }
+
+    /**
+     * RFC 4575 §4.6: whether this document applies after the one of version [last] (null: none yet): a full one when
+     * newer, a partial one only as the next version (after a gap the subscriber fetches the full state again).
+     */
+    fun follows(last: Long?): Boolean = if (full || deleted) last == null || version > last else last != null && version == last + 1
 
     companion object {
         const val CONTENT_TYPE = "application/conference-info+xml"
@@ -37,7 +46,8 @@ data class ConferenceInfo(val group: String, val version: Long, val full: Boolea
             require(state in setOf("full", "partial", "deleted")) { "invalid conference state $state" }
             val users = root.child("users")?.children("user").orEmpty().map { user ->
                 val status = user.child("endpoint")?.child("status")?.text() ?: user.child("status")?.text() ?: "connected"
-                ConferenceUser(user.getAttribute("entity"), status)
+                val removed = user.getAttribute("state") == "deleted"
+                ConferenceUser(user.getAttribute("entity"), if (removed) "disconnected" else status, removed)
             }.filter { it.id.isNotEmpty() }
             return ConferenceInfo(root.getAttribute("entity"), root.getAttribute("version").toLongOrNull() ?: 0,
                 state == "full", state == "deleted", users)

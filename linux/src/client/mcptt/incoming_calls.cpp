@@ -112,14 +112,16 @@ SipResponse Client::mcvideo_regroup_message(const SipMessage &message) {
 SipResponse Client::regroup_message(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
-  if (message.from_uri != service() || asserted_identity(message) != service()) {
-    response.status_code = 403;
-    return response;
-  }
   Regroup regroup;
   try {
     regroup = parse_regroup(*body_of(message, regroup_mime));
   } catch (const std::exception &) {
+    response.status_code = 403;
+    return response;
+  }
+  // The participating function sends the notice; its P-Asserted-Identity is its own on a creation (TS 24.379 clause
+  // 16.2.2.4 step 3f) but copied from the function that removed the regroup on a removal (clause 16.2.2.5 step 3f).
+  if (message.from_uri != service() || (regroup.action != "remove" && asserted_identity(message) != service())) {
     response.status_code = 403;
     return response;
   }
@@ -448,16 +450,29 @@ SipResponse Client::conference_notify(const SipMessage &message) {
     response.status_code = 403;
     return response;
   }
-  if (!conference.full && !conference.deleted) {
-    response.status_code = 400;
-    return response;
-  }
-  if (!conference_version_ || conference.version > *conference_version_) {
+  // RFC 4575 sections 4.6 and 5.6 (TS 24.379 clause 10.1.3.4.1: "according to IETF RFC 4575"): a full document
+  // replaces the participants; a partial one applies on top of them (a user "deleted" or disconnected leaves), only
+  // with the next version: after a gap the current state is fetched again by refreshing the subscription.
+  const bool partial = !conference.full && !conference.deleted;
+  if (partial && (!conference_version_ || conference.version != *conference_version_ + 1)) {
+    if (!conference_version_ || conference.version > *conference_version_) {
+      event("conference_version_gap", {{"version", conference.version}});
+      sip_.request_in_dialog(conference_subscription_, "SUBSCRIBE", {}, {},
+                             {{"Event", "conference"}, {"Expires", "4294967295"},
+                              {"Accept", "application/conference-info+xml"}});
+    }
+  } else if (!conference_version_ || conference.version > *conference_version_) {
     conference_version_ = conference.version;
     status_["conference_version"] = conference.version;
-    status_["conference_participants"] = Json::array();
+    if (!partial) conference_members_.clear();
     for (const auto &member : conference.users)
-      if (member.status == "connected") status_["conference_participants"].push_back(member.user_id);
+      if (member.state == "deleted" || member.status == "disconnected")
+        conference_members_.erase(member.user_id);
+      else
+        conference_members_[member.user_id] = member.status;
+    status_["conference_participants"] = Json::array();
+    for (const auto &[id, endpoint] : conference_members_)
+      if (endpoint == "connected") status_["conference_participants"].push_back(id);
   }
   if (get_header(message.headers, "Subscription-State").starts_with("terminated")) {
     conference_subscription_.clear();
