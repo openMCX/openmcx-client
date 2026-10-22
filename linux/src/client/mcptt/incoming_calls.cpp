@@ -657,13 +657,9 @@ SipResponse Client::incoming_group(const SipMessage &message) {
     response.status_code = 488;
     return response;
   }
-  // Answer-Mode Auto or Manual, which the participating function always sends to a group call invitee; anything else
-  // is answered 400 before the call takes any state (call type, group, priority, session), leaving the client idle.
-  const auto mode = get_header(message.headers, "Answer-Mode");
-  if (mode != "Auto" && mode != "Manual") {
-    response.status_code = 400;
-    return response;
-  }
+  // Answer-Mode Auto or Manual, which the participating function sends to a group call invitee; another value is
+  // ignored, as is the header field's absence (RFC 5373 section 2), and the local setting applies.
+  const auto mode = answer_mode_value(get_header(message.headers, "Answer-Mode"));
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
   check_remote(*message.remote_media);
   local_.queueing = local_.queueing && message.remote_media->queueing;
@@ -734,11 +730,13 @@ SipResponse Client::incoming_private(const SipMessage &message, const McpttInfo 
     response.status_code = 488;
     return response;
   }
-  const auto priv = get_header(message.headers, "Priv-Answer-Mode");
-  const auto mode = get_header(message.headers, "Answer-Mode");
+  // RFC 5373 section 2: an answer-mode value other than Auto and Manual is ignored, like an absent header field.
+  auto priv = answer_mode_value(get_header(message.headers, "Priv-Answer-Mode"));
+  auto mode = answer_mode_value(get_header(message.headers, "Answer-Mode"));
+  if (priv != "Auto" && priv != "Manual") priv.clear();
+  if (mode != "Auto" && mode != "Manual") mode.clear();
   const bool first_to_answer = info.session_type == "first-to-answer";
-  if ((!priv.empty() && priv != "Auto" && priv != "Manual") || (!mode.empty() && mode != "Auto" && mode != "Manual") ||
-      (first_to_answer && priv != "Manual")) {
+  if (first_to_answer && priv != "Manual") {
     response.status_code = 400;
     return response;
   }
@@ -857,7 +855,7 @@ SipResponse Client::incoming_ambient(const SipMessage &message, const McpttInfo 
     response.status_code = 488;
     return response;
   }
-  if (get_header(message.headers, "Priv-Answer-Mode") != "Auto") {
+  if (answer_mode_value(get_header(message.headers, "Priv-Answer-Mode")) != "Auto") {
     response.status_code = 400;
     return response;
   }
@@ -946,11 +944,8 @@ SipResponse Client::incoming_adhoc(const SipMessage &message, const McpttInfo &i
          "399 mcx \"100 function not allowed due to end-to-end security for adhoc group call not implemented\""}};
     return response;
   }
-  const auto mode = get_header(message.headers, "Answer-Mode");
-  if (!mode.empty() && mode != "Auto" && mode != "Manual") {
-    response.status_code = 400;
-    return response;
-  }
+  // RFC 5373 section 2: an answer-mode value other than Auto and Manual is ignored.
+  const auto mode = answer_mode_value(get_header(message.headers, "Answer-Mode"));
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
   check_remote(*message.remote_media);
   local_.queueing = local_.queueing && message.remote_media->queueing;

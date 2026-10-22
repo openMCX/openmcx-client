@@ -284,8 +284,8 @@ SipResponse Client::mcvideo_answer_invite(const SipMessage &message, const Mcptt
 
   // TS 24.281 clause 6.2.3: a private call rings unless automatic commencement applies (Priv-Answer-Mode
   // Auto forces it; Answer-Mode Manual, or mcvideo.answer_mode manual, asks the user).
-  const bool forced = get_header(message.headers, "Priv-Answer-Mode") == "Auto";
-  const bool manual = get_header(message.headers, "Answer-Mode") == "Manual" ||
+  const bool forced = answer_mode_value(get_header(message.headers, "Priv-Answer-Mode")) == "Auto";
+  const bool manual = answer_mode_value(get_header(message.headers, "Answer-Mode")) == "Manual" ||
                       cfg_.at("mcvideo").value("answer_mode", std::string("auto")) == "manual";
   // TS 24.281 clause 15.2.1.2 step 6: an ambient viewing call is always answered automatically.
   if (mcvideo_call_->type == "private" && mcvideo_call_->ambient_type.empty() && !forced && manual) {

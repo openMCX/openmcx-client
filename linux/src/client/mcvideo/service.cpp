@@ -212,19 +212,26 @@ void Client::mcvideo_authorize(const std::string &token) {
 void Client::mcvideo_subscribe() {
   if (!mcvideo_authorized_ || !mcvideo_subscription_.empty()) return;
   mcvideo_status_known_ = false;
-  mcvideo_subscription_ =
-      sip_.subscribe(mcvideo_service_uri(), "presence", 4294967295u,
-                     {{"P-Preferred-Service", mcvideo_service.icsi}, {"Accept", "application/pidf+xml"}},
-                     [this](const SipResponse &response) {
-                       if (response.status_code < 200) return;
-                       if (response.status_code >= 300) {
-                         mcvideo_subscription_.clear();
-                         failure("MCVideo affiliation subscription: " + std::to_string(response.status_code));
-                         return;
-                       }
-                       // TS 24.281 clause 8.2.1.3 step 4 (Expires 4294967295); refreshed before the granted end.
-                       subscription_granted(response, mcvideo_subscription_expires_, mcvideo_subscription_refresh_at_);
-                     });
+  // Step 2: the mcvideo-info with <mcvideo-request-uri> set to this user's MCVideo ID.
+  McpttInfo info;
+  info.request_uri = mcvideo_user();
+  info.client_id = client_id();
+  const auto [type, body] =
+      message_body({{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}}, "mcvideo-" + random_id());
+  mcvideo_subscription_ = sip_.subscribe(
+      mcvideo_service_uri(), "presence", 4294967295u,
+      {{"P-Preferred-Service", mcvideo_service.icsi}, {"Accept", "application/pidf+xml"}},
+      [this](const SipResponse &response) {
+        if (response.status_code < 200) return;
+        if (response.status_code >= 300) {
+          mcvideo_subscription_.clear();
+          failure("MCVideo affiliation subscription: " + std::to_string(response.status_code));
+          return;
+        }
+        // TS 24.281 clause 8.2.1.3 step 4 (Expires 4294967295); refreshed before the granted end.
+        subscription_granted(response, mcvideo_subscription_expires_, mcvideo_subscription_refresh_at_);
+      },
+      type, body);
 }
 
 //------------------------------------------------------------------------------
