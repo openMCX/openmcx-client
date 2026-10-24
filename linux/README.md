@@ -60,6 +60,10 @@ The ISIM keeps its sequence numbers in `isim-sqn.json` next to the status file (
 skips the SIP credential for such an identity, the registration asks for 600 000 s unless `sip.register_expires` says
 otherwise, and the status file's `sip_security` shows the security associations in use. With `log_level` debug the
 ESP keys of each SA are logged, for decrypting a capture. Without `sip.auth` the client stays on digest.
+For a conformance test system, `"isim": {"algorithm": "test", "k": "<32 hex>", "res_length": 16}` puts the ISIM on the
+test algorithm of TS 34.108 clause 8.1.2 instead of MILENAGE: no `opc`, no sequence number check, AUTS only when the
+challenge's AMF is FFFF (AMF_RESYNCH), and a RES of `res_length` bytes (4 to 16, default 16). MILENAGE stays the
+default.
 
 ### Debug log
 
