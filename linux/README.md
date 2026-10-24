@@ -64,6 +64,11 @@ For a conformance test system, `"isim": {"algorithm": "test", "k": "<32 hex>", "
 test algorithm of TS 34.108 clause 8.1.2 instead of MILENAGE: no `opc`, no sequence number check, AUTS only when the
 challenge's AMF is FFFF (AMF_RESYNCH), and a RES of `res_length` bytes (4 to 16, default 16). MILENAGE stays the
 default.
+`"sip": {"transport": "udp"}` with IMS AKA sends SIP over UDP (TS 24.229 clause 4.2A, TS 33.203 clause 7.1, UDP case):
+requests and responses from the protected client port to the P-CSCF's protected server port, everything received on
+the protected server port, and requests of 1300 bytes or more over TCP from the protected client port (RFC 3261
+section 18.1.1); it needs the development image 0.3 (pjproject patch 0002). TCP stays the default; SIP outbound
+(`sip.outbound`) is not available over UDP.
 
 ### Debug log
 
@@ -90,13 +95,13 @@ build the image:
 tools/build-image -t openmcx-client:0.1                    # --server <path> if it is elsewhere
 ```
 
-The image is based on `openmcx-dev:0.2` from openmcx-server (`tools/mcx build`) and holds `/usr/local/bin/mcx-client`
+The image is based on `openmcx-dev:0.3` from openmcx-server (`tools/mcx build`) and holds `/usr/local/bin/mcx-client`
 and the lab health check. It builds against the server repository's protocol libraries (`mcx_sip`, `mcx_core`,
 `mcx_keying` and `include/mcx`), so build it from the same openmcx-server commit as the server image under test. The
 build runs the binary test. A local build and the unit tests inside the dev image, from this directory (the mount holds both repositories):
 
 ```bash
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/../..:/work" -w /work/openmcx-client/linux openmcx-dev:0.2 \
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/../..:/work" -w /work/openmcx-client/linux openmcx-dev:0.3 \
   bash -lc 'cmake -S . -B build && cmake --build build -j4 && build/test_client_rules && tests/test_binary.py'
 ```
 

@@ -615,7 +615,7 @@ linux/tools/build-image -t openmcx-client:<tag>
 docker build -t openmcx-dispatcher:<tag> --build-arg CLIENT_IMAGE=openmcx-client:<tag> dispatcher
 ```
 
-The [Dockerfile](../dispatcher/Dockerfile) builds the Go service in `openmcx-dev:0.2` (running `go vet` and
+The [Dockerfile](../dispatcher/Dockerfile) builds the Go service in `openmcx-dev:0.3` (running `go vet` and
 `go test`) and copies the binary into the image named by `CLIENT_IMAGE`. Unit tests use a fake engine
 (`service/testdata/fake-engine`); lab and browser checks are in `dispatcher/lab/`. Scope, limits, options and the API
 are in the [dispatcher README](../dispatcher/README.md).
@@ -726,7 +726,7 @@ docker build -t openmcx-dispatcher:<tag> --build-arg CLIENT_IMAGE=openmcx-client
 android/tools/gradle-docker.sh :app:assembleDebug
 ```
 
-The client image builds in `openmcx-dev:0.2` (from openmcx-server), runs `test_binary.py`, and ships a stripped binary
+The client image builds in `openmcx-dev:0.3` (from openmcx-server), runs `test_binary.py`, and ships a stripped binary
 on Ubuntu 24.04 with the run-time libraries (libsrtp2, opencore-amrwb, vo-amrwbenc, OpenH264, libcurl, libxml2) and
 the lab health check ([Dockerfile](../linux/docker/Dockerfile)).
 

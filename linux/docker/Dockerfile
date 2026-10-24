@@ -7,7 +7,7 @@
 # plus curl and Python for the lab's health checks. Build with tools/build-image, which stages this repository under
 # /client and the needed openmcx-server files under /openmcx-server.
 
-ARG DEV_IMAGE=openmcx-dev:0.2
+ARG DEV_IMAGE=openmcx-dev:0.3
 ARG RUNTIME_BASE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 
 #------------------------------------------------------------------------------
