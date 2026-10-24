@@ -23,6 +23,7 @@ import java.net.InetSocketAddress
 import java.net.Socket
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
+import org.openmcx.client.security.TlsProfile
 
 /** A connected byte stream to the SIP core. */
 interface Connection : Closeable {
@@ -60,6 +61,7 @@ class SocketConnector(
             val context = ssl ?: throw IllegalStateException("TLS without an SSL context")
             (context.socketFactory.createSocket(plain, host, port, true) as SSLSocket).apply {
                 sslParameters = sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+                TlsProfile.apply(this)
                 startHandshake()
             }
         } else plain

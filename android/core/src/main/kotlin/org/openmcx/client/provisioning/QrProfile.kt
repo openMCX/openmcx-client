@@ -14,6 +14,7 @@ import java.util.zip.Inflater
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
 import javax.net.ssl.X509TrustManager
+import org.openmcx.client.security.TlsProfile
 
 /**
  * An MCX profile from a QR code. A QR code holds at most about 2.9 kB, and a profile with
@@ -83,7 +84,7 @@ object QrProfile {
         }
         val context = SSLContext.getInstance("TLS").apply { init(null, arrayOf(trust), null) }
         val connection = url.openConnection() as HttpsURLConnection
-        connection.sslSocketFactory = context.socketFactory
+        connection.sslSocketFactory = TlsProfile.socketFactory(context)
         connection.hostnameVerifier = javax.net.ssl.HostnameVerifier { _, _ -> true } // the pin names the server
         connection.connectTimeout = 10_000
         connection.readTimeout = 10_000

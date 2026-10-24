@@ -11,6 +11,7 @@ import java.net.URI
 import java.net.URLEncoder
 import javax.net.ssl.HttpsURLConnection
 import javax.net.ssl.SSLContext
+import org.openmcx.client.security.TlsProfile
 
 class HttpResponse(val status: Int, val headers: Map<String, List<String>>, val body: ByteArray) {
     fun header(name: String): String? = headers.entries.firstOrNull { it.key.equals(name, true) }?.value?.firstOrNull()
@@ -42,7 +43,7 @@ class UrlConnectionHttpClient(private val ssl: SSLContext?, private val timeoutM
         withContext(Dispatchers.IO) {
             val connection = URI(url).toURL().openConnection() as HttpURLConnection
             try {
-                if (connection is HttpsURLConnection && ssl != null) connection.sslSocketFactory = ssl.socketFactory
+                if (connection is HttpsURLConnection) connection.sslSocketFactory = TlsProfile.socketFactory(ssl ?: SSLContext.getDefault())
                 connection.instanceFollowRedirects = false
                 connection.requestMethod = method
                 connection.connectTimeout = timeoutMs

@@ -14,6 +14,7 @@ import java.net.Socket
 import java.net.URI
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
+import org.openmcx.client.security.TlsProfile
 
 /**
  * Where to connect for a host and port: the name itself, or an address provisioned for it
@@ -58,6 +59,7 @@ class SocketHttpClient(
                 val context = ssl ?: SSLContext.getDefault()
                 (context.socketFactory.createSocket(plain, host, port, true) as SSLSocket).apply {
                     sslParameters = sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+                    TlsProfile.apply(this)
                     startHandshake()
                 }
             } else plain

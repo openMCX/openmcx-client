@@ -12,6 +12,7 @@ import java.net.URI
 import java.util.UUID
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
+import org.openmcx.client.security.TlsProfile
 
 /** Streaming HTTP/1.1 for FD, retaining the name checks and endpoint map of SocketHttpClient. */
 class SocketFileHttpClient(private val ssl: SSLContext?, private val endpoints: Endpoints = Endpoints.DIRECT,
@@ -83,6 +84,7 @@ class SocketFileHttpClient(private val ssl: SSLContext?, private val endpoints: 
                     (context.socketFactory.createSocket(plain, uri.host, port, true) as SSLSocket).apply {
                         soTimeout = timeoutMs
                         sslParameters = sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
+                        TlsProfile.apply(this)
                         startHandshake()
                     }
                 } else plain
