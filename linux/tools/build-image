@@ -28,6 +28,9 @@ trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/openmcx-server/tools" "$STAGE/client"
 cp -r "$SERVER/CMakeLists.txt" "$SERVER/include" "$SERVER/src" "$STAGE/openmcx-server/"
 cp "$SERVER/tools/healthcheck.py" "$STAGE/openmcx-server/tools/"
+# The vendored third-party sources the server CMakeLists.txt builds and checks (hostap's MILENAGE).
+mkdir -p "$STAGE/openmcx-server/dependencies"
+cp -r "$SERVER/dependencies/hostap" "$STAGE/openmcx-server/dependencies/"
 cp -r "$ROOT/CMakeLists.txt" "$ROOT/src" "$ROOT/tests" "$STAGE/client/"
 cp "$ROOT/../LICENSE" "$ROOT/../NOTICE" "$STAGE/"   # the repository's licence, into the image
 echo "openmcx-server $(git -C "$SERVER" rev-parse --short HEAD 2>/dev/null || echo unknown), client $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo unknown)"

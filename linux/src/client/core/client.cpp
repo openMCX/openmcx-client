@@ -185,7 +185,11 @@ void Client::save_status(std::uint64_t now) {
   status_["pending_floor_confirmation"] = floor_timers_.awaiting_user_confirmation();
   status_["queued"] = floor_timers_.state() == FloorParticipantState::Queued;
   status_["registered"] = registered_;
+  status_["sip_security"] = sip_security_status();
   status_["authorized"] = authorized_;
+  status_["signed_in"] = signed_in_;
+  status_["service_state"] = service_state();
+  status_["sign_in_failures"] = sign_in_failures_;
   status_["token_expires_at"] = expires_;
   status_["token_renewals"] = token_renewals_;
   status_["token_refreshes"] = token_refreshes_;
@@ -348,21 +352,12 @@ bool Client::mcvideo_profile_allows(const std::string &action) const {
 }
 
 //------------------------------------------------------------------------------
-// The client's life: user authentication (login(), TS 24.482 clause 6.2.1), the MCPTT user profile (TS 24.484
-// clause 8.3.1A) and group document (TS 24.481 clause 6.3.3.2.2), key provisioning and the CSKs (TS 33.180
-// clause 5.3.3 and clause 5.4), the XML protection filters, SIP registration and then service authorisation
-// (TS 24.379 clause 7.2.2); then the run loop until quit.
+// The client's life. TS 33.180 clause 5.1.3.1 steps A and B in parallel and clause 5.1.3.2.1: "the SIP REGISTER
+// message shall not be delayed for lack of an access token", so the SIP registration starts first, without one
+// (test view TS 37.579-1 table 5.3.2.2.1-1 steps 1 and 2), and the sign-in follows on the run loop (sign_in()). The
+// service authorisation (TS 24.379 clause 7.2.2, or clause 7.2.1 with the token in a re-REGISTER) waits for both;
+// until then the client is in the limited service state of TS 33.180 clause 5.1.1. Then the run loop until quit.
 void Client::run() {
-  login();
-  event("oidc_authenticated", {{"user_id", user()}});
-  schedule_token_renewal();
-  load_user_documents();
-  if (mcvideo_enabled()) read_mcvideo_profile();
-  if (mcdata_enabled()) read_mcdata_profile();
-  read_service_configurations();
-  if (protected_media() || protected_floor()) {
-    provision_keys();
-  }
   sip_.set_body_filters(
       [this](const SipTransmission &transmission, std::vector<BodyPart> parts) {
         return protect_outgoing(transmission, std::move(parts));
@@ -372,6 +367,7 @@ void Client::run() {
       });
   sip_.start();
   register_and_authorize();
+  schedule([this] { sign_in(); });
   while (!stopping) run_once();
   release();
   if (!dialog_.empty()) sip_.bye(dialog_);
@@ -381,8 +377,72 @@ void Client::run() {
 }
 
 //------------------------------------------------------------------------------
+// TS 33.180 clause 5.1.3.1 step A and clause 5.1.1: user authentication (TS 24.482 clause 6.2.1), on the worker
+// thread (request_tokens) so that the SIP registration goes on meanwhile; then the rest of the sign-in on the run loop
+// (sign_in_documents). A failed or unreachable sign-in leaves the client registered in the limited service state
+// (status "service_state"), and the sign-in is tried again after oauth.sign_in_retry_ms (15 s by default); a token
+// already obtained is kept for the retry.
+void Client::sign_in() {
+  if (signed_in_ || stopping) return;
+  if (!token_.empty()) return sign_in_documents();
+  request_tokens([this](std::exception_ptr error) {
+    if (error) return sign_in_failed(error_text(error));
+    event("oidc_authenticated", {{"user_id", user()}});
+    schedule_token_renewal();
+    sign_in_documents();
+  });
+}
+
+//------------------------------------------------------------------------------
+// The sign-in once the access token is held: the MCPTT user profile (TS 24.484 clause 8.3.1A) and group document
+// (TS 24.481 clause 6.3.3.2.2), the MCVideo and MCData user profiles, the service configurations, and key
+// provisioning and the CSKs (TS 33.180 clause 5.3.3 and clause 5.4); then the service authorisation once registered.
+// With mcptt.documents_on_notify the MCPTT documents are read only on the NOTIFY of the configuration and group
+// document subscriptions (TS 37.579-1 tables 5.3.2.6.1-1 and 5.3.2.7.1-1), not before the service authorisation.
+void Client::sign_in_documents() {
+  try {
+    if (documents_on_notify())
+      profile_index_ = configured_profile_index();
+    else
+      load_user_documents();
+    if (mcvideo_enabled()) read_mcvideo_profile();
+    if (mcdata_enabled()) read_mcdata_profile();
+    if (!documents_on_notify())
+      read_service_configurations();
+    else {
+      std::vector<std::string> services;
+      if (mcvideo_enabled()) services.push_back("mcvideo");
+      if (mcdata_enabled()) services.push_back("mcdata");
+      if (!services.empty()) read_service_configurations(services);
+    }
+    if (protected_media() || protected_floor())
+      provision_keys();
+    else
+      provision_identity_keys();
+  } catch (const std::exception &error) {
+    return sign_in_failed(error.what());
+  }
+  signed_in_ = true;
+  status_.erase("sign_in_error");
+  event("signed_in", {{"registered", registered_}});
+  if (registered_) authorize();
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clause 5.1.1: a failed sign-in: the limited service state, and another attempt later.
+void Client::sign_in_failed(const std::string &reason) {
+  ++sign_in_failures_;
+  status_["sign_in_error"] = reason;
+  failure("sign-in: " + reason);
+  const auto retry = cfg_.at("oauth").value("sign_in_retry_ms", 15000u);
+  event("limited_service", {{"registered", registered_}, {"retry_ms", retry}});
+  schedule_after(retry, [this] { sign_in(); });
+}
+
+//------------------------------------------------------------------------------
 // RFC 3261 section 10.2: the SIP registration (TS 24.379 clause 7.2.1AA: with the feature tags of the client's
-// services), then the service authorisation (TS 24.379 clause 7.2.2), at start-up and at log-on.
+// services), at start-up and at log-on, then the service authorisation (TS 24.379 clause 7.2.2) once the user is
+// signed in (TS 33.180 clause 5.1.3.2.1: the registration does not wait for the access token).
 void Client::register_and_authorize() {
   sip_.register_account(register_expires(), [this](const SipResponse &response) {
     if (response.status_code < 200) return;
@@ -391,19 +451,27 @@ void Client::register_and_authorize() {
       return;
     }
     registered_ = true;
-    event("sip_registered");
-    schedule([this] { authorize(); });
+    event("sip_registered", {{"signed_in", signed_in_}});
+    if (signed_in_) schedule([this] { authorize(); });
   });
 }
 
 //------------------------------------------------------------------------------
+// TS 33.180 clause 5.1.1: the service state of the status file: "full" when authorised, "limited" when registered
+// with the SIP core but not (yet) authorised for the MC service, "none" before the registration.
+std::string Client::service_state() const { return authorized_ ? "full" : registered_ ? "limited" : "none"; }
+
+//------------------------------------------------------------------------------
 // TS 24.379, TS 24.281 and TS 24.282 clause 6.2.8.1.15: the client reads the service configuration document of each
-// of its services (TS 24.484 clauses 8.4.2.8, 9.4.2.8, 10.4.2.8) for the Resource-Priority values of its requests.
+// of its services (TS 24.484 clauses 8.4.2.8, 9.4.2.8, 10.4.2.8) for the Resource-Priority values of its requests;
+// all of them when none is named.
 // A document that cannot be read leaves the service without them: its emergency and imminent peril requests fail.
-void Client::read_service_configurations() {
-  std::vector<std::string> services{"mcptt"};
-  if (mcvideo_enabled()) services.push_back("mcvideo");
-  if (mcdata_enabled()) services.push_back("mcdata");
+void Client::read_service_configurations(std::vector<std::string> services) {
+  if (services.empty()) {
+    services.push_back("mcptt");
+    if (mcvideo_enabled()) services.push_back("mcvideo");
+    if (mcdata_enabled()) services.push_back("mcdata");
+  }
   for (const auto &service : services) {
     const auto path = "/xcap-root/org.3gpp." + service + ".service-config/global/service-config.xml";
     try {
@@ -524,10 +592,31 @@ void Client::provision_keys() {
 }
 
 //------------------------------------------------------------------------------
-// Helper: one pass of the run loop: SIP events, due and scheduled tasks, control commands, floor and media packets,
+// TS 33.180 clause 5.3.3 and annex D (test view TS 37.579-1 table 5.3.2.3.1-1 steps 11 to 14): KMS initialisation
+// and key provisioning with the access token at sign-in, also without protected media or floor control; no CSK is
+// made then. A KMS that cannot be reached leaves the unprotected client signed in.
+void Client::provision_identity_keys() {
+  const auto security = cfg_.value("security", Json::object());
+  if (security.value("kms_uri", std::string{}).empty()) return;
+  try {
+    keys_ = std::make_unique<KeyClient>(http_, security, user());
+    keys_->provision(token_);
+    status_["key_management"] = {{"kms_uri", security.at("kms_uri")},
+                                 {"home_kms_uri", security.value("home_kms_uri", "")},
+                                 {"own_kms", keys_->kms_uri_of(user())}};
+  } catch (const std::exception &error) {
+    keys_.reset();
+    event("key_management_unavailable", {{"reason", error.what()}});
+  }
+}
+
+//------------------------------------------------------------------------------
+// Helper: one pass of the run loop: SIP events, the worker thread's results, due and scheduled tasks, control commands, floor and media packets,
 // the MCVideo media and the periodic tick.
 void Client::run_once() {
   sip_.poll(std::chrono::milliseconds(5));
+  // The results of the worker thread (token grants) run as scheduled tasks.
+  for (auto &task : handoff_.take()) pending_.push_back(std::move(task));
   for (auto due = timed_.begin(); due != timed_.end() && due->first <= monotonic_ms(); due = timed_.erase(due))
     pending_.push_back(std::move(due->second));
   auto tasks = std::move(pending_);

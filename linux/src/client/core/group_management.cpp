@@ -146,8 +146,8 @@ std::string Client::temporary_group_request_xml(const std::string &group_id, con
 }
 
 //------------------------------------------------------------------------------
-// TS 24.481 clause 6.3.13.2.1: subscribe to the group documents of the groups (xcap-diff, RFC 5875).
-void Client::group_documents_subscribe(const std::vector<std::string> &args) {
+// TS 24.481 clause 6.3.13.2.1: subscribe to the group documents of the groups (xcap-diff, RFC 5875); the dialog.
+std::string Client::group_documents_subscribe(const std::vector<std::string> &args) {
   McpttInfo info;
   info.access_token = token_;
   info.client_id = client_id();
@@ -170,6 +170,25 @@ void Client::group_documents_subscribe(const std::vector<std::string> &args) {
       "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary));
   *created = dialog;
   group_doc_subscriptions_[dialog] = args;
+  return dialog;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.481 clause 6.3.13.2.1 with TS 24.484 clause 8.3.2: at service authorisation the GMC subscribes to the group
+// documents of the user's groups, the selected group and the groups monitored besides it, in a SUBSCRIBE of its own
+// next to the GKTP subscription (TS 37.579-1 table 5.3.2.7.1-1 steps 1c1 to 1c4); the NOTIFY is followed by the GET
+// of each document (group_document_notify, steps 3 to 6). Once made, the subscription stays through a new
+// authorisation; a refused one (no group may be followed) is not made again.
+void Client::subscribe_own_group_documents() {
+  if (!cfg_.at("mcptt").value("subscribe_group_documents", true) || !startup_group_subscription_.empty()) return;
+  std::vector<std::string> groups;
+  if (!group().empty()) groups.push_back(group());
+  for (const auto &monitored : monitored_groups_)
+    if (!monitored.empty() && std::find(groups.begin(), groups.end(), monitored) == groups.end())
+      groups.push_back(monitored);
+  if (groups.empty()) return;
+  startup_group_subscription_ = group_documents_subscribe(groups);
+  event("group_documents_subscribed", {{"groups", groups}});
 }
 
 //------------------------------------------------------------------------------
@@ -285,14 +304,19 @@ void Client::take_profile_groups(const std::string &profile) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.484 clause 6.3.13.2.2: the configuration management client subscribes to changes of the user profile
-// document (SIP SUBSCRIBE, event package xcap-diff of RFC 5875).
+// TS 24.484 clause 6.3.13.2.2 item b: the configuration management client subscribes to several documents at once
+// through the subscription proxy function of the CMS (SIP SUBSCRIBE, event package xcap-diff of RFC 5875), one
+// <entry> for each, relative to the CMS XCAP root (test view TS 37.579-1 table 5.3.2.6.1-1 step 1 and table
+// 5.5.3.3.1A-1): the MCPTT UE configuration document (clause 8.2.1A), the MCPTT user profile document (clause
+// 8.3.1A) and the MCPTT service configuration document (clause 8.4.1); item c, the access token in the mcptt-info.
 void Client::subscribe_configuration() {
   McpttInfo info;
   info.access_token = token_;
   info.client_id = client_id();
   auto parts = info_parts(info);
-  parts.push_back({resource_lists_mime, xcap_resource_list({profile_document_path()})});
+  const std::vector<std::string> documents{ue_configuration_document_path(), profile_document_path(),
+                                           service_configuration_document_path};
+  parts.push_back({resource_lists_mime, xcap_resource_list(documents)});
   const auto boundary = "mcx-" + random_id();
   config_subscription_ = sip_.subscribe(
       service(), "xcap-diff", 3600, {{"P-Preferred-Service", mcptt_icsi}},
@@ -302,27 +326,71 @@ void Client::subscribe_configuration() {
         if (response.status_code >= 300) schedule([this] { config_subscription_.clear(); });
       },
       "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary));
-  event("configuration_subscribed", {{"document", profile_document_path()}});
+  status_["configuration"]["subscribed_documents"] = documents;
+  event("configuration_subscribed", {{"documents", documents}});
 }
 
 //------------------------------------------------------------------------------
-// TS 24.484 clause 6.3.13.2.2: on a NOTIFY of the configuration subscription, retrieve the user profile document again
-// (TS 24.484 clause 6.3.3.2.2) and take its actions when its entity tag changed.
+// TS 24.484 clause 8.2.1A: the MCPTT UE configuration document of this UE, users/sip:<MCPTT ID>/<MCSUEID> (the UE
+// instance ID of mcptt.ue_instance_id, else the MCPTT client ID).
+std::string Client::ue_configuration_document_path() const {
+  const auto &mcptt = cfg_.at("mcptt");
+  const auto ue = mcptt.contains("ue_instance_id") ? mcptt.at("ue_instance_id").get<std::string>() : client_id();
+  return "org.3gpp.mcptt.ue-config/users/" + url_encode(user()) + "/" + url_encode(ue);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.484 clauses 6.3.3.2.2 and 8.2.1A: retrieve the MCPTT UE configuration document (test view TS 37.579-1 table
+// 5.3.2.6.1-1 step 5). A CMS that has none for this UE (404) or that cannot be reached leaves the client as it is:
+// the preconfigured values stay in use.
+void Client::read_ue_configuration() {
+  const auto path = "/xcap-root/" + ue_configuration_document_path();
+  Json state{{"document", ue_configuration_document_path()}};
+  try {
+    const auto response = http_.request("GET", cfg_.at("endpoints").at("cms").get<std::string>() + path, {},
+                                        {{"Authorization", "Bearer " + token_}});
+    state["status"] = response.status;
+    if (response.status == 200) {
+      state["etag"] = response.headers.contains("etag") ? response.headers.at("etag") : std::string{};
+      state["bytes"] = response.body.size();
+      // TS 24.484 clause 8.2.2.1: the document's root element is <mcptt-UE-configuration>.
+      state["valid"] = response.body.find("mcptt-UE-configuration") != std::string::npos;
+      event("document_retrieved", {{"resource", path}, {"bytes", response.body.size()}});
+    } else {
+      event("ue_configuration_unavailable", {{"status", response.status}});
+    }
+  } catch (const std::exception &error) {
+    state["status"] = 0;
+    event("ue_configuration_unavailable", {{"reason", error.what()}});
+  }
+  status_["ue_configuration"] = state;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.484 clause 6.3.13.2.2 (RFC 5875): on a NOTIFY of the configuration subscription, retrieve the subscribed
+// documents again (TS 24.484 clause 6.3.3.2.2; test view TS 37.579-1 table 5.3.2.6.1-1 steps 5, 7 and 9): the UE
+// configuration, the user profile, whose actions are taken when its entity tag changed, and the service
+// configuration (its Resource-Priority values).
 void Client::configuration_notified() {
   ++config_notifies_;
+  read_ue_configuration();
   const auto response =
       http_.request("GET", cfg_.at("endpoints").at("cms").get<std::string>() + "/xcap-root/" + profile_document_path(),
                     {}, {{"Authorization", "Bearer " + token_}});
   if (response.status == 200) {
+    event("document_retrieved",
+          {{"resource", "/xcap-root/" + profile_document_path()}, {"bytes", response.body.size()}});
     const auto etag = response.headers.contains("etag") ? response.headers.at("etag") : std::string{};
     if (etag != status_["configuration"].value("etag", std::string{})) {
       if (status_["configuration"].contains("etag")) ++config_refreshes_;
       profile_actions_ = parse_profile_actions(response.body);
       take_profile_groups(response.body);
+      profile_loaded_ = true;
       status_["configuration"]["etag"] = etag;
       event("configuration_refreshed", {{"etag", etag}, {"actions", profile_actions_.size()}});
     }
   }
+  read_service_configurations({"mcptt"});
   status_["configuration"]["notifies"] = config_notifies_;
   status_["configuration"]["refreshes"] = config_refreshes_;
 }
@@ -365,6 +433,10 @@ std::optional<SipResponse> Client::group_document_notify(const SipMessage &messa
                                             {{"Authorization", "Bearer " + token_}});
         auto &document = group_documents_[group];
         document["fetch_status"] = response.status;
+        if (response.status == 200)
+          event("document_retrieved",
+                {{"resource", "/xcap-root/org.openmobilealliance.groups/global/byGroupID/" + url_encode(group)},
+                 {"bytes", response.body.size()}});
         Json members = Json::array();
         for (std::size_t at = response.body.find("<entry"); at != std::string::npos;
              at = response.body.find("<entry", at + 1)) {

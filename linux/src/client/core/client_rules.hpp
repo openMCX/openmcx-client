@@ -85,7 +85,7 @@ inline bool refresh_refusal_final(unsigned refusals, bool has_password, std::int
 // TS 33.180 table B.4.2.2-1 and clause B.4.2.2: the scope of the authentication request: openid, and for MCPTT and
 // each further configured service (MCData, MCVideo) its service, configuration management and group management
 // scopes, with the key management scope where the client is provisioned with keys (security configured).
-inline std::string oidc_scope(bool data, bool video, bool keys) {
+inline std::string oidc_scope(bool data, bool video, bool keys, bool location = false) {
   std::string scope = "openid";
   for (const auto &[service, configured] :
        {std::pair<const char *, bool>{"ptt", true}, {"data", data}, {"video", video}}) {
@@ -94,6 +94,9 @@ inline std::string oidc_scope(bool data, bool video, bool keys) {
       scope += std::string(" 3gpp:mc:") + service + kind;
     if (keys) scope += std::string(" 3gpp:mc:") + service + "_key_management_service";
   }
+  // TS 33.180 table B.4.2.2-1: the location management server's scope, for a client that
+  // uses one (endpoints.lms).
+  if (location) scope += " 3gpp:mc:location_management_service";
   return scope;
 }
 

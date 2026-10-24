@@ -6,7 +6,7 @@
 # tools/build-image) plus the dispatcher web service.
 #   docker build -t openmcx-dispatcher:<tag> --build-arg CLIENT_IMAGE=openmcx-client:<tag> dispatcher
 ARG CLIENT_IMAGE=openmcx-client:0.1
-FROM openmcx-dev:0.1 AS build
+FROM openmcx-dev:0.2 AS build
 WORKDIR /src
 COPY service/go.mod service/go.sum ./
 RUN go mod download

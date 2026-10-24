@@ -20,8 +20,8 @@ namespace mcx {
 inline nlohmann::json oauth_settings(const nlohmann::json &cfg) {
   auto oauth = cfg.at("oauth");
   if (!oauth.contains("scope"))
-    oauth["scope"] =
-        client_rules::oidc_scope(cfg.contains("mcdata"), cfg.contains("mcvideo"), cfg.contains("security"));
+    oauth["scope"] = client_rules::oidc_scope(cfg.contains("mcdata"), cfg.contains("mcvideo"), cfg.contains("security"),
+                                              cfg.contains("endpoints") && cfg.at("endpoints").contains("lms"));
   return oauth;
 }
 

@@ -118,7 +118,7 @@ bool activated(const nlohmann::json &cfg) { return cfg.value("activated", false)
 // MCX Admin activation: the client
 // fetches its bootstrap package from the one-time activation URL, signs in at IdMS
 // with the account's password (TS 24.482 clause 6.2.1), obtains its SIP credential from the Credential
-// Service, and writes the result into its configuration, which keeps its local
+// Service (not for IMS AKA, sip.auth "aka"), and writes the result into its configuration, which keeps its local
 // settings (ports, paths, the device's TLS files). An activated configuration is
 // marked, so that a restart does not use the one-time URL again.
 nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::string &password_file,
@@ -166,8 +166,13 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
                   {"redirect_uri", idms.at("redirect_uri")},
                   {"username", boot.at("login")},
                   {"password", read_secret(password_file)}};
-  cfg["sip"]["core_uri"] = boot.at("sip").at("core_uri");
-  cfg["sip"]["identity"] = boot.at("sip").at("identity");
+  const auto &boot_sip = boot.at("sip");
+  if (boot_sip.contains("core_uri")) cfg["sip"]["core_uri"] = boot_sip.at("core_uri");
+  cfg["sip"]["identity"] = boot_sip.at("identity");
+  // TS 33.203 (TS 33.180 clause 6.2.1, 3GPP access): IMS AKA; the package may carry the ISIM and the P-CSCF.
+  for (const auto *field : {"auth", "isim", "pcscf"})
+    if (boot_sip.contains(field)) cfg["sip"][field] = boot_sip.at(field);
+  const bool ims_aka = cfg["sip"].value("auth", "digest") == "aka";
   for (const auto *service : {"mcptt", "mcdata", "mcvideo"}) {
     if (!boot.contains(service)) continue;
     auto merged = cfg.value(service, nlohmann::json::object());
@@ -180,13 +185,19 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
   // for the SIP credential.
   const auto tokens = oidc_login(http, oauth_settings(cfg));
   const auto token = tokens.at("access_token").get<std::string>();
-  const auto issued = http.request("POST", boot.at("credentials_url").get<std::string>() + "/v1/sip-credential", {},
-                                   {{"Authorization", "Bearer " + token}});
-  require(issued.status == 200,
-          "the Credential Service refused the SIP credential (" + std::to_string(issued.status) + ")");
-  const auto credential = issued.json();
-  cfg["sip"]["username"] = credential.at("username");
-  cfg["sip"]["password"] = credential.at("password");
+  // An IMS AKA identity has no SIP password: its ISIM authenticates it (the Credential Service refuses one).
+  if (!ims_aka) {
+    const auto issued = http.request("POST", boot.at("credentials_url").get<std::string>() + "/v1/sip-credential", {},
+                                     {{"Authorization", "Bearer " + token}});
+    require(issued.status == 200,
+            "the Credential Service refused the SIP credential (" + std::to_string(issued.status) + ")");
+    const auto credential = issued.json();
+    cfg["sip"]["username"] = credential.at("username");
+    cfg["sip"]["password"] = credential.at("password");
+  } else {
+    cfg["sip"].erase("username");
+    cfg["sip"]["password"] = "";
+  }
 
   // Slice F2: a configuration without a device certificate gets one for a key made
   // here, which never leaves this device.

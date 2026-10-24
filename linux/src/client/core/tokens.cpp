@@ -50,63 +50,106 @@ void Client::keep_refresh_state(const Json &tokens) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.482 clause 6.2.1 and TS 33.180 annex B.4 and annex B.5: obtain tokens with the refresh token when there is
-// one; else with the authorization code of a sign-in in the user's browser (oauth.authorization: the code, the PKCE
-// code verifier and the nonce of its request, used once); the password otherwise, or when IdMS refuses
-// the refresh token and a password is configured (a lab client). A device without a
-// password whose refresh token is refused (suspended, Revoke devices) must sign in
-// again: activation, or the browser. Any other failure of the refresh grant (IdMS unreachable, a server error) is
-// transient: the refresh token is kept and renew_token() tries again.
-Json Client::obtain_tokens() {
-  if (!refresh_loaded_) load_refresh_state();
-  const auto oauth = oauth_settings(cfg_);
-  const bool has_password = !oauth.value("password", std::string{}).empty();
-  if (!refresh_token_.empty()) {
-    try {
-      auto tokens = oidc_refresh(idms_http_, oauth, refresh_token_, auth_nonce_);
-      // TS 33.180 table B.5.3-1: IdMS may keep the refresh token instead of issuing another.
-      if (!tokens.contains("refresh_token")) tokens["refresh_token"] = refresh_token_;
-      keep_refresh_state(tokens);
-      ++token_refreshes_;
-      refresh_refusals_ = 0;
-      return tokens;
-    } catch (const oidc_refresh_refused &) {
-      // client_rules::refresh_refusal_final: a first refusal while the access token is valid keeps the refresh
-      // token; renew_token() tries again 30 s later.
-      ++refresh_refusals_;
-      if (!client_rules::refresh_refusal_final(refresh_refusals_, has_password, std::time(nullptr), expires_)) throw;
-      refresh_token_.clear();
-      refresh_refusals_ = 0;
-      if (!has_password) throw;
+// TS 24.482 clause 6.2.1 and TS 33.180 annex B.4 and annex B.5, on the worker thread: obtain tokens with the refresh
+// token when there is one; else with the authorization code of a sign-in in the user's browser (oauth.authorization:
+// the code, the PKCE code verifier and the nonce of its request, used once); the password otherwise, or when IdMS
+// refuses the refresh token and a password is configured (a lab client). A device without a password whose refresh
+// token is refused (suspended, Revoke devices) must sign in again: activation, or the browser. Any other failure of
+// the refresh grant (IdMS unreachable, a server error) is transient: the refresh token is kept and renew_token()
+// tries again. The outcome, an error included, is in the returned grant; the run loop takes it (take_token_grant).
+Client::TokenGrant Client::grant_tokens(const HttpClient &idms, TokenGrant grant) {
+  try {
+    const bool has_password = !grant.oauth.value("password", std::string{}).empty();
+    if (!grant.refresh_token.empty()) {
+      try {
+        auto tokens = oidc_refresh(idms, grant.oauth, grant.refresh_token, grant.nonce);
+        // TS 33.180 table B.5.3-1: IdMS may keep the refresh token instead of issuing another.
+        if (!tokens.contains("refresh_token")) tokens["refresh_token"] = grant.refresh_token;
+        grant.tokens = std::move(tokens);
+        grant.kind = TokenGrant::Kind::refresh;
+        grant.refusals = 0;
+        return grant;
+      } catch (const oidc_refresh_refused &) {
+        // client_rules::refresh_refusal_final: a first refusal while the access token is valid keeps the refresh
+        // token; renew_token() tries again 30 s later.
+        ++grant.refusals;
+        if (!client_rules::refresh_refusal_final(grant.refusals, has_password, std::time(nullptr), grant.expires))
+          throw;
+        grant.refresh_cleared = true;
+        grant.refusals = 0;
+        if (!has_password) throw;
+      }
     }
+    if (grant.oauth.contains("authorization")) {
+      const auto authorization = grant.oauth.at("authorization");
+      grant.authorization_used = true;
+      grant.tokens = oidc_exchange_code(idms, grant.oauth, authorization.at("code"), authorization.at("code_verifier"),
+                                        authorization.at("nonce"));
+      grant.kind = TokenGrant::Kind::browser;
+      return grant;
+    }
+    if (!has_password) throw std::runtime_error("IdMS refused the refresh token, and no password is configured");
+    grant.tokens = oidc_login(idms, grant.oauth);
+    grant.kind = TokenGrant::Kind::password;
+  } catch (...) {
+    grant.error = std::current_exception();
   }
-  if (oauth.contains("authorization")) {
-    const auto authorization = oauth.at("authorization");
-    cfg_["oauth"].erase("authorization");
-    auto tokens = oidc_exchange_code(idms_http_, oauth, authorization.at("code"), authorization.at("code_verifier"),
-                                     authorization.at("nonce"));
-    keep_refresh_state(tokens);
-    ++browser_logins_;
-    return tokens;
-  }
-  if (!has_password) throw std::runtime_error("IdMS refused the refresh token, and no password is configured");
-  auto tokens = oidc_login(idms_http_, oauth);
-  keep_refresh_state(tokens);
-  ++password_logins_;
-
-  // oauth.forget_password (a dispatcher position): the password serves the operator's sign-in only; renewals then
-  // rely on the refresh token alone, so that IdMS refusing it (suspension, Revoke devices) ends the session.
-  if (cfg_["oauth"].value("forget_password", false) && !refresh_token_.empty()) cfg_["oauth"].erase("password");
-  return tokens;
+  return grant;
 }
 
 //------------------------------------------------------------------------------
-// TS 24.482 clause 6.2.1: user authentication: obtain the tokens and check the identities the claims name
-// (TS 33.180 table B.2.1.3-1) against the configured MCPTT ID, and the MCData and MCVideo IDs where IdMS names
-// them; the client ID and SIP URI too where IdMS names them (the OpenMCX IdMS, an extension). A refresh may give no
-// ID token (TS 33.180 table B.5.3-1): the identity stays the one checked at sign-in.
-void Client::login() {
-  auto tokens = obtain_tokens();
+// The run loop takes a token grant: the refresh state (kept in oauth.refresh_token_file), the counters, a used
+// authorization code, and then the tokens themselves (take_tokens); a failed grant is rethrown.
+void Client::take_token_grant(const TokenGrant &grant) {
+  refresh_refusals_ = grant.refusals;
+  if (grant.refresh_cleared) refresh_token_.clear();
+  if (grant.authorization_used) cfg_["oauth"].erase("authorization");
+  if (grant.error) std::rethrow_exception(grant.error);
+  keep_refresh_state(grant.tokens);
+  if (grant.kind == TokenGrant::Kind::refresh) ++token_refreshes_;
+  if (grant.kind == TokenGrant::Kind::browser) ++browser_logins_;
+  if (grant.kind == TokenGrant::Kind::password) {
+    ++password_logins_;
+    // oauth.forget_password (a dispatcher position): the password serves the operator's sign-in only; renewals then
+    // rely on the refresh token alone, so that IdMS refusing it (suspension, Revoke devices) ends the session.
+    if (cfg_["oauth"].value("forget_password", false) && !refresh_token_.empty()) cfg_["oauth"].erase("password");
+  }
+  take_tokens(grant.tokens);
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clause 5.1.3.2.1: the token grant runs on the worker thread (token_job_), so that the SIP processing
+// goes on meanwhile; done runs on the run loop. One grant at a time: a request while one runs waits a second.
+void Client::request_tokens(std::function<void(std::exception_ptr)> done) {
+  if (token_job_.busy()) {
+    schedule_after(1000, [this, done = std::move(done)]() mutable { request_tokens(std::move(done)); });
+    return;
+  }
+  if (!refresh_loaded_) load_refresh_state();
+  TokenGrant grant;
+  grant.oauth = oauth_settings(cfg_);
+  grant.refresh_token = refresh_token_;
+  grant.nonce = auth_nonce_;
+  grant.refusals = refresh_refusals_;
+  grant.expires = expires_;
+  token_job_.start([&idms = idms_http_, grant = std::move(grant)] { return grant_tokens(idms, grant); },
+                   [this, done = std::move(done)](TokenGrant result) {
+                     std::exception_ptr error;
+                     try {
+                       take_token_grant(result);
+                     } catch (...) {
+                       error = std::current_exception();
+                     }
+                     done(error);
+                   });
+}
+
+//------------------------------------------------------------------------------
+// TS 24.482 clause 6.2.1: user authentication: check the identities the claims name (TS 33.180 table B.2.1.3-1)
+// against the configured MCPTT ID, and the MCData and MCVideo IDs where IdMS names them; the client ID and SIP URI
+// too where IdMS names them (the OpenMCX IdMS, an extension), then take the access token. A refresh may give no ID
+// token (TS 33.180 table B.5.3-1): the identity stays the one checked at sign-in.
+void Client::take_tokens(const Json &tokens) {
   if (tokens.contains("claims")) {
     const auto &claims = tokens.at("claims");
     const auto differs = [&claims](const char *claim, const std::string &configured) {
@@ -142,24 +185,24 @@ void Client::schedule_token_renewal() {
 //------------------------------------------------------------------------------
 // TS 24.379 clause 7.2.2 (TS 24.282 clause 7.2.2 for MCData): service authorisation carries the
 // access token, and the server holds it only until the token expires. A token
-// renewed from the IdMS goes to the servers in a new PUBLISH with SIP-If-Match,
-// which keeps the authorisation, the affiliations and any call. If renewal fails,
-// the expiry in tick() still ends the authorisation.
+// renewed from the IdMS (on the worker thread, request_tokens) goes to the servers in a new PUBLISH with
+// SIP-If-Match, which keeps the authorisation, the affiliations and any call. If renewal fails, the expiry in tick()
+// still ends the authorisation.
 void Client::renew_token() {
-  try {
-    login();
-  } catch (const std::exception &error) {
-    failure(std::string("token renewal: ") + error.what());
-    if (std::time(nullptr) + 30 < expires_) schedule_after(30000, [this] { renew_token(); });
-    return;
-  }
-  token_renewals_++;
-  event("token_renewed", {{"expires_at", expires_}});
-  if (authorized_) reauthorize();
-  if (mcdata_enabled() && mcdata_authorized_) mcdata_authorize();
-  // TS 24.281 clause 7.2.2: the MCVideo service authorisation carries the access token as well.
-  if (mcvideo_enabled() && mcvideo_authorized_) mcvideo_authorize();
-  schedule_token_renewal();
+  request_tokens([this](std::exception_ptr error) {
+    if (error) {
+      failure("token renewal: " + error_text(error));
+      if (std::time(nullptr) + 30 < expires_) schedule_after(30000, [this] { renew_token(); });
+      return;
+    }
+    token_renewals_++;
+    event("token_renewed", {{"expires_at", expires_}});
+    if (authorized_) reauthorize();
+    if (mcdata_enabled() && mcdata_authorized_) mcdata_authorize();
+    // TS 24.281 clause 7.2.2: the MCVideo service authorisation carries the access token as well.
+    if (mcvideo_enabled() && mcvideo_authorized_) mcvideo_authorize();
+    schedule_token_renewal();
+  });
 }
 
 //------------------------------------------------------------------------------

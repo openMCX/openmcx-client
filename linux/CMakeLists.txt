@@ -74,3 +74,11 @@ add_executable(test_client_rules tests/test_client_rules.cpp)
 target_include_directories(test_client_rules PRIVATE src/client/core)
 target_compile_options(test_client_rules PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME client_rules COMMAND test_client_rules)
+
+# The background job of the sign-in (src/client/core/handoff.hpp).
+find_package(Threads REQUIRED)
+add_executable(test_handoff tests/test_handoff.cpp)
+target_include_directories(test_handoff PRIVATE src/client/core)
+target_compile_options(test_handoff PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_handoff PRIVATE Threads::Threads)
+add_test(NAME handoff COMMAND test_handoff)

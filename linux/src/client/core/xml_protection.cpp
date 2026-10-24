@@ -155,11 +155,24 @@ std::vector<BodyPart> Client::mcvideo_protect_outgoing(std::vector<BodyPart> par
 // TS 24.379 clause 6.6.1.2 and clause 6.6.1.3: just before sending, the MCPTT client encrypts the XML elements
 // (clause 6.6.2.3.1) and signs the XML bodies (clause 6.6.3.3.1) of a SIP request or response under the CSK
 // (TS 33.180 clause 9.3.4.2 and clause 9.3.5); MCVideo goes to mcvideo_protect_outgoing(), MCData is left alone.
+// TS 24.379 clause 7.2.1 (TS 24.281 clause 7.2.1): a REGISTER for service authorisation, with confidentiality or
+// integrity protection enabled, carries the access token and the client ID encrypted with the CSK (clause 6.6.2.3.3)
+// and its mcptt-info (mcvideo-info) integrity protected with the CSK (clause 6.6.3.3.3); the REGISTER is told by its
+// body, its Contact naming every service of the UE. The MCData REGISTER body is sealed by the MCData service
+// (mcdata_authorize), and a REGISTER without service authorisation has no body to protect.
 std::vector<BodyPart> Client::protect_outgoing(const SipTransmission &transmission, std::vector<BodyPart> parts) {
-  if ((!xml_protection() && !integrity_protection()) || transmission.method == "REGISTER" ||
-      mcdata_transmission(transmission))
-    return parts;
-  if (mcvideo_transmission(transmission)) return mcvideo_protect_outgoing(std::move(parts));
+  if (!xml_protection() && !integrity_protection()) return parts;
+  if (transmission.method == "REGISTER") {
+    const auto carries = [&parts](const std::string &type) {
+      return std::any_of(parts.begin(), parts.end(),
+                         [&type](const BodyPart &part) { return part.content_type == type; });
+    };
+    if (carries(mcvideo_service.info_mime)) return mcvideo_protect_outgoing(std::move(parts));
+    if (!carries(mcptt_mime)) return parts;
+  } else {
+    if (mcdata_transmission(transmission)) return parts;
+    if (mcvideo_transmission(transmission)) return mcvideo_protect_outgoing(std::move(parts));
+  }
 
   // TS 24.379 clause 7.2.1: until the server holds the CSK, only the request uploading it is protected.
   const bool uploads = std::any_of(parts.begin(), parts.end(),

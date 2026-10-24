@@ -141,7 +141,7 @@ std::pair<std::string, std::string> Client::affiliation_subscribe_body() {
 // status subscription (clause 9.2.1.3), then the group key subscription.
 void Client::authorize() {
   if (logged_off_) return;
-  if (keys_) {
+  if (keys_ && (protected_media() || protected_floor())) {
     auto [key, upload] = keys_->make_csk(service());
     protection_.set_floor(key);
     csk_upload_ = std::move(upload);
@@ -186,8 +186,8 @@ void Client::authorize() {
 
 //------------------------------------------------------------------------------
 // The steps after a successful service authorisation, by PUBLISH (clause 7.2.2) or by REGISTER (clause 7.2.1):
-// MCData and MCVideo authorisation, the configuration and affiliation status subscriptions (clause 9.2.1.3), then the
-// group key subscription.
+// MCData and MCVideo authorisation, the configuration, group document (TS 24.481 clause 6.3.13.2.1) and affiliation
+// status subscriptions (clause 9.2.1.3), then the group key subscription.
 void Client::service_authorized() {
   authorization_retry_.attempts = 0;
   authorized_ = true;
@@ -202,6 +202,7 @@ void Client::service_authorized() {
   if (mcvideo_enabled()) schedule([this] { mcvideo_authorize(); });
   if (config_subscription_.empty() && cfg_.at("mcptt").value("subscribe_configuration", true))
     schedule([this] { subscribe_configuration(); });
+  schedule([this] { subscribe_own_group_documents(); });
   schedule([this] { subscribe_affiliation(true); });
 }
 

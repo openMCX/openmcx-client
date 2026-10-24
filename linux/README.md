@@ -49,6 +49,18 @@ The [dispatcher](../dispatcher) uses the client as its engine, through settings 
 `oauth.authorization` with `--authorization-request` (sign-in on IdMS's page).
 Without them the client behaves as a plain client.
 
+### IMS AKA (3GPP access)
+
+On 3GPP access (TS 33.180 clause 6.2.1) the client authenticates to the SIP core with IMS AKA instead of digest over
+TLS (TS 33.203, TS 24.229 clause 5.1.1.2.2): `"sip": {"auth": "aka", "isim": {"impi": "<user>@<domain>", "k": "<32
+hex>", "opc": "<32 hex>", "amf": "8000"}, "pcscf": {"address": "<P-CSCF>", "port": 5060}, "port": <protected server
+port>}`. The SIP signalling then runs over TCP inside IPsec ESP security associations that the client sets up in the
+kernel, so the container needs `cap_add: NET_ADMIN` (without it the client stops with "IMS AKA needs CAP_NET_ADMIN").
+The ISIM keeps its sequence numbers in `isim-sqn.json` next to the status file (or `sip.isim.sqn_file`). Activation
+skips the SIP credential for such an identity, the registration asks for 600 000 s unless `sip.register_expires` says
+otherwise, and the status file's `sip_security` shows the security associations in use. With `log_level` debug the
+ESP keys of each SA are logged, for decrypting a capture. Without `sip.auth` the client stays on digest.
+
 ### Debug log
 
 Off by default. `"log_level": "debug"` in the client's configuration, or the environment variable `MCX_LOG=debug`,
@@ -74,13 +86,13 @@ build the image:
 tools/build-image -t openmcx-client:0.1                    # --server <path> if it is elsewhere
 ```
 
-The image is based on `openmcx-dev:0.1` from openmcx-server (`tools/mcx build`) and holds `/usr/local/bin/mcx-client`
+The image is based on `openmcx-dev:0.2` from openmcx-server (`tools/mcx build`) and holds `/usr/local/bin/mcx-client`
 and the lab health check. It builds against the server repository's protocol libraries (`mcx_sip`, `mcx_core`,
 `mcx_keying` and `include/mcx`), so build it from the same openmcx-server commit as the server image under test. The
 build runs the binary test. A local build and the unit tests inside the dev image, from this directory (the mount holds both repositories):
 
 ```bash
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/../..:/work" -w /work/openmcx-client/linux openmcx-dev:0.1 \
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/../..:/work" -w /work/openmcx-client/linux openmcx-dev:0.2 \
   bash -lc 'cmake -S . -B build && cmake --build build -j4 && build/test_client_rules && tests/test_binary.py'
 ```
 

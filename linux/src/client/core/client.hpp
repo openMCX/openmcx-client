@@ -18,6 +18,7 @@
 
 #include "activation.hpp"
 #include "client_rules.hpp"
+#include "handoff.hpp"
 #include "mcx/floor.hpp"
 #include "mcx/http.hpp"
 #include "mcx/ipconn.hpp"
@@ -86,6 +87,12 @@ inline SipConfig client_sip_config(const Json &cfg, bool disable_tls) {
   // TS 24.281 clause 7.2.1AA: a client that also uses MCVideo registers its tag and ICSI.
   if (cfg.contains("mcvideo")) config.other_services.push_back(&mcvideo_service);
 
+  // sip.auth "aka" (TS 33.203): the ISIM keeps its sequence numbers (TS 33.102 annex C.2) next to the status file
+  // unless sip.isim.sqn_file names another file.
+  if (config.aka.enabled && config.aka.sqn_file.empty())
+    config.aka.sqn_file =
+        (std::filesystem::path(cfg.value("status_file", std::string("."))).parent_path() / "isim-sqn.json").string();
+
   // sip.outbound: RFC 5626, the SIP core reaches this client over its registration's connection, its instance being
   // the MC client ID (TS 24.379 clause 4.10), as the Android client does (a client behind NAT, or on the server's
   // computer). Off by default: a plain Contact the core connects to.
@@ -114,6 +121,13 @@ class Client {
   bool protected_media() const { return cfg_.value("security", Json::object()).value("protect_media", false); }
 
   bool protected_floor() const { return cfg_.value("security", Json::object()).value("protect_floor", false); }
+
+  // mcptt.documents_on_notify: the MCPTT documents are read on the subscription NOTIFYs only (sign_in_documents).
+  bool documents_on_notify() const {
+    const auto &mcptt = cfg_.value("mcptt", Json::object());
+    return mcptt.value("documents_on_notify", false) && mcptt.value("subscribe_configuration", true) &&
+           !mcptt.value("group_from_profile", false);
+  }
 
   bool private_media() const { return call_type_ == "private" || call_type_ == "ambient"; }
 
@@ -347,7 +361,7 @@ class Client {
   // TS 24.484 clauses 8.4, 9.4 and 10.4: the Resource-Priority values of the service configuration documents, by
   // service ("mcptt", "mcvideo", "mcdata") and level ("emergency", "imminent", "normal").
   std::map<std::string, std::map<std::string, std::string>> service_priorities_;
-  void read_service_configurations();
+  void read_service_configurations(std::vector<std::string> services = {});
   Json service_priorities(const std::string &service) const;
   // The MCVideo user profile document (TS 24.484 clause 9.3) as read at start-up.
   Json mcvideo_profile_ = Json::object();
@@ -467,9 +481,36 @@ class Client {
 
   // The registration expiry the client asks for (RFC 3261 section 10.2.1.1): sip.register_expires, an hour by
   // default; a dispatcher position asks for less, so that a revoked credential ends its session at the next refresh.
+  // With IMS AKA (sip.auth "aka") the default is 600 000 s, the value TS 24.229 clause 5.1.1.2.1 e) asks a UE for.
   unsigned register_expires() const {
-    constexpr unsigned an_hour = 3600;
-    return cfg_.at("sip").value("register_expires", an_hour);
+    constexpr unsigned an_hour = 3600, ims_aka_default = 600000;
+    const auto &sip = cfg_.at("sip");
+    return sip.value("register_expires", sip.value("auth", "digest") == "aka" ? ims_aka_default : an_hour);
+  }
+
+  // TS 33.203 clause 7.1 rule 5: the status file's "sip_security": the IMS AKA SA_table of the set in use, or the
+  // digest mechanism.
+  Json sip_security_status() const {
+    const auto status = sip_.security_status();
+    if (!status)
+      return {{"mechanism", cfg_.at("sip").value("auth", "digest") == "aka" ? "ims-aka" : "digest"},
+              {"security_associations", false}};
+    return {{"mechanism", "ims-aka"},
+            {"security_associations", true},
+            {"algorithm", status->algorithm},
+            {"sec_mechanism", status->mechanism},
+            {"alg", status->alg},
+            {"ealg", status->ealg},
+            {"port_uc", status->port_uc},
+            {"port_us", status->port_us},
+            {"port_pc", status->port_pc},
+            {"port_ps", status->port_ps},
+            {"spi_uc", status->spi_uc},
+            {"spi_us", status->spi_us},
+            {"spi_pc", status->spi_pc},
+            {"spi_ps", status->spi_ps},
+            {"associated_uris", status->associated_uris},
+            {"service_routes", status->service_routes}};
   }
 
   std::pair<std::string, std::string> publish_body(bool affiliation);
@@ -500,6 +541,15 @@ class Client {
   void log_on_command();
   // RFC 3261 section 10.2 and TS 24.379 clause 7.2.2: SIP registration, then the service authorisation.
   void register_and_authorize();
+
+  // TS 33.180 clause 5.1.3.1 step A, in parallel with the registration, and the limited service state of clause
+  // 5.1.1 while it has not succeeded.
+  void sign_in();
+  void sign_in_documents();
+  void sign_in_failed(const std::string &reason);
+  bool signed_in_ = false;
+  unsigned sign_in_failures_ = 0;
+  std::string service_state() const;
 
   // TS 24.379, TS 24.282 and TS 24.281 clause 7.2.2: the retries of a refused initial service authorisation of one
   // service. attempts counts the retries since the last success; generation changes with every authorisation
@@ -584,16 +634,22 @@ class Client {
   static std::string temporary_group_request_xml(const std::string &group_id, const std::string &groups, bool chat,
                                                  bool protect);
 
-  void group_documents_subscribe(const std::vector<std::string> &args);
+  std::string group_documents_subscribe(const std::vector<std::string> &args);
+
+  // TS 24.481 clause 6.3.13.2.1 (test view TS 37.579-1 table 5.3.2.7.1-1 steps 1b1 and 1c3): the subscription to the
+  // group documents of the user's groups made at service authorisation (mcptt.subscribe_group_documents, on by
+  // default), its dialog kept among group_doc_subscriptions_.
+  std::string startup_group_subscription_;
+  void subscribe_own_group_documents();
 
   void group_documents_resubscribe(const std::vector<std::string> &args);
 
   void group_documents_unsubscribe();
 
   // ---- Service configuration, core/group_management.cpp (TS 24.484 clause 6.3.13.2.2) ----
-  // The CMC subscribes to its user profile document through the subscription proxy
-  // function of the CMS (whose PSI this client's MCPTT server provides), and reads
-  // the document again when it is notified of a change.
+  // The CMC subscribes to its UE configuration, user profile and service configuration documents in one SUBSCRIBE
+  // through the subscription proxy function of the CMS (whose PSI this client's MCPTT server provides), and reads
+  // the documents again when it is notified.
   std::string config_subscription_;
   unsigned config_notifies_ = 0, config_refreshes_ = 0;
 
@@ -616,6 +672,14 @@ class Client {
   void subscribe_configuration();
 
   void configuration_notified();
+
+  // TS 24.484 clause 8.2.1A: the MCPTT UE configuration document of this UE, and its retrieval.
+  std::string ue_configuration_document_path() const;
+  void read_ue_configuration();
+
+  // TS 24.484 clause 8.4.1: the MCPTT service configuration document.
+  static constexpr const char *service_configuration_document_path =
+      "org.3gpp.mcptt.service-config/global/service-config.xml";
 
   std::optional<SipResponse> group_document_notify(const SipMessage &message);
 
@@ -1866,6 +1930,7 @@ private:
   void group_from_profile();
   // KMS key provisioning and the CSKs (TS 33.180 clause 5.3.3, clause 5.4).
   void provision_keys();
+  void provision_identity_keys();
   // One pass of the run loop.
   void run_once();
 
@@ -1894,9 +1959,32 @@ public:
 
   void keep_refresh_state(const Json &tokens);
 
-  Json obtain_tokens();
+  // TS 24.482 clause 6.2.1 and TS 33.180 annexes B.4 and B.5: one token grant, run on a worker thread (grant_tokens
+  // touches no client state): the IdMS settings and refresh state it starts from, and what it brings back.
+  struct TokenGrant {
+    Json oauth;
+    std::string refresh_token, nonce;
+    unsigned refusals = 0;
+    std::int64_t expires = 0;
+    Json tokens;
+    enum class Kind { none, refresh, browser, password } kind = Kind::none;
+    bool authorization_used = false, refresh_cleared = false;
+    std::exception_ptr error;
+  };
 
-  void login();
+  static TokenGrant grant_tokens(const HttpClient &idms, TokenGrant grant);
+
+  void take_token_grant(const TokenGrant &grant);
+
+  // The run loop's side of the token grant: done(nullptr) once the access token is taken, done(error) otherwise.
+  void request_tokens(std::function<void(std::exception_ptr)> done);
+
+  void take_tokens(const Json &tokens);
+
+  // The worker thread of the token grants and its hand-off to the run loop (run_once). Declared after the HTTP
+  // clients: it is destroyed (and its job waited for) first.
+  Handoff handoff_;
+  BackgroundJob token_job_{handoff_};
 
   void schedule_token_renewal();
 

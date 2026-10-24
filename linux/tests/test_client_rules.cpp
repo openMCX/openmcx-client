@@ -89,6 +89,9 @@ void test_oidc_scope() {
                             "3gpp:mc:video_group_management_service"})
     check(all.find(scope) != std::string::npos, scope);
   check(oidc_scope(true, false, false).find("video") == std::string::npos, "no MCVideo scope without MCVideo");
+  check(oidc_scope(false, false, false).find("location") == std::string::npos, "no location scope without an LMS");
+  check(oidc_scope(false, false, false, true).ends_with(" 3gpp:mc:location_management_service"),
+        "the location scope with an LMS");
 }
 
 //------------------------------------------------------------------------------

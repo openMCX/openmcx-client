@@ -7,7 +7,7 @@
 # plus curl and Python for the lab's health checks. Build with tools/build-image, which stages this repository under
 # /client and the needed openmcx-server files under /openmcx-server.
 
-ARG DEV_IMAGE=openmcx-dev:0.1
+ARG DEV_IMAGE=openmcx-dev:0.2
 ARG RUNTIME_BASE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 
 #------------------------------------------------------------------------------
@@ -30,6 +30,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=build /build/mcx-client.stripped /usr/local/bin/mcx-client
 COPY openmcx-server/tools/healthcheck.py /healthcheck.py
 COPY LICENSE NOTICE /usr/share/doc/openmcx-client/
+# hostap's licence (BSD) for the MILENAGE of the IMS AKA ISIM (openmcx-server dependencies/hostap).
+COPY openmcx-server/dependencies/hostap/README /usr/share/doc/openmcx-client/hostap-README
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later" \
       org.opencontainers.image.source="https://github.com/openMCX/openmcx-client"
 WORKDIR /workspace
