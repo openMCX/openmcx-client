@@ -13,6 +13,8 @@ import android.content.pm.ServiceInfo
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.wifi.WifiManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -25,6 +27,7 @@ import kotlinx.coroutines.launch
 class McxService : LifecycleService() {
     private var control: Job? = null
     private var network: ConnectivityManager.NetworkCallback? = null
+    private var mcxNetwork: ConnectivityManager.NetworkCallback? = null
     private var watchingCalls: Job? = null
     private var wifiLock: WifiManager.WifiLock? = null
 
@@ -55,6 +58,7 @@ class McxService : LifecycleService() {
             kotlinx.coroutines.flow.combine(Engine.inCall, Engine.inVideoCall) { a, v -> a to v }.collect { (a, v) -> foreground(a, v) }
         }
         if (network == null) network = watchNetwork()
+        if (mcxNetwork == null) mcxNetwork = watchMcxNetwork()
         // Keep Wi-Fi out of power save while the screen is off, so incoming signalling and the
         // keepalive pongs are not held back; the alarm covers the times the timer cannot run.
         if (wifiLock == null) wifiLock = runCatching {
@@ -84,7 +88,11 @@ class McxService : LifecycleService() {
             }
 
             override fun onLost(network: Network) {
-                if (network == current) { current = null; Engine.log.add("network lost") }
+                if (network == current) { current = null; Engine.log.add("network lost"); NetworkStatus.defaultNetwork(this@McxService, null) }
+            }
+
+            override fun onCapabilitiesChanged(network: Network, capabilities: NetworkCapabilities) {
+                if (network == current) NetworkStatus.defaultNetwork(this@McxService, capabilities)
             }
 
             override fun onLinkPropertiesChanged(network: Network, properties: LinkProperties) {
@@ -98,8 +106,26 @@ class McxService : LifecycleService() {
         return callback
     }
 
+    /**
+     * Listen (not request) for a cellular network with the MCX capability, for the Network and SIM status only:
+     * the flow stays on the default network. MCX networks are usually restricted, so that is not asked for.
+     */
+    private fun watchMcxNetwork(): ConnectivityManager.NetworkCallback? = runCatching {
+        val request = NetworkRequest.Builder().addTransportType(NetworkCapabilities.TRANSPORT_CELLULAR)
+            .addCapability(NetworkCapabilities.NET_CAPABILITY_MCX)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_NOT_RESTRICTED)
+            .removeCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET).build()
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) = NetworkStatus.mcxNetwork(this@McxService, true)
+            override fun onLost(network: Network) = NetworkStatus.mcxNetwork(this@McxService, false)
+        }
+        getSystemService(ConnectivityManager::class.java).registerNetworkCallback(request, callback)
+        callback
+    }.onFailure { Engine.log.add("MCX network watch: ${it.message}") }.getOrNull()
+
     override fun onDestroy() {
         network?.let { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
+        mcxNetwork?.let { getSystemService(ConnectivityManager::class.java).unregisterNetworkCallback(it) }
         wifiLock?.let { if (it.isHeld) it.release() }
         KeepaliveAlarm.cancel(applicationContext)
         super.onDestroy()

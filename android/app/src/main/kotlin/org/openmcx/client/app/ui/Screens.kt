@@ -137,6 +137,7 @@ object Tags {
     const val LOCATIONS = "locations"
     const val SETTINGS_BACK = "settings-back"
     const val PROFILE_INFO = "profile-info"
+    const val NETWORK_INFO = "network-info"
     const val CALL_ALIAS = "call-alias"
     fun alias(id: String) = "alias-$id"
     fun aliasAction(id: String, action: String) = "alias-$action-$id"
@@ -348,6 +349,7 @@ private fun GearIcon(colour: Color, size: Dp) = Canvas(Modifier.size(size)) {
 private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit) {
     var profile by rememberSaveable { mutableStateOf(false) }
     var history by rememberSaveable { mutableStateOf(false) }
+    var networkInfo by rememberSaveable { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize().padding(horizontal = 12.dp)) {
         item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
@@ -387,6 +389,20 @@ private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit
                     }
                 }
                 state.endpoints.forEach { (name, target) -> Text("$name → $target", style = MaterialTheme.typography.bodySmall) }
+            }
+            // Network and SIM under the profile: what the phone offers for IMS AKA; the app registers with SIP digest.
+            Row(Modifier.fillMaxWidth().clickable { networkInfo = !networkInfo }.testTag(Tags.NETWORK_INFO), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) { Section("Network and SIM") }
+                Text(if (networkInfo) "▾" else "▸", color = Mcx.Muted, modifier = Modifier.padding(top = 12.dp))
+            }
+            if (networkInfo) {
+                if (state.network.isEmpty()) Text("Not known yet", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                state.network.forEach { (label, value) ->
+                    Row(Modifier.padding(vertical = 2.dp)) {
+                        Text(label, style = MaterialTheme.typography.bodySmall, color = Mcx.Muted, modifier = Modifier.width(120.dp))
+                        Text(value, style = MaterialTheme.typography.bodySmall, color = Mcx.Ink)
+                    }
+                }
             }
             if (state.aliases.isNotEmpty()) FunctionalAliases(state, actions)
             // Log off just after the functional aliases (or where they would be).

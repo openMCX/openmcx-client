@@ -487,7 +487,8 @@ class DebugControl(private val context: Context) {
         } ?: emptyList<JSONObject>()))
 
     private fun status(): JSONObject {
-        val client = Engine.client ?: return JSONObject().put("phase", "not-started")
+        val network = NetworkStatus.current.value?.json() ?: JSONObject.NULL
+        val client = Engine.client ?: return JSONObject().put("phase", "not-started").put("network", network)
         val s = client.status.value
         fun service(state: org.openmcx.client.client.ServiceState) =
             JSONObject().put("authorised", state.authorised).put("affiliations", JSONObject(state.affiliations))
@@ -500,6 +501,7 @@ class DebugControl(private val context: Context) {
             .put("offline_since", s.offlineSince ?: JSONObject.NULL).put("next_retry_at", s.nextRetryAt ?: JSONObject.NULL)
             .put("signed_out", s.signedOut ?: JSONObject.NULL)
             .put("flow", client.ua.flow?.connection?.let { "${it.localHost}:${it.localPort}" })
+            .put("network", network)
             .put("pid", android.os.Process.myPid())
             // The service's foreground types as the app sees them: Android 13's dumpsys does not print them.
             .put("fgs_types", (context as? android.app.Service)?.takeIf { android.os.Build.VERSION.SDK_INT >= 29 }?.foregroundServiceType ?: JSONObject.NULL)

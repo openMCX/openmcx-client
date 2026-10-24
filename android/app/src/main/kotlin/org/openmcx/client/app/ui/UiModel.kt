@@ -208,6 +208,8 @@ data class UiState(
     val videoFailure: String? = null,
     /** Known file size limits: by group ID, and for one-to-one files under [ONE_TO_ONE]. */
     val fileLimits: Map<String, Long> = emptyMap(),
+    /** The network and SIM as label and value, for Settings (NetworkStatus). */
+    val network: List<Pair<String, String>> = emptyList(),
 ) {
     fun fileLimit(target: String, group: Boolean): Long? = fileLimits[if (group) target else ONE_TO_ONE]
 
@@ -347,7 +349,8 @@ fun String.short(): String = removePrefix("sip:").substringBefore('@').removeSuf
 
 /** A snapshot of the engine for the screens. */
 fun snapshot(batteryExempt: Boolean = true): UiState {
-    val client = Engine.client ?: return UiState(events = Engine.log.last(30).reversed(), batteryExempt = batteryExempt)
+    val network = org.openmcx.client.app.NetworkStatus.current.value?.rows() ?: emptyList()
+    val client = Engine.client ?: return UiState(events = Engine.log.last(30).reversed(), batteryExempt = batteryExempt, network = network)
     val status = client.status.value
     val mcptt = Engine.mcptt
     val profile = client.profile
@@ -431,6 +434,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     }
     return UiState(
         user = client.config.sip.publicUserId.short(),
+        network = network,
         aliases = aliases,
         aliasNote = aliasNote,
         phase = status.phase,
