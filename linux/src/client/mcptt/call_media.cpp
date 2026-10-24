@@ -71,6 +71,7 @@ void Client::call_state(std::string_view id, SipCallState state, int code) {
     dialog_ = id;
     status_["call_state"] = "active";
     event("call_active", {{"dialog", id}});
+    multicast_join();
     if (cfg_.at("mcptt").value("conference_notifications", true)) schedule([this] { subscribe_conference(); });
   } else if (state == SipCallState::disconnected) {
     if (held_ && id == held_->dialog) {
@@ -132,6 +133,7 @@ void Client::clear_call_state() {
   receive_ssrc_ = audio_ssrc_ = 0;
   talking_ = requesting_ = false;
   transmit_.clear();
+  multicast_leave();
 
   // A private session cannot be rejoined; keep only group session identities.
   if (call_type_ == "private" || call_type_ == "ambient") {
@@ -248,6 +250,13 @@ bool Client::sent_by_server(const sockaddr_in &source, const std::string &addres
 }
 
 //------------------------------------------------------------------------------
+// Helper: whether a packet comes from the server's media address of the negotiated SDP, from any port.
+bool Client::from_server_address(const sockaddr_in &source, const std::string &address) {
+  in_addr expected{};
+  return inet_pton(AF_INET, address.c_str(), &expected) == 1 && source.sin_addr.s_addr == expected.s_addr;
+}
+
+//------------------------------------------------------------------------------
 // Helper: the server's address for a port: the SDP address, or with media.server_source "port" the address its
 // packets on that port came from.
 std::string Client::server_target(const std::string &address, std::uint16_t port) const {
@@ -339,19 +348,24 @@ void Client::floor_packet(const Datagram &datagram) {
 
 //------------------------------------------------------------------------------
 // TS 24.380 clause 6.2.4.3.4: receive RTP media from the floor owner (or, without floor control, TS 24.379
-// clause 11.1.2, from the first sender) and keep the decoded audio, or with media.live pass it on.
-void Client::audio_packet(const Datagram &datagram) {
-  if (!remote_ || !sent_by_server(datagram.source, remote_->address, remote_->audio_port) ||
-      status_.value("call_state", "") != "active")
+// clause 11.1.2, from the first sender) and keep the decoded audio, or with media.live pass it on. Speech received
+// on a joined host group (mcptt/multicast.cpp) comes from the server's media address, from a port of the server's
+// own choosing; the talker drops its own speech sent back to it there.
+void Client::audio_packet(const Datagram &datagram, bool multicast) {
+  if (!remote_ || status_.value("call_state", "") != "active") return;
+  if (multicast ? talking_ || !from_server_address(datagram.source, remote_->address)
+                : !sent_by_server(datagram.source, remote_->address, remote_->audio_port))
     return;
   // Without floor control no Floor Taken names the sender's SSRC: the first one
   // heard is followed (TS 24.379 clause 11.1.2).
   if (no_floor() && !receive_ssrc_) receive_ssrc_ = wire_ssrc(datagram.bytes, false);
   if (!receive_ssrc_ || wire_ssrc(datagram.bytes, false) != receive_ssrc_) return;
+  if (duplicate_rtp(datagram.bytes)) return;
   const auto sender = no_floor() ? private_peer_ : status_.value("floor_owner", std::string{});
   auto bytes = protected_media() ? protection_.unprotect_media(datagram.bytes, sender) : datagram.bytes;
   auto rtp = decode_rtp(bytes);
   if (rtp.payload_type != local_.payload_type || !receive_ssrc_ || rtp.ssrc != receive_ssrc_) return;
+  kept_rtp(datagram.bytes);
   floor_timers_.media_received(monotonic_ms());
   auto pcm = codec_.decode(unpack_amr_wb(rtp.payload, local_.octet_aligned));
   capture_speech(pcm, receive_ssrc_, sender, monotonic_ms()); // media.speech_dir: for an agent
@@ -371,6 +385,7 @@ void Client::audio_packet(const Datagram &datagram) {
     }
   }
   status_["received_packets"] = status_["received_packets"].get<unsigned>() + 1;
+  if (multicast) status_["multicast_received_packets"] = status_.value("multicast_received_packets", 0ULL) + 1;
 }
 
 } // namespace mcx

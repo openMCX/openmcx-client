@@ -160,6 +160,18 @@ void test_floor_and_audio() {
   check(audio_overflow(117, 100, 16) == 17, "past a second the excess is dropped");
 }
 
+//------------------------------------------------------------------------------
+// RFC 3550 appendix A.1: a packet received both by unicast and by multicast is kept once.
+void test_rtp_sequence() {
+  using mcx::client_rules::rtp_sequence_newer;
+  check(rtp_sequence_newer(11, 10), "the next packet is newer");
+  check(!rtp_sequence_newer(10, 10), "a copy received again is not newer");
+  check(!rtp_sequence_newer(9, 10), "an older packet is not newer");
+  check(rtp_sequence_newer(0, 65535), "the sequence number wraps");
+  check(!rtp_sequence_newer(65535, 0), "an older packet across the wrap is not newer");
+  check(!rtp_sequence_newer(10 + 0x8000, 10), "half the sequence space ahead is not newer");
+}
+
 } // namespace
 
 //------------------------------------------------------------------------------
@@ -229,6 +241,7 @@ int main() {
   test_control_unescape();
   test_profile_groups();
   test_floor_and_audio();
+  test_rtp_sequence();
   test_authorization_retry();
   test_alias_outcome();
   test_counts_as_affiliated();

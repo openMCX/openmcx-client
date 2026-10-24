@@ -28,6 +28,7 @@
 #include "mcx/mcdata.hpp"
 #include "mcx/media.hpp"
 #include "mcx/msrp.hpp"
+#include "mcx/multicast.hpp"
 #include "mcx/protected_call.hpp"
 #include "mcx/runtime.hpp"
 #include "mcx/seal_location.hpp"
@@ -1888,7 +1889,28 @@ private:
   mutable std::map<std::uint16_t, std::string> server_sources_;
   void floor_packet(const Datagram &datagram);
 
-  void audio_packet(const Datagram &datagram);
+  static bool from_server_address(const sockaddr_in &source, const std::string &address);
+
+  void audio_packet(const Datagram &datagram, bool multicast = false);
+
+  // ---- IP multicast reception of group call speech (mcptt/multicast.cpp, mcptt.multicast; an OpenMCX profile,
+  // include/mcx/multicast.hpp) ----
+  // The configured host groups; none without mcptt.multicast. While a configured group's call is active the client
+  // has joined its host group (multicast_socket_), and keeps the SSRC and sequence number last received so that a
+  // packet that arrives both by unicast and by multicast is kept once.
+  std::optional<MulticastConfig> multicast_;
+  std::unique_ptr<UdpSocket> multicast_socket_;
+  std::optional<std::pair<std::uint32_t, std::uint16_t>> last_rtp_; // SSRC, sequence number
+
+  void multicast_join();
+
+  void multicast_leave();
+
+  void multicast_poll();
+
+  [[nodiscard]] bool duplicate_rtp(std::span<const std::uint8_t> packet);
+
+  void kept_rtp(std::span<const std::uint8_t> packet);
 
   // ---- Live audio for the dispatcher (mcptt/live_audio.cpp, media.live) ----
   void open_live_audio();

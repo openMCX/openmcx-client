@@ -37,6 +37,7 @@ add_executable(mcx-client
     src/client/mcptt/functional_alias.cpp
     src/client/mcptt/incoming_calls.cpp
     src/client/mcptt/live_audio.cpp
+    src/client/mcptt/multicast.cpp
     src/client/mcptt/priority.cpp
     src/client/mcptt/private_call.cpp
     src/client/mcptt/private_services.cpp

@@ -471,6 +471,15 @@ stateDiagram-v2
   spec's names ('U: has permission').
 - A private call without floor control (TS 24.379 clause 11.1.2, `no_floor()`) has no floor participant: `ptt` starts
   speech at once.
+- IP multicast reception of group call speech (`mcptt.multicast`, `mcptt/multicast.cpp`; an OpenMCX profile, not 3GPP
+  MBMS, with the server's `mcptt.multicast` block). `groups` maps a group URI to `"<IPv4 host group>:<port>"` and
+  `interface` (default `0.0.0.0`) names the interface to join on. When the call of a configured group becomes active
+  (prearranged, chat or broadcast, or a regroup, with floor control) the client joins its host group, and leaves it
+  when the call ends. Speech from the host group goes through `audio_packet` as unicast speech does, accepted from
+  the server's media address on any port. While joined, a packet of the followed SSRC that is not newer than the
+  last one kept (RFC 3550 appendix A.1) is dropped as a copy. The talker drops its own speech from the host group.
+  Floor control stays unicast. The server must list the user in its `users`, and both must name the same host group.
+  Status: `multicast_joined`, `multicast_received_packets`, `multicast_duplicates_dropped`.
 
 ### 3.3 Spec-literal state names and how to add a transition
 

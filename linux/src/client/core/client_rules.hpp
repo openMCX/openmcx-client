@@ -204,6 +204,15 @@ inline std::size_t audio_overflow(std::size_t size, std::size_t limit, std::size
 }
 
 //------------------------------------------------------------------------------
+// RFC 3550 appendix A.1: whether an RTP sequence number comes after the last one received, in modulo 2^16
+// arithmetic (at most half the sequence space ahead). A copy received again, or an older packet, is not newer.
+inline bool rtp_sequence_newer(std::uint16_t sequence, std::uint16_t last) {
+  constexpr std::uint16_t half_space = 0x8000;
+  const auto ahead = static_cast<std::uint16_t>(sequence - last);
+  return ahead != 0 && ahead < half_space;
+}
+
+//------------------------------------------------------------------------------
 // The delay before the client publishes its initial service authorisation again, or nothing when it does not.
 // TS 24.379, TS 24.282 and TS 24.281 clause 7.2.2: a SIP 4xx, 5xx or 6xx response leaves the client not authorised,
 // and they leave whether and when to try again to the client. A refusal that can be transient is retried: 403 (the
