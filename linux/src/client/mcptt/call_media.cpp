@@ -71,7 +71,8 @@ void Client::call_state(std::string_view id, SipCallState state, int code) {
     dialog_ = id;
     status_["call_state"] = "active";
     event("call_active", {{"dialog", id}});
-    multicast_join();
+    // After this dialog's response handlers, which keep the session identity the listening report names.
+    schedule([this] { multicast_join(); });
     if (cfg_.at("mcptt").value("conference_notifications", true)) schedule([this] { subscribe_conference(); });
   } else if (state == SipCallState::disconnected) {
     if (held_ && id == held_->dialog) {
@@ -133,7 +134,8 @@ void Client::clear_call_state() {
   receive_ssrc_ = audio_ssrc_ = 0;
   talking_ = requesting_ = false;
   transmit_.clear();
-  multicast_leave();
+  multicast_leave(false);
+  multicast_off_ = false;
 
   // A private session cannot be rejoined; keep only group session identities.
   if (call_type_ == "private" || call_type_ == "ambient") {
@@ -360,7 +362,7 @@ void Client::audio_packet(const Datagram &datagram, bool multicast) {
   // heard is followed (TS 24.379 clause 11.1.2).
   if (no_floor() && !receive_ssrc_) receive_ssrc_ = wire_ssrc(datagram.bytes, false);
   if (!receive_ssrc_ || wire_ssrc(datagram.bytes, false) != receive_ssrc_) return;
-  if (duplicate_rtp(datagram.bytes)) return;
+  if (duplicate_rtp(datagram.bytes, multicast)) return;
   const auto sender = no_floor() ? private_peer_ : status_.value("floor_owner", std::string{});
   auto bytes = protected_media() ? protection_.unprotect_media(datagram.bytes, sender) : datagram.bytes;
   auto rtp = decode_rtp(bytes);

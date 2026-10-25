@@ -1901,14 +1901,22 @@ private:
   std::optional<MulticastConfig> multicast_;
   std::unique_ptr<UdpSocket> multicast_socket_;
   std::optional<std::pair<std::uint32_t, std::uint16_t>> last_rtp_; // SSRC, sequence number
+  // The session and TMGI of the joined host group's listening status reports (TS 24.379 clause 14.3.3.2), and
+  // "multicast off" in force until the call ends.
+  std::string multicast_session_, multicast_tmgi_;
+  bool multicast_off_ = false;
 
   void multicast_join();
 
-  void multicast_leave();
+  void multicast_leave(bool report);
+
+  void multicast_report(bool listening);
+
+  void multicast_command(const std::string &cmd);
 
   void multicast_poll();
 
-  [[nodiscard]] bool duplicate_rtp(std::span<const std::uint8_t> packet);
+  [[nodiscard]] bool duplicate_rtp(std::span<const std::uint8_t> packet, bool multicast);
 
   void kept_rtp(std::span<const std::uint8_t> packet);
 

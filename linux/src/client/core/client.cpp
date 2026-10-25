@@ -300,7 +300,8 @@ Client::Client(Json cfg, bool disable_tls)
              {"received_packets", 0},
              {"floor_denials", 0},
              {"floor_queue_info_received", 0}};
-  if (multicast_) status_.update({{"multicast_joined", ""}, {"multicast_received_packets", 0}});
+  if (multicast_)
+    status_.update({{"multicast_joined", ""}, {"multicast_listening", false}, {"multicast_received_packets", 0}});
 }
 
 //------------------------------------------------------------------------------
