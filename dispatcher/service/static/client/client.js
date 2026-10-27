@@ -460,7 +460,17 @@ const chat = {
     }
     const last = s.mcdata_last_result || {};
     for (const r of s.mcdata_sent || []) {
-      if (r.status === 300) continue; // the request to an alias, redirected: its follow-up is the message
+      if (r.status === 300) { // the request to an alias, redirected: its follow-up is the message
+        // A poll may have shown the request while it was in flight; its bubble goes to the follow-up.
+        const stale = this.msgs[r.message_id];
+        if (stale) {
+          delete this.msgs[r.message_id];
+          const followed = (s.mcdata_sent || []).some((f) => f.conversation_id === r.conversation_id && f.status !== 300 && this.msgs[f.message_id]);
+          if (!followed) this.pending.push({ ...stale, id: 'local-' + r.message_id, status: 'sending' });
+          changed = true;
+        }
+        continue;
+      }
       const group = r.request_type === 'group-sds';
       const peer = group ? r.target : r.called_alias || r.target;
       const kind = group ? 'group' : r.called_alias ? 'alias' : 'user';
