@@ -106,6 +106,17 @@ void test_percent_decode() {
 }
 
 //------------------------------------------------------------------------------
+// The escaped text of a control command (the "escaped" option of sds and sds-reply).
+void test_control_unescape() {
+  using mcx::client_rules::control_unescape;
+  check(control_unescape("one\\ntwo") == "one\ntwo", "a line break");
+  check(control_unescape("a\\\\nb") == "a\\nb", "an escaped backslash before n stays a backslash");
+  check(control_unescape("col\\tval") == "col\tval", "a tab");
+  check(control_unescape("C:\\dir") == "C:\\dir", "another backslash is kept");
+  check(control_unescape("end\\") == "end\\", "a trailing backslash is kept");
+}
+
+//------------------------------------------------------------------------------
 // TS 24.484 clause 8.3.2: the groups of an MCPTT user profile (<MCPTTGroupInfo> uri-entries).
 void test_profile_groups() {
   using mcx::client_rules::parse_profile_groups;
@@ -215,6 +226,7 @@ int main() {
   test_refresh_refusal();
   test_oidc_scope();
   test_percent_decode();
+  test_control_unescape();
   test_profile_groups();
   test_floor_and_audio();
   test_authorization_retry();

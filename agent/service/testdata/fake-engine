@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+# A stand-in for mcx-client in the daemon tests: the MCData status keys and events the daemon
+# reads, as the engine writes them. Besides the engine's own commands it takes test commands:
+#   fake-sds <from> <disposition 0-3> <text>       a one-to-one SDS arrives
+#   fake-group-sds <from> <group> <text>           a group SDS arrives
+#   fake-file <from> <name>                        a one-to-one file offer arrives
+#   fake-read <message ID>                         the recipient reports a sent message read
+#   fake-emergency-sds <from> <text>               a one-to-one emergency SDS arrives
+#   fake-forget <message ID>                       the engine drops a received message (its last 50)
+#   fake-alias-outcome <outcome>                   the outcome of the next alias activations
+#   fake-lose-alias <alias>                        another user takes the alias over
+# Configuration "fake": {"alias_outcome": "activated" | "refused" | ...}; a recipient whose
+# user part starts with "refuse" answers 403.
+import hashlib, json, os, signal, sys, uuid
+
+config = sys.argv[sys.argv.index("--config") + 1]
+cfg = json.load(open(config))
+fifo, status_file = cfg["control_fifo"], cfg["status_file"]
+fake = cfg.get("fake") or {}
+st = {"registered": True, "authorized": True, "mcdata_authorized": True, "last_error": None,
+      "mcdata_functional_aliases": [], "mcdata_fa_last_result": None, "mcdata_inbox": [], "mcdata_sent": [],
+      "mcdata_notifications": [], "mcdata_files": [], "mcdata_file_notifications": [],
+      "mcdata_fd_last_result": None}
+
+
+def save():
+    tmp = status_file + ".tmp"
+    json.dump(st, open(tmp, "w"))
+    os.replace(tmp, status_file)
+
+
+def event(kind, **detail):
+    detail["event"] = kind
+    print(json.dumps(detail), flush=True)
+
+
+def failure(reason):
+    st["last_error"] = reason
+    event("client_error", reason=reason)
+
+
+def find(key, mid):
+    return next((m for m in st[key] if m["message_id"] == mid), None)
+
+
+def unescape(text):
+    """The engine's control_unescape: \\n a line break, \\t a tab, \\\\ a backslash."""
+    out, i = [], 0
+    while i < len(text):
+        if text[i] == "\\" and i + 1 < len(text) and text[i + 1] in "nt\\":
+            out.append({"n": "\n", "t": "\t", "\\": "\\"}[text[i + 1]])
+            i += 2
+        else:
+            out.append(text[i])
+            i += 1
+    return "".join(out)
+
+
+def options(rest):
+    """The leading option words of sds and sds-reply: (disposition, escaped, the other words)."""
+    disposition, escaped = 0, False
+    while rest and rest[0] in ("delivery", "read", "both", "escaped"):
+        if rest[0] == "escaped":
+            escaped = True
+        else:
+            disposition = {"delivery": 1, "read": 2, "both": 3}[rest[0]]
+        rest = rest[1:]
+    return disposition, escaped, rest
+
+
+def send_sds(target, disposition, text):
+    mid = str(uuid.uuid4())
+    refused = target.split(":", 1)[1].startswith("refuse")
+    st["mcdata_sent"].append({"message_id": mid, "target": target, "text": text, "disposition": disposition,
+                              "status": 403 if refused else 200})
+    st["mcdata_last_result"] = {"message_id": mid, "status": 403 if refused else 200,
+                                "warning": '403 mcdata.test "229 one-to-one target not allowed"' if refused else ""}
+    event("mcdata_sds_sent", message_id=mid, request_type="one-to-one-sds", target=target, disposition=disposition)
+    if disposition in (1, 3) and not refused:
+        st["mcdata_notifications"].append({"from": target, "group": "", "type": 2, "message_id": mid})
+
+
+def command(line):
+    words = line.split()
+    verb, rest = words[0], words[1:]
+    if verb == "mcdata-fa" and rest[0] == "activate":
+        outcome = fake.get("alias_outcome", "activated")
+        st["mcdata_fa_last_result"] = {"action": "activate", "aliases": rest[1:], "status": 200,
+                                       "outcomes": {a: outcome for a in rest[1:]}}
+        if outcome == "activated":
+            st["mcdata_functional_aliases"] += rest[1:]
+        event("mcdata_functional_alias_requested", action="activate", aliases=rest[1:])
+    elif verb == "mcdata-fa" and rest[0] == "use":
+        pass
+    elif verb == "sds":
+        disposition, escaped, rest = options(rest)
+        text = line.split(rest[0], 1)[1].lstrip()  # the text as written, spaces kept
+        send_sds(rest[0], disposition, unescape(text) if escaped else text)
+    elif verb == "sds-reply":
+        disposition, escaped, rest = options(rest)
+        original = find("mcdata_inbox", rest[0]) if rest else None
+        if original is None:
+            return failure("usage: sds-reply [delivery|read|both] [escaped] <received message ID> <text>")
+        text = line.split(rest[0], 1)[1].lstrip()
+        send_sds(original["from"], disposition, unescape(text) if escaped else text)
+    elif verb == "sds-display":
+        received = find("mcdata_inbox", rest[0])
+        if received is None:
+            return failure("no received SDS message with that ID")
+        received["displayed"] = True
+    elif verb == "fd-send":
+        mandatory = rest[0] == "mandatory"
+        if mandatory:
+            rest = rest[1:]
+        target, path = rest
+        if not os.path.isfile(path):
+            return failure("file not found: " + path)
+        mid = str(uuid.uuid4())
+        st["mcdata_fd_last_result"] = {"message_id": mid, "status": 200}
+        event("mcdata_file_sent", message_id=mid, request_type="one-to-one-fd", target=target,
+              file_url="https://content/" + mid, bytes=os.path.getsize(path), mandatory=mandatory)
+        st["mcdata_file_notifications"].append({"from": target, "group": "", "type": 1, "message_id": mid})
+    elif verb in ("fd-accept", "fd-reject", "fd-defer"):
+        offer = find("mcdata_files", rest[0])
+        if offer is None:
+            return failure("no file transfer with that ID")
+        if verb == "fd-accept":
+            folder = os.path.join(os.path.dirname(status_file), "downloads")
+            os.makedirs(folder, exist_ok=True)
+            data = b"contents of " + offer["name"].encode()
+            path = os.path.join(folder, offer["name"])
+            open(path, "wb").write(data)
+            offer.update(state="downloaded", path=path, plain_bytes=len(data),
+                         plain_sha256=hashlib.sha256(data).hexdigest())
+        else:
+            offer["state"] = {"fd-reject": "rejected", "fd-defer": "deferred"}[verb]
+    elif verb == "fake-sds":
+        mid = str(uuid.uuid4())
+        st["mcdata_inbox"].append({"message_id": mid, "conversation_id": str(uuid.uuid4()), "in_reply_to": None,
+                                   "from": rest[0], "group": "", "request_type": "one-to-one-sds",
+                                   "disposition": int(rest[1]), "displayed": False, "functional_alias": "",
+                                   "called_functional_alias": fake.get("called_alias", ""),
+                                   "payloads": [{"content_type": 1, "text": " ".join(rest[2:]), "bytes": 1}]})
+        event("mcdata_sds_received", message_id=mid, **{"from": rest[0]}, group="", disposition=int(rest[1]))
+    elif verb == "fake-emergency-sds":
+        mid = str(uuid.uuid4())
+        st["mcdata_inbox"].append({"message_id": mid, "conversation_id": str(uuid.uuid4()), "from": rest[0],
+                                   "group": "", "request_type": "one-to-one-sds", "disposition": 0,
+                                   "displayed": False, "emergency": True, "used_priority": 9,
+                                   "authenticated": True,
+                                   "payloads": [{"content_type": 1, "text": " ".join(rest[1:]), "bytes": 1}]})
+    elif verb == "fake-group-sds":
+        mid = str(uuid.uuid4())
+        st["mcdata_inbox"].append({"message_id": mid, "conversation_id": str(uuid.uuid4()), "from": rest[0],
+                                   "group": rest[1], "request_type": "group-sds", "disposition": 0,
+                                   "displayed": False,
+                                   "payloads": [{"content_type": 1, "text": " ".join(rest[2:]), "bytes": 1}]})
+        event("mcdata_sds_received", message_id=mid, **{"from": rest[0]}, group=rest[1], disposition=0)
+    elif verb == "fake-file":
+        mid = str(uuid.uuid4())
+        st["mcdata_files"].append({"message_id": mid, "conversation_id": str(uuid.uuid4()), "from": rest[0],
+                                   "group": "", "name": rest[1], "size": 42, "mandatory": False,
+                                   "state": "offered"})
+        event("mcdata_file_offered", message_id=mid, **{"from": rest[0]}, group="", mandatory=False)
+    elif verb == "fake-read":
+        st["mcdata_notifications"].append({"from": "x", "group": "", "type": 3, "message_id": rest[0]})
+    elif verb == "fake-alias-outcome":
+        fake["alias_outcome"] = rest[0]
+    elif verb == "fake-lose-alias":
+        st["mcdata_functional_aliases"] = [a for a in st["mcdata_functional_aliases"] if a != rest[0]]
+    elif verb == "fake-forget":
+        st["mcdata_inbox"] = [m for m in st["mcdata_inbox"] if m["message_id"] != rest[0]]
+    else:
+        failure("unknown client command")
+
+
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+if os.path.exists(fifo):
+    os.remove(fifo)
+os.mkfifo(fifo, 0o600)
+save()
+control = os.fdopen(os.open(fifo, os.O_RDWR), "r")
+for line in control:
+    line = line.strip()
+    if line:
+        command(line)
+        save()

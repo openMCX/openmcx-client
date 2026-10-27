@@ -319,6 +319,9 @@ SipResponse Client::mcdata_sds_received(const std::vector<BodyPart> &parts, cons
       // TS 24.282 clause 9.2.1.2 step 6c: the sender's functional alias and the alias this user was reached through.
       {"functional_alias", info.functional_alias},
       {"called_functional_alias", info.called_functional_alias},
+      // TS 24.282 clause 6.3.7.1.2: an emergency or imminent peril communication.
+      {"emergency", info.emergency.value_or(false)},
+      {"imminent_peril", info.imminent_peril.value_or(false)},
       {"protected", dppk.has_value()},
       {"dppk_id", dppk ? Json(*dppk) : Json(nullptr)},
       {"authenticated", authenticated}};
@@ -489,7 +492,7 @@ void Client::mcdata_tick() {
 //   sds-adhoc [delivery|read|both] [app=<n>] [priority=<n>] <ID,ID,...|criteria=<criteria>|group=<ad hoc group>> <text>
 //   sds-fa [delivery|read|both] [app=<n>] [priority=<n>] <functional alias> <text>
 //   mcdata-fa activate|takeover|deactivate <alias>...   mcdata-fa use <alias>|none
-//   sds-reply <message ID> <text>     (same conversation, InReplyTo)
+//   sds-reply [delivery|read|both] [escaped] <message ID> <text>     (same conversation, InReplyTo)
 //   sds-display <message ID>          (display indication, TS 24.282 clause 9.2.1.3)
 //   mcdata-affiliate | mcdata-deaffiliate
 //   mcdata-storage full|unlimited|<n>   (received messages the client can hold)
@@ -797,12 +800,26 @@ void Client::mcdata_storage_command(std::istringstream &words) {
 //------------------------------------------------------------------------------
 // TS 24.282 clause 9.2.1.1: sds-reply <message ID> <text>, an SDS in the same conversation (InReplyTo).
 void Client::mcdata_sds_reply_command(std::istringstream &words) {
+  auto disposition = mcdata::DispositionRequest::None;
+  bool escaped = false;
   std::string id, text;
-  words >> id;
+  while (words >> id) {
+    if (id == "delivery")
+      disposition = mcdata::DispositionRequest::Delivery;
+    else if (id == "read")
+      disposition = mcdata::DispositionRequest::Read;
+    else if (id == "both")
+      disposition = mcdata::DispositionRequest::DeliveryAndRead;
+    else if (id == "escaped")
+      escaped = true;
+    else
+      break;
+  }
   std::getline(words >> std::ws, text);
+  if (escaped) text = client_rules::control_unescape(text);
   const auto found = mcdata_received_.find(id);
   if (found == mcdata_received_.end() || text.empty())
-    throw std::runtime_error("usage: sds-reply <received message ID> <text>");
+    throw std::runtime_error("usage: sds-reply [delivery|read|both] [escaped] <received message ID> <text>");
   const auto &original = found->second;
   const auto group = original.value("group", std::string{});
   const auto type = original.value("request_type", std::string{});
@@ -813,6 +830,7 @@ void Client::mcdata_sds_reply_command(std::istringstream &words) {
                  : group.empty()            ? original.at("from").get<std::string>()
                                             : group;
   reply.text = text;
+  reply.disposition = disposition;
   reply.conversation = mcdata::parse_uuid(original.at("conversation_id").get<std::string>());
   reply.in_reply_to = mcdata::parse_uuid(id);
   return mcdata_send_sds(reply);
@@ -856,14 +874,15 @@ void Client::mcdata_fa_command(std::istringstream &words) {
 
 //------------------------------------------------------------------------------
 // TS 24.282 clause 9.2.1.1 and clause 9.2.2.2.1: send a standalone SDS over the signalling control plane:
-//   sds|sds-group|sds-adhoc|sds-fa [delivery|read|both] [app=<n>] [priority=<n>] <target> <text>
+//   sds|sds-group|sds-adhoc|sds-fa [delivery|read|both] [app=<n>] [priority=<n>] [escaped] <target> <text>
+// "escaped": the text carries line breaks as \n and backslashes as \\ (client_rules::control_unescape).
 void Client::mcdata_sds_command(const std::string &verb, std::istringstream &words) {
   if (verb != "sds" && verb != "sds-group" && verb != "sds-adhoc" && verb != "sds-fa")
     throw std::runtime_error("unknown MCData command");
   auto disposition = mcdata::DispositionRequest::None;
   std::optional<std::uint8_t> application;
   std::optional<unsigned> priority;
-  bool tamper = false, tamper_signature = false;
+  bool tamper = false, tamper_signature = false, escaped = false;
   std::string word, target, text;
   while (words >> word) {
     if (word == "delivery")
@@ -880,14 +899,18 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
       tamper = true;
     else if (word == "tamper-sig")
       tamper_signature = true;
+    else if (word == "escaped")
+      escaped = true;
     else {
       target = word;
       break;
     }
   }
   std::getline(words >> std::ws, text);
+  if (escaped) text = client_rules::control_unescape(text);
   if (target.empty() || text.empty())
-    throw std::runtime_error("usage: " + verb + " [delivery|read|both] [app=<n>] [priority=<n>] <target> <text>");
+    throw std::runtime_error("usage: " + verb +
+                             " [delivery|read|both] [app=<n>] [priority=<n>] [escaped] <target> <text>");
   SdsRequest request;
   request.type = verb == "sds-group" ? "group-sds" : verb == "sds-adhoc" ? "ad-hoc-group-sds" : "one-to-one-sds";
   request.target = target;

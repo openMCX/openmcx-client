@@ -4,8 +4,8 @@
 
 // Small rules of the MC client without client state, kept apart from the Client class so that
 // tests/test_client_rules.cpp can check them: the notifiers of MCData disposition notifications, the warn-codes of a
-// Warning header field, when a refused refresh token is dropped, the scope of the authentication request, the percent-decoding of an XCAP selector and the
-// groups of an MCPTT user profile, and the retry delay of a refused initial service authorisation.
+// Warning header field, when a refused refresh token is dropped, the scope of the authentication request, the percent-decoding of an XCAP selector, the
+// escaped text of a control command, the groups of an MCPTT user profile, and the retry delay of a refused initial service authorisation.
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19),
 // TS 24.484 V19.6.0 (Rel-19), RFC 3261, RFC 3903, RFC 3986, RFC 6749.
@@ -114,6 +114,24 @@ inline std::string percent_decode(std::string_view text) {
         std::isxdigit(static_cast<unsigned char>(text[index + 2]))) {
       out += static_cast<char>(hex(text[index + 1]) * 16 + hex(text[index + 2]));
       index += 2;
+    } else {
+      out += text[index];
+    }
+  }
+  return out;
+}
+
+//------------------------------------------------------------------------------
+// The text of a control command with the "escaped" option (OpenMCX, not 3GPP): a command is one line, so a line break
+// travels as "\n" and a backslash as "\\"; "\t" is a tab, and any other backslash is kept as it is.
+inline std::string control_unescape(std::string_view text) {
+  std::string out;
+  out.reserve(text.size());
+  for (std::size_t index = 0; index < text.size(); ++index) {
+    const char next = index + 1 < text.size() ? text[index + 1] : '\0';
+    if (text[index] == '\\' && (next == 'n' || next == 't' || next == '\\')) {
+      out += next == 'n' ? '\n' : next == 't' ? '\t' : '\\';
+      ++index;
     } else {
       out += text[index];
     }
