@@ -2,7 +2,6 @@
   "engine": {"config": "/config/client.json"},
   "socket": "/run/mcx-agent/agent.sock",
   "data_dir": "/var/lib/mcx-agent",
-  "alias": "sip:ops-bot.fa@example.org",
   "recipients": [],
   "allow_senders_hours": 24,
   "rate_per_recipient_per_minute": 10,

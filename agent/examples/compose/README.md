@@ -27,15 +27,16 @@ MC system ◀────────────▶ mcx-agent ◀── MCP ove
 
    Other tags: `OPENMCX_AGENT_IMAGE`, `OPENMCX_DISPATCHER_IMAGE`.
 
-2. **The agent's MC identity**: an MC user with MCData (one-to-one SDS and file distribution) and a functional
-   alias it may activate, provisioned in MCX Admin. Put its `mcx-client` configuration in `agent/client/client.json`
+2. **The agent's MC identity**: an MC user with MCData (one-to-one SDS and file distribution), provisioned in MCX
+   Admin; field users write to its MCData ID. Put its `mcx-client` configuration in `agent/client/client.json`
    with the TLS files it names, at the paths it names under `/config`: an activated configuration
    (`mcx-client --config client.json --activate <link> --password-file <file>` once, on the device settings), or the
    one a lab generates. Its `control_fifo` and `status_file` belong under `/run/mcx`.
 
-3. **`agent/agent.json`**: set `alias` to the agent's functional alias; the rest is the chat setup of
+3. **`agent/agent.json`**: the chat setup of
    [API.md](../../API.md#building-a-chat-agent-on-it) (send only to users who wrote within `allow_senders_hours`,
-   rate limits, MCP over HTTP).
+   rate limits, MCP over HTTP). For a role address, add `alias`
+   ([FIRST_AGENT.md](../../FIRST_AGENT.md#7-optional-a-role-address-functional-alias)).
 
 4. **The token** the agent and the daemon share:
 
@@ -44,7 +45,8 @@ MC system ◀────────────▶ mcx-agent ◀── MCP ove
    ```
 
 5. **For "ui"**: another MC user's configuration in `ui/client/client.json`, with `media.live` (see the
-   [dispatcher README](../../../dispatcher/README.md#build-and-run)), and `OPS_AGENT_ALIAS` set to the agent's alias.
+   [dispatcher README](../../../dispatcher/README.md#build-and-run)), and `OPS_AGENT` set to the agent's MCData ID
+   (or to its alias, with `OPS_AGENT_IS_ALIAS=true`).
 
 ## Run
 
@@ -55,7 +57,7 @@ docker compose exec mcx-agent mcx-agent status
 docker compose --profile ui up -d          # and the client page: http://127.0.0.1:8080/client/
 ```
 
-Write to the agent's alias from any MC client (the Android app, the client page): the bot marks the message read
+Write to the agent's MCData ID from any MC client (the Android app, the client page): the bot marks the message read
 and answers in the conversation.
 
 ## Your agent instead of the echo bot

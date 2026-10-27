@@ -130,6 +130,8 @@ agent's MCData ID), `alias` (`{id, state, active, required}`), `registered`, `mc
 | `received` | When the daemon received it |
 | `file_name`, `file_size`, `mandatory`, `file_state`, `path` | A file offer: `file_state` is `offered`, `deferred`, `accepted`, `downloaded`, `rejected`, …; `path` once downloaded |
 
+A field that is false or empty is left out (`emergency`, `text`, `sender_alias`, …): read it with a default.
+
 Only one-to-one messages and file offers reach the agent: group and ad hoc group messages are left out.
 
 ### A sent item

@@ -50,7 +50,8 @@ services:
     image: ${OPENMCX_DISPATCHER_IMAGE:-openmcx-dispatcher:0.1}
     init: true
     command: ["--listen", "0.0.0.0:8080", "--config", "/config/client.json", "--outbox", "/run/mcx/outbox",
-              "--ops-agent", "${OPS_AGENT_ALIAS:-sip:ops-bot.fa@example.org}"]
+              "--ops-agent", "${OPS_AGENT:-sip:ops-bot.mcdata@example.org}",
+              "--ops-agent-alias=${OPS_AGENT_IS_ALIAS:-false}"]
     volumes:
       - ./ui/client:/config:ro                 # its mcx-client configuration, with media.live
     tmpfs:

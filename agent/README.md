@@ -4,7 +4,8 @@
 OpenMCX MC system. It runs the Linux client `mcx-client` as its engine, like the [dispatcher](../dispatcher) does, and
 offers the same tools to agents and shells: an **MCP server** (over HTTP, or stdio) and a **CLI**. MCPTT, MCVideo and
 group SDS are outside its reach. **[API.md](API.md)** is the contract an agent builds on (version 1.0.0): the
-transports, the tools, their results and error codes.
+transports, the tools, their results and error codes. **[FIRST_AGENT.md](FIRST_AGENT.md)** builds an agent on it step
+by step.
 
 ```
 agent (other container) ──MCP over HTTP, token──────────────▶ mcx-agent daemon ──control FIFO / status / events──▶ mcx-client
@@ -56,7 +57,7 @@ communication), `used_priority` (the priority the server applied), `authenticate
 
 ## Functional alias
 
-With `alias` set, the daemon activates it once the engine is authorised for MCData (`mcdata-fa activate`), and once it
+Optional: without `alias`, the agent sends and receives on its own MCData ID. With `alias` set, the daemon activates it once the engine is authorised for MCData (`mcdata-fa activate`), and once it
 is active presents it on everything the agent sends (`mcdata-fa use`). It never takes over an alias another user
 holds. While the alias is not active (refused, take-over possible, or taken over later), sending is refused, unless
 `require_alias` is false; `status` says why. A lost or refused alias is tried again every `alias_retry_s` (30 s), so
