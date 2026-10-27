@@ -92,6 +92,11 @@ func TestCommandLine(t *testing.T) {
 		{map[string]any{"action": "location-request", "alias": "sip:car.alias@example.org"}, "location request fa sip:car.alias@example.org"},
 		{map[string]any{"action": "location-configure", "targets": []any{"sip:a@example.org", "sip:b@example.org"}, "periodic": float64(10)}, `location configure sip:a@example.org,sip:b@example.org {"non_emergency":{"coordinate":true,"minimum_interval":1},"emergency":{"coordinate":true,"minimum_interval":1},"triggers":[{"periodic":10}],"emergency_triggers":[{"periodic":10}]}`},
 		{map[string]any{"action": "sds", "target": "sip:desk.fa@example.org", "to_alias": true, "text": "who is on duty"}, "sds-fa sip:desk.fa@example.org who is on duty"},
+		// A second line is text, never a second command: the engine's escaped option.
+		{map[string]any{"action": "sds", "target": "sip:a@b", "text": "one\nquit"}, "sds escaped sip:a@b one\\nquit"},
+		{map[string]any{"action": "sds", "target": "sip:desk.fa@b", "to_alias": true, "report": "both", "text": "gate 2?\r\nC:\\x"}, "sds-fa both escaped sip:desk.fa@b gate 2?\\nC:\\\\x"},
+		{map[string]any{"action": "sds", "target": "sip:a@b", "report": "read", "text": "plain"}, "sds read sip:a@b plain"},
+		{map[string]any{"action": "sds-display", "id": "6f1c0000-0000-4000-8000-000000000000"}, "sds-display 6f1c0000-0000-4000-8000-000000000000"},
 	}
 	for _, c := range good {
 		got, err := commandLine(c.req)
@@ -135,8 +140,10 @@ func TestCommandLine(t *testing.T) {
 		{"action": "transfer", "target": "sip:carol@example.org", "step": "later"},
 		{"action": "forward", "target": ""},
 		{"action": "mcdata-alert", "on": false, "user": "sip:bob@example.org"},
-		{"action": "sds", "target": "sip:a@b", "text": "one\nquit"},
 		{"action": "sds", "target": "sip:a@b", "text": "  "},
+		{"action": "sds", "target": "sip:a@b", "text": "x", "report": "always"},
+		{"action": "sds", "target": "sip:a@b", "text": "bell\a"},
+		{"action": "sds-display", "id": "x quit"},
 		{"action": "fd-accept", "id": ""},
 		{"action": "adhoc", "targets": []any{}},
 		{"action": "adhoc", "kind": "chat", "targets": []any{"sip:a@b"}},

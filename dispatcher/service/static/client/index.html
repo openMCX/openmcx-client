@@ -1,0 +1,209 @@
+<!doctype html>
+<!-- OpenMCX Licence Information : AGPL-3.0-or-later -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenMCX Client</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="client.css">
+</head>
+<body>
+<header class="strip">
+  <div class="logo" aria-hidden="true"><span>open</span><b>MCX</b></div>
+  <div id="user">OpenMCX</div>
+  <button id="open-settings" class="icon-button" aria-label="Settings" hidden>
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
+      <circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"/>
+      <circle cx="12" cy="12" r="7"/>
+    </svg>
+  </button>
+  <span id="phase" class="pill warn"><span class="dot"></span><span id="phase-text">connecting</span></span>
+</header>
+
+<div id="offline" class="banner warn" hidden>
+  <div class="grow"><b id="offline-title">No service</b><div id="offline-detail" class="hint"></div></div>
+</div>
+
+<section id="signin" class="gate" hidden>
+  <div class="card">
+    <h2>Sign in</h2>
+    <p class="hint">Sign in to the MC system with your OpenMCX account.</p>
+    <p id="signin-reason" class="error"></p>
+    <p id="signin-error" class="error" role="alert"></p>
+    <form id="idms-login" method="get" action="/api/login/browser" hidden>
+      <p class="hint">Your organisation signs you in on its identity server<span id="idms-host"></span>.</p>
+      <button class="btn big" type="submit">Sign in with IdMS</button>
+    </form>
+    <div id="position-login">
+      <form id="login">
+        <input class="field" name="username" autocomplete="username" placeholder="Login" required>
+        <input class="field" name="password" type="password" autocomplete="current-password" placeholder="Password" required>
+        <button class="btn big" type="submit">Sign in</button>
+      </form>
+      <p class="hint">Accounts on this computer: <span id="accounts">none</span></p>
+      <details>
+        <summary class="hint">Activate an account from MCX Admin</summary>
+        <form id="activate">
+          <input class="field" name="url" placeholder="Activation link (https://…)" required>
+          <input class="field" name="password" type="password" autocomplete="current-password" placeholder="Account password" required>
+          <button class="btn" type="submit">Activate and sign in</button>
+        </form>
+      </details>
+    </div>
+    <p id="signin-busy" class="hint"></p>
+  </div>
+</section>
+
+<main id="app" hidden>
+  <div id="incoming" class="incoming" hidden>
+    <div class="label" id="incoming-label">Incoming private call</div>
+    <div class="call-title" id="incoming-title"></div>
+    <div class="call-alias" id="incoming-alias"></div>
+    <div class="row gap">
+      <button id="answer" class="btn big go">Answer</button>
+      <button id="reject" class="btn big outline">Decline</button>
+    </div>
+  </div>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" id="tab-btn-call" aria-controls="tab-call" aria-selected="true">Call</button>
+    <button role="tab" id="tab-btn-chat" aria-controls="tab-chat" aria-selected="false">Chat <span id="chat-badge" class="badge" hidden></span></button>
+    <button role="tab" id="tab-btn-logs" aria-controls="tab-logs" aria-selected="false">Logs</button>
+  </nav>
+
+  <!-- Call: the groups and private calls, or the call in progress with its PTT key. -->
+  <section id="tab-call" class="tab" role="tabpanel">
+    <div id="call-idle" class="column">
+      <div id="call-failure" class="notice" hidden><span id="call-failure-text"></span><button id="call-failure-dismiss">Dismiss</button></div>
+      <div class="section">Groups</div>
+      <div id="groups"></div>
+      <div class="section">Private call</div>
+      <form id="private-form" class="row">
+        <input id="private-target" class="field" placeholder="MCPTT ID (sip:user@domain)" autocomplete="off">
+        <button class="btn outline" type="submit">Call</button>
+        <div class="menu">
+          <button type="button" id="private-more" class="icon-button" aria-label="More private call options" aria-haspopup="true">⋮</button>
+          <div id="private-menu" class="menu-list" hidden>
+            <button type="button" data-private="manual">Ring first</button>
+            <button type="button" data-private="no_floor">Without floor control</button>
+            <button type="button" data-private="emergency" class="danger">Emergency private call</button>
+          </div>
+        </div>
+      </form>
+      <p class="hint">Hold <kbd>Space</kbd> or the PTT key to talk during a call. Press PTT with no call to call the selected group.</p>
+    </div>
+
+    <div id="call-active" class="call" hidden>
+      <div class="call-meta"><span id="call-kind">Group call</span><span id="call-clock" class="tabular"></span></div>
+      <div id="call-priority" class="priority" hidden>
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 2 1 21h22L12 2zm1 15h-2v-2h2v2zm0-4h-2V9h2v4z"/></svg>
+        <span id="call-priority-text"></span>
+      </div>
+      <div class="call-title" id="call-title"></div>
+      <div class="call-alias" id="call-alias" hidden></div>
+      <div class="floor">
+        <div class="badge-dot" id="floor-badge"></div>
+        <div class="grow">
+          <div class="floor-label" id="floor-label">Floor idle</div>
+          <div class="hint" id="floor-hint">Press and hold PTT to talk</div>
+        </div>
+      </div>
+      <div class="key-area">
+        <div class="ring" id="ring">
+          <button id="ptt" class="ptt" aria-label="Push to talk: press and hold">
+            <span id="ptt-icon"></span>
+            <span class="word" id="ptt-word">PTT</span>
+            <span class="sub" id="ptt-sub">Hold to talk</span>
+          </button>
+        </div>
+        <div id="floor-event" class="floor-event" hidden></div>
+      </div>
+      <div class="row gap" id="priority-buttons">
+        <button id="call-emergency" class="btn line-stop">Emergency</button>
+        <button id="call-imminent" class="btn line-peril">Imminent peril</button>
+      </div>
+      <div class="row gap">
+        <button id="speaker" class="speaker-toggle" aria-pressed="true">Speaker on</button>
+        <button id="hangup" class="btn big stop">Hang up</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Chat: one-to-one, group and functional alias conversations over MCData SDS, the ops agent first. -->
+  <section id="tab-chat" class="tab" role="tabpanel" hidden>
+    <div id="chat" class="chat">
+      <aside class="convos">
+        <div class="convos-head">
+          <span class="grow">Conversations</span>
+          <button id="new-chat" class="btn quiet">+ New</button>
+        </div>
+        <div id="convo-list" class="convo-list"></div>
+      </aside>
+      <div class="thread">
+        <div class="thread-head">
+          <button id="back" class="icon-button back" aria-label="Back to conversations">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>
+          </button>
+          <div class="grow">
+            <div class="title" id="thread-title">New chat</div>
+            <div class="sub" id="thread-sub"></div>
+          </div>
+        </div>
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <form id="composer" class="composer">
+          <div class="to" id="to-row" hidden>
+            <select id="to-kind" aria-label="Recipient kind">
+              <option value="user">User</option>
+              <option value="group">Group</option>
+              <option value="alias">Functional alias</option>
+            </select>
+            <input id="to" class="field" placeholder="To: sip:user@domain" autocomplete="off">
+          </div>
+          <div class="send-row">
+            <textarea id="text" rows="1" placeholder="Message" aria-label="Message"></textarea>
+            <button id="send" class="send" type="submit" aria-label="Send">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M3 20.5 21 12 3 3.5 3 10l12 2-12 2z"/></svg>
+            </button>
+          </div>
+          <div class="count" id="count" hidden></div>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-logs" class="tab" role="tabpanel" hidden>
+    <div class="column">
+      <div class="section">Status</div>
+      <dl class="kv" id="status-kv"></dl>
+      <div class="row"><div class="section grow">Activity</div><button id="clear-log" class="btn quiet">Clear</button></div>
+      <ul id="log" class="log"></ul>
+    </div>
+  </section>
+</main>
+
+<section id="settings" class="sheet" hidden>
+  <div class="sheet-head"><button id="close-settings" class="btn quiet">‹ Back</button><b>Settings</b></div>
+  <div class="column">
+    <div class="section">MCX profile</div>
+    <dl class="kv" id="profile-kv"></dl>
+    <div class="section">Appearance</div>
+    <div class="choice" id="theme-choice">
+      <button data-theme-choice="system">System</button><button data-theme-choice="light">Light</button><button data-theme-choice="dark">Dark</button>
+    </div>
+    <div class="section">Chat</div>
+    <div class="row"><div class="grow hint">Messages are kept in this browser. Clearing them does not touch the MC system.</div>
+      <button id="clear-chat" class="btn outline">Clear chat history</button></div>
+    <div id="signout-section" hidden>
+      <div class="section">Session</div>
+      <div class="row"><div class="grow hint">Sign out of the MC system on this computer.</div><button id="signout" class="btn stop">Sign out</button></div>
+    </div>
+    <div class="section">About OpenMCX</div>
+    <p class="hint">The OpenMCX project implements 3GPP Release 19 Mission Critical Services. This page runs the Linux client
+      <code>mcx-client</code> as its engine.</p>
+  </div>
+</section>
+
+<script src="client.js"></script>
+</body>
+</html>

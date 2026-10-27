@@ -43,7 +43,13 @@ func main() {
 	engineArgs := flag.String("engine-args", "", "further engine arguments, space-separated (e.g. --disable-tls)")
 	outbox := flag.String("outbox", "/data/outbox", "where files to send are kept")
 	idle := flag.Duration("idle-signout", 2*time.Minute, "position mode: sign out when no operator page has been open this long")
+	opsAgent := flag.String("ops-agent", "", "the ops agent the client UI's chat offers first: its functional alias or MCData ID")
+	opsAgentName := flag.String("ops-agent-name", "Ops agent", "the ops agent's name in the chat")
+	opsAgentAlias := flag.Bool("ops-agent-alias", true, "--ops-agent is a functional alias (false: an MCData ID)")
 	flag.Parse()
+	if *opsAgent != "" && !word.MatchString(*opsAgent) {
+		log.Fatal("--ops-agent must be a SIP URI")
+	}
 
 	base := *config
 	if (*config == "") == (*device == "") || (*device != "") != (*data != "") {
@@ -79,6 +85,9 @@ func main() {
 		log.Fatal(err)
 	}
 	api := &api{engine: e, audio: audio, outbox: *outbox, pos: pos}
+	if *opsAgent != "" {
+		api.opsAgent = map[string]any{"id": *opsAgent, "name": *opsAgentName, "alias": *opsAgentAlias}
+	}
 	files, _ := fs.Sub(static, "static")
 	mux := http.NewServeMux()
 	mux.Handle("GET /", pageHeaders(http.FileServer(http.FS(files))))

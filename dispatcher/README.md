@@ -120,9 +120,31 @@ docker run ... openmcx-dispatcher:disp --listen 0.0.0.0:8080 --config /config/di
 
 Options: `--listen` (default 127.0.0.1:8080), `--engine`, `--config` (lab mode) or `--device` and `--data` (position
 mode), `--engine-args` (for example `--disable-tls`), `--outbox` (where uploaded files are kept for sending),
-`--idle-signout`. The browser must reach the page from a secure context
+`--idle-signout`, `--ops-agent <functional alias or MCData ID>`, `--ops-agent-name` (default "Ops agent") and
+`--ops-agent-alias` (default true; false when `--ops-agent` is an MCData ID). The browser must reach the page from a secure context
 (`https://` or `http://127.0.0.1`/`localhost`) to use the microphone. In lab mode there is no operator sign-in: publish the port on
 localhost only. Position mode has sign-in; still serve it over TLS (a proxy) when it is reached from another host.
+
+## The client page (`/client/`)
+
+Besides the dispatcher position at `/`, the service serves an MC user's client at `/client/`, drawn as the Android
+app (its colours, top strip, tabs, floor states and PTT key, in light and dark): the same engine, API and audio.
+
+- **Call**: the groups of the user profile with their affiliation, a call on one (normal, broadcast, imminent peril,
+  emergency), private calls (ring first, without floor control, emergency); the call in progress with its floor
+  state, a press-and-hold PTT key (or Space), emergency and imminent peril, speaker and hang up; incoming calls ring.
+- **Chat**: conversations over MCData SDS with users, groups and functional aliases, the ops agent first
+  (`--ops-agent`): sent messages ask for delivery and read reports, shown as ticks; a received message on screen is
+  marked read (`sds-display`); line breaks kept; between the agent's read report and its answer, "working on it".
+  Conversations are kept in the browser (the engine keeps its last 50 messages each way).
+- **Logs**: the engine's status and the page's actions.
+
+```
+docker run ... openmcx-dispatcher:disp --listen 0.0.0.0:8080 --config /config/client.json \
+  --ops-agent sip:ops-bot.fa@example.org          # then open http://127.0.0.1:8080/client/
+```
+
+The ops agent is any MCData user or alias; [`../agent`](../agent) (`mcx-agent`) is the plumbing to build one.
 
 ## API
 
@@ -176,7 +198,9 @@ target is a functional alias; not with `emergency`),
 `{"action":"forward","target":"<MCPTT ID>"}`,
 `{"action":"adhoc","targets":["<MCPTT ID>",...],"kind":"normal|broadcast|imminent|emergency"}`,
 `{"action":"adhoc-modify","add":[...],"remove":[...]}` (the ad hoc group call in progress),
-`{"action":"sds","target":"<MCData ID, group or functional alias>","group":bool,"to_alias":bool,"text":"..."}`,
+`{"action":"sds","target":"<MCData ID, group or functional alias>","group":bool,"to_alias":bool,"report":"none|delivery|read|both","text":"..."}`
+(1 to 1000 characters; line breaks are kept, sent with the engine's `escaped` option),
+`{"action":"sds-display","id":"<received message ID>"}` (the message shown: the read notification its sender asked for),
 `{"action":"sds-session","op":"open","target":"<MCData ID or group>","group":bool,"priority":"normal|emergency|imminent"}`
 (or `"adhoc":true,"targets":[...]`, normal only), `{"action":"sds-session","op":"send","text":"...","disposition":"delivery|read"}`,
 `{"action":"sds-session","op":"close","all":bool}` (`all`: an ad hoc group communication, for every participant),

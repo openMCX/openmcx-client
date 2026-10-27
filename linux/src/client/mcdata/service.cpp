@@ -369,6 +369,8 @@ void Client::mcdata_send_sds(const SdsRequest &request) {
                               {"conversation_id", mcdata::uuid_text(signalling.conversation)},
                               {"request_type", info.request_type},
                               {"target", request.target},
+                              {"text", request.content == mcdata::ContentType::Text ? request.text : std::string{}},
+                              {"date_time", signalling.date_time},
                               {"status", nullptr},
                               {"called_alias", request.called_alias},
                               {"dppk_id", dppk ? Json(*dppk) : Json(nullptr)}});

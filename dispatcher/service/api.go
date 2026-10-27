@@ -19,6 +19,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 
 	"golang.org/x/net/websocket"
 )
@@ -28,6 +29,9 @@ type api struct {
 	audio  *audioBridge
 	outbox string
 	pos    *position // nil in lab mode
+	// The ops agent the client UI's chat offers first (--ops-agent): an MCData ID, or a functional alias the
+	// agent holds; nil without one.
+	opsAgent map[string]any
 }
 
 func (a *api) routes(mux *http.ServeMux) {
@@ -200,8 +204,12 @@ func (a *api) view(r *http.Request) (map[string]any, error) {
 		"location", "location_last_request", "location_last_result",
 		"mcdata_ipconn", "mcdata_ipconn_pings", "mcdata_ipconn_counters",
 		"mcdata_authorized", "mcdata_affiliated", "mcdata_inbox",
-		"mcdata_sent", "mcdata_last_result", "mcdata_files", "mcdata_files_sent", "mcdata_fd_last_result")
+		"mcdata_sent", "mcdata_last_result", "mcdata_files", "mcdata_files_sent", "mcdata_fd_last_result",
+		"mcdata_notifications", "mcdata_undelivered", "last_error")
 	v["session"] = session
+	if a.opsAgent != nil {
+		v["ops_agent"] = a.opsAgent
+	}
 	if raw, err := os.ReadFile(a.engine.configPath()); err == nil {
 		type service struct {
 			UserID  string `json:"user_id"`
@@ -402,6 +410,25 @@ func temporaryDocument(tgi string) string {
 }
 
 // oneLine checks the text of an SDS: one line of 1 to 1000 characters.
+// chatText is the text of an SDS as the engine takes it: printable, 1 to 1000 characters, line breaks kept. A text
+// with line breaks goes with the engine's escaped option (line breaks as \n, backslashes as \\); the second value
+// says so.
+func chatText(text string) (string, bool, error) {
+	text = strings.TrimSpace(strings.NewReplacer("\r\n", "\n", "\r", "\n").Replace(text))
+	if text == "" || len([]rune(text)) > 1000 {
+		return "", false, errors.New("the text must be 1 to 1000 characters")
+	}
+	for _, r := range text {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
+			return "", false, errors.New("the text has a control character")
+		}
+	}
+	if !strings.Contains(text, "\n") {
+		return text, false, nil
+	}
+	return strings.NewReplacer("\\", "\\\\", "\n", "\\n", "\t", "\\t").Replace(text), true, nil
+}
+
 func oneLine(text string) (string, error) {
 	text = strings.TrimSpace(text)
 	if text == "" || len(text) > 1000 || strings.ContainsAny(text, "\r\n") {
@@ -868,9 +895,21 @@ func commandLine(req map[string]any) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		text, err := oneLine(str("text"))
+		text, escaped, err := chatText(str("text"))
 		if err != nil {
 			return "", err
+		}
+		// TS 24.282 clause 9.2.1.3: the delivery and read notifications asked of the recipient.
+		options := ""
+		switch report := str("report"); report {
+		case "", "none":
+		case "delivery", "read", "both":
+			options = report + " "
+		default:
+			return "", fmt.Errorf("unknown report %q", report)
+		}
+		if escaped {
+			options += "escaped "
 		}
 		// TS 24.282 clause 9.2.1.1: an SDS to a functional alias, resolved by the MCData server to a user who
 		// activated it.
@@ -878,12 +917,20 @@ func commandLine(req map[string]any) (string, error) {
 			if flag("group") {
 				return "", errors.New("a functional alias is not a group")
 			}
-			return "sds-fa " + target + " " + text, nil
+			return "sds-fa " + options + target + " " + text, nil
 		}
 		if flag("group") {
-			return "sds-group " + target + " " + text, nil
+			return "sds-group " + options + target + " " + text, nil
 		}
-		return "sds " + target + " " + text, nil
+		return "sds " + options + target + " " + text, nil
+	case "sds-display":
+		// TS 24.282 clause 9.2.1.3: a received message shown to the user; the engine sends the read notification
+		// its sender asked for.
+		message, err := id("id")
+		if err != nil {
+			return "", err
+		}
+		return "sds-display " + message, nil
 	case "sds-session":
 		return sessionLine(req, str, flag, id)
 	case "location-request":
