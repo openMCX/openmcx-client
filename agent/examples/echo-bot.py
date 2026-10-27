@@ -7,10 +7,11 @@
 "Hello <sender>, you said: <text>" in the same conversation, marks the message read (the
 sender sees the read report), and accepts every file offered to it.
 
-It reaches the daemon through the CLI (default) or the MCP server (--mcp), the two ways an
-agent can use mcx-agent; the rest is the same. Standard library only.
+It reaches the daemon through the CLI (default), the MCP server on stdio (--mcp), or the MCP
+server over HTTP from another container (--mcp-url, with the bearer token in --token-file):
+the ways an agent can use mcx-agent; the rest is the same. Standard library only.
 
-    echo-bot.py [--mcp] [--agent mcx-agent] [--cursor FILE]
+    echo-bot.py [--mcp | --mcp-url URL --token-file FILE] [--agent mcx-agent] [--cursor FILE]
 
 The bot keeps the sequence number of the last item it handled in the cursor file, so a restart
 resumes where it stopped; a message already marked read is not answered again. An item whose
@@ -23,6 +24,8 @@ import os
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 
 MAX_ECHO = 200  # characters of the received text quoted back
 
@@ -93,6 +96,49 @@ class McpAgent:
         return result.get('structuredContent') or json.loads(result['content'][0]['text'])
 
 
+class HttpMcpAgent(McpAgent):
+    """Speaks MCP over streamable HTTP: each message a POST to the endpoint, with the bearer token."""
+
+    def __init__(self, url, token):
+        self.url, self.token, self.next_id = url, token, 0
+        info = self.request(
+            'initialize', protocolVersion='2025-06-18', capabilities={}, clientInfo={'name': 'echo-bot', 'version': '1'}
+        )
+        self.notify('notifications/initialized')
+        print(f"MCP server {info['serverInfo']['name']} {info['serverInfo']['version']} at {url}", flush=True)
+
+    def post(self, message, timeout=330):
+        request = urllib.request.Request(
+            self.url,
+            data=json.dumps(message).encode(),
+            method='POST',
+            headers={
+                'Content-Type': 'application/json',
+                'Accept': 'application/json, text/event-stream',
+                'Authorization': 'Bearer ' + self.token,
+                'MCP-Protocol-Version': '2025-06-18',
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                body = response.read()
+        except urllib.error.HTTPError as error:
+            raise ToolError(f'HTTP {error.code}: {error.read().decode(errors="replace").strip()}') from error
+        except OSError as error:
+            raise ToolError(f'the MCP server is not reachable: {error}') from error
+        return json.loads(body) if body else None
+
+    def notify(self, method):
+        self.post({'jsonrpc': '2.0', 'method': method})
+
+    def request(self, method, **params):
+        self.next_id += 1
+        reply = self.post({'jsonrpc': '2.0', 'id': self.next_id, 'method': method, 'params': params})
+        if 'error' in reply:
+            raise ToolError(reply['error']['message'])
+        return reply['result']
+
+
 def read_cursor(path):
     try:
         with open(path) as f:
@@ -138,11 +184,26 @@ def handle(agent, item):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--mcp', action='store_true', help='use the MCP server instead of the CLI')
+    parser.add_argument('--mcp', action='store_true', help='use the MCP server on stdio instead of the CLI')
+    parser.add_argument('--mcp-url', help='use the MCP server over HTTP, e.g. http://mcx-agent:8765/mcp')
+    parser.add_argument('--token-file', help='the bearer token for --mcp-url')
     parser.add_argument('--agent', default='mcx-agent', help='the mcx-agent program')
     parser.add_argument('--cursor', default='echo-bot.cursor', help='where the last handled sequence number is kept')
     args = parser.parse_args()
-    agent = McpAgent(args.agent) if args.mcp else CliAgent(args.agent)
+    if args.mcp_url:
+        if not args.token_file:
+            parser.error('--mcp-url needs --token-file')
+        with open(args.token_file) as f:
+            token = f.readline().strip()
+        while True:  # the daemon may still be starting
+            try:
+                agent = HttpMcpAgent(args.mcp_url, token)
+                break
+            except ToolError as error:
+                print(f'waiting: {error}', flush=True)
+                time.sleep(2)
+    else:
+        agent = McpAgent(args.agent) if args.mcp else CliAgent(args.agent)
 
     while True:
         try:

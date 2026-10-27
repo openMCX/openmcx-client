@@ -38,7 +38,9 @@ type config struct {
 	AllowSendersHours int `json:"allow_senders_hours"`
 	RatePerMin        int `json:"rate_per_minute"`               // all sends together (60)
 	RatePerRecipient  int `json:"rate_per_recipient_per_minute"` // sends to one recipient (10)
-	MaxTextBytes      int `json:"max_text_bytes"`
+	// mcp_http: the MCP server over streamable HTTP as well, for an agent in another container (mcphttp.go).
+	MCPHTTP      *mcpHTTPConfig `json:"mcp_http"`
+	MaxTextBytes int            `json:"max_text_bytes"`
 }
 
 const hardTextLimit = 3000 // well inside one control FIFO line

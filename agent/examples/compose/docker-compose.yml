@@ -1,0 +1,74 @@
+#
+# OpenMCX Licence Information : AGPL-3.0-or-later
+#
+
+# An MCData agent next to an MC system: mcx-agent (the plumbing, with mcx-client as its engine) and a third-party
+# agent in a container of its own that reaches it over MCP on HTTP, here the hello-world echo bot. With the profile
+# "ui", also the OpenMCX client page (the dispatcher service at /client/) as a user who chats with the agent.
+# See README.md in this directory.
+#
+#   openssl rand -hex 32 > secrets/mcx-agent-token
+#   docker compose up -d                  # mcx-agent and the echo bot
+#   docker compose --profile ui up -d     # and the client page on http://127.0.0.1:8080/client/
+
+services:
+  mcx-agent:
+    image: ${OPENMCX_AGENT_IMAGE:-openmcx-agent:0.1}
+    init: true
+    command: ["daemon", "--config", "/etc/mcx-agent/agent.json"]
+    environment:
+      MCX_AGENT_SOCKET: /run/mcx-agent/agent.sock
+    volumes:
+      - ./agent/agent.json:/etc/mcx-agent/agent.json:ro
+      - ./agent/client:/config:ro              # the engine's mcx-client configuration and its TLS files
+      - agent-data:/var/lib/mcx-agent          # the message store, the audit log, the outbox
+    tmpfs:
+      - /run/mcx                               # the engine's control FIFO and status file
+      - /run/mcx-agent                         # the daemon's socket (the CLI: docker compose exec mcx-agent mcx-agent status)
+    secrets:
+      - mcx_agent_token
+    networks: [mc, agents]
+    restart: unless-stopped
+
+  # The third-party agent: nothing of OpenMCX inside, only the MCP endpoint and the token.
+  echo-bot:
+    image: python:3.12-alpine
+    command: ["python", "/bot/echo-bot.py", "--mcp-url", "http://mcx-agent:8765/mcp",
+              "--token-file", "/run/secrets/mcx_agent_token", "--cursor", "/state/echo.cursor"]
+    volumes:
+      - ../echo-bot.py:/bot/echo-bot.py:ro
+      - bot-state:/state
+    secrets:
+      - mcx_agent_token
+    networks: [agents]                         # the agents network only: no route to the MC system
+    depends_on: [mcx-agent]
+    restart: unless-stopped
+
+  # A user of the MC system in the browser, who chats with the agent (another MC identity).
+  client:
+    profiles: [ui]
+    image: ${OPENMCX_DISPATCHER_IMAGE:-openmcx-dispatcher:0.1}
+    init: true
+    command: ["--listen", "0.0.0.0:8080", "--config", "/config/client.json", "--outbox", "/run/mcx/outbox",
+              "--ops-agent", "${OPS_AGENT_ALIAS:-sip:ops-bot.fa@example.org}"]
+    volumes:
+      - ./ui/client:/config:ro                 # its mcx-client configuration, with media.live
+    tmpfs:
+      - /run/mcx
+    ports:
+      - "127.0.0.1:8080:8080"                  # localhost only: the page has no sign-in in this mode
+    networks: [mc]
+    restart: unless-stopped
+
+networks:
+  mc: {}                                       # reaches the MC system (SIP core, servers, IdMS)
+  agents:
+    internal: true                             # mcx-agent and the agents, no way out
+
+volumes:
+  agent-data: {}
+  bot-state: {}
+
+secrets:
+  mcx_agent_token:
+    file: ./secrets/mcx-agent-token

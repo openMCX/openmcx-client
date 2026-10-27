@@ -66,6 +66,13 @@ func runCLI(argv []string) int {
 		return 2
 	}
 	if argv[0] == "tools" {
+		if len(argv) > 1 && argv[1] == "--json" {
+			// The contract as MCP lists it, for tooling: the version and the tools with their input schemas.
+			out := json.NewEncoder(os.Stdout)
+			out.SetIndent("", "  ")
+			_ = out.Encode(map[string]any{"version": version, "tools": toolList()})
+			return 0
+		}
 		printTools()
 		return 0
 	}

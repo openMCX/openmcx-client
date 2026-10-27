@@ -1,0 +1,12 @@
+{
+  "engine": {"config": "/config/client.json"},
+  "socket": "/run/mcx-agent/agent.sock",
+  "data_dir": "/var/lib/mcx-agent",
+  "alias": "sip:ops-bot.fa@example.org",
+  "recipients": [],
+  "allow_senders_hours": 24,
+  "rate_per_recipient_per_minute": 10,
+  "rate_per_minute": 60,
+  "max_text_bytes": 1000,
+  "mcp_http": {"listen": "0.0.0.0:8765", "token_file": "/run/secrets/mcx_agent_token"}
+}

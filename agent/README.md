@@ -2,12 +2,14 @@
 
 `mcx-agent` lets an AI agent (or a script) exchange **MCData one-to-one short data (SDS) and files** through an
 OpenMCX MC system. It runs the Linux client `mcx-client` as its engine, like the [dispatcher](../dispatcher) does, and
-offers the same tools two ways: an **MCP server** for agents and a **CLI** for shells. MCPTT, MCVideo and group SDS are
-outside its reach.
+offers the same tools to agents and shells: an **MCP server** (over HTTP, or stdio) and a **CLI**. MCPTT, MCVideo and
+group SDS are outside its reach. **[API.md](API.md)** is the contract an agent builds on (version 1.0.0): the
+transports, the tools, their results and error codes.
 
 ```
-agent ──stdio MCP──▶ mcx-agent mcp ──┐
-shell ─────────────▶ mcx-agent <tool> ┴─ unix socket ─▶ mcx-agent daemon ──control FIFO / status / events──▶ mcx-client
+agent (other container) ──MCP over HTTP, token──────────────▶ mcx-agent daemon ──control FIFO / status / events──▶ mcx-client
+agent ──stdio MCP──▶ mcx-agent mcp ──┐                            ▲
+shell ─────────────▶ mcx-agent <tool> ┴──────── unix socket ───────┘
 ```
 
 The engine answers nothing on its control FIFO, so the daemon makes each tool a transaction: it writes one command at
@@ -40,23 +42,9 @@ mcx-agent mark-read --message-id 6f1c…
 
 ## Errors
 
-A failed tool answers `{"ok": false, "error": "<message>", "code": "<code>"}` (CLI and socket) or an MCP result with
-`isError`, the text `<code>: <message>` and `{error, code}` as structured content. The codes are stable, the messages
-are not:
-
-| Code | Meaning | CLI exit status |
-|---|---|---|
-| `invalid_argument`, `unknown_tool` | A missing or bad argument, an unknown tool | 2 |
-| `not_allowed` | The configuration does not allow this recipient | 3 |
-| `rate_limited` | Too many sends in the last minute; try again later | 3 |
-| `alias_inactive` | The agent's functional alias is not active, so it may not send | 3 |
-| `engine_not_ready` | The engine (or the daemon) is starting, not registered or not authorised for MCData | 4 |
-| `not_found` | No such message, file offer or outbox file | 1 |
-| `engine_refused` | The engine refused the command | 1 |
-| `send_failed` | The network refused the message (the error has its Warning) or it was not delivered | 1 |
-| `transfer_failed` | A file upload or download failed | 1 |
-| `timeout` | The engine reported no outcome in time | 1 |
-| `internal` | Anything else | 1 |
+A failed tool gives a stable code (`not_allowed`, `alias_inactive`, `rate_limited`, `send_failed`, …) besides its
+message, and the CLI an exit status by kind: 2 a usage error, 3 refused by the agent's policy, 4 not ready, 1 any
+other failure. The codes and what to do about each: [API.md](API.md#errors).
 
 ## Received messages
 
@@ -100,6 +88,7 @@ the agent gets it back once its holder lets it go.
 | `outbox_dir` | Where files are sent from |
 | `alias`, `require_alias`, `alias_retry_s` | The functional alias to send as; refuse to send without it (default true when an alias is set); how often a lost alias is tried again |
 | `recipients`, `allow_senders_hours`, `rate_per_recipient_per_minute`, `rate_per_minute`, `max_text_bytes` | See Safety |
+| `mcp_http` | `{"listen", "token_file", "allowed_origins"}`: MCP over HTTP at `/mcp`, with the bearer token of `token_file` ([API.md](API.md#mcp-over-http)) |
 
 Downloads land where the engine puts them: `downloads/` beside its status file.
 
@@ -112,21 +101,23 @@ docker run -d --name mcx-agent -v $PWD/agent-config:/etc/mcx-agent:ro -v mcx-age
   openmcx-agent:<tag>
 ```
 
-Claude Code, over the container's stdio:
+An agent in another container connects to MCP over HTTP (`mcp_http`): **[examples/compose](examples/compose)** is
+the template, with the echo bot as the agent on a network of its own. Claude Code, over HTTP or the container's
+stdio:
 
 ```bash
+claude mcp add --transport http mcx http://<host>:8765/mcp --header "Authorization: Bearer $(cat token)"
 claude mcp add mcx -- docker exec -i mcx-agent mcx-agent mcp
 ```
 
-Any MCP client works the same way: the server speaks MCP over stdio (protocol versions 2024-11-05 to 2025-06-18) and
-offers tools only.
+The server speaks MCP (protocol versions 2024-11-05 to 2025-06-18) and offers tools only.
 
 ## Hello world: the echo bot
 
 [`examples/echo-bot.py`](examples/echo-bot.py) (Python standard library only, in the image under
 `/usr/local/share/mcx-agent/examples/`) is the smallest complete agent: it waits for messages, marks each read, answers
 "Hello <sender>, you said: <text>" in the sender's conversation, and accepts files. It talks to the daemon through the
-CLI, or through MCP with `--mcp`, the two ways an addon can integrate:
+CLI, MCP on stdio (`--mcp`), or MCP over HTTP (`--mcp-url`, `--token-file`), the ways an agent can integrate:
 
 ```bash
 docker exec -d mcx-agent python3 /usr/local/share/mcx-agent/examples/echo-bot.py --cursor /var/lib/mcx-agent/echo.cursor
@@ -134,15 +125,18 @@ docker exec -d mcx-agent python3 /usr/local/share/mcx-agent/examples/echo-bot.py
 
 ## Tests
 
-The lab scenario `mcdata_agent_scenario` in openmcx-server runs the agent and the echo bot against the real servers
-(lab `mcdata-agent`, the openmcx-agent image as the client image):
+The lab scenario `mcdata_agent_scenario` in openmcx-server runs the agent against the real servers, with the echo
+bot in another client's container over MCP on HTTP (lab `mcdata-agent`, the openmcx-agent image as the client
+image):
 
 ```bash
 docker build -t openmcx-agent:<tag> --build-arg CLIENT_IMAGE=openmcx-client:<tag> agent
 cd ../openmcx-server && tools/regress.py --images <tag> --client-image openmcx-agent:<tag> --select =mcdata-agent
 ```
 
-`go test` runs the daemon against a fake engine ([`service/testdata/fake-engine`](service/testdata/fake-engine)) that
+`go test` checks the tools against the committed contract (`service/testdata/tools_snapshot.json`; after a
+deliberate change, raise `version` in `main.go` and run `UPDATE_SNAPSHOT=1 go test -run TestToolsSnapshot ./...`),
+the MCP transports, and runs the daemon against a fake engine ([`service/testdata/fake-engine`](service/testdata/fake-engine)) that
 writes the MCData status keys and events the daemon reads; the image build runs them.
 
 ```bash

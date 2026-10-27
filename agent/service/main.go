@@ -22,6 +22,11 @@ import (
 
 const defaultSocket = "/run/mcx-agent/agent.sock"
 
+// version is the version of the API contract (API.md): the tools, their arguments and results,
+// the error codes. A tool or argument added raises the minor version; one changed or removed
+// raises the major. tools_snapshot.json holds the tools of this version.
+const version = "1.0.0"
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -44,7 +49,7 @@ func usage() {
   mcx-agent daemon --config <agent.json>
   mcx-agent mcp [--socket <path>]
   mcx-agent [--socket <path>] <tool> [--<argument> <value>]...
-  mcx-agent tools
+  mcx-agent tools [--json]
 
 The socket is %s unless --socket or MCX_AGENT_SOCKET says otherwise.
 `, defaultSocket)

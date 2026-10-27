@@ -233,6 +233,7 @@ func (d *daemon) toolStatus(args) (any, error) {
 	d.mu.Unlock()
 	running, _ := d.eng.running()
 	out := map[string]any{
+		"version":           version,
 		"ready":             ready,
 		"engine_running":    running,
 		"mcdata_id":         d.eng.userID,

@@ -1,0 +1,284 @@
+{
+  "tools": [
+    {
+      "description": "The agent's MCData state: whether it can send, its MCData ID, its functional alias, unread messages.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "status"
+    },
+    {
+      "description": "Send a one-to-one MCData short data message (SDS) to an MCData user, as the agent's functional alias. Returns the message ID and, depending on 'wait', the network's answer and the recipient's reports.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "report": {
+            "default": "both",
+            "description": "which disposition notifications to ask the recipient for",
+            "enum": [
+              "none",
+              "delivered",
+              "read",
+              "both"
+            ],
+            "type": "string"
+          },
+          "text": {
+            "description": "the message; line breaks are kept",
+            "type": "string"
+          },
+          "timeout_s": {
+            "default": 30,
+            "description": "how long to wait, in seconds (1 to 300, default 30)",
+            "type": "integer"
+          },
+          "to": {
+            "description": "the recipient's MCData ID, a SIP URI (sip:user@domain)",
+            "type": "string"
+          },
+          "wait": {
+            "default": "sent",
+            "description": "return once the message is sent (the network accepted it), delivered or read; none returns at once",
+            "enum": [
+              "none",
+              "sent",
+              "delivered",
+              "read"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "send_message"
+    },
+    {
+      "description": "Reply to a received message, in its conversation (InReplyTo), as the agent's functional alias.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "description": "the ID of the received message",
+            "type": "string"
+          },
+          "report": {
+            "default": "both",
+            "description": "which disposition notifications to ask the recipient for",
+            "enum": [
+              "none",
+              "delivered",
+              "read",
+              "both"
+            ],
+            "type": "string"
+          },
+          "text": {
+            "description": "the reply; line breaks are kept",
+            "type": "string"
+          },
+          "timeout_s": {
+            "default": 30,
+            "description": "how long to wait, in seconds (1 to 300, default 30)",
+            "type": "integer"
+          },
+          "wait": {
+            "default": "sent",
+            "description": "return once the reply is sent, delivered or read; none returns at once",
+            "enum": [
+              "none",
+              "sent",
+              "delivered",
+              "read"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id",
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "reply_message"
+    },
+    {
+      "description": "What is known of a sent or received message or file: network answer, delivered, read, file state.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "description": "the message ID",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "type": "object"
+      },
+      "name": "message_status"
+    },
+    {
+      "description": "Received one-to-one messages and file offers, oldest first. Without 'since', the latest ones; with it, those after that sequence number (pass the last_seq of the previous call to read on).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "description": "only from this MCData ID",
+            "type": "string"
+          },
+          "kind": {
+            "default": "any",
+            "description": "messages, files or both",
+            "enum": [
+              "any",
+              "message",
+              "file"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "default": 20,
+            "description": "at most this many items (1 to 200)",
+            "type": "integer"
+          },
+          "since": {
+            "description": "only items with a higher seq",
+            "type": "integer"
+          },
+          "unread_only": {
+            "default": false,
+            "description": "only messages not marked read",
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "inbox"
+    },
+    {
+      "description": "Wait for the next received one-to-one message or file offer and return it; returns timed_out when none comes. Without 'since', only what arrives after the call.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "description": "only from this MCData ID",
+            "type": "string"
+          },
+          "kind": {
+            "default": "any",
+            "description": "messages, files or both",
+            "enum": [
+              "any",
+              "message",
+              "file"
+            ],
+            "type": "string"
+          },
+          "since": {
+            "description": "return the first item with a higher seq, even one already received",
+            "type": "integer"
+          },
+          "timeout_s": {
+            "default": 60,
+            "description": "how long to wait, in seconds (1 to 300, default 60)",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "wait_message"
+    },
+    {
+      "description": "Mark a received message read. Sends the read report when the sender asked for one; reading the inbox never does.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "message_id": {
+            "description": "the received message's ID",
+            "type": "string"
+          }
+        },
+        "required": [
+          "message_id"
+        ],
+        "type": "object"
+      },
+      "name": "mark_read"
+    },
+    {
+      "description": "Send a file from the agent's outbox directory to an MCData user (file distribution over HTTP), as the agent's functional alias. Returns once the file is uploaded and offered.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "file": {
+            "description": "the file's name in the outbox directory",
+            "type": "string"
+          },
+          "mandatory": {
+            "default": false,
+            "description": "the recipient downloads it without asking its user",
+            "type": "boolean"
+          },
+          "timeout_s": {
+            "default": 60,
+            "description": "how long to wait, in seconds (1 to 300, default 60)",
+            "type": "integer"
+          },
+          "to": {
+            "description": "the recipient's MCData ID, a SIP URI",
+            "type": "string"
+          }
+        },
+        "required": [
+          "to",
+          "file"
+        ],
+        "type": "object"
+      },
+      "name": "send_file"
+    },
+    {
+      "description": "Accept (download), reject or defer a received file offer. Accept returns the downloaded file's path.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "description": "what to do",
+            "enum": [
+              "accept",
+              "reject",
+              "defer"
+            ],
+            "type": "string"
+          },
+          "message_id": {
+            "description": "the file offer's message ID",
+            "type": "string"
+          },
+          "timeout_s": {
+            "default": 120,
+            "description": "how long to wait, in seconds (1 to 300, default 120)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "message_id",
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "respond_file"
+    }
+  ],
+  "version": "1.0.0"
+}

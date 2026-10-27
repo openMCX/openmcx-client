@@ -91,6 +91,17 @@ func runDaemon(args []string) int {
 		log.Print(err)
 		return 1
 	}
+	if cfg.MCPHTTP != nil && cfg.MCPHTTP.Listen != "" {
+		token, err := readToken(cfg.MCPHTTP.TokenFile)
+		if err != nil {
+			log.Printf("mcp_http: %v", err)
+			return 1
+		}
+		server := &http.Server{Addr: cfg.MCPHTTP.Listen, Handler: newMCPHTTP(token, cfg.MCPHTTP.AllowedOrigins, d.call),
+			ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+		go func() { log.Printf("mcp_http: %v", server.ListenAndServe()) }()
+		log.Printf("mcx-agent: MCP over HTTP on %s/mcp", cfg.MCPHTTP.Listen)
+	}
 	go d.poll()
 	go d.supervise()
 	stop := make(chan os.Signal, 1)
