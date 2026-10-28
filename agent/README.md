@@ -11,7 +11,7 @@
 It runs the Linux client `mcx-client` as its engine, like the [dispatcher](../dispatcher) does, and offers the same
 tools to agents and shells: an **MCP server** (over HTTP, or stdio) and a **CLI**; video pictures go to an HTTP
 endpoint beside MCP. The agent itself (speech to text, a model, text to speech, the camera) is yours: mcx-agent is the
-plumbing. Group SDS is outside its reach. **[API.md](API.md)** is the contract an agent builds on (version 1.1.0):
+plumbing. Group SDS is outside its reach. **[API.md](API.md)** is the contract an agent builds on (version 1.2.0):
 the transports, the tools, their results and error codes. **[Agent Tutorial 2](https://github.com/openMCX/openmcx-server/blob/main/tutorials/agents/02-first-agent/README.md)** builds an MCData agent on
 it step by step.
 
