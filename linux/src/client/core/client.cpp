@@ -287,8 +287,8 @@ Client::Client(Json cfg, bool disable_tls)
       floor_(cfg_.at("media").at("bind"), local_.floor_port) {
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
   local_.protected_media = protected_media();
-  if (cfg_.at("mcptt").contains("multicast")) multicast_ = multicast_config(cfg_.at("mcptt").at("multicast"));
-  mbms_configure();
+  if (cfg_.at("mcptt").contains("multicast"))
+    throw std::runtime_error("mcptt.multicast is replaced by the MBMS procedures (the mbms block)");
   open_live_audio();
   if (mcvideo_enabled()) open_live_video();
   floor_timers_ = participant_timers();
@@ -301,7 +301,8 @@ Client::Client(Json cfg, bool disable_tls)
              {"received_packets", 0},
              {"floor_denials", 0},
              {"floor_queue_info_received", 0}};
-  if (multicast_)
+  mbms_configure();
+  if (mbms_enabled_)
     status_.update({{"multicast_joined", ""}, {"multicast_listening", false}, {"multicast_received_packets", 0}});
 }
 

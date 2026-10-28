@@ -1924,18 +1924,21 @@ private:
   void mbms_command(const std::string &cmd);
   void publish_mbms();
 
-  // ---- IP multicast reception of group call speech (mcptt/multicast.cpp, mcptt.multicast; an OpenMCX profile,
-  // include/mcx/multicast.hpp) ----
-  // The configured host groups; none without mcptt.multicast. While a configured group's call is active the client
-  // has joined its host group (multicast_socket_), and keeps the SSRC and sequence number last received so that a
-  // packet that arrives both by unicast and by multicast is kept once.
-  std::optional<MulticastConfig> multicast_;
+  // ---- MCPTT media over an MBMS subchannel (mcptt/multicast.cpp): TS 24.380 clauses 10.3.2 to 10.3.4 ----
+  // The subchannels the Map Group To Bearer messages on the general purpose subchannels associated with groups
+  // (TS 24.380 clause 10.3.2), by group URI. While the call of a mapped group is active the client has joined its
+  // subchannel (multicast_socket_) and keeps the SSRC and sequence number last received so that a packet that arrives
+  // both by unicast and over the subchannel is kept once.
+  struct MbmsMapping {
+    MbmsService service = MbmsService::Mcptt;
+    std::string tmgi;
+    MbmsSubchannel subchannel;
+  };
+  std::map<std::string, MbmsMapping> mbms_mappings_;
   std::unique_ptr<UdpSocket> multicast_socket_;
   std::optional<std::pair<std::uint32_t, std::uint16_t>> last_rtp_; // SSRC, sequence number
-  // The session and TMGI of the joined host group's listening status reports (TS 24.379 clause 14.3.3.2), and
-  // "multicast off" in force until the call ends.
-  std::string multicast_session_, multicast_tmgi_;
-  bool multicast_off_ = false;
+  // The session, group and TMGI of the joined subchannel's listening status reports (TS 24.379 clause 14.3.3.2).
+  std::string multicast_session_, multicast_group_, multicast_tmgi_;
 
   void multicast_join();
 
@@ -1943,9 +1946,11 @@ private:
 
   void multicast_report(bool listening);
 
-  void multicast_command(const std::string &cmd);
-
   void multicast_poll();
+
+  void mbms_mapped(const std::string &tmgi, const SubchannelMessage &message);
+
+  void mbms_unmapped(const SubchannelMessage &message);
 
   [[nodiscard]] bool duplicate_rtp(std::span<const std::uint8_t> packet, bool multicast);
 

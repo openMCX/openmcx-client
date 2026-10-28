@@ -49,8 +49,8 @@ void Client::remember_session(const std::vector<SipHeader> &headers) {
     session_uri_ = uri;
     status_["session_uri"] = uri;
     schedule([this] { subscribe_conference(); });
-    // The session identity of an active call known only now: its host group is joined with it.
-    if (multicast_ && !multicast_socket_ && status_.value("call_state", "") == "active")
+    // The session identity of an active call known only now: a mapped MBMS subchannel is joined with it.
+    if (mbms_enabled_ && !multicast_socket_ && status_.value("call_state", "") == "active")
       schedule([this] { multicast_join(); });
   }
 }

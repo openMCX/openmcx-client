@@ -135,7 +135,6 @@ void Client::clear_call_state() {
   talking_ = requesting_ = false;
   transmit_.clear();
   multicast_leave(false);
-  multicast_off_ = false;
 
   // A private session cannot be rejoined; keep only group session identities.
   if (call_type_ == "private" || call_type_ == "ambient") {

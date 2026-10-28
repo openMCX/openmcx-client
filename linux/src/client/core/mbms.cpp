@@ -226,6 +226,14 @@ void Client::mbms_report(MbmsService service, const std::string &psi, bool liste
                  for (const auto &tmgi : tmgis)
                    if (auto found = mbms_bearers_.find(tmgi); found != mbms_bearers_.end())
                      found->second.accepted = listening && response.status_code < 300;
+                 // TS 24.379 clause 14.2.3 NOTE 2: "not-listening" on the general purpose subchannel ends the
+                 // listening to the bearer's MBMS subchannels; the joined one is left after the grace.
+                 if (!listening && multicast_socket_ && std::ranges::find(tmgis, multicast_tmgi_) != tmgis.end()) {
+                   status_["multicast_listening"] = false;
+                   schedule_after(200, [this, session = multicast_session_] {
+                     if (session == multicast_session_) multicast_leave(false);
+                   });
+                 }
                  publish_mbms();
                });
   event("mbms_report_sent", {{"listening", listening}, {"general_purpose", true}, {"tmgis", tmgis}});
@@ -258,8 +266,11 @@ void Client::mbms_poll() {
 // TS 24.380 clause 10.3.6 (TS 24.581 clause 10.3.6): a Bearer Announcement message received over a bearer is
 // acknowledged with a listening status report for the TMGIs it names that the client has an announcement of; the
 // monitoring state "inactive" is taken as an instruction to stop monitoring them (the specifications do not say,
-// docs/3GPP_CORRECTION_CANDIDATES.md M10), reported "not-listening". The other messages come with later phases.
+// docs/3GPP_CORRECTION_CANDIDATES.md M10), reported "not-listening". Map and Unmap Group To Bearer are taken by
+// mcptt/multicast.cpp.
 void Client::mbms_subchannel_message(const std::string &tmgi, const SubchannelMessage &message) {
+  if (message.type == SubchannelMessageType::MapGroup) return mbms_mapped(tmgi, message);
+  if (message.type == SubchannelMessageType::UnmapGroup) return mbms_unmapped(message);
   if (message.type != SubchannelMessageType::Announcement) return;
   status_["mbms_bearer_announcements"] = status_.value("mbms_bearer_announcements", 0ULL) + 1;
   const auto &bearer = mbms_bearers_.at(tmgi);

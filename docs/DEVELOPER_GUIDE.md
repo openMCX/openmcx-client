@@ -471,21 +471,16 @@ stateDiagram-v2
   spec's names ('U: has permission').
 - A private call without floor control (TS 24.379 clause 11.1.2, `no_floor()`) has no floor participant: `ptt` starts
   speech at once.
-- IP multicast reception of group call speech (`mcptt.multicast`, `mcptt/multicast.cpp`; an OpenMCX profile, not 3GPP
-  MBMS, with the server's `mcptt.multicast` block). `groups` maps a group URI to `{"host_group": "<IPv4 host
-  group>:<port>", "tmgi": "<TMGI>"}`, as on the server, and `interface` (default `0.0.0.0`) names the interface to
-  join on. When the call of a configured group becomes active (prearranged, chat or broadcast, or a regroup, with
-  floor control) the client joins its host group and reports "listening" for the session and TMGI (TS 24.379 clause
-  14.3.3.2: a SIP MESSAGE to the MCPTT service with `application/vnd.3gpp.mcptt-mbms-usage-info+xml` and an
-  mcptt-info naming the user). A refused report leaves the host group; the call goes on by unicast. `multicast off`
-  reports "not-listening" and leaves the host group once the server has answered (the server then sends the speech
-  by unicast); `multicast on` joins and reports again; the choice lasts until the call ends. Speech from the host
-  group goes through `audio_packet` as unicast speech does, accepted from the server's media address on any port.
-  While joined, a packet of the followed SSRC that is not newer than the last one kept (RFC 3550 appendix A.1) is
-  dropped as a copy. The talker drops its own speech from the host group. Floor control stays unicast. Status:
-  `multicast_joined`, `multicast_listening` (the server took the report), `multicast_refused` (the status code of a
-  refused report), `multicast_received_packets`, and `duplicates_dropped_multicast` and
-  `duplicates_dropped_unicast` (the copies dropped, by the way they came).
+- MCPTT media over an MBMS subchannel (`mcptt/multicast.cpp`, TS 24.380 clause 10.3). A Map Group To Bearer message
+  on a general purpose subchannel maps a group to a subchannel; while the call of that group is active the client
+  joins it and reports "listening" for the session and TMGI (TS 24.379 clause 14.3.3.1 condition 1) to the bearer's
+  MBMS PSI. Speech from the subchannel goes through `audio_packet` as unicast speech does, accepted from the server's
+  media address on any port; the talker drops its own; while joined a packet of the followed SSRC not newer than the
+  last one kept (RFC 3550 appendix A.1) is dropped as a copy. Unmap Group To Bearer (or a "not-listening" report on
+  the general purpose subchannel) reports "not-listening" and leaves 200 ms after the server's answer. Floor control
+  stays unicast. `mcptt.multicast` (the former static profile) is refused. Status: `multicast_joined`,
+  `multicast_listening`, `multicast_refused`, `multicast_received_packets`, `duplicates_dropped_multicast` and
+  `duplicates_dropped_unicast`.
 - MBMS usage (`mbms`, `core/mbms.cpp`; TS 24.379 clause 14.3 for MCPTT, TS 24.281 clause 16.2 for MCVideo). The
   `mbms` block is the emulated MBMS interface of the UE (no modem or radio): `service_areas` (the MBMS service area
   IDs, hexBinary, the UE is in) and `interface` (default `0.0.0.0`). Without it MBMS bearer announcements are
