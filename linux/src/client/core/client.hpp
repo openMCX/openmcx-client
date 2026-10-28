@@ -28,6 +28,7 @@
 #include "mcx/mcdata.hpp"
 #include "mcx/media.hpp"
 #include "mcx/msrp.hpp"
+#include "mcx/mbms.hpp"
 #include "mcx/multicast.hpp"
 #include "mcx/protected_call.hpp"
 #include "mcx/runtime.hpp"
@@ -1342,7 +1343,36 @@ private:
 
   void mcvideo_control_packet(const Datagram &datagram);
 
-  void mcvideo_video_packet(const Datagram &datagram);
+  void mcvideo_video_packet(const Datagram &datagram, bool multicast = false);
+
+  // The MBMS subchannel a Map Group To Bearer message associated with a group (TS 24.380 clause 10.3.2, TS 24.581
+  // clause 10.3.2): the bearer's service and TMGI, and the subchannel.
+  struct MbmsMapping {
+    MbmsService service = MbmsService::Mcptt;
+    std::string tmgi;
+    MbmsSubchannel subchannel;
+    // The participating function's SSRC (the Map Group To Bearer header's): the media control messages over the
+    // subchannel carry it.
+    std::uint32_t ssrc = 0;
+  };
+
+  // ---- MCVideo media over an MBMS subchannel (mcvideo/multicast.cpp): TS 24.581 clauses 10.3.2 to 10.3.4 ----
+  // The subchannels mapped to MCVideo groups, and the one joined for the active group call (its video port), with the
+  // session, group and TMGI of its reports and the stream's last SSRC and sequence number.
+  std::map<std::string, MbmsMapping> mbms_video_mappings_;
+  std::unique_ptr<UdpSocket> mcvideo_multicast_socket_;
+  std::string mcvideo_multicast_session_, mcvideo_multicast_group_, mcvideo_multicast_tmgi_;
+  client_rules::RtpReceiveWindow mcvideo_rtp_window_;
+  [[nodiscard]] bool mcvideo_mappable() const;
+  void mcvideo_mbms_mapped(const std::string &tmgi, const SubchannelMessage &message);
+  void mcvideo_mbms_unmapped(const SubchannelMessage &message);
+  void mcvideo_multicast_join();
+  void mcvideo_multicast_leave(bool report);
+  void mcvideo_multicast_report(bool listening);
+  void mcvideo_multicast_poll();
+  [[nodiscard]] bool mcvideo_duplicate(std::span<const std::uint8_t> bytes, bool multicast);
+  void mcvideo_mbms_control_packet(const Datagram &datagram);
+  void mcvideo_control_message(const transmission::Packet &packet);
 
   void mcvideo_tick(std::uint64_t now);
 
@@ -1889,22 +1919,84 @@ private:
   mutable std::map<std::uint16_t, std::string> server_sources_;
   void floor_packet(const Datagram &datagram);
 
+  void floor_message(FloorPacket packet, bool multicast);
+
   static bool from_server_address(const sockaddr_in &source, const std::string &address);
 
   void audio_packet(const Datagram &datagram, bool multicast = false);
 
-  // ---- IP multicast reception of group call speech (mcptt/multicast.cpp, mcptt.multicast; an OpenMCX profile,
-  // include/mcx/multicast.hpp) ----
-  // The configured host groups; none without mcptt.multicast. While a configured group's call is active the client
-  // has joined its host group (multicast_socket_), and keeps the SSRC and sequence number last received so that a
-  // packet that arrives both by unicast and by multicast is kept once.
-  std::optional<MulticastConfig> multicast_;
+  // ---- MBMS usage (core/mbms.cpp): TS 24.379 clause 14.3, TS 24.281 clause 16.2, TS 24.380 clause 10.3 ----
+  // An announced bearer (by TMGI): its service, <announcement>, SDP, the MBMS public service identity that announced
+  // it, the host group and port of its general purpose subchannel and, while the emulated MBMS interface can receive
+  // it, the socket joined to it; whether "listening" was reported last, and accepted.
+  struct MbmsBearer {
+    MbmsService service = MbmsService::Mcptt;
+    MbmsAnnouncement announcement;
+    std::string sdp, psi, general_purpose_address;
+    std::uint16_t general_purpose_port = 0;
+    std::unique_ptr<UdpSocket> socket;
+    bool reported_listening = false, accepted = false;
+    // TS 24.379 clause 14B.3.2: a 5G MBS session (keyed by its MBS session ID) rather than an MBMS bearer, its mode
+    // and whether the server wants UE session join notifications (clause 14B.3.5).
+    bool mbs = false;
+    std::string mode;
+    std::optional<bool> report_join;
+    // TS 24.379 clause 14.3.2 step 1 f: the MSCCK of the general purpose subchannel's "a=key-mgmt", whose SRTCP
+    // protects the bearer's subchannel control messages (TS 24.380 clause 13.3.3); none when they are clear.
+    std::unique_ptr<ProtectedCall> mscck;
+  };
+  bool mbms_enabled_ = false;
+  std::string mbms_interface_ = "0.0.0.0";
+  // The emulated MBMS interface: the MBMS service areas the UE is in, the TMGIs with bad radio conditions ("all":
+  // every bearer).
+  std::set<std::string> mbms_areas_, mbms_bad_;
+  std::map<std::string, MbmsBearer> mbms_bearers_;
+  // Bearers whose announcement was cancelled after "listening" was reported: service and PSI to report to.
+  std::map<std::string, std::tuple<MbmsService, std::string, bool>> mbms_cancelled_;
+  // TS 24.379 clause 14.3.4 (TS 24.281 clause 16.2.4): the MuSiK of each service's key download, whose SRTCP protects
+  // the floor (transmission) control over the subchannels (TS 33.180 clause 9.2.2).
+  std::unique_ptr<ProtectedCall> mbms_musik_, mcvideo_mbms_musik_;
+  [[nodiscard]] std::vector<std::uint8_t> mbms_open_control(std::span<const std::uint8_t> bytes, const MbmsBearer &bearer);
+  [[nodiscard]] static std::uint8_t mbms_mki_purpose(std::span<const std::uint8_t> bytes);
+  // TS 24.379 clause 14.3.3.1: the bearers reported as about to be suspended.
+  std::set<std::string> mbms_suspending_;
+  void mbms_suspension_report(const std::string &tmgi, bool suspending);
+  void mbms_group_dynamic_data(MbmsService service, std::span<const std::uint8_t> bytes);
+  void mbms_paged(const SubchannelMessage &message);
+  void mbms_configure();
+  [[nodiscard]] const std::string *mbms_usage_body(const SipMessage &message, MbmsService service) const;
+  SipResponse mbms_message(const SipMessage &message, MbmsService service, const std::string &body, bool mbs);
+  void mbms_update();
+  void mbms_report(MbmsService service, const std::string &psi, bool listening, const std::vector<std::string> &tmgis,
+                   bool mbs = false);
+  [[nodiscard]] static BodyPart mbms_status_part(MbmsService service, bool mbs, const MbmsListeningStatus &status);
+  void mbs_join_notification(const std::string &session, bool join, const std::string &mcptt_session = {});
+  void mbms_poll();
+  void mbms_subchannel_message(const std::string &tmgi, const SubchannelMessage &message);
+  void mbms_command(const std::string &cmd);
+  void publish_mbms();
+
+  // ---- MCPTT media over an MBMS subchannel (mcptt/multicast.cpp): TS 24.380 clauses 10.3.2 to 10.3.4 ----
+  // The subchannels the Map Group To Bearer messages on the general purpose subchannels associated with groups
+  // (TS 24.380 clause 10.3.2), by group URI. While the call of a mapped group is active the client has joined its
+  // subchannel (multicast_socket_) and keeps the window of sequence numbers received so that a packet that arrives
+  // both by unicast and over the subchannel is kept once; the packets that come ahead of a gap wait a little for the
+  // ones the radio still delays (held_rtp_).
+  std::map<std::string, MbmsMapping> mbms_mappings_;
   std::unique_ptr<UdpSocket> multicast_socket_;
-  std::optional<std::pair<std::uint32_t, std::uint16_t>> last_rtp_; // SSRC, sequence number
-  // The session and TMGI of the joined host group's listening status reports (TS 24.379 clause 14.3.3.2), and
-  // "multicast off" in force until the call ends.
-  std::string multicast_session_, multicast_tmgi_;
-  bool multicast_off_ = false;
+  client_rules::RtpReceiveWindow rtp_window_;
+  struct HeldRtp {
+    std::uint64_t since;
+    Datagram datagram;
+    bool multicast;
+  };
+  std::vector<HeldRtp> held_rtp_;
+  bool releasing_held_rtp_ = false;
+  // The session, group and TMGI of the joined subchannel's listening status reports (TS 24.379 clause 14.3.3.2).
+  std::string multicast_session_, multicast_group_, multicast_tmgi_;
+  // TS 24.380 clause 10.3.3: the message sequence numbers of the floor control messages over the joined subchannel.
+  FloorSequenceTracker mbms_floor_sequence_;
+  void mbms_floor_packet(const Datagram &datagram);
 
   void multicast_join();
 
@@ -1912,11 +2004,17 @@ private:
 
   void multicast_report(bool listening);
 
-  void multicast_command(const std::string &cmd);
-
   void multicast_poll();
 
+  void mbms_mapped(const std::string &tmgi, const SubchannelMessage &message);
+
+  void mbms_unmapped(const SubchannelMessage &message);
+
   [[nodiscard]] bool duplicate_rtp(std::span<const std::uint8_t> packet, bool multicast);
+
+  [[nodiscard]] bool hold_rtp(const Datagram &datagram, bool multicast);
+
+  void release_held_rtp(std::uint64_t now, bool all = false);
 
   void kept_rtp(std::span<const std::uint8_t> packet);
 

@@ -471,21 +471,58 @@ stateDiagram-v2
   spec's names ('U: has permission').
 - A private call without floor control (TS 24.379 clause 11.1.2, `no_floor()`) has no floor participant: `ptt` starts
   speech at once.
-- IP multicast reception of group call speech (`mcptt.multicast`, `mcptt/multicast.cpp`; an OpenMCX profile, not 3GPP
-  MBMS, with the server's `mcptt.multicast` block). `groups` maps a group URI to `{"host_group": "<IPv4 host
-  group>:<port>", "tmgi": "<TMGI>"}`, as on the server, and `interface` (default `0.0.0.0`) names the interface to
-  join on. When the call of a configured group becomes active (prearranged, chat or broadcast, or a regroup, with
-  floor control) the client joins its host group and reports "listening" for the session and TMGI (TS 24.379 clause
-  14.3.3.2: a SIP MESSAGE to the MCPTT service with `application/vnd.3gpp.mcptt-mbms-usage-info+xml` and an
-  mcptt-info naming the user). A refused report leaves the host group; the call goes on by unicast. `multicast off`
-  reports "not-listening" and leaves the host group once the server has answered (the server then sends the speech
-  by unicast); `multicast on` joins and reports again; the choice lasts until the call ends. Speech from the host
-  group goes through `audio_packet` as unicast speech does, accepted from the server's media address on any port.
-  While joined, a packet of the followed SSRC that is not newer than the last one kept (RFC 3550 appendix A.1) is
-  dropped as a copy. The talker drops its own speech from the host group. Floor control stays unicast. Status:
-  `multicast_joined`, `multicast_listening` (the server took the report), `multicast_refused` (the status code of a
-  refused report), `multicast_received_packets`, and `duplicates_dropped_multicast` and
-  `duplicates_dropped_unicast` (the copies dropped, by the way they came).
+- MCPTT media over an MBMS subchannel (`mcptt/multicast.cpp`, TS 24.380 clause 10.3). A Map Group To Bearer message
+  on a general purpose subchannel maps a group to a subchannel; while the call of that group is active the client
+  joins it and reports "listening" for the session and TMGI (TS 24.379 clause 14.3.3.1 condition 1) to the bearer's
+  MBMS PSI. Speech from the subchannel goes through `audio_packet` as unicast speech does, accepted from the server's
+  media address on any port; the talker drops its own; while joined a packet of the followed SSRC not newer than the
+  last one kept (RFC 3550 appendix A.1) is dropped as a copy. Unmap Group To Bearer (or a "not-listening" report on
+  the general purpose subchannel) reports "not-listening" and leaves 200 ms after the server's answer. Floor Taken
+  and Floor Idle from the subchannel (`mbms_floor_packet`: the server's address, the Map Group To Bearer's SSRC, their
+  own message sequence numbers, no Floor Ack) go to the floor participant (`floor_message`); the talker's own Floor
+  Taken is ignored; the other floor messages stay unicast. Status adds `mbms_floor_received`. `mcptt.multicast` (the former static profile) is refused. Status: `multicast_joined`,
+  `multicast_listening`, `multicast_refused`, `multicast_received_packets`, `duplicates_dropped_multicast` and
+  `duplicates_dropped_unicast`.
+- MCVideo media over an MBMS subchannel (`mcvideo/multicast.cpp`, TS 24.581 clause 10.3): as for MCPTT, a Map Group To
+  Bearer of an MCVideo bearer for the group of the active MCVideo group call joins the subchannel's video port and
+  reports "listening" for the session (`application/vnd.3gpp.mcvideo-mbms-usage-info+xml`, mcvideo-info); the video
+  from it is decoded as the unicast video (`mcvideo_video_packet`), the transmitting client drops its own, copies
+  are dropped by sequence number. Transmission Idle and Media Transmission Notification from the subchannel go to
+  `mcvideo_control_message` (status `mcvideo_mbms_control_received`). The audio port is not joined. Status: `mcvideo_multicast_joined`,
+  `mcvideo_multicast_listening`, `mcvideo_multicast_received_packets`, `mcvideo_duplicates_dropped_multicast` and
+  `mcvideo_duplicates_dropped_unicast`.
+- MBMS usage (`mbms`, `core/mbms.cpp`; TS 24.379 clause 14.3 for MCPTT, TS 24.281 clause 16.2 for MCVideo). The
+  `mbms` block is the emulated MBMS interface of the UE (no modem or radio): `service_areas` (the MBMS service area
+  IDs, hexBinary, the UE is in) and `interface` (default `0.0.0.0`). Without it MBMS bearer announcements are
+  answered 200 and ignored. An announcement (a SIP MESSAGE with the service's P-Asserted-Service and
+  `application/vnd.3gpp.mcptt-mbms-usage-info+xml` or `...mcvideo-mbms-usage-info+xml`) stores each
+  `<announcement>` by TMGI with its SDP, the address of its `<GPMS>` media line and the P-Asserted-Identity (the MBMS
+  PSI the reports go to); one without service areas cancels. While the UE is in one of a bearer's service areas with
+  good radio conditions the client joins its general purpose subchannel and reports "listening" with
+  `<general-purpose>` true (clause 14.3.3.1); when it stops (cancellation, bad radio, leaving the areas) it reports
+  "not-listening" with `<general-purpose>` false. A Bearer Announcement message received on the general purpose
+  subchannel (TS 24.380 clause 10.3.6) is acknowledged with a report; monitoring state inactive stops the bearer.
+  An "a=key-mgmt:mikey" in the general purpose media line carries the bearer's MSCCK: its initiator must be the
+  announcing PSI and it must open with the user's key (MCVideo: the MCVideo identity's), else the announcement is
+  answered 488 with warning 136; the bearer's subchannel control messages must then be SRTCP under it (MKI purpose
+  tag 5; the Bearer Announcement message stays clear). A MuSiK download (`<mbms-defaultMuSiK-download>` or
+  `<mbms-explicitMuSiK-download>` with an application/mikey body) is opened the same way and keys the SRTCP of the
+  floor (transmission) control over the subchannels (MKI purpose tag 6) when floor control is protected.
+  `mbms suspend|resume <TMGI>` (the RAN's notice that a bearer is about to be suspended, or no longer) sends the
+  suspension status report ("suspending"/"not-suspending", TS 24.379 clause 14.3.3) unless the announcement said
+  `<report-suspension>` false. Application Paging (TS 24.380 clause 10.3.5) is counted; Group Dynamic Data Notify
+  (clear, or SRTCP under the MuSiK) is kept by group in `mbms_group_dynamic_data`.
+  A 5G MBS session announcement (`application/vnd.3gpp.mcptt-mbs-usage-info+xml` or `...mcvideo-mbs-usage-info+xml`,
+  TS 24.379 clause 14B) is stored the same way, keyed by its MBS session ID; its reports use the MBS body (listening
+  status with `<unicast-listening-status>`, de-announcement status for `mbms suspend|resume`), "MCSC"/"MCV5" messages
+  map its subchannels, and a multicast session whose announcement asks for it gets UE session join notifications
+  (clause 14B.3.5) for the general purpose subchannel and for each joined session.
+  Commands: `mbms area <id>[,<id>...]|none`, `mbms quality good|bad [<TMGI>]`, `mbms suspend|resume <TMGI>`. Status: `mbms_areas`,
+  `mbms_bearers` (by TMGI or MBS session ID: `service`, `system`, `general_purpose`, `joined`, `mscck`,
+  `reported_listening`, `accepted`), `mbs_join_notifications`,
+  `mbms_musik_id`, `mcvideo_mbms_musik_id`, `mbms_suspension_reports`, `mbms_paging_received`,
+  `mbms_group_dynamic_data`, `mbms_group_dynamic_data_received`,
+  `mbms_general_purpose_received`, `mbms_general_purpose_rejected`, `mbms_bearer_announcements`.
 
 ### 3.3 Spec-literal state names and how to add a transition
 

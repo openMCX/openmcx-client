@@ -38,6 +38,7 @@ add_executable(mcx-client
     src/client/mcptt/incoming_calls.cpp
     src/client/mcptt/live_audio.cpp
     src/client/mcptt/multicast.cpp
+    src/client/core/mbms.cpp
     src/client/mcptt/priority.cpp
     src/client/mcptt/private_call.cpp
     src/client/mcptt/private_services.cpp
@@ -52,6 +53,7 @@ add_executable(mcx-client
     src/client/mcvideo/location.cpp
     src/client/mcvideo/service.cpp
     src/client/mcvideo/session.cpp
+    src/client/mcvideo/multicast.cpp
     # mcdata
     src/client/mcdata/alert.cpp
     src/client/mcdata/dispatch.cpp

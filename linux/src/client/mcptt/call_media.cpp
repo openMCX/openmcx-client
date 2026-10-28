@@ -135,7 +135,6 @@ void Client::clear_call_state() {
   talking_ = requesting_ = false;
   transmit_.clear();
   multicast_leave(false);
-  multicast_off_ = false;
 
   // A private session cannot be rejoined; keep only group session identities.
   if (call_type_ == "private" || call_type_ == "ambient") {
@@ -277,6 +276,14 @@ void Client::floor_packet(const Datagram &datagram) {
   auto bytes = protected_floor() ? protection_.unprotect_floor(datagram.bytes) : datagram.bytes;
   auto packet = decode_floor(bytes);
   if (packet.ssrc != local_.floor_ssrc) return;
+  floor_message(packet, false);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 6.2.4: a floor control message from the floor control server, received by unicast or (TS 24.380
+// clause 10.3.3, mcptt/multicast.cpp) over the MBMS subchannel, whose messages have their own message sequence
+// numbers and ask for no Floor Ack.
+void Client::floor_message(FloorPacket packet, bool multicast) {
   validate_on_network_floor(packet);
   if (packet.type == FloorType::Ack) {
     floor_timers_.receive(packet, monotonic_ms());
@@ -290,7 +297,7 @@ void Client::floor_packet(const Datagram &datagram) {
     ack.fields = {source_field(0), message_type_field(packet.type)};
     transmit_floor(ack);
   }
-  if (!floor_sequence_.accept(packet)) return;
+  if (!(multicast ? mbms_floor_sequence_ : floor_sequence_).accept(packet)) return;
   floor_timers_.receive(packet, monotonic_ms());
   if (packet.type == FloorType::Granted) {
     if (talking_) return;
@@ -331,7 +338,9 @@ void Client::floor_packet(const Datagram &datagram) {
     release();
     event("floor_revoked");
   } else if (packet.type == FloorType::Idle) {
-    if (talking_) release();
+    // TS 24.380 clause 6.2.4.4: 'U: has permission' takes no Floor Idle. One over the subchannel can be a T7
+    // repetition sent before the server granted this user's request, overtaken by the unicast Floor Granted.
+    if (talking_ && !multicast) release();
     status_["floor_owner"] = "";
     receive_ssrc_ = 0;
   } else if (packet.type == FloorType::Taken) {
@@ -362,7 +371,7 @@ void Client::audio_packet(const Datagram &datagram, bool multicast) {
   // heard is followed (TS 24.379 clause 11.1.2).
   if (no_floor() && !receive_ssrc_) receive_ssrc_ = wire_ssrc(datagram.bytes, false);
   if (!receive_ssrc_ || wire_ssrc(datagram.bytes, false) != receive_ssrc_) return;
-  if (duplicate_rtp(datagram.bytes, multicast)) return;
+  if (duplicate_rtp(datagram.bytes, multicast) || hold_rtp(datagram, multicast)) return;
   const auto sender = no_floor() ? private_peer_ : status_.value("floor_owner", std::string{});
   auto bytes = protected_media() ? protection_.unprotect_media(datagram.bytes, sender) : datagram.bytes;
   auto rtp = decode_rtp(bytes);
@@ -388,6 +397,7 @@ void Client::audio_packet(const Datagram &datagram, bool multicast) {
   }
   status_["received_packets"] = status_["received_packets"].get<unsigned>() + 1;
   if (multicast) status_["multicast_received_packets"] = status_.value("multicast_received_packets", 0ULL) + 1;
+  if (!held_rtp_.empty()) release_held_rtp(monotonic_ms());
 }
 
 } // namespace mcx

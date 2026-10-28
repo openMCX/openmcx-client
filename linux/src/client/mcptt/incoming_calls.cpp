@@ -63,6 +63,16 @@ SipResponse Client::incoming_clear(const SipMessage &message) {
 // messages to their services, location, regroup (TS 24.379 clause 16.2.1.3), private call
 // services, ad hoc alerts (clause 12.1A.1.3) and priority notices.
 SipResponse Client::incoming_clear_message(const SipMessage &message) {
+  // TS 24.379 clause 14.3.2 and TS 24.281 clause 16.2.2: an MBMS bearer announcement (or MuSiK download) of the
+  // MCPTT or the MCVideo participating function (core/mbms.cpp).
+  for (const auto service : {MbmsService::Mcptt, MbmsService::Mcvideo}) {
+    if (const auto *usage = mbms_usage_body(message, service)) return mbms_message(message, service, *usage, false);
+    // TS 24.379 clause 14B.3.2 (TS 24.281 clause 16A.2.2): a 5G MBS session announcement.
+    const std::string mbs_mime = mbs_usage_type(service).mime;
+    for (const auto &part : message.parts)
+      if (part.content_type == mbs_mime) return mbms_message(message, service, part.body, true);
+    if (message.content_type == mbs_mime) return mbms_message(message, service, message.body, true);
+  }
   // The MCVideo server's alerts (TS 24.281 clause 11.2) and in-call priority INFO (TS 24.281 clause 6.2.8.1.13),
   // before any MCPTT handling parses MCPTT information.
   // TS 24.281 clause 21.2.1.3 and clause 21.2.1.4: an MCVideo regroup notice from the MCVideo server.

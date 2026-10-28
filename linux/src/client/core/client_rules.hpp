@@ -213,6 +213,43 @@ inline bool rtp_sequence_newer(std::uint16_t sequence, std::uint16_t last) {
 }
 
 //------------------------------------------------------------------------------
+// RFC 3550 appendix A.1 with the sliding window of RFC 3711 section 3.3.2: the sequence numbers of one SSRC kept from
+// two paths (unicast and an MBMS subchannel, whose radio delays it by tens of milliseconds), which arrive out of order
+// around a change of path. A packet is a copy when its sequence number was kept already, too old when it is the window
+// or more behind the highest kept; anything else is fresh, an older one that is late included.
+struct RtpReceiveWindow {
+  static constexpr std::uint16_t size = 64;
+  std::optional<std::uint32_t> ssrc;
+  std::uint16_t highest = 0;
+  std::uint64_t kept = 0; // bit n: highest - n was kept
+
+  [[nodiscard]] bool fresh(std::uint32_t packet_ssrc, std::uint16_t sequence) const {
+    if (ssrc != packet_ssrc || rtp_sequence_newer(sequence, highest)) return true;
+    const auto behind = static_cast<std::uint16_t>(highest - sequence);
+    return behind < size && !((kept >> behind) & 1U);
+  }
+
+  // How far a fresh sequence number is ahead of the highest kept (1: the next one), 0 when it is not ahead.
+  [[nodiscard]] std::uint16_t ahead(std::uint32_t packet_ssrc, std::uint16_t sequence) const {
+    if (ssrc != packet_ssrc || !rtp_sequence_newer(sequence, highest)) return 0;
+    return static_cast<std::uint16_t>(sequence - highest);
+  }
+
+  void keep(std::uint32_t packet_ssrc, std::uint16_t sequence) {
+    if (ssrc != packet_ssrc) {
+      ssrc = packet_ssrc;
+      highest = sequence;
+      kept = 1;
+    } else if (const auto step = ahead(packet_ssrc, sequence)) {
+      kept = step >= size ? 1 : (kept << step) | 1U;
+      highest = sequence;
+    } else if (const auto behind = static_cast<std::uint16_t>(highest - sequence); behind < size) {
+      kept |= std::uint64_t{1} << behind;
+    }
+  }
+};
+
+//------------------------------------------------------------------------------
 // The delay before the client publishes its initial service authorisation again, or nothing when it does not.
 // TS 24.379, TS 24.282 and TS 24.281 clause 7.2.2: a SIP 4xx, 5xx or 6xx response leaves the client not authorised,
 // and they leave whether and when to try again to the client. A refusal that can be transient is retried: 403 (the

@@ -602,6 +602,14 @@ void Client::mcvideo_control_packet(const Datagram &datagram) {
   const auto packet =
       transmission::decode(protected_floor() ? mcvideo_protection_.unprotect_floor(datagram.bytes) : datagram.bytes);
   if (!transmission::from_server(packet.type) || packet.ssrc != call.local.floor_ssrc) return;
+  mcvideo_control_message(packet);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.581 clause 6.2: a transmission control message from the transmission control server, received by unicast or
+// (TS 24.581 clause 10.3.3, mcvideo/multicast.cpp) over the MBMS subchannel.
+void Client::mcvideo_control_message(const transmission::Packet &packet) {
+  auto &call = *mcvideo_call_;
   using transmission::Field;
   switch (packet.type) {
   case transmission::Type::Granted: {
@@ -719,11 +727,14 @@ void Client::mcvideo_control_packet(const Datagram &datagram) {
 
 //------------------------------------------------------------------------------
 // TS 26.281 clauses 4.1.1 and 4.1.3 with RFC 6184: reassemble, decode and record each received H.264 picture.
-void Client::mcvideo_video_packet(const Datagram &datagram) {
+void Client::mcvideo_video_packet(const Datagram &datagram, bool multicast) {
   auto &call = *mcvideo_call_;
+  // Video over an MBMS subchannel (mcvideo/multicast.cpp) comes from the server's media address on any port.
   if (!call.remote || !call.remote->video ||
-      !sent_by_server(datagram.source, call.remote->address, call.remote->video->port))
+      !(multicast ? from_server_address(datagram.source, call.remote->address)
+                  : sent_by_server(datagram.source, call.remote->address, call.remote->video->port)))
     return;
+  if (mcvideo_duplicate(datagram.bytes, multicast)) return;
   // TS 24.281 clause 4.7.1: SRTP under the GMK, keyed per sender: the user the server names as transmitting.
   // A private call's PCK needs no sender; a group call's GMK is keyed by the sender.
   const auto sender = call.type == "private" ? call.peer : call.transmitter;
