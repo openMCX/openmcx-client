@@ -13,7 +13,9 @@
 // Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.281 V19.6.0 (Rel-19), TS 24.380 V19.2.0 (Rel-19),
 // TS 24.581 V19.2.0 (Rel-19), RFC 1112, RFC 4566.
 
+#include "mcx/key_client.hpp"
 #include "mcx/mbms.hpp"
+#include "mcx/warning.hpp"
 
 #include "client.hpp"
 
@@ -31,11 +33,18 @@ const ServiceProfile &profile_of(MbmsService service) {
 }
 
 //------------------------------------------------------------------------------
-// RFC 4566 sections 5.7 and 5.14: the port of the n-th media line (counted from 1) and its connection address
-// (media-level, else session-level; an IPv4 multicast address may carry "/<ttl>"). Throws when there is no such line.
-std::pair<std::string, std::uint16_t> media_line_address(const std::string &sdp, unsigned number) {
+// RFC 4566 sections 5.7 and 5.14 and RFC 4567 section 3.1: the port of the n-th media line (counted from 1), its
+// connection address (media-level, else session-level; an IPv4 multicast address may carry "/<ttl>") and its
+// "a=key-mgmt:mikey" data, if any. Throws when there is no such line.
+struct MediaLine {
+  std::string address;
+  std::uint16_t port = 0;
+  std::string key_mgmt;
+};
+MediaLine media_line(const std::string &sdp, unsigned number) {
   std::istringstream lines(sdp);
-  std::string line, session_address, address;
+  std::string line, session_address;
+  MediaLine out;
   unsigned current = 0;
   long port = -1;
   while (std::getline(lines, line) && current <= number) {
@@ -48,11 +57,25 @@ std::pair<std::string, std::uint16_t> media_line_address(const std::string &sdp,
     } else if (line.starts_with("c=IN IP4 ") && (current == 0 || current == number)) {
       auto value = line.substr(9);
       if (const auto slash = value.find('/'); slash != std::string::npos) value.resize(slash);
-      (current == 0 ? session_address : address) = value;
+      (current == 0 ? session_address : out.address) = value;
+    } else if (line.starts_with("a=key-mgmt:mikey ") && current == number) {
+      out.key_mgmt = line.substr(17);
     }
   }
   if (current < number || port <= 0 || port > 65535) throw std::runtime_error("no such media line in the SDP");
-  return {address.empty() ? session_address : address, static_cast<std::uint16_t>(port)};
+  if (out.address.empty()) out.address = session_address;
+  out.port = static_cast<std::uint16_t>(port);
+  return out;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clauses 14.3.2 step 1 f and 14.3.4: the answer to an announcement or MuSiK download whose MIKEY-SAKKE
+// I_MESSAGE fails: 488 with warning 136.
+SipResponse mikey_refusal(const ServiceProfile &profile) {
+  SipResponse response;
+  response.status_code = 488;
+  response.headers = {{"Warning", "399 mcx \"" + warning_text(profile, Warning::mikey_authentication_failed) + "\""}};
+  return response;
 }
 
 } // namespace
@@ -106,13 +129,36 @@ SipResponse Client::mbms_message(const SipMessage &message, MbmsService service,
     response.status_code = 400;
     return response;
   }
-  if (!mbms_enabled_ || usage.announcements.empty()) return response;
+  if (!mbms_enabled_) return response;
+  auto psi = asserted_identity(message);
+  if (psi.empty()) psi = message.from_uri;
+  auto *keys = service == MbmsService::Mcvideo ? mcvideo_keys_.get() : keys_.get();
+  // TS 24.379 clause 14.3.4 (TS 24.281 clause 16.2.4): a MuSiK download: the I_MESSAGE of the application/mikey body
+  // from the participating function's PSI (step 1 a), opened with this user's key (TS 33.180 clause 5.8); the MuSiK
+  // protects the floor control over the MBMS subchannels. Groups listed or not, the client holds one MuSiK.
+  if (usage.musik_download) {
+    const std::string *mikey = nullptr;
+    for (const auto &part : message.parts)
+      if (part.content_type == "application/mikey") mikey = &part.body;
+    try {
+      if (!mikey || !keys) throw std::runtime_error("no MuSiK I_MESSAGE or no key management");
+      if (KeyClient::initiator(*mikey) != psi) throw std::runtime_error("MuSiK from another initiator");
+      const auto key = keys->accept_signalling_key(psi, *mikey, 6);
+      auto &musik = service == MbmsService::Mcvideo ? mcvideo_mbms_musik_ : mbms_musik_;
+      musik = std::make_unique<ProtectedCall>(service == MbmsService::Mcvideo);
+      musik->set_floor(key);
+      status_[service == MbmsService::Mcvideo ? "mcvideo_mbms_musik_id" : "mbms_musik_id"] = key.csb_id;
+      event("mbms_musik_received", {{"service", profile.name}, {"musik_id", key.csb_id}});
+    } catch (const std::exception &error) {
+      event("mbms_musik_refused", {{"service", profile.name}, {"reason", error.what()}});
+      return mikey_refusal(profile);
+    }
+  }
+  if (usage.announcements.empty()) return response;
   std::string sdp_body;
   if (message.content_type == "application/sdp") sdp_body = message.body;
   for (const auto &part : message.parts)
     if (part.content_type == "application/sdp") sdp_body = part.body;
-  auto psi = asserted_identity(message);
-  if (psi.empty()) psi = message.from_uri;
   for (const auto &announcement : usage.announcements) {
     if (announcement.cancellation()) {
       if (const auto found = mbms_bearers_.find(announcement.tmgi); found != mbms_bearers_.end()) {
@@ -128,16 +174,32 @@ SipResponse Client::mbms_message(const SipMessage &message, MbmsService service,
     bearer.announcement = announcement;
     bearer.psi = psi;
     bearer.sdp = sdp_body;
+    MediaLine line;
     try {
       if (!announcement.gpms) throw std::runtime_error("announcement without GPMS");
-      std::tie(bearer.general_purpose_address, bearer.general_purpose_port) =
-          media_line_address(sdp_body, *announcement.gpms);
+      line = media_line(sdp_body, *announcement.gpms);
+      bearer.general_purpose_address = line.address;
+      bearer.general_purpose_port = line.port;
       if (!is_ipv4_multicast(bearer.general_purpose_address))
         throw std::runtime_error("general purpose subchannel is not an IPv4 host group");
     } catch (const std::exception &error) {
       event("mbms_announcement_refused", {{"tmgi", announcement.tmgi}, {"reason", error.what()}});
       response.status_code = 488;
       return response;
+    }
+    // Step 1 f: the MSCCK of the general purpose subchannel, from the participating function's PSI (i, iv: else 488
+    // with warning 136), decrypted with this user's key (v) with its MSCCK-ID (vi).
+    if (!line.key_mgmt.empty()) {
+      try {
+        if (!keys) throw std::runtime_error("no key management");
+        if (KeyClient::initiator(line.key_mgmt) != psi) throw std::runtime_error("MSCCK from another initiator");
+        const auto key = keys->accept_signalling_key(psi, line.key_mgmt, 5);
+        bearer.mscck = std::make_unique<ProtectedCall>(service == MbmsService::Mcvideo);
+        bearer.mscck->set_floor(key);
+      } catch (const std::exception &error) {
+        event("mbms_announcement_refused", {{"tmgi", announcement.tmgi}, {"reason", error.what()}});
+        return mikey_refusal(profile);
+      }
     }
     // A replaced announcement keeps the reception of its general purpose subchannel when it is unchanged.
     if (const auto old = mbms_bearers_.find(announcement.tmgi); old != mbms_bearers_.end()) {
@@ -257,8 +319,7 @@ void Client::mbms_poll() {
       if (!datagram) break;
       status_["mbms_general_purpose_received"] = status_.value("mbms_general_purpose_received", 0ULL) + 1;
       try {
-        if (!is_subchannel_message(datagram->bytes)) throw std::runtime_error("not a subchannel control message");
-        const auto message = decode_subchannel(datagram->bytes);
+        const auto message = decode_subchannel(mbms_open_control(datagram->bytes, bearer));
         if (message.service != bearer.service) throw std::runtime_error("subchannel control of another service");
         mbms_subchannel_message(tmgi, message);
       } catch (const std::exception &error) {
@@ -267,6 +328,26 @@ void Client::mbms_poll() {
       }
     }
   }
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 annex G: the purpose tag of the MKI that ends an SRTCP packet (RFC 3711 section 3.4, the 32-bit KFC-ID;
+// TS 33.180 clause 9.4.6), or 0 for a packet too short to carry one.
+std::uint8_t Client::mbms_mki_purpose(std::span<const std::uint8_t> bytes) {
+  return bytes.size() < 12 ? 0 : static_cast<std::uint8_t>(bytes[bytes.size() - 4] >> 4);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 13.3.3: a subchannel control message of a bearer: with the bearer's MSCCK it must be SRTCP under it
+// (MKI purpose tag 5), except the Bearer Announcement message, which has no SSRC (M17); without one it must be clear.
+std::vector<std::uint8_t> Client::mbms_open_control(std::span<const std::uint8_t> bytes, const MbmsBearer &bearer) {
+  if (is_subchannel_message(bytes)) {
+    if (bearer.mscck && (bytes[0] & 0x1f) != static_cast<std::uint8_t>(SubchannelMessageType::Announcement))
+      throw std::runtime_error("clear subchannel control message under an MSCCK");
+    return {bytes.begin(), bytes.end()};
+  }
+  if (!bearer.mscck || mbms_mki_purpose(bytes) != 5) throw std::runtime_error("not a subchannel control message");
+  return bearer.mscck->unprotect_floor(bytes);
 }
 
 //------------------------------------------------------------------------------
@@ -335,6 +416,7 @@ void Client::publish_mbms() {
         {"service", profile_of(bearer.service).name},
         {"general_purpose", bearer.general_purpose_address + ":" + std::to_string(bearer.general_purpose_port)},
         {"joined", bearer.socket != nullptr},
+        {"mscck", bearer.mscck != nullptr},
         {"reported_listening", bearer.reported_listening},
         {"accepted", bearer.accepted}};
   status_["mbms_areas"] = std::vector<std::string>(mbms_areas_.begin(), mbms_areas_.end());

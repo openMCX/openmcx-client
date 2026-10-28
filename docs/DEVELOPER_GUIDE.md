@@ -502,8 +502,15 @@ stateDiagram-v2
   `<general-purpose>` true (clause 14.3.3.1); when it stops (cancellation, bad radio, leaving the areas) it reports
   "not-listening" with `<general-purpose>` false. A Bearer Announcement message received on the general purpose
   subchannel (TS 24.380 clause 10.3.6) is acknowledged with a report; monitoring state inactive stops the bearer.
+  An "a=key-mgmt:mikey" in the general purpose media line carries the bearer's MSCCK: its initiator must be the
+  announcing PSI and it must open with the user's key (MCVideo: the MCVideo identity's), else the announcement is
+  answered 488 with warning 136; the bearer's subchannel control messages must then be SRTCP under it (MKI purpose
+  tag 5; the Bearer Announcement message stays clear). A MuSiK download (`<mbms-defaultMuSiK-download>` or
+  `<mbms-explicitMuSiK-download>` with an application/mikey body) is opened the same way and keys the SRTCP of the
+  floor (transmission) control over the subchannels (MKI purpose tag 6) when floor control is protected.
   Commands: `mbms area <id>[,<id>...]|none`, `mbms quality good|bad [<TMGI>]`. Status: `mbms_areas`,
-  `mbms_bearers` (by TMGI: `service`, `general_purpose`, `joined`, `reported_listening`, `accepted`),
+  `mbms_bearers` (by TMGI: `service`, `general_purpose`, `joined`, `mscck`, `reported_listening`, `accepted`),
+  `mbms_musik_id`, `mcvideo_mbms_musik_id`,
   `mbms_general_purpose_received`, `mbms_general_purpose_rejected`, `mbms_bearer_announcements`.
 
 ### 3.3 Spec-literal state names and how to add a transition

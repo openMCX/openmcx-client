@@ -1936,6 +1936,9 @@ private:
     std::uint16_t general_purpose_port = 0;
     std::unique_ptr<UdpSocket> socket;
     bool reported_listening = false, accepted = false;
+    // TS 24.379 clause 14.3.2 step 1 f: the MSCCK of the general purpose subchannel's "a=key-mgmt", whose SRTCP
+    // protects the bearer's subchannel control messages (TS 24.380 clause 13.3.3); none when they are clear.
+    std::unique_ptr<ProtectedCall> mscck;
   };
   bool mbms_enabled_ = false;
   std::string mbms_interface_ = "0.0.0.0";
@@ -1945,6 +1948,11 @@ private:
   std::map<std::string, MbmsBearer> mbms_bearers_;
   // Bearers whose announcement was cancelled after "listening" was reported: service and PSI to report to.
   std::map<std::string, std::pair<MbmsService, std::string>> mbms_cancelled_;
+  // TS 24.379 clause 14.3.4 (TS 24.281 clause 16.2.4): the MuSiK of each service's key download, whose SRTCP protects
+  // the floor (transmission) control over the subchannels (TS 33.180 clause 9.2.2).
+  std::unique_ptr<ProtectedCall> mbms_musik_, mcvideo_mbms_musik_;
+  [[nodiscard]] std::vector<std::uint8_t> mbms_open_control(std::span<const std::uint8_t> bytes, const MbmsBearer &bearer);
+  [[nodiscard]] static std::uint8_t mbms_mki_purpose(std::span<const std::uint8_t> bytes);
   void mbms_configure();
   [[nodiscard]] const std::string *mbms_usage_body(const SipMessage &message, MbmsService service) const;
   SipResponse mbms_message(const SipMessage &message, MbmsService service, const std::string &body);

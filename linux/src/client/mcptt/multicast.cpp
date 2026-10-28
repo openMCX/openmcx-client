@@ -161,13 +161,17 @@ void Client::multicast_poll() {
     if (!datagram) break;
     try {
       // RFC 5761 section 4: media control shares the subchannel's port; RTCP packet types are 200 to 204.
-      if (is_subchannel_message(datagram->bytes)) {
-        const auto message = decode_subchannel(datagram->bytes);
-        if (message.type == SubchannelMessageType::UnmapGroup) mbms_unmapped(message);
-        continue;
-      }
       if (datagram->bytes.size() >= 2 && datagram->bytes[1] >= 200 && datagram->bytes[1] <= 204) {
-        mbms_floor_packet(*datagram);
+        // TS 24.380 clause 13.3.3: an Unmap Group To Bearer (clear, or SRTCP under the bearer's MSCCK) or a floor
+        // control message (clear, or SRTCP under the MuSiK).
+        const auto bearer = mbms_bearers_.find(multicast_tmgi_);
+        const bool control = is_subchannel_message(datagram->bytes) || mbms_mki_purpose(datagram->bytes) == 5;
+        if (control && bearer != mbms_bearers_.end()) {
+          const auto message = decode_subchannel(mbms_open_control(datagram->bytes, bearer->second));
+          if (message.type == SubchannelMessageType::UnmapGroup) mbms_unmapped(message);
+        } else if (!control) {
+          mbms_floor_packet(*datagram);
+        }
         continue;
       }
       audio_packet(*datagram, true);
@@ -182,13 +186,15 @@ void Client::multicast_poll() {
 // TS 24.380 clause 10.3.3 step 1 a: Floor Taken and Floor Idle over the joined subchannel (clauses 10.2.3.2 and
 // 10.2.3.3) go to the floor participant as those received by unicast do, from the server's media address with the
 // participating function's SSRC of the Map Group To Bearer; the talker's own Floor Taken is not its own state. Any
-// other floor control message there is ignored. The subchannel's messages are clear: under protected floor control
-// the server keeps them unicast.
+// other floor control message there is ignored.
 void Client::mbms_floor_packet(const Datagram &datagram) {
   if (!remote_ || !from_server_address(datagram.source, remote_->address)) return;
   const auto mapping = mbms_mappings_.find(multicast_group_);
-  if (mapping == mbms_mappings_.end() || protected_floor()) return;
-  auto packet = decode_floor(datagram.bytes);
+  if (mapping == mbms_mappings_.end()) return;
+  // TS 24.380 clause 13.3.3: under protected floor control the messages are SRTCP under the MuSiK (its MKI purpose tag
+  // 6); a clear one is then refused, as is a protected one without the MuSiK.
+  if (protected_floor() && (!mbms_musik_ || mbms_mki_purpose(datagram.bytes) != 6)) return;
+  auto packet = decode_floor(protected_floor() ? mbms_musik_->unprotect_floor(datagram.bytes) : datagram.bytes);
   if (packet.ssrc != mapping->second.ssrc || (packet.type != FloorType::Taken && packet.type != FloorType::Idle)) return;
   if (packet.type == FloorType::Taken)
     for (const auto &field : packet.fields)
