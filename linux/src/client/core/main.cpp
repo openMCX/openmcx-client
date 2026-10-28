@@ -27,7 +27,7 @@ int main(int argc, char **argv) {
     // client then exchanges (oauth.authorization).
     if (args.authorization_request) {
       mcx::HttpClient http(cfg.at("tls").at("ca_file").get<std::string>(), {}, mcx::address_map(cfg),
-                           mcx::HttpTrust::configured_and_system);
+                           mcx::HttpTrust::configured_and_system, mcx::crl_file(cfg));
       std::cout << mcx::oidc_authorization_request(http, mcx::oauth_settings(cfg)).dump() << '\n';
       return 0;
     }

@@ -928,10 +928,10 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
 // Helper: the MCData part of status.json: protection counters, MCData states (TS 24.282 annex G.4) and the results
 // of the last procedures.
 void Client::mcdata_status() {
-  status_["xml_protection"] = {
-      {"enabled", xml_protection()}, {"encrypted", xml_encrypted_},         {"decrypted", xml_decrypted_},
-      {"refused", xml_refused_},     {"integrity", integrity_protection()}, {"signed", xml_signed_},
-      {"verified", xml_verified_}};
+  status_["xml_protection"] = {{"enabled", xml_protection()},         {"encrypted", xml_encrypted_},
+                               {"decrypted", xml_decrypted_},         {"refused", xml_refused_},
+                               {"integrity", integrity_protection()}, {"signed", xml_signed_},
+                               {"verified", xml_verified_},           {"csk_held", csk_.has_value()}};
   status_["mcdata_xml_protection"] = {{"enabled", mcdata_xml_key().has_value()},
                                       {"encrypted", mcdata_xml_encrypted_},
                                       {"decrypted", mcdata_xml_decrypted_}};

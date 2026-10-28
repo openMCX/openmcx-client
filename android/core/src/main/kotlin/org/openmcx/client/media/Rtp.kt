@@ -4,6 +4,7 @@
 
 package org.openmcx.client.media
 
+import java.nio.Buffer
 import java.nio.ByteBuffer
 
 /** An RTP packet (RFC 3550 §5.1), without header extensions on send. */
@@ -51,7 +52,8 @@ data class RtpPacket(
                 buffer.short
                 val words = buffer.short.toInt() and 0xffff
                 if (buffer.remaining() < 4 * words) return null
-                buffer.position(buffer.position() + 4 * words)
+                // Through Buffer: the covariant ByteBuffer.position(int) of JDK 9 is not in the Android SDK.
+                (buffer as Buffer).position(buffer.position() + 4 * words)
             }
             var end = length
             if (b0 and 0x20 != 0) end -= data[length - 1].toInt() and 0xff // padding

@@ -19,7 +19,8 @@ Linux client (linux/), built with the openmcx-server sources and their libraries
   hostap MILENAGE (hostap_2_11 src/crypto/milenage.c, the IMS AKA ISIM)
                            BSD-3-Clause             https://w1.fi/hostap/
                            Copyright (c) 2006-2007 Jouni Malinen; licence text in images as hostap-README
-  libsrtp2                 BSD-3-Clause             https://github.com/cisco/libsrtp
+  libsrtp 2.8.1            BSD-3-Clause             https://github.com/cisco/libsrtp
+                           with OpenMCX's patch in openmcx-server dependencies/libsrtp (the first SRTCP index is zero)
   OpenH264                 BSD-2-Clause             https://github.com/cisco/openh264
   opencore-amr, vo-amrwbenc  Apache-2.0             https://sourceforge.net/projects/opencore-amr/
   nlohmann/json, libxml2   MIT                      https://github.com/nlohmann/json, https://gitlab.gnome.org/GNOME/libxml2

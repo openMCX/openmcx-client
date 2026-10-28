@@ -29,6 +29,8 @@ void Client::regroup_notified(const Regroup &regroup) {
     regroups_.erase(regroup.regroup_uri);
   }
   status_["regroups"] = regroups_;
+  // TS 33.180 clauses 7.3.11 and 7.3.12: the GMK of the regroup's preconfigured group is obtained for its calls.
+  update_key_subscriptions();
   event("regroup_notification", {{"regroup", regroup.regroup_uri},
                                  {"action", regroup.action},
                                  {"groups", regroup.groups},

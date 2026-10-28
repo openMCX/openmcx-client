@@ -116,6 +116,7 @@ class SipTimeout(message: String) : Exception(message)
 class UserAgent(
     private val scope: CoroutineScope,
     val identity: UaIdentity,
+    /** RFC 3261 §17.1.1.2 Timer B and §17.1.2.2 Timer F: 64*T1, T1 500 ms (§17.1.1.1, appendix A). */
     private val transactionTimeoutMs: Long = 32_000,
 ) {
     private val random = SecureRandom()
@@ -129,6 +130,8 @@ class UserAgent(
     var onRequest: suspend (ServerTransaction) -> Unit = { it.respond(501, "Not Implemented") }
     /** Receives ACKs for our 2xx answers, keyed by dialog. */
     var onAck: suspend (SipRequest) -> Unit = {}
+    /** Checked before every request goes out (each transaction and ACK); throws when the request may not be sent. */
+    var outboundGate: (SipRequest) -> Unit = {}
 
     private class ClientTx(val request: SipRequest, val provisional: suspend (SipResponse) -> Unit) {
         val final = CompletableDeferred<SipResponse>()
@@ -214,6 +217,7 @@ class UserAgent(
     }
 
     private suspend fun transact(request: SipRequest, provisional: suspend (SipResponse) -> Unit): SipResponse {
+        outboundGate(request)
         val flow = flow ?: throw IllegalStateException("no flow")
         val branch = newBranch()
         val c = flow.connection

@@ -99,7 +99,7 @@ std::string Client::mcdata_upload(const std::string &path, const std::string &gr
       "\"\r\nContent-Length: " + std::to_string(size) + "\r\n\r\n" + contents + "\r\n--" + boundary + "--\r\n";
   const auto response =
       http_.request("POST", mcdata_content_server() + "/mcdata/files", body,
-                    {{"Content-Type", "multipart/mixed; boundary=" + boundary}, {"Authorization", "Bearer " + token_}});
+                    {{"Content-Type", "multipart/mixed; boundary=" + boundary}, {"Authorization", bearer()}});
   if (response.status != 201) {
     // The media storage function refused the file (TS 24.282 clause 10.2.2.2 step 1): 403 by
     // transmission control, 413 above <max-data-size-fd-bytes>.
@@ -123,7 +123,7 @@ bool Client::mcdata_download(Json &file) {
   // annex A is not supplied).
   const auto own = cfg_.at("endpoints").value("content", std::string{});
   const auto source = own.empty() || url.starts_with(own) ? url : own + "/mcdata/remote-files?url=" + url_encode(url);
-  const auto response = http_.request("GET", source, {}, {{"Authorization", "Bearer " + token_}});
+  const auto response = http_.request("GET", source, {}, {{"Authorization", bearer()}});
   file["download_status"] = response.status;
   if (response.status != 200) {
     event("mcdata_file_download_failed", {{"file_url", url}, {"status", response.status}});

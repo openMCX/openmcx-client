@@ -87,3 +87,18 @@ target_include_directories(test_handoff PRIVATE src/client/core)
 target_compile_options(test_handoff PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(test_handoff PRIVATE Threads::Threads)
 add_test(NAME handoff COMMAND test_handoff)
+
+# The client's floor control SRTCP under openmcx-server's ProtectedCall: re-key in a call, the server's SSRC.
+add_executable(test_floor_ssrc tests/test_floor_ssrc.cpp)
+target_include_directories(test_floor_ssrc PRIVATE src/client/core)
+target_compile_options(test_floor_ssrc PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_floor_ssrc PRIVATE mcx_core)
+add_test(NAME floor_ssrc COMMAND test_floor_ssrc)
+set_tests_properties(floor_ssrc PROPERTIES SKIP_RETURN_CODE 77)
+
+# The gate of required XML protection (src/client/core/xml_gate.hpp): no message under it without the service's CSK.
+add_executable(test_xml_gate tests/test_xml_gate.cpp)
+target_include_directories(test_xml_gate PRIVATE src/client/core)
+target_compile_options(test_xml_gate PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_xml_gate PRIVATE mcx_core)
+add_test(NAME xml_gate COMMAND test_xml_gate)

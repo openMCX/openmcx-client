@@ -113,3 +113,28 @@ Open: at the end of a burst a listener phone sometimes misses the last 1-6 frame
 bursts), although the talker sends its Floor Release 40 ms after its last frame. Whether the server stops relaying
 early or the frames are lost on the Wi-Fi needs a capture on the server; it is part of the floor loss item of the load
 plan.
+
+## Android 11 and 12 (2026-10-27)
+
+A user report: activation failed on Android 12 with "No virtual method readNBytes(I)[B in class Ljava/io/InputStream;".
+`InputStream.readNBytes(int)` is API level 33 (Android 13), while the app's minSdk is 30 (Android 11). The core module
+is a plain JVM module, which Android lint does not check against minSdk, so nothing had caught it.
+
+Fixed:
+
+- `SocketHttpClient` reads bodies with `readUpTo`, a loop on `read(byte[], int, int)` with the same result.
+- The RTP parser skipped a header extension through the JDK 9 covariant `ByteBuffer.position(int)`, which the Android
+  SDK has at no level. It now calls it through `Buffer`.
+- `AndroidApiLevelTest` (core) checks every `java.*` method the core's classes call against the SDK's
+  `api-versions.xml` at the app's minSdk, supertypes included. On the old code it fails with
+  `InputStream.readNBytes(I)[B (API 33)`.
+
+| Device | Result |
+|---|---|
+| JVM unit tests | 227 passed (with the API check and tests for `readUpTo` and the RTP header extension); app unit tests 10 passed |
+| Android 11 (API 30): emulator, google_apis x86_64 in Docker with KVM, phone mode | Activation from an MCX Admin code, sign-in, registration, MCPTT and MCData authorisation and affiliation, SDS both ways, MC log-off and SIP de-REGISTER (200). No `NoSuchMethodError` in the log. MCPTT calls not checked: the emulator is behind QEMU's NAT (see [PHONE.md](PHONE.md)) |
+| Android 12 (API 31): redroid 12.0.0 | Activation from MCX Admin codes, private call with speech (209 frames, all unchanged), SDS, MC log-off and SIP de-REGISTER (200) |
+| Android 13 (Xiaomi 2109119DI) and Android 16 (moto g67), on Wi-Fi | Activation from MCX Admin codes, a group call and private calls both ways with speech, SDS both ways, MC log-off |
+
+Not checked: Android 12L (API 32), which has no redroid image. The redroid 11 image does not boot on a host whose
+`binder_linux` creates no `/dev/binder` nodes; the emulator was used instead.

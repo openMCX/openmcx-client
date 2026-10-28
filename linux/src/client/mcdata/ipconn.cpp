@@ -197,7 +197,7 @@ void Client::ipcon_ping(const std::string &destination, unsigned count, std::siz
   if (!ipcon_socket_ || !ipcon_peer_.port) throw std::runtime_error("no IP connectivity session is open");
   if (!count || count > 100 || size > 1400)
     throw std::runtime_error("ipcon-ping sends 1 to 100 echoes of at most 1400 bytes");
-  const auto identifier = static_cast<std::uint16_t>(random_ssrc());
+  const auto identifier = static_cast<std::uint16_t>(mcx::random_ssrc()); // a random ICMP identifier, no SSRC
   for (unsigned sequence = 1; sequence <= count; ++sequence) {
     std::vector<std::uint8_t> data(size);
     for (std::size_t index = 0; index < size; ++index)

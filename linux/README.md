@@ -66,6 +66,12 @@ configured:
   from an IDR picture on, goes in one UDP datagram to that port: a byte 1 for an IDR picture (else 0), the RTP
   timestamp (4 bytes, big-endian), then the picture's NAL units in H.264 annex B.
 
+### Subscription durations
+
+The xcap-diff subscriptions (RFC 5875) ask for durations the specifications leave to the subscriber (RFC 5875
+section 4.5, RFC 6665 section 3.1.1): `subscriptions.group_documents_expires_s` (600 s by default),
+`subscriptions.configuration_documents_expires_s` and `subscriptions.group_keys_expires_s` (3600 s each).
+
 ### IMS AKA (3GPP access)
 
 On 3GPP access (TS 33.180 clause 6.2.1) the client authenticates to the SIP core with IMS AKA instead of digest over
@@ -112,13 +118,13 @@ build the image:
 tools/build-image -t openmcx-client:0.1                    # --server <path> if it is elsewhere
 ```
 
-The image is based on `openmcx-dev:0.3` from openmcx-server (`tools/mcx build`) and holds `/usr/local/bin/mcx-client`
+The image is based on `openmcx-dev:0.4` from openmcx-server (`tools/mcx build`) and holds `/usr/local/bin/mcx-client`
 and the lab health check. It builds against the server repository's protocol libraries (`mcx_sip`, `mcx_core`,
 `mcx_keying` and `include/mcx`), so build it from the same openmcx-server commit as the server image under test. The
 build runs the binary test. A local build and the unit tests inside the dev image, from this directory (the mount holds both repositories):
 
 ```bash
-docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/../..:/work" -w /work/openmcx-client/linux openmcx-dev:0.3 \
+docker run --rm --user "$(id -u):$(id -g)" -v "$PWD/../..:/work" -w /work/openmcx-client/linux openmcx-dev:0.4 \
   bash -lc 'cmake -S . -B build && cmake --build build -j4 && build/test_client_rules && tests/test_binary.py'
 ```
 

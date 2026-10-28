@@ -71,7 +71,7 @@ Client::TokenGrant Client::grant_tokens(const HttpClient &idms, TokenGrant grant
         return grant;
       } catch (const oidc_refresh_refused &) {
         // client_rules::refresh_refusal_final: a first refusal while the access token is valid keeps the refresh
-        // token; renew_token() tries again 30 s later.
+        // token; renew_token() tries again after oauth.token_renewal_retry_ms (30 s by default).
         ++grant.refusals;
         if (!client_rules::refresh_refusal_final(grant.refusals, has_password, std::time(nullptr), grant.expires))
           throw;
@@ -160,7 +160,8 @@ void Client::take_tokens(const Json &tokens) {
         (mcdata_enabled() && differs("mcdata_id", mcdata_user())) ||
         (mcvideo_enabled() && differs("mcvideo_id", mcvideo_user())))
       throw std::runtime_error("OIDC identity does not match configured MCPTT/SIP client");
-  } else if (token_.empty()) {
+    identity_checked_ = true;
+  } else if (!identity_checked_) {
     throw std::runtime_error("IdMS gave no ID token at sign-in");
   }
   token_ = tokens.at("access_token");
@@ -171,15 +172,31 @@ void Client::take_tokens(const Json &tokens) {
     expires_ = tokens.at("claims").at("exp");
   else
     throw std::runtime_error("IdMS gave no expires_in");
+  std::lock_guard lock(store_mutex_);
+  store_channel_.token = token_;
+  store_channel_.token_expires = expires_;
 }
 
 //------------------------------------------------------------------------------
-// Helper: renew the access token (TS 33.180 annex B.5) before it expires: 10 minutes ahead, or halfway for a
-// token that lives less than 20 minutes.
+// TS 33.180 annex B.12: "If the current time is beyond the time specified by the "expires_in" parameter, the
+// associated token shall no longer be considered valid and no client requests shall be made using the expired
+// token."
+const std::string &Client::access_token() const {
+  if (token_.empty() || std::time(nullptr) > expires_) throw std::runtime_error("no valid access token");
+  return token_;
+}
+
+//------------------------------------------------------------------------------
+// Helper: renew the access token (TS 33.180 annex B.5.1, which leaves the time to the client) before it expires:
+// oauth.token_renewal_lead_s ahead (10 minutes), or halfway for a token that lives less than
+// oauth.token_renewal_halfway_below_s (20 minutes); defaults pending maintainer choice (no spec value).
 void Client::schedule_token_renewal() {
+  const auto &oauth = cfg_.at("oauth");
   const auto left = std::max<std::int64_t>(expires_ - std::time(nullptr), 0);
-  const auto lead = left < 1200 ? left / 2 : left - 600;
-  schedule_after(static_cast<std::uint64_t>(lead) * 1000, [this] { renew_token(); });
+  const auto delay = client_rules::token_renewal_delay_s(
+      left, oauth.value("token_renewal_lead_s", client_rules::default_token_renewal_lead_s),
+      oauth.value("token_renewal_halfway_below_s", client_rules::default_token_renewal_halfway_below_s));
+  schedule_after(static_cast<std::uint64_t>(delay) * 1000, [this] { renew_token(); });
 }
 
 //------------------------------------------------------------------------------
@@ -187,12 +204,16 @@ void Client::schedule_token_renewal() {
 // access token, and the server holds it only until the token expires. A token
 // renewed from the IdMS (on the worker thread, request_tokens) goes to the servers in a new PUBLISH with
 // SIP-If-Match, which keeps the authorisation, the affiliations and any call. If renewal fails, the expiry in tick()
-// still ends the authorisation.
+// still ends the authorisation. A failed renewal is tried again after oauth.token_renewal_retry_ms (30 s: default
+// pending maintainer choice (no spec value)) while the token lasts longer than that.
 void Client::renew_token() {
   request_tokens([this](std::exception_ptr error) {
     if (error) {
       failure("token renewal: " + error_text(error));
-      if (std::time(nullptr) + 30 < expires_) schedule_after(30000, [this] { renew_token(); });
+      const auto retry =
+          cfg_.at("oauth").value("token_renewal_retry_ms", client_rules::default_token_renewal_retry_ms);
+      if (std::time(nullptr) + static_cast<std::int64_t>(retry / 1000) < expires_)
+        schedule_after(retry, [this] { renew_token(); });
       return;
     }
     token_renewals_++;

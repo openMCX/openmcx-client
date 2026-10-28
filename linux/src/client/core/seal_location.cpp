@@ -48,7 +48,7 @@ void Client::seal_start() {
   const auto url =
       endpoints.at("lms").get<std::string>() + "/seal-lm/v1/users/" + url_encode(user()) + "/configuration";
   const auto response =
-      http_.request("GET", url, {}, {{"Authorization", "Bearer " + token_}, {"Accept", seal::location_mime}});
+      http_.request("GET", url, {}, {{"Authorization", bearer()}, {"Accept", seal::location_mime}});
   seal_.last_status = response.status;
   if (response.status != 200)
     throw std::runtime_error("SEAL location configuration: " + std::to_string(response.status));
@@ -78,7 +78,7 @@ void Client::seal_tick(std::uint64_t now) {
   }
   try {
     const auto response = http_.request("POST", seal_.config.report_uri, seal::report_xml(user(), "periodic", *fix),
-                                        {{"Authorization", "Bearer " + token_}, {"Content-Type", seal::location_mime}});
+                                        {{"Authorization", bearer()}, {"Content-Type", seal::location_mime}});
     seal_.last_status = response.status;
     if (response.status == 200)
       ++seal_.sent;
@@ -98,7 +98,7 @@ void Client::seal_online() {
   seal_.offline = false;
   if (!seal_.stored.empty() && !seal_.config.history_uri.empty()) {
     const auto response = http_.request("POST", seal_.config.history_uri, seal::history_xml("history", seal_.stored),
-                                        {{"Authorization", "Bearer " + token_}, {"Content-Type", seal::location_mime}});
+                                        {{"Authorization", bearer()}, {"Content-Type", seal::location_mime}});
     seal_.last_status = response.status;
     if (response.status != 200)
       throw std::runtime_error("SEAL history location result report: " + std::to_string(response.status));

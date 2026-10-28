@@ -3,9 +3,9 @@
 //
 
 // MCData payload, signalling and XML protection, MCData client side: PCK, GMK and CSK protected payloads, payload
-// authentication and XML confidentiality (member functions of Client).
+// authentication, XML confidentiality and XML integrity (member functions of Client).
 //
-// Specifications: TS 24.282 V19.7.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).
+// Specifications: TS 24.282 V19.7.0 (Rel-19), TS 33.180 V19.5.0 (Rel-19).
 
 #include "client.hpp"
 
@@ -53,14 +53,25 @@ bool Client::mcdata_protects_signalling() const {
 //------------------------------------------------------------------------------
 // TS 24.282 clause 6.6.1: the CSK protecting signalling with the participating MCData function, once it accepted it.
 const keying::KeyMessage *Client::mcdata_signalling_key() const {
-  return mcdata_csk_accepted_ && mcdata_csk_ ? &*mcdata_csk_ : nullptr;
+  return mcdata_protects_signalling() && mcdata_csk_accepted_ && mcdata_csk_ ? &*mcdata_csk_ : nullptr;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 7.2.2 step 3 (clause 7.2.1 for the REGISTER): the CSK is uploaded "if either confidentiality
+// protection is enabled as specified in clause 6.5.2.3.1 or integrity protection is enabled as specified in clause
+// 6.5.3.3.1"; signalling protection (clause 6.6) uses it as well.
+bool Client::mcdata_needs_csk() const {
+  return mcdata_protects_signalling() || mcdata_protects_xml() || mcdata_integrity_protection();
 }
 
 //------------------------------------------------------------------------------
 // TS 24.282 clause 6.5.2 with TS 33.180 clause 9.3: confidentiality of the sensitive XML content of
-// TS 24.282 clause 4.6, under the CSK (XPK) and this client's MCData ID.
+// TS 24.282 clause 4.6, under the CSK (XPK) and this client's MCData ID, as clause 6.5.2.3.1 enables it: the
+// <confidentiality-protection> of the MCData service configuration document "set to "true" or no
+// <confidentiality-protection> element is present". False until that document has been read.
 bool Client::mcdata_protects_xml() const {
-  return mcdata_enabled() && cfg_.at("mcdata").value("confidentiality_protection", false);
+  const auto protection = protection_of("mcdata");
+  return mcdata_enabled() && protection && protection->confidentiality;
 }
 
 //------------------------------------------------------------------------------
@@ -73,6 +84,61 @@ std::optional<xmlsec::Key> Client::mcdata_xml_key(bool uploading) const {
   key.id = mcdata_csk_->csb_id;
   key.user = mcdata_user();
   return key;
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 annex E.6.10 ("the time in UTC at which the associated key shall no longer be used"): the MCData CSK is
+// not used as the XPK past its Expiry time; throws then, so that nothing is encrypted, signed, decrypted or verified
+// under it (an outgoing message is not sent, never in the clear; an incoming one is refused).
+void Client::require_mcdata_csk_in_use() const {
+  if (mcdata_csk_) keying::require_in_use(*mcdata_csk_, static_cast<std::uint64_t>(std::time(nullptr)));
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 6.5.3.3.1: integrity protection of the XML MIME bodies sent to the MCData server, as the
+// <integrity-protection> of the MCData service configuration document enables it ("set to "true" or no
+// <integrity-protection> element is present"). False until that document has been read.
+bool Client::mcdata_integrity_protection() const {
+  const auto protection = protection_of("mcdata");
+  return mcdata_enabled() && protection && protection->integrity;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 6.5.3.2: the XPK of integrity protection is the CSK (XPK-ID the CSK-ID), with this client's MCData
+// ID (TS 33.180 annex F.1.4); while uploading the CSK it is used before the server has accepted it.
+std::optional<xmlsec::Key> Client::mcdata_integrity_key(bool uploading) const {
+  if (!mcdata_csk_ || !(mcdata_csk_accepted_ || uploading)) return std::nullopt;
+  xmlsec::Key key;
+  key.xpk = mcdata_csk_->key;
+  key.id = mcdata_csk_->csb_id;
+  key.user = mcdata_user();
+  return key;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clauses 6.5.3.1 and 6.5.3.3.3 with TS 33.180 clause 9.3.5: when integrity protection is enabled, every
+// XML MIME body of a request or response to the MCData server (already confidentiality protected where configured)
+// is signed under the CSK, the signatures in an application/vnd.3gpp.mcptt-signed+xml body (TS 24.379 annex F.6).
+// Until the server holds the CSK, only the request uploading it is signed (clause 7.2.2 step 7).
+std::vector<BodyPart> Client::mcdata_sign_outgoing(std::vector<BodyPart> parts) {
+  if (!mcdata_integrity_protection() ||
+      std::any_of(parts.begin(), parts.end(), [](const BodyPart &part) { return part.content_type == signed_mime; }))
+    return parts;
+  const bool uploads = std::any_of(parts.begin(), parts.end(),
+                                   [](const BodyPart &part) { return part.content_type == "application/mikey"; });
+  const auto key = mcdata_integrity_key(uploads);
+  if (!key) return parts;
+  std::vector<xmlsec::SignedBody> bodies;
+  for (auto &part : parts)
+    if (signable_part(part.content_type)) {
+      if (part.content_id.empty()) part.content_id = random_id().substr(0, 16) + "@mcx";
+      bodies.push_back({part.content_id, part.body});
+    }
+  if (bodies.empty()) return parts;
+  require_mcdata_csk_in_use();
+  parts.push_back({signed_mime, xmlsec::sign(bodies, *key, "urn:3gpp:ns:mcpttSignedDoc:1.0")});
+  ++xml_signed_;
+  return parts;
 }
 
 //------------------------------------------------------------------------------
@@ -98,11 +164,13 @@ bool Client::mcdata_xml_part(const std::string &type) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.282 clause 6.5.2.3.1: encrypt the protected XML content of the MIME bodies under the XPK.
+// TS 24.282 clause 6.5.2.3.1: encrypt the protected XML content of the MIME bodies under the XPK (the CSK, not past
+// its Expiry time).
 std::vector<BodyPart> Client::mcdata_encrypt_xml(std::vector<BodyPart> parts, const std::optional<xmlsec::Key> &key) {
   if (!key) return parts;
   for (auto &part : parts)
     if (mcdata_xml_part(part.content_type)) {
+      require_mcdata_csk_in_use();
       part.body = xmlsec::encrypt(part.body, *key, mcdata_xml_profile());
       ++mcdata_xml_encrypted_;
     }
@@ -118,6 +186,7 @@ std::vector<BodyPart> Client::mcdata_decrypt_xml(std::vector<BodyPart> parts) {
   for (auto &part : parts) {
     if (!mcdata_xml_part(part.content_type) || !xmlsec::is_protected(part.body)) continue;
     if (!key) throw std::runtime_error("encrypted XML without an XPK");
+    require_mcdata_csk_in_use();
     part.body = xmlsec::decrypt(part.body, *key);
     ++mcdata_xml_decrypted_;
   }
@@ -151,6 +220,8 @@ SipResponse Client::mcdata_opened_response(const SipResponse &raw) {
 std::vector<BodyPart> Client::mcdata_seal_signalling(std::vector<BodyPart> parts) {
   const auto *key = mcdata_signalling_key();
   if (!key) return mcdata_encrypt_xml(std::move(parts), mcdata_xml_key());
+  // TS 33.180 annex E.6.10: nothing is sealed under the CSK past its Expiry time (the message is not sent).
+  keying::require_in_use(*key, static_cast<std::uint64_t>(std::time(nullptr)));
   for (auto &part : parts) {
     if (part.content_type != mcdata::signalling_mime || part.body.empty()) continue;
     part.body = mcdata_protected_payload(part.body, *key);
@@ -179,13 +250,16 @@ Client::mcdata_seal_msrp(std::vector<std::pair<std::string, std::string>> parts)
 std::vector<BodyPart> Client::mcdata_open_signalling(std::vector<BodyPart> parts) {
   const auto *key = mcdata_signalling_key();
   if (!key) throw std::runtime_error("no CSK for MCData signalling");
+  // TS 33.180 annex E.6.10: nothing is opened under the CSK past its Expiry time (the message is refused).
+  keying::require_in_use(*key, static_cast<std::uint64_t>(std::time(nullptr)));
   for (auto &part : parts) {
     if (part.content_type != mcdata::signalling_mime) continue;
     if (part.body.empty() || !(static_cast<std::uint8_t>(part.body[0]) & 0x40))
       throw std::runtime_error("clear signalling while signalling protection is in use");
     const std::span bytes(reinterpret_cast<const std::uint8_t *>(part.body.data()), part.body.size());
     if (keying::payload_key_id(bytes) != key->csb_id) throw std::runtime_error("signalling under another key");
-    const auto opened = keying::open_payload(bytes, key->key, payload_profile());
+    // TS 33.180 annex F.1.5 (last paragraph): CSK signalling, the one use of DP_AES_256_GCM, accepted as well.
+    const auto opened = keying::open_payload(bytes, key->key, payload_profile(), true);
     if (opened.plain.empty() || (opened.message_type & 0x3f) != (opened.plain[0] & 0x3f) || (opened.plain[0] & 0xc0))
       throw std::runtime_error("protected signalling type mismatch");
     part.body.assign(opened.plain.begin(), opened.plain.end());
@@ -198,8 +272,13 @@ std::vector<BodyPart> Client::mcdata_open_signalling(std::vector<BodyPart> parts
 // Helper: the configured wire profile (message type and IEIs) of the key parameters of protected payloads.
 keying::KeyParameterWireProfile Client::payload_profile() const {
   const auto &wire = cfg_.at("security").at("key_parameter_profile");
-  return {wire.at("message_type").get<std::uint8_t>(), wire.at("algorithm").get<std::uint8_t>(),
-          wire.at("key_parameters_iei").get<std::uint8_t>(), wire.at("encrypted_payload_iei").get<std::uint8_t>()};
+  keying::KeyParameterWireProfile profile{
+      wire.at("message_type").get<std::uint8_t>(), wire.at("algorithm").get<std::uint8_t>(),
+      wire.at("key_parameters_iei").get<std::uint8_t>(), wire.at("encrypted_payload_iei").get<std::uint8_t>()};
+  // TS 33.180 table 8.5.4.2-2: the agreed profile's code of DP_AES_256_GCM, if it names one (no default: TS 33.180
+  // assigns no code).
+  if (wire.contains("algorithm_256")) profile.algorithm_256 = wire.at("algorithm_256").get<std::uint8_t>();
+  return profile;
 }
 
 //------------------------------------------------------------------------------
@@ -207,6 +286,15 @@ keying::KeyParameterWireProfile Client::payload_profile() const {
 void Client::expire_data_keys() {
   const auto now = static_cast<std::uint64_t>(std::time(nullptr));
   std::erase_if(mcdata_pcks_, [now](const auto &entry) { return entry.second.expires <= now; });
+}
+
+//------------------------------------------------------------------------------
+// The end of an MCData PCK context (client_rules::data_pck_end): the local lifetime mcdata.pck_lifetime_s (default
+// 3600), or the PCK's own Expiry time when it is earlier (TS 33.180 annex E.6.10).
+std::uint64_t Client::data_pck_end(const keying::KeyMessage &key) const {
+  return client_rules::data_pck_end(static_cast<std::uint64_t>(std::time(nullptr)) +
+                                        cfg_.at("mcdata").value("pck_lifetime_s", 3600u),
+                                    key.properties ? key.properties->expiry_unix_seconds : 0);
 }
 
 //------------------------------------------------------------------------------
@@ -219,31 +307,19 @@ std::pair<keying::KeyMessage, std::string> Client::mcdata_pck_for(const std::str
   if (!mcdata_keys_) throw std::runtime_error("MCData key management client unavailable");
   auto [key, message] = mcdata_keys_->make_pck(peer);
   if (mcdata_pcks_.size() >= 256) throw std::runtime_error("MCData PCK context capacity reached");
-  mcdata_pcks_[key.csb_id] = {
-      key, peer, static_cast<std::uint64_t>(std::time(nullptr)) + cfg_.at("mcdata").value("pck_lifetime_s", 3600u)};
+  mcdata_pcks_[key.csb_id] = {key, peer, data_pck_end(key)};
   return {key, message};
 }
 
 //------------------------------------------------------------------------------
 // TS 33.180 clause 8.4 with TS 24.282 clause 6.6.3.2: the current GMK whose MC group IDs include the group.
-keying::KeyMessage Client::mcdata_gmk_for(const std::string &group) const {
-  const keying::KeyMessage *best = nullptr;
-  const auto now = static_cast<std::uint64_t>(std::time(nullptr));
-  for (const auto &[id, key] : group_keys_) {
-    try {
-      keying::require_active(key, group, now);
-    } catch (const std::exception &) {
-      continue;
-    }
-    if (!best || key.properties->activation_unix_seconds > best->properties->activation_unix_seconds) best = &key;
-  }
-  if (!best) throw std::runtime_error("no active group key for " + group);
-  return *best;
-}
+keying::KeyMessage Client::mcdata_gmk_for(const std::string &group) const { return gmk_for(group); }
 
 //------------------------------------------------------------------------------
 // TS 33.180 clause 8.5.1: the Protected Payload message of an MCData message under a key (a DPPK or the CSK); it
-// inherits the message type with bit 7 set.
+// inherits the message type with bit 7 set. DP_AES_128_GCM: for a PCK or GMK the only algorithm with a key (annex
+// E.1.1, F.1.5); for the CSK the default of table 8.5.4.1-1 NOTE 6, as no key download indicates another (TS 24.282
+// clause 7.2.5 step 1f; the key download has no coding for it, TS 33.180 clause 5.8.1).
 std::string Client::mcdata_protected_payload(const std::string &message, const keying::KeyMessage &key) const {
   keying::ProtectedPayload sealed;
   sealed.message_type = static_cast<std::uint8_t>(message.at(0)) | 0x40;
@@ -273,9 +349,7 @@ void Client::mcdata_accept_pck(const std::string &encoded, const std::string &se
     return;
   auto [key, initiator] = mcdata_keys_->accept_pck(sender, encoded);
   if (mcdata_pcks_.size() >= 256) throw std::runtime_error("MCData PCK context capacity reached");
-  mcdata_pcks_[key.csb_id] = {key, initiator,
-                              static_cast<std::uint64_t>(std::time(nullptr)) +
-                                  cfg_.at("mcdata").value("pck_lifetime_s", 3600u)};
+  mcdata_pcks_[key.csb_id] = {key, initiator, data_pck_end(key)};
   event("mcdata_pck_accepted", {{"from", sender}, {"pck_id", key.csb_id}});
 }
 

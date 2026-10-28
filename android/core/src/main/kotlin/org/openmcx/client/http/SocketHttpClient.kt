@@ -94,7 +94,7 @@ class SocketHttpClient(
         val body = when {
             method == "HEAD" || code in 100..199 || code == 204 || code == 304 -> ByteArray(0)
             header("Transfer-Encoding")?.contains("chunked", true) == true -> chunked(input)
-            header("Content-Length") != null -> input.readNBytes(header("Content-Length")!!.trim().toInt())
+            header("Content-Length") != null -> readUpTo(input, header("Content-Length")!!.trim().toInt())
             else -> input.readBytes()
         }
         return HttpResponse(code, headers, body)
@@ -105,7 +105,7 @@ class SocketHttpClient(
         while (true) {
             val size = (line(input) ?: break).substringBefore(';').trim().toInt(16)
             if (size == 0) { while (!line(input).isNullOrEmpty()) Unit; break }
-            out.write(input.readNBytes(size))
+            out.write(readUpTo(input, size))
             line(input)
         }
         return out.toByteArray()
@@ -121,4 +121,20 @@ class SocketHttpClient(
             out.write(b)
         }
     }
+}
+
+/**
+ * Up to [count] bytes of [input], fewer only at the end of the stream, as InputStream.readNBytes(int) reads them;
+ * that method is API level 33 (Android 13), so the loop on read(byte[], int, int) serves Android 11 and 12 too.
+ */
+internal fun readUpTo(input: InputStream, count: Int): ByteArray {
+    require(count >= 0) { "negative length $count" }
+    val buffer = ByteArray(count)
+    var read = 0
+    while (read < count) {
+        val n = input.read(buffer, read, count - read)
+        if (n < 0) break
+        read += n
+    }
+    return if (read == count) buffer else buffer.copyOf(read)
 }

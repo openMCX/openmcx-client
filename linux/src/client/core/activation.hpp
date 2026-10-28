@@ -28,6 +28,9 @@ inline nlohmann::json oauth_settings(const nlohmann::json &cfg) {
 // The configuration's address map ("address_map", from the activation package): "host:port" as the package names a
 // server -> "address:port" where this client reaches it; empty without one.
 HttpAddressMap address_map(const nlohmann::json &cfg);
+// TS 33.180 clause 6.1.1 (TS 33.310 clause 6.1.1): the configuration's CRL file ("tls.crl_file", PEM) that every
+// HTTPS request checks the server's certificate chain against; empty without one.
+std::string crl_file(const nlohmann::json &cfg);
 // Whether a configuration was written by an activation.
 bool activated(const nlohmann::json &cfg);
 // The configuration completed from the activation URL's bootstrap package, the

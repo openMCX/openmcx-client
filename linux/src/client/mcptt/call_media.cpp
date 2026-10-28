@@ -15,14 +15,22 @@ namespace mcx {
 
 //------------------------------------------------------------------------------
 // TS 24.379 clause 6.2.1: check the server's SDP against this client's offer (floor control, SSRC, media profile,
-// keys, media address); throws when it does not fit.
+// keys, media address); throws when it does not fit. TS 24.380 clauses 14.3.2 and 14.4: an "mc_queueing" or
+// "mc_implicit_request" this client did not offer is no reason to refuse it: an answer's is discarded
+// (negotiated_media), and an offer's is answered without it.
 void Client::check_remote(const MediaDescription &media, bool private_call) {
   if ((media.control == MediaControl::none) != no_floor())
     throw std::runtime_error("floor control negotiation mismatch");
-  if (!no_floor() && media.floor_ssrc == local_.floor_ssrc)
+  // TS 24.380 clause 4.3.3.1: the server's SSRC for this client's floor control messages; refused when it is this
+  // client's own or, under the CSK, one already used for another stream, also of the held call that has carried no
+  // packet yet (mcx::floor_ssrc_refused, mcptt_floor_streams; RFC 7714 section 8.4, RFC 3711 section 9.1); the call's
+  // own SSRC again (a re-INVITE, a refresh) is the stream going on.
+  if (!no_floor() &&
+      floor_ssrc_refused(media.floor_ssrc, local_.floor_ssrc,
+                         remote_ ? std::optional(remote_->floor_ssrc) : std::nullopt,
+                         protected_floor() ? &protection_ : nullptr, mcptt_floor_streams()))
     throw std::runtime_error("directional floor SSRC collision");
-  if (media.protected_media != protected_media() || (media.queueing && !local_.queueing) || media.implicit_request)
-    throw std::runtime_error("unsupported media profile");
+  if (media.protected_media != protected_media()) throw std::runtime_error("unsupported media profile");
   // A private call's key arrives with the call itself (TS 33.180 clause 7.2.2).
   if (protected_media() && !private_call && !protection_.group_ready())
     throw std::runtime_error("group key unavailable");
@@ -30,6 +38,91 @@ void Client::check_remote(const MediaDescription &media, bool private_call) {
   if (media.address != resolve_ipv4(cfg_.at("server_address").get<std::string>()) ||
       media.floor_address != media.address)
     throw std::runtime_error("media server address mismatch");
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 14.4: "if the attribute contains attribute parameters that were not present in the associated
+// offer, the offerer shall discard those attribute parameters": "mc_queueing" without this client's, and
+// "mc_implicit_request" unless this client's INVITE requested the floor with it (implicit_offered_). The "mc_ssrc"
+// is kept: the offerer "shall use the returned value [...] even if the "mc_ssrc" attribute was not present in the
+// associated offer". For a server's offer this is the negotiated outcome as well (clause 14.3.2).
+MediaDescription Client::negotiated_media(MediaDescription media) const {
+  media.queueing = client_rules::answer_parameter_kept(media.queueing, local_.queueing);
+  media.implicit_request = client_rules::answer_parameter_kept(media.implicit_request, implicit_offered_);
+  return media;
+}
+
+//------------------------------------------------------------------------------
+// The call command's implicit floor request choice (TS 24.380 clause 14.2.5), the configured one otherwise:
+// mcptt.implicit_floor_request (default false) with mcptt.implicit_wav. Consumed by the call it is for.
+Client::ImplicitChoice Client::implicit_choice() {
+  if (auto choice = std::exchange(next_implicit_, std::nullopt)) return *choice;
+  const auto &mcptt = cfg_.at("mcptt");
+  return {mcptt.value("implicit_floor_request", false), mcptt.value("implicit_wav", std::string{})};
+}
+
+//------------------------------------------------------------------------------
+// Helper: the talk burst of an implicit floor request: the choice's WAV, sent once Floor Granted arrives
+// (floor_packet), as for "ptt <WAV>".
+void Client::prepare_implicit_speech(const ImplicitChoice &choice) {
+  if (!choice.requested) return;
+  if (choice.wav.empty()) throw std::runtime_error("implicit floor request needs implicit=<WAV> or mcptt.implicit_wav");
+  wav_path_ = choice.wav;
+  transmit_ = read_wav(wav_path_);
+  transmit_offset_ = 0;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 6.4 and TS 24.380 clause 14.2.5: the call's INVITE (invite) carries "mc_implicit_request" when
+// implicit; only this INVITE does (TS 24.380 clause 14.5: in a later offer it has meaning only for an upgrade to
+// emergency). own: it is this client's implicit floor request, handled at the 200 (OK); false for the implicit
+// request to grant the floor to the terminating client of a remotely initiated ambient listening call.
+void Client::invite_with_implicit(bool implicit, bool own, const std::function<void()> &invite) {
+  early_floor_.clear();
+  call_answered_ = false;
+  local_.implicit_request = implicit;
+  try {
+    invite();
+  } catch (...) {
+    local_.implicit_request = implicit_offered_ = false;
+    throw;
+  }
+  local_.implicit_request = false;
+  implicit_offered_ = implicit && own;
+  // The outcome of the last implicit floor request: "offered", then "accepted" or "not accepted".
+  if (implicit_offered_) status_["implicit_floor_request"] = "offered";
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 6.2.4.2.2 (originating floor participant), once both the 200 (OK) and its SDP answer are in:
+// with the implicit floor request negotiated (clause 6.2.1 item 1; the answer's "mc_implicit_request", clause
+// 14.3.5), step 4: "a. shall start timer T101 (Floor Request) and initialise counter C101 (Floor Request) to 1;
+// b. shall enter the 'U: pending Request' state; and c. [...] shall act as if the floor control message was
+// received in the 'U: pending Request' state" for each one stored before the 200 (OK) (step 2). Without it the
+// client stays in 'U: has no permission' and does not send the talk burst.
+void Client::implicit_floor_answered() {
+  if (!implicit_offered_ || !call_answered_ || !remote_) return;
+  implicit_offered_ = false;
+  auto stored = std::exchange(early_floor_, {});
+  if (!remote_->implicit_request) {
+    requesting_ = false;
+    transmit_.clear();
+    transmit_offset_ = 0;
+    status_["implicit_floor_request"] = "not accepted";
+    event("implicit_floor_request_not_accepted", {{"dialog", dialog_}});
+    return;
+  }
+  floor_timers_.expect_implicit_grant(floor_message(FloorType::Request), monotonic_ms());
+  requesting_ = true;
+  status_["implicit_floor_request"] = "accepted";
+  event("implicit_floor_request_accepted", {{"dialog", dialog_}, {"stored_floor_messages", stored.size()}});
+  for (const auto &datagram : stored) {
+    try {
+      floor_packet(datagram);
+    } catch (const std::exception &error) {
+      failure(std::string("stored floor message: ") + error.what());
+    }
+  }
 }
 
 //------------------------------------------------------------------------------
@@ -60,6 +153,11 @@ void Client::call_state(std::string_view id, SipCallState state, int code) {
     return;
   }
   if (state == SipCallState::confirmed) {
+    // TS 24.380 clause 6.2.4.2.2: the 200 (OK) of the call being set up (an implicit floor request's outcome).
+    if (id == dialog_ && !call_answered_) {
+      call_answered_ = true;
+      implicit_floor_answered();
+    }
     if (ambient_ && id == ambient_->dialog) {
       if (dialog_ != id) return; // yielded to another call
       if (ambient_->role == "listened-to") {
@@ -143,12 +241,17 @@ void Client::clear_call_state() {
   }
   local_.direction = "sendrecv";
   local_.implicit_request = false;
+  implicit_offered_ = call_answered_ = false;
+  early_floor_.clear();
   local_.control = MediaControl::floor;
   leave_monitored_call();
   last_call_type_ = call_type_;
   last_call_group_ = call_group_;
   call_type_.clear();
-  call_group_.clear();
+  if (!call_group_.empty()) {
+    call_group_.clear();
+    restore_group_key();
+  }
   private_peer_.clear();
 
   // Cancelled before answering, or released as not selected: restore MEPP.
@@ -174,6 +277,15 @@ void Client::clear_call_state() {
 // or a Floor Release, with the Floor Indicator of the call type, and run its timer.
 void Client::send_floor(FloorType type) {
   if (!remote_) return;
+  const auto packet = floor_message(type);
+  floor_timers_.send(packet, monotonic_ms());
+  transmit_floor(packet);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clauses 6.2.4.3.5, 6.2.4.4.5 and 6.2.4.5.3: a Floor Request (Floor Indicator, Location and Floor
+// Priority fields), Floor Release (Floor Indicator) or Floor Queue Position Request of this call. Needs remote_.
+FloorPacket Client::floor_message(FloorType type) const {
   FloorPacket packet;
   packet.type = type;
   packet.ssrc = remote_->floor_ssrc;
@@ -197,8 +309,7 @@ void Client::send_floor(FloorType type) {
   if (type == FloorType::Request)
     packet.fields.push_back(priority_field(static_cast<std::uint8_t>(
         std::min<unsigned>(cfg_.at("mcptt").value("floor_priority", 0u), remote_->floor_priority.value_or(0)))));
-  floor_timers_.send(packet, monotonic_ms());
-  transmit_floor(packet);
+  return packet;
 }
 
 //------------------------------------------------------------------------------
@@ -271,6 +382,13 @@ std::string Client::server_target(const std::string &address, std::uint16_t port
 // (clause 6.2.4.4.4), Floor Revoke (clause 6.2.4.5.4), Floor Idle (clause 6.2.4.3.2) or Floor Taken
 // (clause 6.2.4.3.3).
 void Client::floor_packet(const Datagram &datagram) {
+  // TS 24.380 clause 6.2.4.2.2 step 2: before the 200 (OK) of a call offered with an implicit floor request, a
+  // floor control message for this client's floor SSRC is stored, and checked in full once the request is
+  // accepted (implicit_floor_answered).
+  if (implicit_offered_ && !call_answered_) {
+    if (wire_ssrc(datagram.bytes, true) == local_.floor_ssrc) early_floor_.push_back(datagram);
+    return;
+  }
   if (!remote_ || !sent_by_server(datagram.source, remote_->floor_address, remote_->floor_port)) return;
   if (wire_ssrc(datagram.bytes, true) != local_.floor_ssrc) return;
   auto bytes = protected_floor() ? protection_.unprotect_floor(datagram.bytes) : datagram.bytes;
@@ -306,6 +424,8 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     audio_ssrc_ = 0;
     for (auto &field : packet.fields)
       if (field.id == static_cast<unsigned>(FloorFieldId::AudioSsrc)) audio_ssrc_ = read_audio_ssrc(field);
+    // TS 24.379 clause 6.2.1 NOTE 2 and TS 24.380 clause 14.4: otherwise the "mc_ssrc" of the SDP answer.
+    if (!audio_ssrc_) audio_ssrc_ = remote_->granted_audio_ssrc;
     if (!audio_ssrc_) throw std::runtime_error("Floor Granted lacks audio SSRC");
     if (floor_timers_.awaiting_user_confirmation()) {
       event("queued_floor_granted", {{"action", "floor-confirm"}});

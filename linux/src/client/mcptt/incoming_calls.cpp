@@ -333,6 +333,10 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
     SipResponse response;
     response.status_code = asserted_identity(message) == service() ? 200 : 403;
     if (response.status_code == 200) schedule([this] { configuration_notified(); });
+    // RFC 6665 section 4.1.3: on Subscription-State "terminated" the subscriber "MUST consider the subscription
+    // terminated"; its documents are read as any NOTIFY's.
+    if (response.status_code == 200 && get_header(message.headers, "Subscription-State").starts_with("terminated"))
+      configuration_subscription_ended(std::string(get_header(message.headers, "Subscription-State")));
     return response;
   }
   if (mcvideo_enabled() && !message.dialog_id.empty() && message.dialog_id == mcvideo_key_subscription_)
@@ -369,12 +373,22 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
 
 //------------------------------------------------------------------------------
 // TS 24.481 clause 6.3.13.2.1 and TS 33.180 clause 5.7: a group key notification (xcap-diff) on a key
-// subscription: install the GMK of the selected group, or forget it when the subscription terminates.
+// subscription: keep the GMK of its group (the selected group's, or one of update_key_subscriptions); the GMK of the
+// group whose key the media uses now (that of the call's group during a call, else the selected group's) is
+// selected (TS 33.180 clauses 7.3.4, 7.3.5, 7.3.11 and 7.3.12). The selected group's terminated subscription forgets
+// its key.
 SipResponse Client::group_key_notify(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
   auto found = key_subscriptions_.find(message.dialog_id);
-  if (found == key_subscriptions_.end() || asserted_identity(message) != service() || message.from_uri != service()) {
+  // RFC 6665 section 4.1.3: a NOTIFY that matches no subscription (e.g. the final NOTIFY after the subscriber ended
+  // it): "MUST return a 481 (Subscription does not exist) response".
+  if (found == key_subscriptions_.end()) {
+    event("group_key_notify_rejected", {{"reason", "no subscription"}, {"from_uri", message.from_uri}});
+    response.status_code = 481;
+    return response;
+  }
+  if (!from_gms_proxy(message, true)) {
     response.status_code = 403;
     return response;
   }
@@ -386,26 +400,43 @@ SipResponse Client::group_key_notify(const SipMessage &message) {
       transmit_.clear();
       if (!dialog_.empty()) schedule([this] { sip_.bye(dialog_); });
     }
+    if (const auto extra = extra_key_subscriptions_.find(found->second);
+        extra != extra_key_subscriptions_.end() && extra->second == message.dialog_id) {
+      extra_key_refresh_at_.erase(message.dialog_id);
+      extra_key_subscriptions_.erase(extra);
+    }
     key_subscriptions_.erase(found);
     return response;
   }
-  if (message.dialog_id != key_subscription_ || found->second != group()) return response;
+  const auto key_group = found->second;
+  const bool selected = message.dialog_id == key_subscription_;
+  if (selected && key_group != key_group_of(group())) return response;
   if (!keys_ || message.content_type != "application/xcap-diff+xml") {
     response.status_code = 400;
     return response;
   }
-  auto document = keying::parse_gktp_xcap_diff(message.body, group(), xcap_root());
-  auto key = keys_->open_group(gms_identity(), group(), document);
-  protection_.set_group(key);
+  auto document = keying::parse_gktp_xcap_diff(message.body, key_group, xcap_root());
+  auto key = keys_->open_group(gms_identity(), key_group, document);
 
   // The GMK also protects MCData payloads for its MC group IDs (TS 33.180 clause 8.4).
   group_keys_[key.csb_id] = key;
+  // With the keys of several groups held, expired keys (annex E.6.10) go first, so that the bound of 16 keeps the
+  // usable ones.
+  const auto now = static_cast<std::uint64_t>(std::time(nullptr));
+  std::erase_if(group_keys_, [now](const auto &entry) {
+    const auto &properties = entry.second.properties;
+    return properties && properties->expiry_unix_seconds != 0 && properties->expiry_unix_seconds <= now;
+  });
   while (group_keys_.size() > 16) group_keys_.erase(group_keys_.begin());
+  const auto in_use = key_group_of(call_group_.empty() ? group() : call_group_);
+  if (key_group == in_use) protection_.set_group(key);
   status_["group_key_notifications"] = status_.value("group_key_notifications", 0ULL) + 1;
-  status_["group_key_id"] = key.csb_id;
-  status_["protected_ready"] = true;
-  if (desired_affiliation_ && !affiliated_) schedule([this] { affiliate(); });
-  event("group_key_installed", {{"group_id", group()}, {"key_id", key.csb_id}});
+  if (selected) {
+    status_["group_key_id"] = key.csb_id;
+    status_["protected_ready"] = true;
+    if (desired_affiliation_ && !affiliated_) schedule([this] { affiliate(); });
+  }
+  event("group_key_installed", {{"group_id", key_group}, {"key_id", key.csb_id}, {"selected", key_group == in_use}});
   return response;
 }
 
@@ -630,7 +661,7 @@ SipResponse Client::group_call_reinvite(const SipMessage &message) {
       message.remote_media->floor_port != remote_->floor_port ||
       message.remote_media->payload_type != remote_->payload_type ||
       message.remote_media->octet_aligned != remote_->octet_aligned ||
-      message.remote_media->queueing != remote_->queueing) {
+      (message.remote_media->queueing && local_.queueing) != remote_->queueing) {
     response.status_code = 488;
     return response;
   }
@@ -670,13 +701,24 @@ SipResponse Client::incoming_group(const SipMessage &message) {
   // Answer-Mode Auto or Manual, which the participating function sends to a group call invitee; another value is
   // ignored, as is the header field's absence (RFC 5373 section 2), and the local setting applies.
   const auto mode = answer_mode_value(get_header(message.headers, "Answer-Mode"));
+  // TS 33.180 clauses 7.3.4 and 7.3.5 (a broadcast group's own GMK), 7.3.11 and 7.3.12 (a regroup's preconfigured
+  // group's GMK) and 7.4.2: the call is keyed with the GMK of its group; a protected call whose GMK this client does
+  // not hold is refused, not keyed with another group's.
+  const auto key_call_group = via_hierarchy || via_regroup || via_monitor ? info.calling_group : group();
+  if (protected_media() && !select_call_key(key_call_group)) {
+    response.status_code = 488;
+    return response;
+  }
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
   check_remote(*message.remote_media);
   local_.queueing = local_.queueing && message.remote_media->queueing;
   local_.floor_priority = message.remote_media->floor_priority;
   if (via_monitor) enter_monitored_call(info.calling_group);
   update_priority(info, message_location(message));
-  local_.floor_ssrc = random_ssrc();
+  // Test aid ("next-answer-floor-ssrc offered"): the answer allocates the SSRC the offer allocated, which a relay
+  // refuses under the CSK (TS 24.380 clause 4.3.3.1, RFC 7714 section 8.4); once.
+  local_.floor_ssrc =
+      std::exchange(answer_offered_floor_ssrc_, false) ? message.remote_media->floor_ssrc : random_ssrc();
   dialog_ = message.dialog_id;
   local_.payload_type = message.remote_media->payload_type;
   local_.octet_aligned = message.remote_media->octet_aligned;

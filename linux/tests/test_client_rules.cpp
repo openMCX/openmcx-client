@@ -4,13 +4,15 @@
 
 // Unit tests of src/client/core/client_rules.hpp: the rules of the MC client that need no client state.
 //
-// Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19),
-// TS 24.484 V19.6.0 (Rel-19), RFC 3261, RFC 3903, RFC 3986, RFC 6749.
+// Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 24.380 V19.2.0 (Rel-19),
+// TS 33.180 V19.4.0 (Rel-19), TS 24.484 V19.6.0 (Rel-19), RFC 3261, RFC 3903, RFC 3986, RFC 6749.
 
 #include "client_rules.hpp"
 
 #include <cstdio>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -74,6 +76,22 @@ void test_refresh_refusal() {
   check(refresh_refusal_final(2, false, 130, 900), "a second refusal in a row is final");
   check(refresh_refusal_final(1, false, 900, 900), "a refusal once the token expired is final");
   check(refresh_refusal_final(1, true, 100, 900), "a client with a password signs in again at once");
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 annex B.5.1: when the access token is renewed; the defaults stay 600 s ahead, halfway below 1200 s, and a
+// failed renewal again after 30 s.
+void test_token_renewal() {
+  using namespace mcx::client_rules;
+  check(default_token_renewal_lead_s == 600 && default_token_renewal_halfway_below_s == 1200 &&
+            default_token_renewal_retry_ms == 30000,
+        "the default renewal timing is unchanged");
+  check(token_renewal_delay_s(3600) == 3000, "a 1-hour token is renewed 10 minutes ahead");
+  check(token_renewal_delay_s(1200) == 600, "a 20-minute token is renewed 10 minutes ahead");
+  check(token_renewal_delay_s(900) == 450, "a 15-minute token is renewed halfway");
+  check(token_renewal_delay_s(3600, 300, 600) == 3300, "a configured lead");
+  check(token_renewal_delay_s(500, 300, 600) == 250, "a configured halfway bound");
+  check(token_renewal_delay_s(100, 300, 50) == 0, "a lead longer than the token renews at once");
 }
 
 //------------------------------------------------------------------------------
@@ -251,10 +269,96 @@ void test_counts_as_affiliated() {
   check(!counts_as_affiliated("deaffiliated"), "nor a deaffiliated one");
 }
 
+//------------------------------------------------------------------------------
+// TS 24.380 clause 14.2.5: the implicit floor request word of a call command; clause 6.2.1 item 2: not for a rejoin.
+void test_implicit_word() {
+  using mcx::client_rules::implicit_word;
+  const auto call = implicit_word("call emergency implicit");
+  check(call.command == "call emergency" && call.requested == true && call.wav.empty(), "call ... implicit");
+  const auto wav = implicit_word("private bob manual implicit=/media/talk.wav");
+  check(wav.command == "private bob manual" && wav.requested == true && wav.wav == "/media/talk.wav",
+        "private ... implicit=<WAV>");
+  const auto off = implicit_word("chat no-implicit");
+  check(off.command == "chat" && off.requested == false, "chat no-implicit");
+  check(implicit_word("adhoc bob carol implicit").command == "adhoc bob carol", "adhoc ... implicit");
+  check(implicit_word("first-to-answer bob carol implicit").requested == true, "first-to-answer ... implicit");
+  check(!implicit_word("call").requested && implicit_word("call").command == "call", "no word: unchanged");
+  check(!implicit_word("call emergency").requested, "another last word: unchanged");
+  check(!implicit_word("ptt implicit").requested && implicit_word("ptt implicit").command == "ptt implicit",
+        "not a call command: unchanged");
+  check(!implicit_word("call implicit=").requested, "implicit= without a WAV is no choice");
+  check(implicit_word("rejoin implicit").rejoin && !implicit_word("rejoin implicit").requested,
+        "a rejoin is never an implicit floor request");
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 14.4: an answer's fmtp parameter the offer lacked is discarded.
+void test_answer_parameters() {
+  using mcx::client_rules::answer_parameter_kept;
+  check(answer_parameter_kept(true, true), "an offered parameter the answer returns is kept");
+  check(!answer_parameter_kept(true, false), "an unoffered parameter is discarded");
+  check(!answer_parameter_kept(false, true), "a parameter the answer leaves out is not negotiated");
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clauses 7.3.4, 7.3.11 and 7.3.12: the GMK of a call's group: a regroup's preconfigured group, else the
+// group's own; the newest usable key of that group, none for a group without one.
+void test_call_key_group() {
+  using mcx::client_rules::key_group;
+  using mcx::client_rules::newest_usable;
+  const auto preconfigured = [](const std::string &group) {
+    return group == "sip:regroup@x" ? std::string("sip:pre@x") : std::string{};
+  };
+  check(key_group("sip:regroup@x", preconfigured) == "sip:pre@x", "a regroup is keyed with its preconfigured group");
+  check(key_group("sip:monitored@x", preconfigured) == "sip:monitored@x", "a monitored group with its own GMK");
+  check(key_group("sip:broadcast@x", preconfigured) == "sip:broadcast@x", "a broadcast group with its own GMK");
+  struct Key {
+    std::string group;
+    unsigned activation;
+  };
+  const std::map<unsigned, Key> keys{
+      {1, {"sip:selected@x", 10}}, {2, {"sip:pre@x", 20}}, {3, {"sip:pre@x", 30}}, {4, {"sip:selected@x", 40}}};
+  const auto of = [&](const std::string &group) {
+    return newest_usable(keys, [&](const Key &key) { return key.group == group; },
+                         [](const Key &key) { return key.activation; });
+  };
+  check(of("sip:pre@x") && of("sip:pre@x")->activation == 30, "the newest GMK of the preconfigured group");
+  check(of("sip:selected@x") && of("sip:selected@x")->activation == 40, "the selected group's GMK, not another's");
+  check(!of("sip:other@x"), "no GMK for a group without one: the call is refused, not keyed with another's");
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 annex E.6.10: an MCData PCK context ends at the earlier of the local lifetime and the PCK's own Expiry
+// time (0: none); with an Expiry time 1 s ahead it is usable now and gone at that time (expire_data_keys drops a
+// context once its end is reached).
+void test_data_pck_end() {
+  using mcx::client_rules::data_pck_end;
+  const std::uint64_t now = 2000000000, local = now + 3600;
+  check(data_pck_end(local, 0) == local, "PCK without Expiry time: the local lifetime");
+  check(data_pck_end(local, now + 7200) == local, "later Expiry time: the local lifetime");
+  const auto end = data_pck_end(local, now + 1);
+  check(end == now + 1, "earlier Expiry time ends the context");
+  check(end > now, "usable 1 s before its Expiry time");
+  check(!(end > now + 1), "not usable at its Expiry time");
+}
+
+//------------------------------------------------------------------------------
+// RFC 3711 section 3.4: the floor control streams of the call under way, both directions, go on under a new CSK.
+void test_call_floor_ssrcs() {
+  using mcx::client_rules::call_floor_ssrcs;
+  check(call_floor_ssrcs(7, 9) == std::set<std::uint32_t>{7, 9}, "both directions of the call go on");
+  check(call_floor_ssrcs(7, std::nullopt) == std::set<std::uint32_t>{7}, "before the answer: this client's SSRC");
+  check(call_floor_ssrcs(0, std::nullopt).empty(), "no call: none");
+}
+
 int main() {
+  test_call_floor_ssrcs();
+  test_call_key_group();
+  test_data_pck_end();
   test_notifiers();
   test_has_warning();
   test_refresh_refusal();
+  test_token_renewal();
   test_oidc_scope();
   test_percent_decode();
   test_control_unescape();
@@ -264,6 +368,8 @@ int main() {
   test_authorization_retry();
   test_alias_outcome();
   test_counts_as_affiliated();
+  test_implicit_word();
+  test_answer_parameters();
   if (failures) std::fprintf(stderr, "%d check(s) failed\n", failures);
   return failures ? 1 : 0;
 }

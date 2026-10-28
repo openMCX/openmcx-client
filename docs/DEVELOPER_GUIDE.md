@@ -92,9 +92,15 @@ flowchart LR
   C -- "HTTP: file distribution, message store" --> STORE
 ```
 
-The configuration names the endpoints (`endpoints.cms`, `endpoints.gms`, `endpoints.msgstore`,
-`endpoints.notification`), the SIP core (`sip.core_uri`, which must use `transport=tls`), the trusted core address
+The configuration names the endpoints (`endpoints.cms` and `endpoints.gms`, the CMS and GMS XCAP root URIs of TS 24.484
+clause 7.2.2.7 items 7 and 8, used as given, e.g. `https://http-proxy:8443/cms/xcap-root`; `endpoints.msgstore`,
+`endpoints.notification`), the IdMS endpoints (`oauth.idms_auth_endpoint` and `oauth.idms_token_endpoint`, the
+`<idms-auth-endpoint>` and `<idms-token-endpoint>` of TS 24.484 clause 7.2.2.7 item 4, and `oauth.jwks_uri`; each one
+left out comes from the discovery document of `oauth.issuer`), the SIP core (`sip.core_uri`, which must use `transport=tls`), the trusted core address
 (`trusted_core`) and the PSIs of the MC servers (`mcptt.service_uri`, `mcdata.service_uri`, `mcvideo.service_uri`).
+The optional `tls.crl_file` (PEM) holds the CRLs every HTTPS request checks the server's certificate chain against
+(TS 33.180 clause 6.1.1, TS 33.310 clauses 6.1.1 and 6.1a): each certificate of the chain needs a current CRL of its
+issuer there, and a listed or uncovered certificate fails the request.
 Group and configuration document changes arrive as SIP NOTIFY with the `xcap-diff` event package through the MCPTT
 server's PSI.
 
@@ -239,7 +245,10 @@ Where each step lives:
 
 Token renewal (`schedule_token_renewal`, `renew_token`) signs in again ten minutes before the token expires (halfway
 for a token that lives less than 20 minutes) and sends the MCPTT, MCData and MCVideo authorisation PUBLISH again with
-SIP-If-Match.
+SIP-If-Match. TS 33.180 annex B.5.1 leaves the timing to the client: `oauth.token_renewal_lead_s` (600),
+`oauth.token_renewal_halfway_below_s` (1200) and `oauth.token_renewal_retry_ms` (30000, the next attempt after a failed
+renewal while the token lasts longer) set it, and `oauth.sign_in_retry_ms` (15000) the next sign-in after a failed one;
+the defaults are pending the maintainer's choice (no spec value).
 
 The MCPTT and MCVideo affiliation status subscriptions ask for Expires 4294967295 (TS 24.379 clause 9.2.1.3 step 4,
 TS 24.281 clause 8.2.1.3 step 4). The server may grant less in its 200 (OK); `subscription_granted` records the granted
@@ -452,7 +461,8 @@ client's handling of Floor Revoke (`floor_packet` calls `release()`, which sends
 stateDiagram-v2
   [*] --> NoPermission: call established
   NoPermission --> PendingRequest: ptt / Floor Request (start T101)
-  NoPermission --> PendingRequest: implicit request (expect_implicit_grant)
+  NoPermission --> PendingRequest: 200 (OK) accepts the implicit request (start T101, nothing sent)
+  NoPermission --> PendingRequest: grant to the listened-to user of a remote-init ambient call (no T101)
   PendingRequest --> HasPermission: Floor Granted
   PendingRequest --> Queued: Queue Position Info (queued)
   PendingRequest --> NoPermission: Floor Deny / Floor Taken / T101 expired C101 times
@@ -466,6 +476,12 @@ stateDiagram-v2
 - Timer intervals and counters come from the configuration in `participant_timers()` (`mcptt/service.cpp`):
   `mcptt.floor_request_retry_ms` (T101), `floor_release_retry_ms` (T100), `floor_queue_retry_ms` (T104),
   `floor_media_idle_ms` (T103), `floor_queued_grant_action_ms` (T132) and `floor_transmissions` (C100, C101, C104).
+- An implicit floor request (TS 24.380 clauses 6.2.4.2.2 and 14.2.5): a call command ending in `implicit[=<WAV>]`
+  (or `mcptt.implicit_floor_request` with `mcptt.implicit_wav`) offers `mc_implicit_request` in its INVITE only.
+  When the 200 (OK) echoes it, `implicit_floor_answered` (`mcptt/call_media.cpp`) calls
+  `expect_implicit_grant(request, now)`: 'U: pending Request' with T101 running, and the floor messages stored before
+  the 200 (OK) are handled; T101 expiry sends the Floor Request. Without the echo the call stays in 'U: has no
+  permission' and the WAV is dropped. The status field `implicit_floor_request` shows the outcome.
 - T103 (end of RTP media) only clears the floor owner shown in the status file (`floor_participant_tick`).
 - The status file uses the enumerator names (`HasPermission`), not the spec's quoted names; the code comments use the
   spec's names ('U: has permission').
@@ -570,14 +586,18 @@ To add a transition:
 
 All key material comes from the shared `mcx_keying` library through `KeyClient`. Protection is switched on per
 configuration key; the key client is created by `provision_keys()` (`core/client.cpp`), which `run()` calls only when
-`security.protect_media` or `security.protect_floor` is set.
+`security.protect_media` or `security.protect_floor` is set. `security.kms_keyprov_identity_path` (default `true`)
+chooses the KMS KeyProvision Request-URI of TS 33.180 annex D.2.4: `true` names the identity in a `keyprov`
+subdirectory, `false` sends the plain `…/keyprov` for the MCPTT ID (the MCData and MCVideo IDs are still named in the
+subdirectory).
 
 | What | Key | Where | Configuration | Specification |
 |---|---|---|---|---|
 | CSK upload | CSK, MIKEY-SAKKE I_MESSAGE in `application/mikey` | `publish_body` (MCPTT), `mcvideo_authorize`, MCData authorisation | with key provisioning | TS 33.180 clause 5.4; TS 24.282 clause 7.2.2 step 3 |
-| MCPTT XML confidentiality | CSK as XPK | `protect_outgoing`, `protect_incoming` (`core/xml_protection.cpp`), installed with `SipEngine::set_body_filters` | `security.confidentiality_protection` | TS 24.379 clause 6.6.2, TS 33.180 clause 9.3.4 |
-| MCPTT XML integrity | CSK | same, `signable_part` | `security.integrity_protection` | TS 24.379 clause 6.6.3, TS 33.180 clause 9.3.5 |
-| MCVideo XML protection | MCVideo CSK | `mcvideo_protect_outgoing` | same switches | TS 24.281 clauses 6.6.2.3.1, 6.6.3.3.1 |
+| MCPTT XML confidentiality | CSK as XPK | `protect_outgoing`, `protect_incoming` (`core/xml_protection.cpp`), installed with `SipEngine::set_body_filters` | `<confidentiality-protection>` of the MCPTT service configuration document (absent: enabled) | TS 24.379 clause 6.6.2, TS 33.180 clause 9.3.4 |
+| MCPTT XML integrity | CSK | same, `signable_part` (every XML MIME body, Canonical XML 1.0) | `<integrity-protection>` of the same document (absent: enabled) | TS 24.379 clause 6.6.3, TS 33.180 clause 9.3.5 |
+| CSK key download | the new CSK in a MIKEY-SAKKE I_MESSAGE from the participating function | `csk_key_download` (`core/sip_dispatch.cpp`): 200, or 488 with Warning 136 | — | TS 24.379, TS 24.281, TS 24.282 clause 7.2.5; TS 33.180 clause 9.2.1.4 |
+| MCVideo XML protection | MCVideo CSK | `mcvideo_protect_outgoing` | the MCVideo service configuration document's elements | TS 24.281 clauses 6.6.2.3.1, 6.6.3.3.1 |
 | Refusal of bad XML | — | `Client::incoming` (`core/sip_dispatch.cpp`): 403 with Warning 139 or 140 | — | TS 24.379 clauses 6.6.2.4.2, 6.6.3.4.2 |
 | Group media | GMK from the GKTP document | `subscribe_keys`, `group_key_notify`; `ProtectedCall::set_group` | `security.protect_media` | TS 24.481 clause 6.3.13.2.1, TS 33.180 clause 5.7 |
 | Private call media | PCK in `a=key-mgmt` | `offer_private_key`, `accept_private_key`, `answer_private_key`, `bind_private_key` (`core/protected_call.cpp`) | `security.protect_media` | TS 24.379 clause 11.1.1.2.1.1 step 11, TS 33.180 clauses 5.6, 7.2.4 |
@@ -587,7 +607,8 @@ configuration key; the key client is created by `provision_keys()` (`core/client
 | MCData payloads | PCK (one-to-one) or GMK (group) as DPPK | `mcdata_protect_sds`, `mcdata_seal`, `mcdata_open`, `mcdata_seal_file` (`mcdata/protection.cpp`) | `mcdata.protect_payload` | TS 33.180 clause 8, TS 24.282 clause 6.6.3.2 |
 | MCData payload signature | ECCSI | `mcdata_sign`, `mcdata_verify` | `mcdata.authenticate_payload` | TS 33.180 clause 8.5.5 |
 | MCData signalling | MCData CSK | `mcdata_seal_signalling`, `mcdata_open_signalling`, `mcdata_seal_msrp` | `mcdata.protect_signalling` | TS 24.282 clause 6.6.3, TS 33.180 clause 9.5 |
-| MCData XML | MCData CSK as XPK | `mcdata_encrypt_xml`, `mcdata_decrypt_xml` | `mcdata.confidentiality_protection` | TS 24.282 clause 6.5.2 |
+| MCData XML | MCData CSK as XPK | `mcdata_encrypt_xml`, `mcdata_decrypt_xml` | the MCData service configuration document's `<confidentiality-protection>` | TS 24.282 clause 6.5.2 |
+| MCData XML integrity | MCData CSK | `mcdata_sign_outgoing` (from `protect_outgoing`), verified in `protect_incoming` | the MCData document's `<integrity-protection>` | TS 24.282 clause 6.5.3 |
 
 Points to know:
 
@@ -597,13 +618,23 @@ Points to know:
   the server's first protected request can overtake its 200 (OK) to the authorisation.
 - A protected file is a series of Protected Payload messages with one Payload ID. TS 24.282 table 15.2.2-1 has no
   type for file data; the code uses FD SIGNALLING PAYLOAD with bit 7 (`protected_file_type` in `client.hpp`).
+- The XML protection a service requires is read from its service configuration document (`service_protection_`,
+  `parse_service_protection`), never from a local switch. Until a service's document is read, an XML body the client
+  would protect is not sent (`require_protection_known`). With `mcptt.documents_on_notify` the configuration management
+  subscription goes before the service authorisation (`start_authorization`), and the keys and the authorisation wait
+  for the MCPTT service configuration document (`configuration_notified`).
+- The group document and group key subscriptions go to `gms.subscription_psi`, the GMS-URI (TS 24.481 clause
+  6.3.13.2.1 step b); activation takes it from the `<GMS-URI>` of the package's UE initial configuration. Without it
+  they are refused locally, never sent to another PSI.
 - MCX Admin activation (`core/activation.cpp`) makes an EC P-256 device key and a PKCS#10 request, and stores the
   activated configuration readable by its owner only. Refresh tokens are kept in `oauth.refresh_token_file`, owner
   only (`keep_refresh_state`).
 
 The Android app implements key management and protection for MCVideo only (`core/.../mcvideo/CallProtection.kt`,
 `security/`): PCK, GMK and the MCVideo CSK. MCPTT media protection and MCVideo signalling protection are not
-implemented there ([VIDEO.md](../android/docs/VIDEO.md)).
+implemented there ([VIDEO.md](../android/docs/VIDEO.md)). So the app does not start a service whose service
+configuration document enables XML signalling protection, or whose document it could not read
+(`McxClient.protectionRefusal`): the reason is in the service's state and shown on the main screen.
 
 ## 5. The dispatcher
 
@@ -667,7 +698,7 @@ linux/tools/build-image -t openmcx-client:<tag>
 docker build -t openmcx-dispatcher:<tag> --build-arg CLIENT_IMAGE=openmcx-client:<tag> dispatcher
 ```
 
-The [Dockerfile](../dispatcher/Dockerfile) builds the Go service in `openmcx-dev:0.3` (running `go vet` and
+The [Dockerfile](../dispatcher/Dockerfile) builds the Go service in `openmcx-dev:0.4` (running `go vet` and
 `go test`) and copies the binary into the image named by `CLIENT_IMAGE`. Unit tests use a fake engine
 (`service/testdata/fake-engine`); lab and browser checks are in `dispatcher/lab/`. Scope, limits, options and the API
 are in the [dispatcher README](../dispatcher/README.md).
@@ -725,6 +756,13 @@ then per service authorisation, affiliation status subscription and affiliation 
 [MCPTT](../android/docs/wire/phase2-mcptt.md), [MCData](../android/docs/wire/phase3-mcdata.md)) describe what the
 servers expect, clause by clause.
 
+The provisioning sets the timing the specifications leave to the client, with defaults pending the maintainer's
+choice (no spec value): `idms.token_renewal_lead_s` (300; the token is renewed that long before it expires, halfway for
+a token that lives less than twice that) and `idms.token_refresh_before_s` (600; at start-up a kept token with less
+left is refreshed), TS 33.180 annex B.5.1; `recovery.first_retry_ms` (2000) and `recovery.last_retry_ms` (60000), the
+delay after a failed start-up or sign-in (TS 33.180 clause 5.1.1, the limited service state), doubled after each
+failure up to the last.
+
 ### 6.3 Build and gaps
 
 - Builds run in Docker: `android/tools/gradle-docker.sh :app:assembleDebug` builds the image from
@@ -778,7 +816,7 @@ docker build -t openmcx-dispatcher:<tag> --build-arg CLIENT_IMAGE=openmcx-client
 android/tools/gradle-docker.sh :app:assembleDebug
 ```
 
-The client image builds in `openmcx-dev:0.3` (from openmcx-server), runs `test_binary.py`, and ships a stripped binary
+The client image builds in `openmcx-dev:0.4` (from openmcx-server), runs `test_binary.py`, and ships a stripped binary
 on Ubuntu 24.04 with the run-time libraries (libsrtp2, opencore-amrwb, vo-amrwbenc, OpenH264, libcurl, libxml2) and
 the lab health check ([Dockerfile](../linux/docker/Dockerfile)).
 

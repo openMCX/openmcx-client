@@ -256,6 +256,16 @@ SipResponse Client::mcvideo_answer_invite(const SipMessage &message, const Mcptt
     response.status_code = 488;
     return response;
   }
+  // The server's transmission control SSRC for this client (mcvideo_media): an offer with one refused is rejected
+  // with 488 (RFC 3261 section 13.3.1.3: "A UAS rejecting an offer contained in an INVITE SHOULD return a 488 (Not
+  // Acceptable Here) response").
+  if (message.remote_media->control != MediaControl::none &&
+      floor_ssrc_refused(message.remote_media->floor_ssrc, mcvideo_call_->local.floor_ssrc,
+                         mcvideo_call_->remote ? std::optional(mcvideo_call_->remote->floor_ssrc) : std::nullopt,
+                         protected_floor() ? &mcvideo_protection_ : nullptr)) {
+    response.status_code = 488;
+    return response;
+  }
   auto answer = mcvideo_call_->local;
 
   // TS 24.281 clause 4.7.1: protected media only with the matching key: the GMK in a group call.
@@ -376,6 +386,17 @@ bool Client::mcvideo_media(std::string_view dialog, const MediaDescription &medi
   if (!mcvideo_call_ || mcvideo_call_->dialog != dialog) return false;
   if (media.control != mcvideo_call_->local.control || !media.video)
     throw std::runtime_error("MCVideo call without MCVideo media");
+  // TS 24.581 clause 4.3.3.1: the server's SSRC for this client's transmission control messages; refused when it is
+  // this client's own or, under the MCVideo CSK, one already used for another stream (mcx::floor_ssrc_refused, RFC
+  // 7714 section 8.4, RFC 3711 section 9.1); the call's own SSRC again (a re-INVITE, a refresh) is the stream going
+  // on. The refusal ends this MCVideo call and its dialog (the media callback in client.cpp), as check_remote does
+  // for an MCPTT call.
+  if (media.control != MediaControl::none &&
+      (std::exchange(mcvideo_refuse_control_ssrc_, false) ||
+       floor_ssrc_refused(media.floor_ssrc, mcvideo_call_->local.floor_ssrc,
+                          mcvideo_call_->remote ? std::optional(mcvideo_call_->remote->floor_ssrc) : std::nullopt,
+                          protected_floor() ? &mcvideo_protection_ : nullptr)))
+    throw std::runtime_error("directional transmission control SSRC collision");
   mcvideo_call_->remote = media;
   if (!mcvideo_call_->early_control.empty())
     schedule([this, generation = mcvideo_call_->generation] {
@@ -415,7 +436,7 @@ bool Client::mcvideo_call_state(std::string_view dialog, SipCallState state) {
       mcvideo_alias_call_ = {{"generation", mcvideo_call_->generation},
                              {"alias", mcvideo_call_->called_alias},
                              {"mode", mcvideo_call_->mode}};
-    mcvideo_end_call("disconnected");
+    mcvideo_end_call("disconnected", true);
   }
   return true;
 }
@@ -501,9 +522,12 @@ SipResponse Client::mcvideo_conference_notify(const SipMessage &message) {
 //------------------------------------------------------------------------------
 // Helper: end the MCVideo call: keep its figures in mcvideo_last_call_, drop its PCK and retire its conference
 // subscription.
-void Client::mcvideo_end_call(const std::string &reason) {
+void Client::mcvideo_end_call(const std::string &reason, bool dialog_ended) {
   if (!mcvideo_call_) return;
   auto &call = *mcvideo_call_;
+  // [dialog_ended]: the SIP stack reported the dialog's end; otherwise the dialog stays the MCVideo service's until it
+  // does (mcvideo_closing_).
+  if (!dialog_ended && !call.dialog.empty()) mcvideo_closing_.insert(call.dialog);
   mcvideo_last_call_ = {{"group", call.group},
                         {"type", call.type},
                         {"video_mode", call.video_mode},
@@ -786,9 +810,16 @@ void Client::mcvideo_tick(std::uint64_t now) {
   for (const auto &payload : video::packetize(unit)) {
     RtpPacket rtp{
         call.remote->video->payload_type, payload.marker, call.sequence++, timestamp, call.video_ssrc, payload.bytes};
-    const auto bytes = encode_rtp(rtp);
-    call.video->send(call.local.protected_media ? mcvideo_protection_.protect_media(bytes, mcvideo_user()) : bytes,
-                     server_target(call.remote->address, call.remote->video->port), call.remote->video->port);
+    auto bytes = encode_rtp(rtp);
+    if (call.local.protected_media) try {
+        bytes = mcvideo_protection_.protect_media(bytes, mcvideo_user());
+      } catch (const PacketKeyExpired &) {
+        // TS 33.180 annex E.6.10: past the PCK's Expiry time the packet is not sent (never in the clear); the call
+        // itself is left as it is.
+        status_["mcvideo_key_expired_packets"] = status_.value("mcvideo_key_expired_packets", 0ULL) + 1;
+        continue;
+      }
+    call.video->send(bytes, server_target(call.remote->address, call.remote->video->port), call.remote->video->port);
   }
   ++call.sent;
   // The sender's own reconstruction: what a receiver must show for this timestamp.

@@ -144,7 +144,9 @@ std::pair<std::string, std::string> Client::affiliation_subscribe_body() {
 // status subscription (clause 9.2.1.3), then the group key subscription.
 void Client::authorize() {
   if (logged_off_) return;
-  if (keys_ && (protected_media() || protected_floor())) {
+  // TS 24.379 clause 7.2.2 step 3: a CSK for media and floor protection and for XML confidentiality or integrity
+  // protection.
+  if (keys_ && (protected_media() || protected_floor() || xml_protection() || integrity_protection())) {
     auto [key, upload] = keys_->make_csk(service());
     protection_.set_floor(key);
     csk_upload_ = std::move(upload);

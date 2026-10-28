@@ -4,10 +4,13 @@
 
 package org.openmcx.client.security
 
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonObject
 import java.math.BigInteger
 import java.security.KeyFactory
 import java.security.PublicKey
 import java.security.Signature
+import java.security.interfaces.RSAPublicKey
 import java.security.spec.RSAPublicKeySpec
 import java.util.Base64
 
@@ -22,14 +25,22 @@ data class Jwk(val kid: String?, val n: String, val e: String) {
 
 /** A compact JWS (RFC 7515) with its decoded header and claims (as JSON text, parsed by the caller). */
 class Jwt(val headerJson: String, val claimsJson: String, private val signingInput: ByteArray, private val signature: ByteArray) {
-    /** Verify an RS256 signature with one of [keys], chosen by `kid` when the header names one. */
+    /**
+     * Verify an RS256 signature with one of [keys], chosen by `kid` when the header names one. RFC 7518 §3.3: "A key of
+     * size 2048 bits or larger MUST be used". RFC 7515 §4.1.11: this verifier understands no extension, so a header
+     * with "crit" makes the JWS invalid.
+     */
     fun verifyRs256(keys: List<Jwk>, kid: String?, alg: String?) {
         if (alg != "RS256") throw JwtError("unsupported JWS algorithm $alg")
+        val header = runCatching { Json.parseToJsonElement(headerJson).jsonObject }.getOrNull() ?: throw JwtError("malformed JWS header")
+        if ("crit" in header) throw JwtError("critical header parameter not understood")
         val candidates = if (kid != null) keys.filter { it.kid == kid } else keys
         if (candidates.isEmpty()) throw JwtError("no key for kid $kid")
         val ok = candidates.any { key ->
+            val publicKey = key.publicKey()
+            if ((publicKey as RSAPublicKey).modulus.bitLength() < 2048) throw JwtError("RSA key shorter than 2048 bits")
             Signature.getInstance("SHA256withRSA").run {
-                initVerify(key.publicKey()); update(signingInput); verify(signature)
+                initVerify(publicKey); update(signingInput); verify(signature)
             }
         }
         if (!ok) throw JwtError("bad JWS signature")

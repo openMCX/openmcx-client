@@ -80,6 +80,9 @@ void Client::adhoc_call(const std::string &arguments) {
   info.participant_criteria = criteria; // TS 24.379 clause 17.2.2.1.1 step 12
   auto parts = info_parts(info);
   if (!targets.empty()) parts.push_back({resource_lists_mime, resource_list_xml(targets)});
+  // TS 24.379 clause 17.2.2.1.1 step 14: "if an implicit floor request is required".
+  const auto implicit = implicit_choice();
+  prepare_implicit_speech(implicit);
   local_.floor_priority.reset();
   local_.floor_ssrc = random_ssrc();
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
@@ -88,22 +91,24 @@ void Client::adhoc_call(const std::string &arguments) {
   call_type_ = "adhoc";
   call_group_.clear();
   status_["last_call_failure"] = nullptr;
-  dialog_ = sip_.invite(
-      service(), local_, parts,
-      [this](const SipResponse &response) {
-        if (response.status_code >= 200 && response.status_code < 300) {
-          // The server returns the generated ad hoc group identity (TS 24.379 clause 17.2.2.1.1, 2xx step 4).
-          for (const auto &part : response.parts)
-            if (part.content_type == mcptt_mime) call_group_ = parse_mcptt_info(part.body).calling_group;
-          remember_session(response.headers);
-        } else if (response.status_code >= 300) {
-          status_["last_call_failure"] = {{"status", response.status_code},
-                                          {"warning", std::string(get_header(response.headers, "Warning"))}};
-          adhoc_priority_ = "normal";
-          failure("ad hoc call setup: " + std::to_string(response.status_code));
-        }
-      },
-      headers);
+  invite_with_implicit(implicit.requested, true, [&] {
+    dialog_ = sip_.invite(
+        service(), local_, parts,
+        [this](const SipResponse &response) {
+          if (response.status_code >= 200 && response.status_code < 300) {
+            // The server returns the generated ad hoc group identity (TS 24.379 clause 17.2.2.1.1, 2xx step 4).
+            for (const auto &part : response.parts)
+              if (part.content_type == mcptt_mime) call_group_ = parse_mcptt_info(part.body).calling_group;
+            remember_session(response.headers);
+          } else if (response.status_code >= 300) {
+            status_["last_call_failure"] = {{"status", response.status_code},
+                                            {"warning", std::string(get_header(response.headers, "Warning"))}};
+            adhoc_priority_ = "normal";
+            failure("ad hoc call setup: " + std::to_string(response.status_code));
+          }
+        },
+        headers);
+  });
   status_["call_state"] = "calling";
   event("adhoc_call_requested", {{"targets", targets}, {"priority", priority}});
 }

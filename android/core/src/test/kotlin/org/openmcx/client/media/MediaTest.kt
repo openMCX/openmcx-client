@@ -29,6 +29,19 @@ class MediaTest {
         assertEquals(p, RtpPacket.parse(bytes))
     }
 
+    /** RFC 3550 §5.3.1: a header extension (X bit, profile word, length in 32-bit words) is skipped. */
+    @Test
+    fun rtpSkipsTheHeaderExtension() {
+        val header = byteArrayOf(0x90.toByte(), 97, 0, 7, 0, 0, 0, 160.toByte(), 0x12, 0x34, 0x56, 0x78)
+        val extension = byteArrayOf(0xbe.toByte(), 0xde.toByte(), 0, 2) + ByteArray(8) { 0x55 }
+        val payload = byteArrayOf(1, 2, 3)
+        val p = RtpPacket.parse(header + extension + payload)!!
+        assertEquals(97, p.payloadType)
+        assertEquals(7, p.sequence)
+        assertArrayEquals(payload, p.payload)
+        assertNull(RtpPacket.parse(header + byteArrayOf(0xbe.toByte(), 0xde.toByte(), 0, 9)))
+    }
+
     @Test
     fun rtpRejectsOtherVersionsAndSpotsRtcp() {
         assertNull(RtpPacket.parse(ByteArray(12)))

@@ -44,14 +44,14 @@ Lab values (fixture `a1`, user alice). The same pattern applies to bob, client-c
 ## 0. Start-up order (what OpenMCX actually requires)
 
 ```
- 1  HTTPS  GET  idms  /.well-known/openid-configuration
- 2  HTTPS  GET  idms  /authorize?...            -> JSON {request_id}
- 3  HTTPS  POST idms  /login                    -> 302 Location: redirect_uri?code&state
- 4  HTTPS  POST idms  /token                    -> access_token, id_token (no refresh_token)
- 5  HTTPS  GET  idms  /jwks                     -> verify id_token (RS256)
- 6  HTTPS  GET  proxy /cms/xcap-root/3gpp.mcptt.user-profile/users/<MCPTT-ID>/index
- 7  HTTPS  GET  proxy /gms/xcap-root/org.openmobilealliance.groups/global/byGroupID/<group>   (per group)
- 8  TLS (mutual) to sip-core:5061; REGISTER -> 401 -> REGISTER+Authorization -> 200
+ 1  TLS (mutual) to sip-core:5061; REGISTER -> 401 -> REGISTER+Authorization -> 200
+ 2  HTTPS  GET  idms  /.well-known/openid-configuration
+ 3  HTTPS  GET  idms  /authorize?...            -> HTML user authentication form (Accept: text/html)
+ 4  HTTPS  POST idms  <form action> (/userauth) -> 302 Location: redirect_uri?code&state
+ 5  HTTPS  POST idms  /token                    -> access_token, id_token (no refresh_token)
+ 6  HTTPS  GET  idms  /jwks                     -> verify id_token (RS256)
+ 7  HTTPS  GET  proxy /cms/xcap-root/3gpp.mcptt.user-profile/users/<MCPTT-ID>/index
+ 8  HTTPS  GET  proxy /gms/xcap-root/org.openmobilealliance.groups/global/byGroupID/<group>   (per group)
  9  PUBLISH poc-settings  -> sip:mcptt@   (407, retry) -> 200 + SIP-ETag           MCPTT authorised
 10  SUBSCRIBE presence    -> sip:mcptt@   -> 200 (Expires: 3600) ; NOTIFY (empty status)
 11  PUBLISH presence      -> sip:mcptt@   -> 200 + SIP-ETag ; NOTIFY status="affiliated"   MCPTT ready
@@ -59,6 +59,10 @@ Lab values (fixture `a1`, user alice). The same pattern applies to bob, client-c
 13  SUBSCRIBE presence    -> sip:mcdata@  -> 200 (Expires: 4294967295) ; NOTIFY (current/implicit groups)
 14  PUBLISH presence      -> sip:mcdata@  -> 200 + SIP-ETag ; NOTIFY status="affiliated", echoed p-id   MCData ready
 ```
+
+TS 33.180 §5.1.3.2.1: the REGISTER (step 1) is not delayed for lack of an access token; the sign-in (steps 2 to 8)
+follows it. Until the sign-in succeeds the client stays registered in the limited service state of §5.1.1 (status
+`limitedService`, phase `limited-service`) and tries again after the start-up back-off or on Retry now.
 
 Hard ordering constraints enforced by the servers:
 - Step 9 must precede 10 and 11. Without service authorisation, `authenticated()` throws and the MCPTT server answers
@@ -101,18 +105,21 @@ There is no `refresh_token` grant, no `userinfo_endpoint` and no `end_session_en
 | `scope` | must contain the word `openid`; nothing else is checked | `openid`, then for each configured service (`ptt`, `data`, `video`) `3gpp:mc:<s>_service`, `3gpp:mc:<s>_config_management_service` and `3gpp:mc:<s>_group_management_service`; when protected, `3gpp:mc:ptt_key_management_service` and `3gpp:mc:video_key_management_service` (TS 33.180 table B.4.2.2-1) |
 | `state` | non-empty, ≤1024 | random |
 | `nonce` | non-empty, ≤1024 (**mandatory**, stricter than OIDC for code flow) | random |
-| `acr_values` | accepted, not checked | `3gpp:acr:password` (REQUIRED by TS 33.180 table B.4.2.2-1) |
+| `acr_values` | non-empty (REQUIRED by TS 33.180 table B.4.2.2-1; else `invalid_request` to the redirect URI) | `3gpp:acr:password` |
 | `code_challenge` | exactly 43 base64url chars | `BASE64URL(SHA256(verifier))` |
 | `code_challenge_method` | = `S256` (**mandatory**) | `S256` |
 
-**Deviation:** the response is JSON, not an HTML login page or a redirect:
+With `Accept: text/html` (sent by `IdmsClient.loginDirect`) the answer is the HTML page with the user
+authentication form (TS 37.579-1 table 5.3.2.3.2-5: inputs `user` and `password`, POST to `/userauth?request_id=…`);
+`loginDirect` fills and posts it as the Linux client does, with the cookies the page set. Without it the answer is
+JSON, used only as the fallback for the IdMS of OpenMCX 1.0.0:
 ```
 HTTP 200  Content-Type: application/json
 {"request_id":"9Zkb5IwWC-adZAKuEFn0gGIrjzlFHvCo1rKoLHQFQ04"}
 ```
 Errors: 400 `{"error":"invalid_request"}`; 429 `temporarily_unavailable`. The `request_id` is valid for 5 min.
 
-### 1.3 Non-interactive login: `POST /login` (`svc/idms.go:85-125`)
+### 1.3 Fallback login (OpenMCX 1.0.0 IdMS only): `POST /login` (`svc/idms.go:85-125`)
 ```
 POST /login HTTP/1.1
 Host: idms:8443
@@ -823,7 +830,7 @@ XML (`src/protocol.cpp:50-62,80-109`, `src/mcdata.cpp:29-68`):
 
 | # | Issue | Impact on the Android client |
 |---|---|---|
-| 1 | `/authorize` returns JSON `{request_id}` and login is a proprietary `POST /login`. There is no browser page. | **An AppAuth Custom Tab flow cannot work against this IdMS.** Implement the direct HTTP flow as the lab login and keep AppAuth for a real IdMS. The redirect URI is fixed to `http://127.0.0.1:8900/callback`, so never follow it. |
+| 1 | `/authorize` answers `Accept: text/html` with the user authentication form; the JSON `{request_id}` and `POST /login` remain only for the OpenMCX 1.0.0 IdMS. | The lab login (`loginDirect`) fills the form as the Linux client does and falls back to `POST /login`. The redirect URI is fixed to `http://127.0.0.1:8900/callback`, so never follow it. |
 | 2 | No refresh token; TTL 3600 s | Re-login every hour with stored credentials, then re-authorise both services. If this is missed, the servers de-authorise silently. |
 | 3 | The MC client ID is provisioned and bound in the token | Use `client_id` from provisioning or the token for `+sip.instance`, the tuple id, `<…-client-id>` and the `<entity id>`. A different value gives 403. |
 | 4 | Mutual TLS is required at the SIP core | The Keystore must hold the client certificate and key (RSA, PKCS#8). Lab certificates last 30 days. |

@@ -259,9 +259,8 @@ const EnhancedStatusValues &Client::mcdata_group_status_values(const std::string
     if (const auto found = mcdata_enhanced_values_.find(group); found != mcdata_enhanced_values_.end())
       return found->second;
   auto document = http_.request("GET",
-                                cfg_.at("endpoints").at("gms").get<std::string>() +
-                                    "/xcap-root/org.openmobilealliance.groups/global/byGroupID/" + url_encode(group),
-                                {}, {{"Authorization", "Bearer " + token_}});
+                                groups_xcap() + "/global/byGroupID/" + url_encode(group),
+                                {}, {{"Authorization", bearer()}});
   if (document.status != 200)
     throw std::runtime_error("group document retrieval failed: " + std::to_string(document.status));
   return mcdata_enhanced_values_[group] = group_enhanced_status(document.body);

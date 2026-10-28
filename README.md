@@ -20,7 +20,7 @@ migration to a partner system are not part of it. The servers are in
 [openmcx-server](https://github.com/openMCX/openmcx-server) and MCX Admin, which provisions and activates the
 clients, in [openmcx-admin](https://github.com/openMCX/openmcx-admin).
 
-**Containerised** Linux client and dispatcher (Docker); the **Android** app for Android 11 and later (tested on Android 13 and 16 phones), built in Docker
+**Containerised** Linux client and dispatcher (Docker); the **Android** app for Android 11 and later (tested on Android 13 and 16 phones, an Android 11 emulator and Android 12 containers), built in Docker
 too ([building](docs/DEVELOPER_GUIDE.md#81-build)).
 
 **Try it**: [Tutorial 1: MCX over WLAN with the Android app](https://github.com/openMCX/openmcx-server/blob/main/tutorials/end-to-end/01-mcx-over-wlan-android/README.md)

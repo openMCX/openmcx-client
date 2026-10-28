@@ -100,7 +100,9 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
         "tls": {"ca": "ca.crt", "cert": "client.crt", "key": "client.key"},
         # No username or password where the lab's IdMS signs users in on its own page (a Keycloak lab).
         "idms": {"issuer": oauth["issuer"], "client_id": oauth["client_id"], "redirect_uri": oauth["redirect_uri"],
-                 **{key: oauth[key] for key in ("username", "password") if key in oauth}},
+                 # TS 24.484 clause 7.2.2.7 item 4: the IdMS endpoints, where the configuration names them.
+                 **{key: oauth[key] for key in ("username", "password", "idms_auth_endpoint", "idms_token_endpoint",
+                                                "jwks_uri") if key in oauth}},
         "cms": ref["endpoints"]["cms"],
         "gms": ref["endpoints"]["gms"],
         "mcptt": {"user_id": mcptt["user_id"], "psi": mcptt["service_uri"], "groups": [mcptt["group_id"]],
@@ -229,6 +231,10 @@ def keycloak_at_host(fixture: Path, compose: dict, hostip: str, port: int) -> No
             cfg["common"]["issuer"] = issuer
         elif "oauth" in cfg:
             cfg["oauth"]["issuer"] = issuer
+            # Another IdMS: its endpoints come from its discovery document (no configured <idms-auth-endpoint>,
+            # <idms-token-endpoint> or JWKS URI of the lab IdMS).
+            for key in ("idms_auth_endpoint", "idms_token_endpoint", "jwks_uri"):
+                cfg["oauth"].pop(key, None)
         else:
             continue
         path.write_text(json.dumps(cfg, indent=2) + "\n")
@@ -762,7 +768,7 @@ def log_off_phones(name: str) -> None:
         try:
             answer = Device(name, role).control("log-off", timeout=40)
             result = answer.get("result") or {}
-            print(f"{role}: logged off (servers {result.get('log_off')}, de-REGISTER {result.get('deregistered')})"
+            print(f"{role}: logged off (MC log-off {result.get('log_off')}, SIP de-REGISTER {result.get('deregistered')})"
                   if answer.get("ok") else f"{role}: not logged off: {answer.get('error', answer)}")
         except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as e:
             print(f"{role}: not logged off ({e})")

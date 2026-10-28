@@ -5,6 +5,7 @@
 package org.openmcx.client.mcvideo
 
 import org.openmcx.client.security.KeyMessage
+import org.openmcx.client.security.Mikey
 import org.openmcx.client.security.SecureStream
 import org.openmcx.client.security.SecurityMaterial
 import org.openmcx.client.security.SrtpError
@@ -16,11 +17,19 @@ import org.openmcx.client.security.SrtpKeys
  * (the initiator's streams on CS-ID 2, the receiver's on 3), a group call's under the group's GMK
  * ([Group]). One SRTP context per stream; a packet that fails to authenticate is dropped and creates no
  * context. Null keys leave those packets in the clear.
+ *
+ * TS 33.180 E.6.10: "The 'Expiry time' element shall define the time in UTC at which the associated key shall no
+ * longer be used ... A value of 0 shall imply the key shall not expire." Each key ([csk], the media key [mediaKey],
+ * the GMK of [Group]) is checked at every packet against [clock] (Unix seconds): past its Expiry time, or revoked
+ * (E.6.9 Status bit 0), protect returns null (the packet is not sent) and unprotect returns null (dropped), never the
+ * clear packet. A key without Key Parameters has no Expiry time. The call itself is left as it is.
  */
 open class CallProtection(
-    csk: KeyMessage?,
+    private val csk: KeyMessage?,
     private val sentMedia: SecurityMaterial?,
     private val receivedMedia: SecurityMaterial?,
+    private val mediaKey: KeyMessage? = null,
+    private val clock: () -> Long = unixNow,
 ) {
     private val floor: SecurityMaterial? = csk?.let { SrtpKeys.floorControl(it, mcvideo = true) }
     private val floors = HashMap<Long, SecureStream>()
@@ -37,6 +46,12 @@ open class CallProtection(
 
     open val protectsMedia get() = sentMedia != null
     val protectsControl get() = floor != null
+
+    /** Whether [key] may be used now (TS 33.180 E.6.9, E.6.10): not revoked and before a non-zero Expiry time. */
+    protected fun inUse(key: KeyMessage?): Boolean {
+        val p = key?.properties ?: return true
+        return p.status and 1L != 0L && (p.expiry == 0L || clock() < p.expiry)
+    }
 
     protected fun u32(p: ByteArray, at: Int) = if (p.size < at + 4) -1L else
         ((p[at].toLong() and 0xff) shl 24) or ((p[at + 1].toLong() and 0xff) shl 16) or ((p[at + 2].toLong() and 0xff) shl 8) or (p[at + 3].toLong() and 0xff)
@@ -58,21 +73,35 @@ open class CallProtection(
         return use(map, ssrc, { SecureStream(material, ssrc) }, action)
     }
 
-    open fun protectRtp(packet: ByteArray): ByteArray? = sentMedia?.let { on(sent, it, packet, 8) { s -> s.protectRtp(packet) } } ?: packet.takeIf { sentMedia == null }
+    open fun protectRtp(packet: ByteArray): ByteArray? = sentMedia?.let {
+        if (!inUse(mediaKey)) null else on(sent, it, packet, 8) { s -> s.protectRtp(packet) }
+    } ?: packet.takeIf { sentMedia == null }
 
-    open fun unprotectRtp(packet: ByteArray): ByteArray? = receivedMedia?.let { on(received, it, packet, 8) { s -> s.unprotectRtp(packet) } } ?: packet.takeIf { receivedMedia == null }
+    open fun unprotectRtp(packet: ByteArray): ByteArray? = receivedMedia?.let {
+        if (!inUse(mediaKey)) null else on(received, it, packet, 8) { s -> s.unprotectRtp(packet) }
+    } ?: packet.takeIf { receivedMedia == null }
 
-    fun protectControl(packet: ByteArray): ByteArray? = floor?.let { on(floors, it, packet, 4) { s -> s.protectRtcp(packet) } } ?: packet.takeIf { floor == null }
+    fun protectControl(packet: ByteArray): ByteArray? = floor?.let {
+        if (!inUse(csk)) null else on(floors, it, packet, 4) { s -> s.protectRtcp(packet) }
+    } ?: packet.takeIf { floor == null }
 
-    fun unprotectControl(packet: ByteArray): ByteArray? = floor?.let { on(floors, it, packet, 4) { s -> s.unprotectRtcp(packet) } } ?: packet.takeIf { floor == null }
+    fun unprotectControl(packet: ByteArray): ByteArray? = floor?.let {
+        if (!inUse(csk)) null else on(floors, it, packet, 4) { s -> s.unprotectRtcp(packet) }
+    } ?: packet.takeIf { floor == null }
 
     /**
      * A group call under the group's GMK (TS 33.180 7.3, E.3.2), [gmk] carrying the GMK-ID: each sender's
      * streams keyed by its GUK-ID on CS-ID 5, MKI GMK-ID ‖ GUK-ID and the ROC in every packet. A received
      * packet's sender is the one of [senders] (the transmitter first) whose GUK-ID its MKI carries.
      */
-    class Group(csk: KeyMessage?, private val gmk: KeyMessage, own: String, private val senders: () -> Collection<String>) :
-        CallProtection(csk, null, null) {
+    class Group(
+        csk: KeyMessage?,
+        private val gmk: KeyMessage,
+        own: String,
+        clock: () -> Long = unixNow,
+        private val senders: () -> Collection<String>,
+    ) :
+        CallProtection(csk, null, null, gmk, clock) {
         private val sentMaterial = SrtpKeys.groupCall(gmk, gmk.csbId, SrtpKeys.gukId(gmk.key, gmk.csbId, own), mcvideo = true)
         private val sent = HashMap<Long, SecureStream>()
         private val received = HashMap<Long, SecureStream>()
@@ -82,11 +111,13 @@ open class CallProtection(
         val gmkId get() = gmk.csbId
 
         override fun protectRtp(packet: ByteArray): ByteArray? {
+            if (!inUse(gmk)) return null
             val ssrc = u32(packet, 8)
             return use(sent, ssrc, { SecureStream(sentMaterial, ssrc) }) { it.protectRtp(packet) }
         }
 
         override fun unprotectRtp(packet: ByteArray): ByteArray? {
+            if (!inUse(gmk)) return null
             if (packet.size < 12 + 16 + 12) { failures++; return null }
             val mki = packet.size - 12
             if (u32(packet, mki) != gmk.csbId) { failures++; return null }
@@ -101,6 +132,9 @@ open class CallProtection(
     }
 
     companion object {
+        /** The clock of the key times: Unix seconds. */
+        val unixNow: () -> Long = { Mikey.nowNtp() - Mikey.NTP_EPOCH }
+
         @Volatile private var warm = false
 
         /** Load and exercise AES-GCM and the key derivation once per process. */
@@ -113,7 +147,13 @@ open class CallProtection(
         }
 
         /** A private (one-to-one) call under [pck], whose initiator we are or not. */
-        fun privateCall(csk: KeyMessage?, pck: KeyMessage, localInitiator: Boolean) = CallProtection(csk,
-            SrtpKeys.privateCall(pck, fromInitiator = localInitiator, mcvideo = true), SrtpKeys.privateCall(pck, fromInitiator = !localInitiator, mcvideo = true))
+        fun privateCall(csk: KeyMessage?, pck: KeyMessage, localInitiator: Boolean, clock: () -> Long = unixNow) =
+            CallProtection(
+                csk,
+                SrtpKeys.privateCall(pck, fromInitiator = localInitiator, mcvideo = true),
+                SrtpKeys.privateCall(pck, fromInitiator = !localInitiator, mcvideo = true),
+                pck,
+                clock,
+            )
     }
 }

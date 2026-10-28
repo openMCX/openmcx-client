@@ -73,6 +73,15 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
     mepp_ = 4;
     if (alert) mpea_ = 2;
   }
+  // TS 24.379 clause 11.1.1.2.1.1 step 13: "if implicit floor control is required"; a call without floor control
+  // has no floor control parameters (TS 24.380 clause 14.2.6).
+  const bool commanded = next_implicit_.has_value();
+  auto implicit = implicit_choice();
+  if (without_floor && implicit.requested && commanded)
+    throw std::runtime_error("a private call without floor control has no implicit floor request");
+  if (without_floor) implicit = {};
+  redirect_implicit_ = implicit;
+  prepare_implicit_speech(implicit);
   local_.floor_priority.reset();
   local_.floor_ssrc = random_ssrc();
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
@@ -96,9 +105,11 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
     auto &character = local_.key_mgmt[local_.key_mgmt.size() / 2];
     character = character == 'A' ? 'B' : 'A';
   }
-  dialog_ = sip_.invite(
-      service(), local_, parts,
-      [this, target](const SipResponse &response) { private_call_response(target, response); }, headers);
+  invite_with_implicit(implicit.requested, true, [&] {
+    dialog_ = sip_.invite(
+        service(), local_, parts,
+        [this, target](const SipResponse &response) { private_call_response(target, response); }, headers);
+  });
   bind_private_key(key, true);
   status_["call_state"] = "calling";
   event("private_call_requested", {{"target", target}, {"mode", mode}, {"emergency", emergency}, {"alert", alert}});
@@ -229,6 +240,7 @@ void Client::private_call_alias_redirect(const SipResponse &response) {
   schedule([this, selected, called, mode = mode_for_redirect_] {
     if (!dialog_.empty()) return;
     pending_called_alias_ = called;
+    next_implicit_ = redirect_implicit_;
     private_call(selected + " " + mode);
   });
 }
@@ -253,6 +265,7 @@ void Client::private_call_kms_redirect(const std::string &target, const SipRespo
       if (!dialog_.empty()) return;
       forwarded_kms_ = {target, kms};
       try {
+        next_implicit_ = redirect_implicit_;
         private_call(target + " " + mode);
       } catch (const std::exception &error) {
         failure(error.what());
@@ -310,6 +323,10 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
     mepp_ = 4;
     if (alert) mpea_ = 2;
   }
+  // TS 24.379 clause 11.1.1.2.1.1 step 13 (the first-to-answer call's INVITE as well): "if implicit floor control
+  // is required".
+  const auto implicit = implicit_choice();
+  prepare_implicit_speech(implicit);
   local_.floor_priority.reset();
   local_.floor_ssrc = random_ssrc();
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
@@ -325,25 +342,27 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
   local_.key_mgmt.clear();
   awaiting_answer_key_ = protected_media();
   answer_key_senders_ = to_alias ? std::vector<std::string>{} : targets;
-  dialog_ = sip_.invite(
-      service(), local_, parts,
-      [this](const SipResponse &response) {
-        if (response.status_code == 183 && status_.value("call_state", "") == "calling")
-          status_["call_state"] = "progress";
-        if (response.status_code >= 200 && response.status_code < 300) {
-          for (const auto &part : response.parts)
-            if (part.content_type == mcptt_mime) private_peer_ = parse_mcptt_info(part.body).called_party;
-          remember_session(response.headers);
-          private_emergency_granted(response); // TS 24.379 clause 6.2.8.3.4
-          event("first_to_answer_answered", {{"called_party", private_peer_}});
-        } else if (response.status_code >= 300) {
-          private_emergency_refused(); // TS 24.379 clause 6.2.8.3.5
-          status_["last_call_failure"] = {{"status", response.status_code},
-                                          {"warning", std::string(get_header(response.headers, "Warning"))}};
-          failure("first-to-answer call setup: " + std::to_string(response.status_code));
-        }
-      },
-      headers);
+  invite_with_implicit(implicit.requested, true, [&] {
+    dialog_ = sip_.invite(
+        service(), local_, parts,
+        [this](const SipResponse &response) {
+          if (response.status_code == 183 && status_.value("call_state", "") == "calling")
+            status_["call_state"] = "progress";
+          if (response.status_code >= 200 && response.status_code < 300) {
+            for (const auto &part : response.parts)
+              if (part.content_type == mcptt_mime) private_peer_ = parse_mcptt_info(part.body).called_party;
+            remember_session(response.headers);
+            private_emergency_granted(response); // TS 24.379 clause 6.2.8.3.4
+            event("first_to_answer_answered", {{"called_party", private_peer_}});
+          } else if (response.status_code >= 300) {
+            private_emergency_refused(); // TS 24.379 clause 6.2.8.3.5
+            status_["last_call_failure"] = {{"status", response.status_code},
+                                            {"warning", std::string(get_header(response.headers, "Warning"))}};
+            failure("first-to-answer call setup: " + std::to_string(response.status_code));
+          }
+        },
+        headers);
+  });
   status_["call_state"] = "calling";
   event("first_to_answer_requested", {{"targets", targets}, {"emergency", emergency}, {"alert", alert}});
 }
@@ -374,14 +393,12 @@ void Client::ambient_call(const std::string &arguments) {
   local_.floor_priority.reset();
   local_.floor_ssrc = random_ssrc();
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
-  // Steps 11 to 13 and clause 6.2.1 step c: an implicit floor request (local-init) or an
-  // implicit request to grant the floor to the invited user (remote-init).
-  local_.implicit_request = true;
   local_.direction = listening ? "recvonly" : "sendonly";
   floor_sequence_.reset();
   floor_timers_ = participant_timers();
+  // TS 24.380 clause 6.2.4.2.2 step 4: a local-init call enters 'U: pending Request' once its 200 (OK) accepts the
+  // implicit floor request (implicit_floor_answered); the listened-to user's speech is sent when granted.
   if (!listening) {
-    floor_timers_.expect_implicit_grant();
     transmit_ = ambient_audio();
     transmit_offset_ = 0;
   }
@@ -390,25 +407,29 @@ void Client::ambient_call(const std::string &arguments) {
   ambient_ = AmbientCall{"", type, listening ? "listening" : "listened-to", target, false, false, ""};
   status_["last_call_failure"] = nullptr;
   const auto key = offer_private_key(target);
-  dialog_ = sip_.invite(
-      service(), local_, parts,
-      [this](const SipResponse &response) {
-        if (response.status_code >= 300) {
-          status_["last_call_failure"] = {{"status", response.status_code},
-                                          {"warning", std::string(get_header(response.headers, "Warning"))}};
-          failure("ambient listening call setup: " + std::to_string(response.status_code));
-        }
-        if (!ambient_) return;
-        if (response.status_code == 183 && get_header(response.headers, "Alert-Info") == "<file:///dev/null>")
-          ambient_->null_alert = true;
-        if (response.status_code >= 200 && response.status_code < 300) {
-          ambient_->release_allowed =
-              get_header(response.headers, "Feature-Caps").find("g.3gpp.mcptt.ambient-listening-call-release") !=
-              std::string_view::npos;
-          event("ambient_call_answered", {{"role", ambient_->role}, {"release_allowed", ambient_->release_allowed}});
-        }
-      },
-      {{"Priv-Answer-Mode", "Auto"}}); // step 14
+  // Steps 11 to 13 and clause 6.2.1 step c: an implicit floor request (local-init) or an implicit request to grant
+  // the floor to the invited user (remote-init, not this client's own floor request).
+  invite_with_implicit(true, !listening, [&] {
+    dialog_ = sip_.invite(
+        service(), local_, parts,
+        [this](const SipResponse &response) {
+          if (response.status_code >= 300) {
+            status_["last_call_failure"] = {{"status", response.status_code},
+                                            {"warning", std::string(get_header(response.headers, "Warning"))}};
+            failure("ambient listening call setup: " + std::to_string(response.status_code));
+          }
+          if (!ambient_) return;
+          if (response.status_code == 183 && get_header(response.headers, "Alert-Info") == "<file:///dev/null>")
+            ambient_->null_alert = true;
+          if (response.status_code >= 200 && response.status_code < 300) {
+            ambient_->release_allowed =
+                get_header(response.headers, "Feature-Caps").find("g.3gpp.mcptt.ambient-listening-call-release") !=
+                std::string_view::npos;
+            event("ambient_call_answered", {{"role", ambient_->role}, {"release_allowed", ambient_->release_allowed}});
+          }
+        },
+        {{"Priv-Answer-Mode", "Auto"}}); // step 14
+  });
   bind_private_key(key, true);
   ambient_->dialog = dialog_;
 

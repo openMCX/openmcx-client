@@ -50,4 +50,22 @@ class ServiceConfigTest {
         assertEquals(true, ServiceConfig.floorQueue(doc("<floor-control-queue><depth>3</depth></floor-control-queue>")))
         assertEquals(false, ServiceConfig.floorQueue(doc("")))
     }
+
+    /** TS 24.379 §6.6.2.3.1 and §6.6.3.3.1: `<signalling-protection>`; an absent element means enabled. */
+    @Test
+    fun signallingProtection() {
+        val doc = { inner: String -> "<service-configuration-info xmlns=\"urn:3gpp:ns:mcpttServiceConfig:1.0\">" +
+            "<service-configuration-params domain=\"x\"><on-network>$inner$three</on-network></service-configuration-params>" +
+            "</service-configuration-info>" }
+        assertEquals(true to true, ServiceConfig.signallingProtection(doc("")))
+        assertEquals(false to false, ServiceConfig.signallingProtection(doc("<signalling-protection>" +
+            "<confidentiality-protection>false</confidentiality-protection><integrity-protection>0</integrity-protection>" +
+            "</signalling-protection>")))
+        assertEquals(false to true, ServiceConfig.signallingProtection(doc("<signalling-protection>" +
+            "<confidentiality-protection>false</confidentiality-protection></signalling-protection>")))
+        assertThrows(DocumentError::class.java) {
+            ServiceConfig.signallingProtection(doc("<signalling-protection><integrity-protection>yes</integrity-protection>" +
+                "</signalling-protection>"))
+        }
+    }
 }

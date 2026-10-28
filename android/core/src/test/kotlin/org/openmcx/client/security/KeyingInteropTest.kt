@@ -46,6 +46,19 @@ class KeyingInteropTest {
         assertEquals(v.getString("bob_keyprov_request").substringAfterLast('/'), KeyClient.urlEncode("sip:bob.mcvideo@mcx.test"))
     }
 
+    /** Table D.3.3.2-1, RFC 6090 6.2: the SSK in more octets (leading zeros) is the same key; a larger one is not. */
+    @Test fun sskWithLeadingZeroOctets() {
+        val xml = v.getString("bob_keyprov_xml")
+        val at = xml.indexOf('>', xml.indexOf("UserSigningKeySSK")) + 1
+        val request = v.getString("bob_keyprov_request")
+        val user = "sip:bob.mcvideo@mcx.test"
+        val plain = keys("bob", user)
+        fun parse(prefix: String) =
+            KmsDocuments.parseKeyProv(xml.substring(0, at) + prefix + xml.substring(at), kms, user, request, now)
+        for (prefix in listOf("00", "0000")) assertEquals(plain.ssk, parse(prefix).ssk)
+        assertTrue(runCatching { parse("01") }.isFailure)
+    }
+
     @Test fun opensTheServersGmkMessage() {
         val bob = keys("bob", "sip:bob.mcvideo@mcx.test")
         val message = KmsDocuments.parseGktp(v.getString("gktp_document"), v.getString("group"))
@@ -83,7 +96,7 @@ class KeyingInteropTest {
         val bob = keys("bob", "sip:bob.mcvideo@mcx.test")
         val pck = Mikey.newKey(1, now)
         val message = Mikey.create(kms, alice, bob.uri, pck)
-        val env = Mikey.envelope(message)
+        val env = Mikey.envelope(message, now)
         assertEquals(alice.uri, env.initiator); assertEquals(bob.uri, env.receiver); assertEquals(pck.csbId, env.csbId)
         val opened = Mikey.open(kms, bob, alice.uri, message, now + 10)
         assertArrayEquals(pck.key, opened.key)

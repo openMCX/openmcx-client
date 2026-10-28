@@ -136,6 +136,28 @@ object ServiceConfig {
         return root.descendants("floor-control-queue").any()
     }
 
+    /**
+     * TS 24.379 §6.6.2.3.1 and §6.6.3.3.1 (TS 24.281 the same, TS 24.282 §6.5.2.3.1 and §6.5.3.3.1): the
+     * `<confidentiality-protection>` and `<integrity-protection>` of `<signalling-protection>` in `<on-network>`;
+     * protection is enabled when the element is "true" or absent (TS 24.484 §8.4.2.7 NOTE 4, default "true"). Returns
+     * (confidentiality, integrity).
+     */
+    fun signallingProtection(text: String): Pair<Boolean, Boolean> {
+        val root = Xml.parse(text)
+        if (root.localName != "service-configuration-info" || root.namespaceURI?.endsWith("ServiceConfig:1.0") != true)
+            throw DocumentError("not a service configuration document")
+        val signalling = root.descendants("on-network").firstOrNull()?.descendants("signalling-protection")?.firstOrNull()
+        fun enabled(name: String): Boolean {
+            val value = signalling?.descendants(name)?.firstOrNull()?.text()?.trim() ?: return true
+            return when (value) {
+                "true", "1" -> true
+                "false", "0" -> false
+                else -> throw DocumentError("<$name> is not a boolean: $value")
+            }
+        }
+        return enabled("confidentiality-protection") to enabled("integrity-protection")
+    }
+
     fun resourcePriorities(text: String): Map<String, String> {
         val root = Xml.parse(text)
         if (root.localName != "service-configuration-info" || root.namespaceURI?.endsWith("ServiceConfig:1.0") != true)
@@ -151,7 +173,11 @@ object ServiceConfig {
     }
 }
 
-/** XCAP retrieval (RFC 4825 §7.3) of the profile and group documents, with the access token (TS 24.481 §6.3.3). */
+/**
+ * XCAP retrieval (RFC 4825 §7.3) of the profile and group documents, with the access token (TS 24.481 §6.3.3).
+ * [cms] and [gms] are the `<CMS-XCAP-root-URI>` and `<GMS-XCAP-root-URI>` (TS 24.484 §7.2.2.7 items 7 and 8), used as
+ * given.
+ */
 class DocumentClient(private val http: HttpClient, private val cms: String, private val gms: String) {
     private val etags = mutableMapOf<String, Pair<String, String>>() // url -> (etag, body)
 
@@ -170,15 +196,15 @@ class DocumentClient(private val http: HttpClient, private val cms: String, priv
 
     /** TS 24.484 §8.3.1A: the user's MCPTT user profile document, mcptt-user-profile-<index>.xml. */
     suspend fun userProfile(mcpttId: String, index: Int, token: String): UserProfile =
-        UserProfile.parse(fetch("$cms/xcap-root/org.3gpp.mcptt.user-profile/users/${enc(mcpttId)}/mcptt-user-profile-$index.xml", token))
+        UserProfile.parse(fetch("$cms/org.3gpp.mcptt.user-profile/users/${enc(mcpttId)}/mcptt-user-profile-$index.xml", token))
 
     /** TS 24.484 §8.4.2.8 (§9.4.2.8, §10.4.2.8): the service configuration document of `mcptt`, `mcvideo` or `mcdata`. */
     suspend fun serviceConfiguration(service: String, token: String): String =
-        fetch("$cms/xcap-root/org.3gpp.$service.service-config/global/service-config.xml", token)
+        fetch("$cms/org.3gpp.$service.service-config/global/service-config.xml", token)
 
     suspend fun serviceResourcePriorities(service: String, token: String): Map<String, String> =
         ServiceConfig.resourcePriorities(serviceConfiguration(service, token))
 
     suspend fun group(groupId: String, token: String): GroupDocument =
-        GroupDocument.parse(fetch("$gms/xcap-root/org.openmobilealliance.groups/global/byGroupID/${enc(groupId)}", token))
+        GroupDocument.parse(fetch("$gms/org.openmobilealliance.groups/global/byGroupID/${enc(groupId)}", token))
 }

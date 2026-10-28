@@ -25,6 +25,17 @@ private class FakeIdms(var nonceOverride: String? = null, var stateOverride: Str
     var refreshIdToken = true
     var refreshNonce = true
     var rotate = true
+    /** The ID token's aud (JSON), its iat and further claims, and the token responses' token_type. */
+    var audience = "\"mcx-lab-client\""
+    var issuedAt = true
+    var extraClaims = ""
+    var tokenType = "Bearer"
+    /** The authorization endpoint answers a client accepting text/html with the user authentication form (as the
+     * OpenMCX IdMS and third-party ones do); false: with the request ID of the OpenMCX 1.0.0 IdMS only. */
+    var form = true
+    var cookie: String? = null
+    /** The discovery documents fetched. */
+    var discoveries = 0
     val issuer = "https://idms:8443"
     private val keys = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
     var pending: Map<String, String> = emptyMap()
@@ -36,6 +47,8 @@ private class FakeIdms(var nonceOverride: String? = null, var stateOverride: Str
         URLDecoder.decode(it.substringBefore('='), "UTF-8") to URLDecoder.decode(it.substringAfter('='), "UTF-8")
     }
 
+    private fun iat(now: Long) = if (issuedAt) """"iat":$now,""" else ""
+
     private fun jwt(claims: String): String {
         val input = b64urlEncode("""{"alg":"RS256","kid":"k1","typ":"JWT"}""".toByteArray()) + "." + b64urlEncode(claims.toByteArray())
         val sig = Signature.getInstance("SHA256withRSA").run { initSign(keys.private); update(input.toByteArray()); sign() }
@@ -44,10 +57,39 @@ private class FakeIdms(var nonceOverride: String? = null, var stateOverride: Str
 
     override suspend fun request(method: String, url: String, headers: Map<String, String>, body: ByteArray?): HttpResponse {
         val uri = URI(url)
-        return when (uri.path) {
+        // The TS 37.579-1 table 5.5.8.1-1 paths of the configured <idms-auth-endpoint> and <idms-token-endpoint>.
+        // The form's relative action resolves under /idms/ then.
+        val path = mapOf("/idms/auth" to "/authorize", "/idms/userauth" to "/userauth", "/idms/token" to "/token",
+            "/idms/keys" to "/jwks")[uri.path] ?: uri.path
+        if (path == "/.well-known/openid-configuration") discoveries++
+        return when (path) {
             "/.well-known/openid-configuration" -> ok("""{"issuer":"$issuer","authorization_endpoint":"$issuer/authorize",
                 "token_endpoint":"$issuer/token","jwks_uri":"$issuer/jwks"}""")
-            "/authorize" -> { pending = query(uri.rawQuery); ok("""{"request_id":"r1"}""") }
+            "/authorize" -> {
+                pending = query(uri.rawQuery)
+                if (!form || headers["Accept"]?.contains("text/html") != true) return ok("""{"request_id":"r1"}""")
+                // TS 37.579-1 table 5.3.2.3.2-5: the user authentication form, its action relative to the page.
+                HttpResponse(200, mapOf("Content-Type" to listOf("text/html; charset=utf-8"),
+                    "Set-Cookie" to listOf("AUTH_SESSION=s1; Path=/; Secure; HttpOnly")),
+                    """<!doctype html><html><head><style>p{color:red}</style></head><body><!-- <form> -->
+                    <form action="userauth?request_id=r1&amp;tab=1" method="POST">
+                    <input type="text" name="user"><input type="password" name="password">
+                    <input type="hidden" name="credentialId" value=""><input type="submit" value="Login">
+                    </form></body></html>""".toByteArray())
+            }
+            "/userauth" -> {
+                val fields = query(String(body!!))
+                if (method != "POST" || uri.rawQuery != "request_id=r1&tab=1" ||
+                    headers["Cookie"] != "AUTH_SESSION=s1" || fields.keys != setOf("user", "password", "credentialId"))
+                    return HttpResponse(400, emptyMap(), """{"error":"invalid_request"}""".toByteArray())
+                cookie = headers["Cookie"]
+                // RFC 6749 §4.1.2.1: a refused user goes back to the redirect URI with the error.
+                val signedIn = fields["user"] == "alice" && fields["password"] == "secret"
+                if (signedIn) code = "c1"
+                val result = if (signedIn) "code=c1" else "error=access_denied"
+                val state = stateOverride ?: pending["state"]
+                HttpResponse(302, mapOf("Location" to listOf("${pending["redirect_uri"]}?$result&state=$state")), ByteArray(0))
+            }
             "/login" -> {
                 val form = query(String(body!!))
                 if (form["password"] != "secret") return HttpResponse(401, emptyMap(), """{"error":"access_denied"}""".toByteArray())
@@ -61,19 +103,19 @@ private class FakeIdms(var nonceOverride: String? = null, var stateOverride: Str
                     if (rotate) refresh++
                     val now = System.currentTimeMillis() / 1000
                     val nonce = if (refreshNonce) """"nonce":"${pending["nonce"]}",""" else ""
-                    val id = jwt("""{"iss":"$issuer","aud":"mcx-lab-client","sub":"sip:alice.mcptt@mcx.test","exp":${now + 3600},
-                        $nonce"mcptt_id":"sip:alice.mcptt@mcx.test","client_id":"urn:uuid:1"}""")
+                    val id = jwt("""{"iss":"$issuer","aud":$audience,"sub":"sip:alice.mcptt@mcx.test","exp":${now + 3600},
+                        ${iat(now)}$extraClaims$nonce"mcptt_id":"sip:alice.mcptt@mcx.test","client_id":"urn:uuid:1"}""")
                     val idPart = if (refreshIdToken) ""","id_token":"$id"""" else ""
                     val refreshPart = if (rotate) ""","refresh_token":"RT$refresh"""" else ""
-                    return ok("""{"access_token":"AT$refresh","expires_in":1800$idPart$refreshPart,"token_type":"Bearer"}""")
+                    return ok("""{"access_token":"AT$refresh","expires_in":1800$idPart$refreshPart,"token_type":"$tokenType"}""")
                 }
                 val challenge = b64urlEncode(MessageDigest.getInstance("SHA-256").digest(form["code_verifier"]!!.toByteArray()))
                 if (form["code"] != code || challenge != pending["code_challenge"]) return HttpResponse(400, emptyMap(), ByteArray(0))
                 val now = System.currentTimeMillis() / 1000
-                val id = jwt("""{"iss":"$issuer","aud":"mcx-lab-client","sub":"sip:alice.mcptt@mcx.test","exp":${now + 3600},
-                    "nonce":"${nonceOverride ?: pending["nonce"]}","mcptt_id":"sip:alice.mcptt@mcx.test","mcdata_id":"sip:alice.mcdata@mcx.test",
+                val id = jwt("""{"iss":"$issuer","aud":$audience,"sub":"sip:alice.mcptt@mcx.test","exp":${now + 3600},
+                    ${iat(now)}$extraClaims"nonce":"${nonceOverride ?: pending["nonce"]}","mcptt_id":"sip:alice.mcptt@mcx.test","mcdata_id":"sip:alice.mcdata@mcx.test",
                     "mcvideo_id":"sip:alice.mcvideo@mcx.test","sip_uri":"sip:alice@mcx.test","client_id":"urn:uuid:1"}""")
-                ok("""{"access_token":"AT","expires_in":3600,"id_token":"$id","refresh_token":"RT$refresh","token_type":"Bearer"}""")
+                ok("""{"access_token":"AT","expires_in":3600,"id_token":"$id","refresh_token":"RT$refresh","token_type":"$tokenType"}""")
             }
             "/jwks" -> {
                 val pub = keys.public as RSAPublicKey
@@ -89,12 +131,79 @@ class IdmsTest {
     private fun client(idms: FakeIdms) = IdmsClient(idms, idms.issuer, "mcx-lab-client", "http://127.0.0.1:8900/callback")
 
     @Test
+    fun configuredEndpointsAreUsedWithoutDiscovery() = runTest {
+        // TS 24.484 §7.2.2.7 item 4: <idms-auth-endpoint>, <idms-token-endpoint> (and a JWKS URI) used as given.
+        val idms = FakeIdms()
+        val endpoints =
+            IdmsEndpoints("${idms.issuer}/idms/auth", "${idms.issuer}/idms/token", "${idms.issuer}/idms/keys")
+        val client =
+            IdmsClient(idms, idms.issuer, "mcx-lab-client", "http://127.0.0.1:8900/callback", endpoints = endpoints)
+        val tokens = client.loginDirect("alice", "secret")
+        assertEquals("sip:alice.mcptt@mcx.test", tokens.mcpttId)
+        assertEquals("AT1", client.refresh(tokens).accessToken)
+        assertEquals(0, idms.discoveries)
+        // Without a configured JWKS URI, only that one comes from the discovery document.
+        val partly = FakeIdms()
+        IdmsClient(partly, partly.issuer, "mcx-lab-client", "http://127.0.0.1:8900/callback",
+            endpoints = IdmsEndpoints("${partly.issuer}/idms/auth", "${partly.issuer}/idms/token"))
+            .loginDirect("alice", "secret")
+        assertEquals(1, partly.discoveries)
+        assertThrows(IdmsError::class.java) {
+            IdmsClient(idms, idms.issuer, "mcx-lab-client", "http://127.0.0.1:8900/callback",
+                endpoints = IdmsEndpoints(token = "http://idms:8443/idms/token"))
+        }
+    }
+
+    @Test
     fun directLogin() = runTest {
         val tokens = client(FakeIdms()).loginDirect("alice", "secret")
         assertEquals("AT", tokens.accessToken)
         assertEquals("sip:alice.mcptt@mcx.test", tokens.mcpttId)
         assertEquals("urn:uuid:1", tokens.clientId)
         assertEquals("sip:alice.mcvideo@mcx.test", tokens.mcvideoId)
+    }
+
+    @Test
+    fun directLoginFillsTheAuthenticationForm() = runTest {
+        // TS 37.579-1 table 5.3.2.3.1-1 steps 3a1 to 9: the form posted with the page's cookie, not POST /login.
+        val idms = FakeIdms()
+        assertEquals("AT", client(idms).loginDirect("alice", "secret").accessToken)
+        assertEquals("AUTH_SESSION=s1", idms.cookie)
+        assertThrows(IdmsError::class.java) {
+            kotlinx.coroutines.runBlocking { client(FakeIdms()).loginDirect("alice", "wrong") }
+        }
+    }
+
+    @Test
+    fun directLoginFallsBackToTheRequestId() = runTest {
+        // The IdMS of OpenMCX 1.0.0: no form, the request ID for POST /login.
+        val idms = FakeIdms().apply { form = false }
+        assertEquals("AT", client(idms).loginDirect("alice", "secret").accessToken)
+        assertEquals(null, idms.cookie)
+    }
+
+    @Test
+    fun authenticationFormIsReadStrictly() {
+        val form = IdmsForm.parse("""<form method=post action='/a?x=1&amp;y=&#50;'><input name=u type=email>
+            <input type=password name=p><input type=checkbox name=c><input type=radio name=r value=v checked>
+            <input name=d disabled></form>""")!!
+        assertEquals("/a?x=1&y=2", form.action)
+        assertEquals(mapOf("u" to "alice", "p" to "secret", "r" to "v"), IdmsForm.fields(form, "alice", "secret"))
+        assertEquals(null, IdmsForm.parse("<p>no form</p>"))
+        for (page in listOf("<form></form><form></form>", "<form><select name=s></select></form>",
+                "<form><input type=file name=f></form>", "<form><input name=a", "<form>"))
+            assertThrows(IdmsError::class.java) { IdmsForm.parse(page) }
+        val noPassword = IdmsForm.parse("<form><input name=u></form>")!!
+        assertThrows(IdmsError::class.java) { IdmsForm.fields(noPassword, "a", "b") }
+        // RFC 3986 §5.2.2.
+        val base = "https://idms:8443/realms/mcx/auth?client_id=c"
+        assertEquals("https://idms:8443/realms/mcx/login?s=1", IdmsForm.resolve(base, "login?s=1"))
+        assertEquals("https://idms:8443/userauth", IdmsForm.resolve(base, "/userauth"))
+        assertEquals("https://idms:8443/realms/mcx/auth?r=1", IdmsForm.resolve(base, "?r=1"))
+        assertEquals("https://other/x", IdmsForm.resolve(base, "//other/x"))
+        for (action in listOf("http://idms/x", "javascript:x", "../x", "/a/./b"))
+            assertThrows(IdmsError::class.java) { IdmsForm.resolve(base, action) }
+        assertEquals("a=1; b=2", IdmsForm.cookies(mapOf("set-cookie" to listOf("a=1; Path=/", "b=2"))))
     }
 
     @Test
@@ -151,6 +260,32 @@ class IdmsTest {
         assertEquals("RT1", third.refreshToken)
         assertEquals(second.idToken, third.idToken)
         assertEquals("sip:alice.mcptt@mcx.test", third.mcpttId)
+    }
+
+    @Test
+    fun acceptsTheCaseOfTheBearerTokenType() = runTest {
+        // RFC 6749 §5.1: the token_type value is case insensitive.
+        assertEquals("AT", client(FakeIdms().apply { tokenType = "bearer" }).loginDirect("alice", "secret").accessToken)
+    }
+
+    @Test
+    fun rejectsIdTokensAndTokenTypesTheProfileDoesNotAllow() = runTest {
+        val refused = listOf<FakeIdms.() -> Unit>(
+            // OIDC Core §3.1.3.7 step 3: an additional audience.
+            { audience = """["mcx-lab-client","account"]""" },
+            // TS 33.180 table B.2.1.2-1: iat is REQUIRED.
+            { issuedAt = false },
+            // RFC 7519 §4.1.5: not before a future nbf.
+            { extraClaims = """"nbf":${System.currentTimeMillis() / 1000 + 600},""" },
+            // RFC 6749 §7.1: an access token of a type this client does not understand.
+            { tokenType = "DPoP" },
+        )
+        for (change in refused) {
+            val idms = FakeIdms().apply(change)
+            assertThrows(IdmsError::class.java) { kotlinx.coroutines.runBlocking { client(idms).loginDirect("alice", "secret") } }
+        }
+        // An audience list of the client alone is accepted.
+        client(FakeIdms().apply { audience = """["mcx-lab-client"]""" }).loginDirect("alice", "secret")
     }
 
     @Test

@@ -12,16 +12,24 @@
 namespace mcx {
 
 //------------------------------------------------------------------------------
-// Helper: the XCAP root of the group documents on the group management server (AUID org.openmobilealliance.groups).
-std::string Client::groups_xcap() const {
-  return cfg_.at("endpoints").at("gms").get<std::string>() + "/xcap-root/org.openmobilealliance.groups";
-}
+// TS 24.484 clause 7.2.2.7 item 7: the group management server XCAP Root URI (<GMS-XCAP-root-URI>, endpoints.gms),
+// used as given; the documents are below it (RFC 4825 section 6).
+std::string Client::gms_xcap_root() const { return cfg_.at("endpoints").at("gms").get<std::string>(); }
+
+//------------------------------------------------------------------------------
+// TS 24.484 clause 7.2.2.7 item 8: the configuration management server XCAP Root URI (<CMS-XCAP-root-URI>,
+// endpoints.cms), used as given.
+std::string Client::cms_xcap_root() const { return cfg_.at("endpoints").at("cms").get<std::string>(); }
+
+//------------------------------------------------------------------------------
+// Helper: the group documents on the group management server (AUID org.openmobilealliance.groups).
+std::string Client::groups_xcap() const { return gms_xcap_root() + "/org.openmobilealliance.groups"; }
 
 //------------------------------------------------------------------------------
 // Helper: one XCAP request to the group management server; the answer is kept in status_["xcap_last"].
 void Client::xcap_request(const std::string &method, const std::string &url, const std::string &content_type,
                           const std::string &body) {
-  std::map<std::string, std::string> headers{{"Authorization", "Bearer " + token_}};
+  std::map<std::string, std::string> headers{{"Authorization", bearer()}};
   if (!content_type.empty()) headers["Content-Type"] = content_type;
   const auto response = http_.request(method, url, body, headers);
   // "seq" tells one answer from the next, for a caller reading the status.
@@ -62,9 +70,9 @@ void Client::profile_command(const std::string &cmd) {
   if (!(words >> index)) index = 1;
   if (verb != "profile-revoke" || id.empty() || action.empty() || index < 1 || index > 255)
     throw std::runtime_error("profile-revoke <MCPTT ID> <action> [<profile index>]");
-  const auto url = cfg_.at("endpoints").at("cms").get<std::string>() + "/xcap-root/org.3gpp.mcptt.user-profile/users/" +
+  const auto url = cms_xcap_root() + "/org.3gpp.mcptt.user-profile/users/" +
                    url_encode(id) + "/mcptt-user-profile-" + std::to_string(index) + ".xml";
-  const auto current = http_.request("GET", url, {}, {{"Authorization", "Bearer " + token_}});
+  const auto current = http_.request("GET", url, {}, {{"Authorization", bearer()}});
   if (current.status != 200) {
     status_["xcap_last"] = {{"method", "GET"},
                             {"url", url},
@@ -94,7 +102,7 @@ void Client::profile_command(const std::string &cmd) {
   if (!revoked) throw std::runtime_error("the profile does not grant " + action);
 
   // The MIME type of the user profile document (TS 24.484 clause 8.3.2.5).
-  std::map<std::string, std::string> headers{{"Authorization", "Bearer " + token_},
+  std::map<std::string, std::string> headers{{"Authorization", bearer()},
                                              {"Content-Type", "application/vnd.3gpp.mcptt-user-profile+xml"}};
   if (current.headers.contains("etag")) headers["If-Match"] = current.headers.at("etag");
   const auto response = http_.request("PUT", url, body, headers);
@@ -161,7 +169,7 @@ std::string Client::group_documents_subscribe(const std::vector<std::string> &ar
   // (RFC 6665 section 4.1.2.1), so it is not kept for a later re-SUBSCRIBE.
   auto created = std::make_shared<std::string>();
   const auto dialog = sip_.subscribe(
-      service(), "xcap-diff", 600, {{"P-Preferred-Service", mcptt_icsi}},
+      gms_subscription_psi(), "xcap-diff", group_documents_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
       [this, args, created](const SipResponse &response) {
         if (response.status_code < 200) return;
         status_["group_subscription_result"] = {{"groups", args}, {"status", response.status_code}};
@@ -203,14 +211,15 @@ void Client::group_documents_resubscribe(const std::vector<std::string> &args) {
   for (const auto &entry : group_doc_subscriptions_) {
     const auto dialog = entry.first;
     try {
-      sip_.request_in_dialog(
-          dialog, "SUBSCRIBE", resource_lists_mime, xcap_resource_list(entries),
-          {{"Event", "xcap-diff"}, {"Expires", "600"}}, [this, dialog, args](const SipResponse &response) {
-            if (response.status_code < 200) return;
-            status_["group_subscription_result"] = {{"groups", args}, {"status", response.status_code}};
-            if (response.status_code == 200)
-              schedule([this, dialog, args] { group_doc_subscriptions_[dialog] = args; });
-          });
+      sip_.request_in_dialog(dialog, "SUBSCRIBE", resource_lists_mime, xcap_resource_list(entries),
+                             {{"Event", "xcap-diff"}, {"Expires", std::to_string(group_documents_expires_s())}},
+                             [this, dialog, args](const SipResponse &response) {
+                               if (response.status_code < 200) return;
+                               status_["group_subscription_result"] = {{"groups", args},
+                                                                       {"status", response.status_code}};
+                               if (response.status_code == 200)
+                                 schedule([this, dialog, args] { group_doc_subscriptions_[dialog] = args; });
+                             });
     } catch (const std::exception &error) {
       event("group_resubscribe_failed", {{"reason", error.what()}});
       failed.push_back(dialog);
@@ -319,15 +328,87 @@ void Client::subscribe_configuration() {
   parts.push_back({resource_lists_mime, xcap_resource_list(documents)});
   const auto boundary = "mcx-" + random_id();
   config_subscription_ = sip_.subscribe(
-      service(), "xcap-diff", 3600, {{"P-Preferred-Service", mcptt_icsi}},
+      service(), "xcap-diff", configuration_documents_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
       [this](const SipResponse &response) {
         if (response.status_code < 200) return;
         status_["configuration"]["subscription_status"] = response.status_code;
-        if (response.status_code >= 300) schedule([this] { config_subscription_.clear(); });
+        if (response.status_code < 300) return configuration_subscription_granted(response);
+        schedule([this, code = response.status_code] {
+          config_subscription_.clear();
+          config_expires_at_ = 0;
+          // A sign-in waiting for the MCPTT service configuration document tries again later.
+          if (awaiting_mcptt_configuration_) sign_in_failed("configuration subscription: " + std::to_string(code));
+        });
       },
       "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary));
   status_["configuration"]["subscribed_documents"] = documents;
   event("configuration_subscribed", {{"documents", documents}});
+}
+
+//------------------------------------------------------------------------------
+// RFC 6665 section 4.1.2.2 (TS 24.484 clause 6.3.13.2.2): the configuration subscription refreshed by a SUBSCRIBE in
+// its dialog with the same Expires as the initial one, on a later sign-in attempt (start_authorization). The CMS
+// answers with a NOTIFY (RFC 6665 section 4.2.2), which configuration_notified() handles. On a 404, 405, 410, 416,
+// 480-485, 489, 501 or 604 the subscriber "MUST consider the subscription terminated", as when the refresh cannot be
+// sent; the next sign-in attempt subscribes anew. On any other error "the original subscription is still considered
+// valid for the duration of the most recently known "Expires" value" (configuration_subscription_tick).
+void Client::refresh_configuration_subscription() {
+  if (config_subscription_.empty()) return;
+  const auto id = config_subscription_;
+  try {
+    sip_.request_in_dialog(id, "SUBSCRIBE", {}, {},
+                           {{"Event", "xcap-diff"},
+                            {"Expires", std::to_string(configuration_documents_expires_s())},
+                            {"P-Preferred-Service", mcptt_icsi}},
+                           [this, id](const SipResponse &response) {
+                             if (response.status_code < 200 || config_subscription_ != id) return;
+                             status_["configuration"]["subscription_status"] = response.status_code;
+                             const auto code = response.status_code;
+                             if (code < 300) {
+                               configuration_subscription_granted(response);
+                               return event("configuration_subscription_refreshed");
+                             }
+                             const auto reason = std::to_string(code);
+                             if (code == 404 || code == 405 || code == 410 || code == 416 ||
+                                 (code >= 480 && code <= 485) || code == 489 || code == 501 || code == 604)
+                               return schedule([this, reason] { configuration_subscription_ended(reason); });
+                             event("configuration_subscription_refresh_failed",
+                                   {{"reason", reason}, {"expires_at", config_expires_at_}});
+                           });
+  } catch (const std::exception &error) {
+    configuration_subscription_ended(error.what());
+  }
+}
+
+//------------------------------------------------------------------------------
+// RFC 6665 section 4.1.2.1: the Expires of the 2xx "indicates the actual duration for which the subscription will
+// remain active" (without one, the duration asked for).
+void Client::configuration_subscription_granted(const SipResponse &response) {
+  std::int64_t granted = configuration_documents_expires_s();
+  try {
+    if (const auto value = get_header(response.headers, "Expires"); !value.empty())
+      granted = std::stoll(std::string(value));
+  } catch (const std::exception &) {}
+  config_expires_at_ = granted > 0 ? std::time(nullptr) + granted : 0;
+  status_["configuration"]["subscription_expires_at"] = config_expires_at_;
+}
+
+//------------------------------------------------------------------------------
+// The configuration subscription is over: a refresh answered with one of the codes of RFC 6665 section 4.1.2.2, its
+// expiry (section 4.1.2.1), or a NOTIFY with Subscription-State "terminated" (section 4.1.3: the subscriber "MUST
+// consider the subscription terminated"). Nothing is sent; a later sign-in attempt subscribes anew
+// (start_authorization).
+void Client::configuration_subscription_ended(const std::string &reason) {
+  config_subscription_.clear();
+  config_expires_at_ = 0;
+  event("configuration_subscription_ended", {{"reason", reason}});
+}
+
+//------------------------------------------------------------------------------
+// From tick(): the end of the duration the last 2xx granted (RFC 6665 section 4.1.2.1).
+void Client::configuration_subscription_tick() {
+  if (!config_subscription_.empty() && config_expires_at_ && std::time(nullptr) >= config_expires_at_)
+    configuration_subscription_ended("expired");
 }
 
 //------------------------------------------------------------------------------
@@ -344,11 +425,11 @@ std::string Client::ue_configuration_document_path() const {
 // 5.3.2.6.1-1 step 5). A CMS that has none for this UE (404) or that cannot be reached leaves the client as it is:
 // the preconfigured values stay in use.
 void Client::read_ue_configuration() {
-  const auto path = "/xcap-root/" + ue_configuration_document_path();
+  const auto path = "/" + ue_configuration_document_path();
   Json state{{"document", ue_configuration_document_path()}};
   try {
-    const auto response = http_.request("GET", cfg_.at("endpoints").at("cms").get<std::string>() + path, {},
-                                        {{"Authorization", "Bearer " + token_}});
+    const auto response = http_.request("GET", cms_xcap_root() + path, {},
+                                        {{"Authorization", bearer()}});
     state["status"] = response.status;
     if (response.status == 200) {
       state["etag"] = response.headers.contains("etag") ? response.headers.at("etag") : std::string{};
@@ -375,11 +456,11 @@ void Client::configuration_notified() {
   ++config_notifies_;
   read_ue_configuration();
   const auto response =
-      http_.request("GET", cfg_.at("endpoints").at("cms").get<std::string>() + "/xcap-root/" + profile_document_path(),
-                    {}, {{"Authorization", "Bearer " + token_}});
+      http_.request("GET", cms_xcap_root() + "/" + profile_document_path(),
+                    {}, {{"Authorization", bearer()}});
   if (response.status == 200) {
     event("document_retrieved",
-          {{"resource", "/xcap-root/" + profile_document_path()}, {"bytes", response.body.size()}});
+          {{"resource", "/" + profile_document_path()}, {"bytes", response.body.size()}});
     const auto etag = response.headers.contains("etag") ? response.headers.at("etag") : std::string{};
     if (etag != status_["configuration"].value("etag", std::string{})) {
       if (status_["configuration"].contains("etag")) ++config_refreshes_;
@@ -393,6 +474,19 @@ void Client::configuration_notified() {
   read_service_configurations({"mcptt"});
   status_["configuration"]["notifies"] = config_notifies_;
   status_["configuration"]["refreshes"] = config_refreshes_;
+  // The sign-in waiting for this document (start_authorization): its keys, then the service authorisation; a document
+  // that could not be read fails this attempt (sign_in_failed: another one later).
+  if (awaiting_mcptt_configuration_ && !protection_of("mcptt"))
+    return sign_in_failed("the mcptt service configuration document could not be read");
+  if (awaiting_mcptt_configuration_) {
+    awaiting_mcptt_configuration_ = false;
+    try {
+      provision_for_protection();
+    } catch (const std::exception &error) {
+      return sign_in_failed(error.what());
+    }
+    if (registered_) authorize();
+  }
 }
 
 //------------------------------------------------------------------------------
@@ -403,7 +497,7 @@ std::optional<SipResponse> Client::group_document_notify(const SipMessage &messa
   if (found == group_doc_subscriptions_.end()) return std::nullopt;
   SipResponse response;
   response.status_code = 200;
-  if (asserted_identity(message) != service()) {
+  if (!from_gms_proxy(message, false)) {
     response.status_code = 403;
     return response;
   }
@@ -430,12 +524,12 @@ std::optional<SipResponse> Client::group_document_notify(const SipMessage &messa
       schedule([this, group] {
         // TS 24.481 clause 6.3.3.2.2: retrieve the changed group document.
         const auto response = http_.request("GET", groups_xcap() + "/global/byGroupID/" + url_encode(group), {},
-                                            {{"Authorization", "Bearer " + token_}});
+                                            {{"Authorization", bearer()}});
         auto &document = group_documents_[group];
         document["fetch_status"] = response.status;
         if (response.status == 200)
           event("document_retrieved",
-                {{"resource", "/xcap-root/org.openmobilealliance.groups/global/byGroupID/" + url_encode(group)},
+                {{"resource", "/org.openmobilealliance.groups/global/byGroupID/" + url_encode(group)},
                  {"bytes", response.body.size()}});
         Json members = Json::array();
         for (std::size_t at = response.body.find("<entry"); at != std::string::npos;

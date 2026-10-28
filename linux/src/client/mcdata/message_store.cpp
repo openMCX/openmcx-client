@@ -33,7 +33,7 @@ std::string Client::store_url(const std::string &kind, const std::string &id) co
 // Authorization header (TS 24.282 clause 21.2), the last one kept in the status.
 HttpResponse Client::store_request(const std::string &method, const std::string &url, const Json &body,
                                    const std::string &content_type, const std::string &raw) {
-  std::map<std::string, std::string> headers{{"Authorization", "Bearer " + token_}};
+  std::map<std::string, std::string> headers{{"Authorization", bearer()}};
   std::string payload = raw;
   if (!body.is_null()) payload = body.dump();
   if (!payload.empty()) headers["Content-Type"] = content_type;
@@ -96,7 +96,7 @@ void Client::store_sync() {
   std::vector<std::string> known;
   for (const auto &item : store_status_["objects"].items()) known.push_back(item.key());
   for (const auto &id : known) {
-    auto object = http_.request("GET", store_url("objects", id), {}, {{"Authorization", "Bearer " + token_}});
+    auto object = http_.request("GET", store_url("objects", id), {}, {{"Authorization", bearer()}});
     if (object.status == 200) store_remember(object.json().at("object"));
   }
   event("mcdata_msgstore_synchronised",
@@ -136,11 +136,27 @@ void Client::store_subscribe() {
   store_status_["subscription"] = subscription;
   store_status_["channel"] = channel;
   store_channel_.running = std::make_shared<std::atomic<bool>>(true);
+  {
+    std::lock_guard lock(store_mutex_);
+    store_channel_.token = access_token();
+    store_channel_.token_expires = expires_;
+  }
+  // TS 33.180 annex B.12: the poll thread takes the current access token at each poll (renewals included), and does
+  // not poll while it has expired (it looks again every second, as after a failed poll).
   store_channel_.poller = std::thread([this, running = store_channel_.running, url = store_channel_.channel_url,
-                                       token = token_, ca = cfg_.at("tls").at("ca_file").get<std::string>(),
-                                       map = address_map(cfg_)] {
-    HttpClient client(ca, {}, map);
+                                       ca = cfg_.at("tls").at("ca_file").get<std::string>(), map = address_map(cfg_),
+                                       crls = crl_file(cfg_)] {
+    HttpClient client(ca, {}, map, HttpTrust::configured, crls);
     while (*running) {
+      std::string token;
+      {
+        std::lock_guard lock(store_mutex_);
+        if (std::time(nullptr) <= store_channel_.token_expires) token = store_channel_.token;
+      }
+      if (token.empty()) {
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        continue;
+      }
       try {
         const auto response =
             client.request("POST", url + "?wait=8", "{}",
@@ -310,7 +326,7 @@ void Client::msgstore_command(std::istringstream &words) {
 // Helper: mcdata-msgstore payload: the payload of an object (or one payload part), kept as its size, hash and text.
 void Client::msgstore_payload(const std::vector<std::string> &args) {
   const auto url = store_url("objects", args[0]) + (args.size() > 1 ? "/payloadParts/" + args[1] : "/payload");
-  const auto response = http_.request("GET", url, {}, {{"Authorization", "Bearer " + token_}});
+  const auto response = http_.request("GET", url, {}, {{"Authorization", bearer()}});
   store_status_["payload"] = {
       {"object", args[0]},
       {"status", response.status},
@@ -491,7 +507,7 @@ void Client::msgstore_control_command(std::istringstream &words) {
 std::string Client::mcdata_upload_by_reference(const std::string &object, const std::string &group, std::string &name,
                                                std::uint64_t &size, std::string &digest) {
   const auto payload = store_url("objects", object) + "/payload";
-  const auto stored = http_.request("GET", payload, {}, {{"Authorization", "Bearer " + token_}});
+  const auto stored = http_.request("GET", payload, {}, {{"Authorization", bearer()}});
   if (stored.status != 200) throw std::runtime_error("message store payload: " + std::to_string(stored.status));
   size = stored.body.size();
   digest = sha256_hex(stored.body);
@@ -506,7 +522,7 @@ std::string Client::mcdata_upload_by_reference(const std::string &object, const 
                     "\"\r\n\r\n\r\n--" + boundary + "--\r\n";
   const auto response =
       http_.request("POST", mcdata_content_server() + "/mcdata/files", body,
-                    {{"Content-Type", "multipart/mixed; boundary=" + boundary}, {"Authorization", "Bearer " + token_}});
+                    {{"Content-Type", "multipart/mixed; boundary=" + boundary}, {"Authorization", bearer()}});
   if (response.status != 201) {
     mcdata_fd_last_result_ = {{"upload_status", response.status}, {"reference", payload}};
     throw std::runtime_error("file upload by reference: " + std::to_string(response.status));

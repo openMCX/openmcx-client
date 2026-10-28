@@ -449,7 +449,8 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         incoming = incoming?.let(::item),
         messages = messages,
         history = Engine.history?.recent(50) ?: emptyList(),
-        error = status.lastError,
+        error = status.lastError ?: listOfNotNull(status.mcptt.refused, status.mcdata.refused, status.mcvideo.refused)
+            .joinToString(". ").ifEmpty { null },
         provisioned = true,
         events = Engine.log.last(30).reversed(),
         batteryExempt = batteryExempt,

@@ -43,6 +43,12 @@ data class Tokens(
     val nonce: String = "",
 )
 
+/**
+ * The IdMS endpoints of the initial MC UE configuration (TS 24.484 §7.2.2.7 item 4): `<idms-auth-endpoint>`,
+ * `<idms-token-endpoint>`, and a JWKS URI; null where not configured.
+ */
+data class IdmsEndpoints(val auth: String? = null, val token: String? = null, val jwks: String? = null)
+
 /** An authorization request in progress: what the IdMS must echo back, and the PKCE verifier. */
 data class AuthorizationRequest(val url: String, val state: String, val nonce: String, val verifier: String)
 
@@ -50,9 +56,8 @@ data class AuthorizationRequest(val url: String, val state: String, val nonce: S
  * OIDC authorization code flow with PKCE (TS 24.482 §6, RFC 7636) against the IdMS.
  *
  * The interactive path hands [authorizationUrl] to a browser and completes with
- * [exchange] once the redirect arrives. The OpenMCX lab IdMS has no login page: its
- * authorization endpoint returns a request ID that is completed by a credential POST
- * to `/login` ([loginDirect]).
+ * [exchange] once the redirect arrives. The configured-credential path ([loginDirect]) fills
+ * the IdMS's user authentication form itself, as the Linux client does.
  */
 class IdmsClient(
     private val http: HttpClient,
@@ -61,11 +66,27 @@ class IdmsClient(
     private val redirectUri: String,
     private val scope: String = "openid 3gpp:mc:ptt_service 3gpp:mc:data_service",
     private val clock: () -> Long = { System.currentTimeMillis() / 1000 },
+    /**
+     * TS 24.484 §7.2.2.7 item 4: the configured `<idms-auth-endpoint>`, `<idms-token-endpoint>` and a JWKS URI (OIDC
+     * Core §10, keys "by other means"), used as given (https, TS 33.180 §5.1.2.1); each one not configured comes from
+     * the issuer's discovery document.
+     */
+    private val endpoints: IdmsEndpoints = IdmsEndpoints(),
 ) {
     private val random = SecureRandom()
     private var discovery: JsonObject? = null
 
     private fun token(bytes: Int) = b64urlEncode(ByteArray(bytes).also(random::nextBytes))
+
+    init {
+        listOfNotNull(endpoints.auth, endpoints.token, endpoints.jwks).forEach {
+            if (!it.startsWith("https://")) throw IdmsError("configured IdMS endpoint $it is not an https URI")
+        }
+    }
+
+    /** The configured endpoint, or the one of the discovery document (fetched only then). */
+    private suspend fun endpoint(configured: String?, name: String): String =
+        configured ?: discover().str(name) ?: throw IdmsError("no $name")
 
     private suspend fun discover(): JsonObject = discovery ?: run {
         val r = http.get("$issuer/.well-known/openid-configuration")
@@ -77,7 +98,7 @@ class IdmsClient(
     }
 
     suspend fun authorizationUrl(): AuthorizationRequest {
-        val endpoint = discover().str("authorization_endpoint") ?: throw IdmsError("no authorization endpoint")
+        val endpoint = endpoint(endpoints.auth, "authorization_endpoint")
         val verifier = token(48)
         val challenge = b64urlEncode(MessageDigest.getInstance("SHA-256").digest(verifier.toByteArray()))
         val state = token(16)
@@ -92,15 +113,33 @@ class IdmsClient(
         return AuthorizationRequest("$endpoint?$query", state, nonce, verifier)
     }
 
-    /** The lab login: authorization request, credential POST, then the code exchange. */
+    /**
+     * The login with configured credentials, as the Linux client's oidc_login: TS 24.482 §6.2.1 and TS 33.180
+     * §B.4.2.2-B.4.2.5, with the test view of TS 37.579-1 table 5.3.2.3.1-1 steps 3a1 to 9: the Authentication
+     * Request (an HTTP GET of the authorization endpoint), the IdMS's HTML page with the user authentication form
+     * (table 5.3.2.3.2-5), the form posted to its action with the user name and password (table 5.5.4.3-1, condition
+     * USERAUTH) and the cookies the page set, the 302 (Found) to the redirect URI with the authorization code, and
+     * the code exchange. An IdMS that offers no form but the OpenMCX request ID (the IdMS of OpenMCX 1.0.0) is
+     * answered with POST {issuer}/login.
+     */
     suspend fun loginDirect(username: String, password: String): Tokens {
         val request = authorizationUrl()
-        val authz = http.get(request.url)
-        if (authz.status != 200) throw IdmsError("authorization request: HTTP ${authz.status} ${authz.text}")
-        val requestId = Json.parseToJsonElement(authz.text).jsonObject.str("request_id")
-            ?: throw IdmsError("authorization response without request_id")
-        val login = http.postForm("$issuer/login", mapOf("request_id" to requestId, "username" to username, "password" to password))
-        if (login.status !in 300..399) throw IdmsError("login: HTTP ${login.status} ${login.text}")
+        val page = http.get(request.url, mapOf("Accept" to "text/html, application/json;q=0.5"))
+        if (page.status != 200) throw IdmsError("authorization request: HTTP ${page.status} ${page.text}")
+        val login = if (page.header("Content-Type")?.lowercase()?.startsWith("text/html") == true) {
+            val form = IdmsForm.parse(page.text) ?: throw IdmsError("the IdMS page has no user authentication form")
+            // A GET form would put the password in the URI.
+            if (form.method != "post") throw IdmsError("the IdMS user authentication form is not a POST")
+            val cookies = IdmsForm.cookies(page.headers)
+            http.postForm(IdmsForm.resolve(request.url, form.action), IdmsForm.fields(form, username, password),
+                if (cookies.isEmpty()) emptyMap() else mapOf("Cookie" to cookies))
+        } else {
+            val requestId = Json.parseToJsonElement(page.text).jsonObject.str("request_id")
+                ?: throw IdmsError("the IdMS offers neither a user authentication form nor a request ID")
+            http.postForm("$issuer/login",
+                mapOf("request_id" to requestId, "username" to username, "password" to password))
+        }
+        if (login.status != 302) throw IdmsError("IdMS user authentication failed: HTTP ${login.status} ${login.text}")
         return complete(request, login.header("Location") ?: throw IdmsError("login redirect without Location"))
     }
 
@@ -116,7 +155,7 @@ class IdmsClient(
     }
 
     suspend fun exchange(request: AuthorizationRequest, code: String): Tokens {
-        val endpoint = discover().str("token_endpoint") ?: throw IdmsError("no token endpoint")
+        val endpoint = endpoint(endpoints.token, "token_endpoint")
         val r = http.postForm(endpoint, mapOf("grant_type" to "authorization_code", "client_id" to clientId,
             "redirect_uri" to redirectUri, "code" to code, "code_verifier" to request.verifier))
         if (r.status != 200) throw IdmsError("token request: HTTP ${r.status} ${r.text}")
@@ -130,7 +169,7 @@ class IdmsClient(
      */
     suspend fun refresh(current: Tokens): Tokens {
         val refreshToken = current.refreshToken ?: throw IdmsError("no refresh token")
-        val endpoint = discover().str("token_endpoint") ?: throw IdmsError("no token endpoint")
+        val endpoint = endpoint(endpoints.token, "token_endpoint")
         val r = http.postForm(endpoint, mapOf("grant_type" to "refresh_token", "client_id" to clientId, "refresh_token" to refreshToken))
         if (r.status == 400 || r.status == 401) throw IdmsRefused("IdMS refused the refresh token")
         if (r.status != 200) throw IdmsError("token refresh: HTTP ${r.status} ${r.text}")
@@ -140,6 +179,9 @@ class IdmsClient(
     private suspend fun tokens(text: String, nonce: String, previous: Tokens? = null): Tokens {
         val body = Json.parseToJsonElement(text).jsonObject
         val access = body.str("access_token") ?: throw IdmsError("no access token")
+        // RFC 6749 §7.1: "The client MUST NOT use an access token if it does not understand the token type"; TS 33.180
+        // §B.10 and tables B.4.2.5-1 and B.5.3-1: "bearer" (RFC 6749 §5.1: "Value is case insensitive").
+        if (!body.str("token_type").equals("bearer", ignoreCase = true)) throw IdmsError("token type ${body.str("token_type")}")
         // TS 33.180 annex B.12: the client takes the access token's lifetime from expires_in.
         val expiresIn = (body["expires_in"] as? JsonPrimitive)?.longOrNull
         val refreshToken = body.str("refresh_token") ?: previous?.refreshToken
@@ -161,13 +203,13 @@ class IdmsClient(
     }
 
     /**
-     * Verify the ID token (OIDC Core §3.1.3.7): signature, issuer, audience, nonce and lifetime. The ID token of a
-     * refresh may leave the nonce out (OIDC Core §12.2).
+     * Verify the ID token (OIDC Core §3.1.3.7): signature, issuer, audience, nonce and lifetime, and the claims TS 33.180
+     * table B.2.1.2-1 requires (sub, iat). The ID token of a refresh may leave the nonce out (OIDC Core §12.2).
      */
     private suspend fun verifyIdToken(token: String, nonce: String, refreshed: Boolean = false): JsonObject {
         val jwt = Jwt.parse(token)
         val header = Json.parseToJsonElement(jwt.headerJson).jsonObject
-        val jwksUri = discover().str("jwks_uri") ?: throw IdmsError("no JWKS URI")
+        val jwksUri = endpoint(endpoints.jwks, "jwks_uri")
         val r = http.get(jwksUri)
         if (r.status != 200) throw IdmsError("JWKS: HTTP ${r.status}")
         val keys = Json.parseToJsonElement(r.text).jsonObject["keys"]!!.jsonArray.map { it.jsonObject }
@@ -177,10 +219,19 @@ class IdmsClient(
         if (claims.str("iss") != issuer) throw IdmsError("ID token issuer ${claims.str("iss")}")
         val aud = claims["aud"]
         val audiences = if (aud is JsonPrimitive) listOf(aud.content) else aud?.jsonArray?.map { it.jsonPrimitive.content } ?: emptyList()
-        if (clientId !in audiences) throw IdmsError("ID token audience $audiences")
+        // OIDC Core §3.1.3.7 step 3: rejected "if it contains additional audiences not trusted by the Client" (this
+        // client trusts no other).
+        if (audiences.isEmpty() || audiences.any { it != clientId }) throw IdmsError("ID token audience $audiences")
         if (claims.str("nonce") != nonce && !(refreshed && claims["nonce"] == null)) throw IdmsError("ID token nonce mismatch")
+        if (claims.str("sub").isNullOrEmpty()) throw IdmsError("ID token without sub")
+        if ((claims["iat"] as? JsonPrimitive)?.longOrNull == null) throw IdmsError("ID token without iat")
         val exp = (claims["exp"] as? JsonPrimitive)?.longOrNull ?: throw IdmsError("ID token without exp")
         if (exp < clock() - 60) throw IdmsError("ID token expired")
+        // RFC 7519 §4.1.5: not "accepted for processing" before nbf.
+        claims["nbf"]?.let { nbf ->
+            val notBefore = (nbf as? JsonPrimitive)?.longOrNull ?: throw IdmsError("ID token with an invalid nbf")
+            if (notBefore > clock()) throw IdmsError("ID token not yet valid")
+        }
         return claims
     }
 

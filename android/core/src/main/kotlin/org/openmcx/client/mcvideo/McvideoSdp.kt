@@ -67,7 +67,20 @@ object McvideoSdp {
     const val PROFILE_LEVEL_ID = "42e01f"
     private val random = SecureRandom()
 
-    fun newSsrc(): Long = (random.nextInt().toLong() and 0xffffffffL).let { if (it == 0L) 1L else it }
+    // RFC 7714 §8.4: "each originating endpoint MUST maintain a history of outbound SSRC identifiers that it has
+    // issued within the lifetime of the current master key, and when a new SSRC requests an SSRC identifier it MUST
+    // NOT be given an identifier that has been previously issued". The CSK protects transmission control in every
+    // call of its lifetime and a GMK every group call; the history spans the process, so it covers each key's lifetime.
+    private val issued = HashSet<Long>()
+
+    /** A random non-zero SSRC (RFC 3550 §8.1) never issued before by this client (RFC 7714 §8.4). */
+    @Synchronized
+    fun newSsrc(): Long {
+        while (true) {
+            val ssrc = (random.nextInt().toLong() and 0xffffffffL).let { if (it == 0L) 1L else it }
+            if (issued.add(ssrc)) return ssrc
+        }
+    }
     private fun sessionId() = (random.nextInt() and 0x7fffffff).toLong()
 
     private fun audio(local: LocalVideoMedia, pt: Int, octetAligned: Boolean) = MediaDescription(

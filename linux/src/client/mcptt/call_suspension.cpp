@@ -38,7 +38,8 @@ Client::CallSnapshot Client::suspend_call() {
       local_,           remote_,     floor_timers_, floor_sequence_, transmit_,
       transmit_offset_, audio_ssrc_, receive_ssrc_, talking_,        requesting_,
       first_to_answer_, dialog_,     call_type_,    call_group_,     private_peer_,
-      adhoc_priority_,  mepc_,       mepp_,         mpea_,           status_.value("call_state", Json("idle"))};
+      adhoc_priority_,  mepc_,       mepp_,         mpea_,           status_.value("call_state", Json("idle")),
+      session_uri_};
   protection_.suspend_private();
   talking_ = requesting_ = false;
   transmit_.clear();
@@ -48,7 +49,8 @@ Client::CallSnapshot Client::suspend_call() {
   floor_sequence_.reset();
   receive_ssrc_ = audio_ssrc_ = 0;
   local_.direction = "sendrecv";
-  local_.implicit_request = false;
+  local_.implicit_request = implicit_offered_ = call_answered_ = false;
+  early_floor_.clear();
   local_.control = MediaControl::floor;
   dialog_.clear();
   call_type_.clear();
@@ -87,6 +89,8 @@ void Client::resume_call(CallSnapshot &&snapshot) {
   mepc_ = snapshot.mepc;
   mepp_ = snapshot.mepp;
   mpea_ = snapshot.mpea;
+  session_uri_ = std::move(snapshot.session_uri);
+  status_["session_uri"] = session_uri_;
   if (const auto key = private_keys_.find(dialog_); key != private_keys_.end()) protection_.resume_private(key->second);
   status_["call_state"] = snapshot.call_state;
   next_audio_ = monotonic_ms();

@@ -18,6 +18,7 @@ import org.openmcx.client.http.Endpoints
 import org.openmcx.client.http.HttpClient
 import org.openmcx.client.http.SocketHttpClient
 import org.openmcx.client.idms.IdmsClient
+import org.openmcx.client.idms.IdmsEndpoints
 import org.openmcx.client.security.Pem
 import java.net.URI
 import java.net.URL
@@ -71,7 +72,11 @@ object Activation {
         val addressMap = pkg["address_map"]?.jsonObject?.mapValues { it.value.jsonPrimitive.content } ?: emptyMap()
         val client = http(ca, addressMap)
         val idms = pkg.obj("idms")
-        val tokens = IdmsClient(client, idms.str("issuer"), idms.str("client_id"), idms.str("redirect_uri"))
+        // TS 24.484 §7.2.2.7 item 4: the package's IdMS endpoints, where it names them.
+        val idmsEndpoints =
+            IdmsEndpoints(idms.opt("idms_auth_endpoint"), idms.opt("idms_token_endpoint"), idms.opt("jwks_uri"))
+        val tokens = IdmsClient(client, idms.str("issuer"), idms.str("client_id"), idms.str("redirect_uri"),
+            endpoints = idmsEndpoints)
             .loginDirect(pkg.str("login"), password)
         val auth = mapOf("Authorization" to "Bearer ${tokens.accessToken}")
         val sip = client.request("POST", pkg.str("credentials_url").trimEnd('/') + "/v1/sip-credential", auth, ByteArray(0))
@@ -115,6 +120,9 @@ object Activation {
             putJsonObject("idms") {
                 put("issuer", idms.str("issuer")); put("client_id", idms.str("client_id")); put("redirect_uri", idms.str("redirect_uri"))
                 put("username", pkg.str("login")); put("password", password)
+                // TS 24.484 §7.2.2.7 item 4: the package's IdMS endpoints, where it names them.
+                for (key in listOf("idms_auth_endpoint", "idms_token_endpoint", "jwks_uri"))
+                    idms.opt(key)?.let { put(key, it) }
             }
             put("cms", endpoints.str("cms"))
             put("gms", endpoints.str("gms"))

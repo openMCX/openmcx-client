@@ -13,10 +13,28 @@
 namespace mcx {
 
 //------------------------------------------------------------------------------
+// TS 24.380 clause 14.2.5 (an implementation option): a call command ("call ...", "chat ...", "private ...",
+// "private-fa ...", "first-to-answer[-fa] ...", "adhoc ...") may end in "implicit" or "implicit=<WAV>" (the INVITE
+// is an implicit floor request; the WAV is sent once the floor is granted, mcptt.implicit_wav by default) or
+// "no-implicit"; the word is taken off and kept for the call (next_implicit_). TS 24.380 clause 6.2.1 item 2: a
+// "rejoin" is never an implicit floor request. Returns the command without the word.
+std::string Client::take_implicit_choice(const std::string &cmd) {
+  next_implicit_.reset();
+  auto word = client_rules::implicit_word(cmd);
+  if (word.rejoin) throw std::runtime_error("a rejoin is not an implicit floor request");
+  if (!word.requested) return word.command;
+  ImplicitChoice choice{*word.requested, word.wav};
+  if (choice.requested && choice.wav.empty()) choice.wav = cfg_.at("mcptt").value("implicit_wav", std::string{});
+  next_implicit_ = choice;
+  return word.command;
+}
+
+//------------------------------------------------------------------------------
 // Command entry point: signal the location reporting triggers of a call request (TS 24.379 clause 13.2.2), let a call
 // request by a listened-to user end its ambient listening call (TS 23.379 clause 10.14.3.3, place_call()) and run
-// the command.
-void Client::command(const std::string &cmd) {
+// the command, without its implicit floor request choice (take_implicit_choice).
+void Client::command(const std::string &command_line) {
+  const auto cmd = take_implicit_choice(command_line);
   // McpttSignallingEvent triggers (TS 24.379 annex F.3): a non-emergency group or private call.
   if (cmd == "call" || cmd == "rejoin" || cmd == "chat" || cmd == "call broadcast")
     location_signal(location::Event::GroupCallNonEmergency);
@@ -45,7 +63,8 @@ void Client::command(const std::string &cmd) {
 //     clause 6.2.4.3.5, clause 6.2.4.5.3);
 //   answer, reject: answer a call in manual commencement mode (TS 24.379 clause 6.2.3.2);
 //   call [broadcast] [emergency|imminent], chat [emergency|imminent], rejoin, call force: prearranged group call
-//     (clause 10.1.1.2.1.1), chat group call (clause 10.1.2.2.1.1), rejoin by session identity;
+//     (clause 10.1.1.2.1.1), chat group call (clause 10.1.2.2.1.1), rejoin by session identity; a call command may
+//     end in implicit[=<WAV>] or no-implicit (take_implicit_choice);
 //   pre-establish, chat-join <group>: test aids for the server's refusals;
 //   hangup: release the call (clause 10.1.1.2.3.1, clause 11.1.3.1.1.1, ambient clause 11.1.6.2.1.3);
 //   affiliate, deaffiliate: affiliation status change (clause 9.2.1.2);
@@ -142,18 +161,60 @@ void Client::run_command(const std::string &cmd) {
     // granted duration ends (TS 24.379 clause 9.2.1.3, TS 24.281 clause 8.2.1.3).
     refresh_affiliation_subscription(false);
     if (mcvideo_enabled()) refresh_affiliation_subscription(true);
-  } else if (cmd == "refresh-reinvite") {
+  } else if (cmd == "refresh-reinvite" || cmd.starts_with("refresh-reinvite ")) {
     // Test aid: a session refresh by re-INVITE (RFC 4028 section 7.4) with the current offer and no MC service
-    // information, as a third-party client may send; the final status goes to last_refresh.
+    // information, as a third-party client may send; the final status goes to last_refresh. Options change only the
+    // offer of this request, never the call's own media description (local_): "hold" and "resume" offer sendonly
+    // and sendrecv (RFC 5359 section 2.1); "floor-ssrc changed" offers a new floor control SSRC and "floor-ssrc
+    // colliding" the server's own (remote_), both of which the server refuses (TS 24.380 clause 4.3.3.1), and
+    // "floor-ssrc <number>" the given one (a relay refuses one used before under the CSK). After a
+    // rejection the call goes on with its negotiated media (RFC 3261 section 14.1).
     if (dialog_.empty()) {
       failure("refresh-reinvite: no call");
     } else {
-      sip_.reinvite(dialog_, local_, {}, [this](const SipResponse &response) {
+      auto offer = local_;
+      std::istringstream words(cmd.substr(std::string_view("refresh-reinvite").size()));
+      for (std::string word; words >> word;) {
+        if (word == "hold") {
+          offer.direction = "sendonly";
+        } else if (word == "resume") {
+          offer.direction = "sendrecv";
+        } else if (word == "floor-ssrc") {
+          std::string kind;
+          words >> kind;
+          if (kind == "changed") {
+            do offer.floor_ssrc = mcx::random_ssrc();
+            while (offer.floor_ssrc == local_.floor_ssrc || (remote_ && offer.floor_ssrc == remote_->floor_ssrc));
+          } else if (kind == "colliding" && remote_) {
+            offer.floor_ssrc = remote_->floor_ssrc;
+          } else if (!kind.empty() && kind.find_first_not_of("0123456789") == std::string::npos) {
+            offer.floor_ssrc = static_cast<std::uint32_t>(std::stoul(kind));
+          } else {
+            throw std::runtime_error("refresh-reinvite floor-ssrc: changed, a number, or colliding once answered");
+          }
+        } else {
+          throw std::runtime_error("refresh-reinvite: unknown option " + word);
+        }
+      }
+      // Each request is numbered, so that its answer is told apart from an earlier one's in the status.
+      const auto sequence = ++refresh_sequence_;
+      status_["last_refresh_offer"] = {
+          {"sequence", sequence}, {"floor_ssrc", offer.floor_ssrc}, {"direction", offer.direction}};
+      sip_.reinvite(dialog_, offer, {}, [this, sequence](const SipResponse &response) {
         if (response.status_code < 200) return;
-        status_["last_refresh"] = response.status_code;
-        event("session_refresh_answered", {{"status", response.status_code}});
+        status_["last_refresh"] = {{"sequence", sequence}, {"status", response.status_code}};
+        event("session_refresh_answered", {{"status", response.status_code}, {"sequence", sequence}});
       });
     }
+  } else if (cmd == "mcvideo-refuse-control-ssrc") {
+    // Test aid: the next MCVideo answer's transmission control SSRC is refused (mcvideo_media).
+    mcvideo_refuse_control_ssrc_ = true;
+  } else if (cmd == "next-answer-floor-ssrc offered") {
+    // Test aid: the next group call answer allocates the offer's floor SSRC (incoming_group).
+    answer_offered_floor_ssrc_ = true;
+  } else if (cmd == "next-floor-ssrc previous") {
+    // Test aid: the next group or chat call offers the floor SSRC of the previous call (invite_group_call).
+    reuse_floor_ssrc_ = true;
   } else if (cmd == "hangup") {
     hangup_command();
   } else if (cmd == "affiliate") {
@@ -278,9 +339,8 @@ void Client::select_group(const std::string &cmd) {
   const auto authorising = regroup ? regroups_.at(selected).value("preconfigured", selected) : selected;
   auto document =
       http_.request("GET",
-                    cfg_.at("endpoints").at("gms").get<std::string>() +
-                        "/xcap-root/org.openmobilealliance.groups/global/byGroupID/" + url_encode(authorising),
-                    {}, {{"Authorization", "Bearer " + token_}});
+                    groups_xcap() + "/global/byGroupID/" + url_encode(authorising),
+                    {}, {{"Authorization", bearer()}});
   if (document.status != 200) throw std::runtime_error("group authorization retrieval failed");
   cfg_["mcptt"]["group_id"] = selected;
   // A monitored group selected is affiliated as the selected group from now on.
@@ -373,6 +433,9 @@ void Client::group_call_command(const std::string &cmd) {
     headers.push_back({"Resource-Priority", priority});
     event("ric_priority_applied", {{"target", group()}, {"resource_priority", priority}});
   }
+  // TS 33.180 clauses 7.3.11 and 7.4.2: the call is keyed with the selected group's GMK (its preconfigured group's for
+  // a regroup); without one, the answer is refused as before (check_remote).
+  if (protected_media()) select_call_key(group());
   invite_group_call(cmd, chat, info, headers);
 }
 
@@ -385,7 +448,10 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
       cfg_.at("mcptt").value("maximum_floor_priority", cfg_.at("mcptt").value("floor_priority", 0u));
   if (maximum_priority > 99) throw std::runtime_error("maximum floor priority must be 0..99");
   local_.floor_priority = static_cast<std::uint8_t>(maximum_priority);
-  local_.floor_ssrc = random_ssrc();
+  // Test aid ("next-floor-ssrc previous"): the call offers the floor SSRC of this client's previous call, which the
+  // server refuses under the CSK (TS 24.380 clause 4.3.3.1, RFC 7714 section 8.4); once.
+  const auto previous = local_.floor_ssrc;
+  local_.floor_ssrc = std::exchange(reuse_floor_ssrc_, false) && previous ? previous : random_ssrc();
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
   if (cmd == "rejoin" && session_uri_.empty()) throw std::runtime_error("no previous session identity");
   const bool adhoc_rejoin = cmd == "rejoin" && last_call_type_ == "adhoc";
@@ -397,26 +463,32 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
     info.alert.reset();
     info.imminent_peril.reset();
   }
+  // TS 24.379 clause 10.1.1.2.1.1 step 16 and clause 10.1.2.2.1.1 step 15: "if an implicit floor request is
+  // required"; TS 24.380 clause 6.2.1 item 2: never for a rejoin of an ongoing call.
+  const auto implicit = cmd == "rejoin" ? ImplicitChoice{} : implicit_choice();
+  prepare_implicit_speech(implicit);
   floor_sequence_.reset();
   floor_timers_ = participant_timers();
   call_type_ = adhoc_rejoin ? "adhoc" : chat ? "chat" : info.broadcast == true ? "broadcast" : "prearranged";
   call_group_ = adhoc_rejoin ? last_call_group_ : std::string{};
-  dialog_ = sip_.invite(
-      cmd == "rejoin" ? session_uri_ : service(), local_, info_parts(info),
-      [this](const SipResponse &response) {
-        if (response.status_code >= 200 && response.status_code < 300) {
-          remember_session(response.headers);
-          priority_response(response);
-        } else if (response.status_code >= 300) {
-          status_["last_call_failure"] = {{"status", response.status_code},
-                                          {"warning", std::string(get_header(response.headers, "Warning"))}};
-          failure("call setup: " + std::to_string(response.status_code));
-        }
-        // TS 24.379 clause 10.1.5.2.2: report the outcome of a remotely initiated group call.
-        if (response.status_code >= 200 && followup_ && followup_->kind == "remote-group")
-          report_followup(response.status_code < 300);
-      },
-      headers);
+  invite_with_implicit(implicit.requested, true, [&] {
+    dialog_ = sip_.invite(
+        cmd == "rejoin" ? session_uri_ : service(), local_, info_parts(info),
+        [this](const SipResponse &response) {
+          if (response.status_code >= 200 && response.status_code < 300) {
+            remember_session(response.headers);
+            priority_response(response);
+          } else if (response.status_code >= 300) {
+            status_["last_call_failure"] = {{"status", response.status_code},
+                                            {"warning", std::string(get_header(response.headers, "Warning"))}};
+            failure("call setup: " + std::to_string(response.status_code));
+          }
+          // TS 24.379 clause 10.1.5.2.2: report the outcome of a remotely initiated group call.
+          if (response.status_code >= 200 && followup_ && followup_->kind == "remote-group")
+            report_followup(response.status_code < 300);
+        },
+        headers);
+  });
   status_["last_call_failure"] = nullptr;
   status_["call_state"] = "calling";
 }
@@ -545,8 +617,8 @@ void Client::hangup_command() {
 //------------------------------------------------------------------------------
 // TS 24.379 clause 9.2.1.2: "monitor <group>... | monitor none" sets the groups affiliated besides the selected one;
 // the next PUBLISH lists them all (the affiliation status change procedure names every group the client wants).
-// Each must be one this client may select. With protected media a call needs its group's GMK (TS 33.180),
-// which this client holds for the selected group only, so groups are not monitored then.
+// Each must be one this client may select. With protected media each monitored group's GMK is subscribed to
+// (update_key_subscriptions), as a call on it is keyed with it (TS 33.180 clause 7.4.2).
 void Client::monitor_command(const std::string &cmd) {
   if (!authorized_) throw std::runtime_error("authorization required");
   std::istringstream words(cmd.substr(8));
@@ -565,8 +637,6 @@ void Client::monitor_command(const std::string &cmd) {
     groups.push_back(candidate);
   }
   if (none && !groups.empty()) throw std::runtime_error("usage: monitor <group>... | monitor none");
-  if (!groups.empty() && protected_media())
-    throw std::runtime_error("groups are not monitored with protected media: a call needs its own group key");
   if (groups.size() > 16) throw std::runtime_error("at most 16 groups are monitored");
   if (selected_priority_ && std::find(groups.begin(), groups.end(), call_group_) == groups.end())
     throw std::runtime_error("the call's group stays monitored until the call ends");
@@ -575,6 +645,7 @@ void Client::monitor_command(const std::string &cmd) {
     entry = std::find(groups.begin(), groups.end(), entry.key()) == groups.end() ? monitored_state_.erase(entry)
                                                                                  : std::next(entry);
   event("monitored_groups", {{"groups", monitored_groups_}});
+  update_key_subscriptions();
   if (desired_affiliation_) affiliate();
 }
 

@@ -9,6 +9,7 @@
 #include "activation.hpp"
 
 #include "mcx/http.hpp"
+#include "mcx/protocol.hpp"
 
 #include <openssl/evp.h>
 #include <openssl/pem.h>
@@ -111,6 +112,12 @@ HttpAddressMap address_map(const nlohmann::json &cfg) {
 }
 
 //------------------------------------------------------------------------------
+// TS 33.180 clause 6.1.1 (TS 33.310 clause 6.1.1): the configuration's CRL file ("tls.crl_file"); empty without one.
+std::string crl_file(const nlohmann::json &cfg) {
+  return cfg.value("tls", nlohmann::json::object()).value("crl_file", std::string());
+}
+
+//------------------------------------------------------------------------------
 // Helper: whether the configuration has been activated already.
 bool activated(const nlohmann::json &cfg) { return cfg.value("activated", false); }
 
@@ -140,7 +147,9 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
   }
   const auto configured_ca = cfg.value("tls", nlohmann::json::object()).value("ca_file", std::string());
   require(!pin.empty() || !configured_ca.empty(), "the link has no #pin= and no CA file is configured");
-  const auto fetched = pin.empty() ? HttpClient(configured_ca).request("GET", url) : http_get_pinned(url, pin);
+  const auto fetched = pin.empty()
+                           ? HttpClient(configured_ca, {}, {}, HttpTrust::configured, crl_file(cfg)).request("GET", url)
+                           : http_get_pinned(url, pin);
   require(fetched.status == 200,
           "the activation URL was refused (" + std::to_string(fetched.status) + "): used, expired or unknown");
   const auto boot = fetched.json();
@@ -157,7 +166,8 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
   // The package's address map: where this client reaches each server the package names (through a host's published
   // ports); every HTTPS request of the client applies it.
   if (boot.contains("address_map")) cfg["address_map"] = boot.at("address_map");
-  HttpClient http(cfg.at("tls").at("ca_file").get<std::string>(), {}, address_map(cfg));
+  HttpClient http(cfg.at("tls").at("ca_file").get<std::string>(), {}, address_map(cfg), HttpTrust::configured,
+                  crl_file(cfg));
 
   // Identity and system settings from the bootstrap; local settings stay.
   const auto &idms = boot.at("idms");
@@ -166,6 +176,10 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
                   {"redirect_uri", idms.at("redirect_uri")},
                   {"username", boot.at("login")},
                   {"password", read_secret(password_file)}};
+  // TS 24.484 clause 7.2.2.7 item 4: the package's <idms-auth-endpoint> and <idms-token-endpoint> (and JWKS URI),
+  // where it names them; otherwise the issuer's discovery document gives them (oidc_endpoint).
+  for (const auto *field : {"idms_auth_endpoint", "idms_token_endpoint", "jwks_uri"})
+    if (idms.contains(field)) cfg["oauth"][field] = idms.at(field);
   const auto &boot_sip = boot.at("sip");
   if (boot_sip.contains("core_uri")) cfg["sip"]["core_uri"] = boot_sip.at("core_uri");
   cfg["sip"]["identity"] = boot_sip.at("identity");
@@ -180,6 +194,10 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
     cfg[service] = merged;
   }
   if (boot.contains("endpoints")) cfg["endpoints"] = boot.at("endpoints");
+  // TS 24.484 clause 7.2.2.1 item 4 (TS 24.483 clause 8.2.9): the <GMS-URI> of the package's UE initial configuration
+  // is the GMS subscription proxy PSI of the group document and group key subscriptions.
+  if (boot.contains("ue_initial_configuration"))
+    cfg["gms"]["subscription_psi"] = parse_initial_gms_uri(boot.at("ue_initial_configuration").get<std::string>());
 
   // Sign in (TS 24.482 clause 6.2.1), with the scope of the services of the package, and ask the Credential Service
   // for the SIP credential.

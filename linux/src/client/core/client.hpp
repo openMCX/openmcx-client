@@ -117,7 +117,32 @@ class Client {
   ProtectedCall protection_;
   std::string csk_upload_, key_subscription_;
   std::map<std::string, std::string> key_subscriptions_;
-  std::uint64_t next_key_refresh_ = 0;
+  // When the GKTP subscription is refreshed in its dialog (Unix seconds; 0: none due), key_refresh_time.
+  std::int64_t key_refresh_at_ = 0;
+
+  // The Expires of the xcap-diff subscriptions (RFC 5875; TS 24.481 clause 6.3.13.2.1 and TS 24.484 clause
+  // 6.3.13.2.2 send the SUBSCRIBE "according to ... IETF RFC 5875" and set no value). RFC 5875 section 4.5: "The
+  // default expiration time for subscriptions within this package is 3600 seconds"; RFC 6665 section 3.1.1 lets the
+  // subscriber ask for another duration, so the values are local policy: subscriptions.group_documents_expires_s
+  // (600 s by default), subscriptions.configuration_documents_expires_s and subscriptions.group_keys_expires_s (the
+  // GKTP subscriptions; 3600 s each by default).
+  unsigned subscription_expires(const char *key, unsigned fallback) const {
+    const auto block = cfg_.find("subscriptions");
+    if (block == cfg_.end()) return fallback;
+    const auto value = block->find(key);
+    if (value == block->end()) return fallback;
+    if (!value->is_number_unsigned() || value->get<std::uint64_t>() > 4294967295ULL)
+      throw std::invalid_argument(std::string("subscriptions.") + key + " must be 0 to 4294967295");
+    return value->get<unsigned>();
+  }
+
+  unsigned group_documents_expires_s() const { return subscription_expires("group_documents_expires_s", 600); }
+
+  unsigned configuration_documents_expires_s() const {
+    return subscription_expires("configuration_documents_expires_s", 3600);
+  }
+
+  unsigned key_subscription_expires_s() const { return subscription_expires("group_keys_expires_s", 3600); }
 
   // ---- Protected calls and private call keys (core/protected_call.cpp) ----
   bool protected_media() const { return cfg_.value("security", Json::object()).value("protect_media", false); }
@@ -140,6 +165,43 @@ class Client {
   // A private or ambient listening call is protected by its PCK, a group call by the GMK.
   bool media_key_ready() const { return private_media() ? protection_.private_ready() : protection_.group_ready(); }
 
+  // RFC 7714 section 8.4: every SSRC this client gives a stream of its own (floor or transmission control, audio,
+  // video) is new to the history of its MCPTT and MCVideo keys (ProtectedCall::issue_ssrc), so that no SRTP or SRTCP
+  // stream under a shared master key (the CSK, a GMK) starts again with an SSRC issued before. Hides mcx::random_ssrc
+  // in the member functions. Nor is it one negotiated for a call kept that has carried no packet yet, so has no
+  // context (mcptt_floor_streams, mcvideo_floor_streams): RFC 7714 section 9.1 forms the SRTCP IV from the SSRC and
+  // the index, so a new stream of this client on it would repeat the IVs of the other direction under the CSK.
+  std::uint32_t random_ssrc() {
+    auto reserved = mcptt_floor_streams();
+    reserved.merge(mcvideo_floor_streams());
+    std::uint32_t ssrc;
+    do ssrc = mcx::random_ssrc();
+    while (protection_.ssrc_taken(ssrc) || mcvideo_protection_.ssrc_taken(ssrc) || reserved.contains(ssrc));
+    protection_.record_ssrc(ssrc);
+    mcvideo_protection_.record_ssrc(ssrc);
+    return ssrc;
+  }
+
+  // The floor control streams of the MCPTT calls kept, both directions (client_rules::call_floor_ssrcs): the call
+  // under way and, during an announced transfer, the transferred user's call held (held_, TS 24.379 clause
+  // 11.1.8.2.2), which goes on when it is resumed. They continue under a new CSK (csk_key_download).
+  std::set<std::uint32_t> mcptt_floor_streams() const {
+    auto ssrcs = client_rules::call_floor_ssrcs(local_.floor_ssrc,
+                                                remote_ ? std::optional(remote_->floor_ssrc) : std::nullopt);
+    if (held_)
+      ssrcs.merge(client_rules::call_floor_ssrcs(
+          held_->local.floor_ssrc, held_->remote ? std::optional(held_->remote->floor_ssrc) : std::nullopt));
+    return ssrcs;
+  }
+
+  // The transmission control streams of the MCVideo call, both directions; none without a call.
+  std::set<std::uint32_t> mcvideo_floor_streams() const {
+    if (!mcvideo_call_) return {};
+    return client_rules::call_floor_ssrcs(mcvideo_call_->local.floor_ssrc,
+                                          mcvideo_call_->remote ? std::optional(mcvideo_call_->remote->floor_ssrc)
+                                                                : std::nullopt);
+  }
+
   // The PCK of each private call dialog (TS 33.180 clause 5.6), removed when the dialog ends.
   std::map<std::string, std::uint32_t> private_keys_;
   // A first-to-answer caller receives the PCK in the SDP answer (TS 33.180 clause 7.2.4).
@@ -158,10 +220,59 @@ class Client {
   bool answer_private_key(const MediaDescription &media);
 
   std::string gms_identity() const { return cfg_.at("security").at("gms_uri"); }
+  // TS 24.481 clause 6.3.13.2.1 step b: "the configured public service identity for performing subscription proxy
+  // function of the GMS" (TS 24.483 clause 8.2.9 GMSURI, the <GMS-URI> of TS 24.484 clause 7.2.2.1 item 4):
+  // gms.subscription_psi. Not configured: the subscription is refused here (throws), never sent to another PSI.
+  std::string gms_subscription_psi() const {
+    const auto gms = cfg_.value("gms", Json::object());
+    if (!gms.contains("subscription_psi"))
+      throw std::runtime_error("gms.subscription_psi (the GMS-URI) is not configured");
+    return gms.at("subscription_psi").get<std::string>();
+  }
+  // RFC 6665 section 4.1.3: the NOTIFYs of a group document or group key subscription come from its notifier, the
+  // GMS subscription proxy PSI it was sent to (the From of the dialog), asserted by the SIP core.
+  bool from_gms_proxy(const SipMessage &message, bool check_from) const {
+    if (!cfg_.value("gms", Json::object()).contains("subscription_psi")) return false;
+    const auto psi = gms_subscription_psi();
+    return asserted_identity(message) == psi && (!check_from || message.from_uri == psi);
+  }
 
   std::string xcap_root() const;
 
   void subscribe_keys();
+
+  // TS 24.481 clause 6.3.13.2.1 and RFC 6665 section 4.1.2.2: the GKTP subscription refreshed by a re-SUBSCRIBE in its
+  // dialog (the MCVideo one when mcvideo).
+  void refresh_key_subscription(bool mcvideo);
+
+  // TS 33.180 clauses 7.3.4, 7.3.5, 7.3.11 and 7.3.12: the group whose GMK keys a call on the group: the
+  // preconfigured group of a regroup this client was told of (TS 24.379 clause 16), else the group itself.
+  std::string key_group_of(const std::string &group) const;
+
+  // TS 33.180 clause 5.7 and annex E.6: the newest usable GMK whose MC group IDs include the group; throws if none.
+  keying::KeyMessage gmk_for(const std::string &group) const;
+
+  // The GMK of the group of a call (key_group_of) selected for the call's media; false when this client holds none.
+  bool select_call_key(const std::string &call_group);
+
+  // At the end of a call on another group: the selected group's GMK keys the media again.
+  void restore_group_key();
+
+  // TS 24.481 clause 6.3.13.2.1: one GKTP subscription for each further group whose GMK this client needs besides
+  // the selected group's: the monitored groups and the preconfigured groups of the regroups it was told of. New ones
+  // are subscribed, those no longer needed end (RFC 6665 section 4.1.2.3).
+  void update_key_subscriptions();
+
+  // The further GKTP subscriptions (update_key_subscriptions): group -> dialog, and when each dialog is refreshed
+  // (Unix seconds; 0: none due, key_refresh_time).
+  std::map<std::string, std::string> extra_key_subscriptions_;
+  std::map<std::string, std::int64_t> extra_key_refresh_at_;
+
+  // RFC 6665 section 4.1.2.2: a further GKTP subscription refreshed in its dialog; a failed refresh subscribes again.
+  void refresh_extra_key_subscription(const std::string &dialog);
+
+  // RFC 6665 section 4.1.2.1: when to refresh a GKTP subscription after its 2xx (Unix seconds).
+  std::int64_t key_refresh_time(const SipResponse &response) const;
 
   void subscribe_affiliation(bool initial);
 
@@ -291,6 +402,41 @@ class Client {
   Json last_ambient_ = nullptr;
   std::string ambient_source_;
 
+  // ---- Implicit floor request (TS 24.379 clause 6.4, TS 24.380 clauses 6.2.4.2.2 and 14) ----
+  // TS 24.380 clause 14.2.5: outside ambient listening, whether a call's INVITE is an implicit floor request "is an
+  // implementation option": the call command's "implicit[=<WAV>]" or "no-implicit", or else
+  // mcptt.implicit_floor_request (default false); the speech sent once the floor is granted is that WAV or
+  // mcptt.implicit_wav.
+  struct ImplicitChoice {
+    bool requested = false;
+    std::string wav;
+  };
+
+  std::optional<ImplicitChoice> next_implicit_;
+  // The choice of the last private call, for its new INVITE after a 300 or a KMS redirect.
+  ImplicitChoice redirect_implicit_;
+  // The INVITE of the call being set up offered "mc_implicit_request" as this client's own floor request. local_
+  // keeps it only for that INVITE, so that no later offer carries it (TS 24.380 clause 14.5). Cleared once the
+  // 200 (OK) is handled (implicit_floor_answered).
+  bool implicit_offered_ = false;
+  // The dialog of the call being set up is confirmed: its 200 (OK) arrived.
+  bool call_answered_ = false;
+  // TS 24.380 clause 6.2.4.2.2 step 2: the floor control messages received before the 200 (OK) of a call offered
+  // with an implicit floor request, handled once the request is accepted (step 4c).
+  std::vector<Datagram> early_floor_;
+
+  // The call command's implicit floor request choice, taken off its end (command()).
+  std::string take_implicit_choice(const std::string &cmd);
+  // The choice for the call being set up (consumed): the command's or the configured one.
+  ImplicitChoice implicit_choice();
+  // Sends the INVITE (invite) of a call with or without the implicit floor request (TS 24.379 clause 6.4); own:
+  // the request is this client's floor request (false for a remotely initiated ambient listening call).
+  void invite_with_implicit(bool implicit, bool own, const std::function<void()> &invite);
+  // The talk burst of an implicit floor request: its WAV, sent once the floor is granted.
+  void prepare_implicit_speech(const ImplicitChoice &choice);
+  // TS 24.380 clause 6.2.4.2.2 steps 2 to 4: the 200 (OK) of a call offered with an implicit floor request.
+  void implicit_floor_answered();
+
   // ---- Ambient listening and suspended calls (mcptt/call_suspension.cpp) ----
   bool ambient_listened_to() const { return ambient_ && ambient_->role == "listened-to"; }
 
@@ -315,6 +461,8 @@ class Client {
     std::string dialog, call_type, call_group, private_peer, adhoc_priority;
     int mepc, mepp, mpea;
     Json call_state;
+    // The call's session identity (TS 24.379 clause 11.1.1.2.1.1), which another call in between replaces.
+    std::string session_uri;
   };
 
   // Idle for placing a call: a hidden ambient listening dialog does not count.
@@ -360,6 +508,12 @@ class Client {
   // side: the Replaces value the next call carries (clause 11.1.1.2.1.1 step 14b1).
   // Target side: the incoming call replaces the current one (RFC 3891).
   std::optional<CallSnapshot> held_;
+  // Test aid: the next group or chat call offers the previous call's floor SSRC ("next-floor-ssrc previous").
+  bool reuse_floor_ssrc_ = false;
+  // Test aid: the next group call answer allocates the offer's floor SSRC ("next-answer-floor-ssrc offered").
+  bool answer_offered_floor_ssrc_ = false;
+  // Test aid: the number of the last refresh-reinvite request.
+  unsigned refresh_sequence_ = 0;
   // held_ is the transferred user's call with the requester, kept during a transfer (TS 24.379 clause 11.1.8.2.2).
   bool transfer_kept_ = false;
   std::string announced_target_, announced_replaces_, next_call_replaces_;
@@ -374,6 +528,21 @@ class Client {
   // TS 24.484 clauses 8.4, 9.4 and 10.4: the Resource-Priority values of the service configuration documents, by
   // service ("mcptt", "mcvideo", "mcdata") and level ("emergency", "imminent", "normal").
   std::map<std::string, std::map<std::string, std::string>> service_priorities_;
+  // TS 24.379 and TS 24.281 clauses 6.6.2.3.1 and 6.6.3.3.1, TS 24.282 clauses 6.5.2.3.1 and 6.5.3.3.1: the
+  // <signalling-protection> of each service configuration document read (an absent element is enabled); a service
+  // without an entry has not been read, so whether its protection applies is not known.
+  std::map<std::string, ServiceProtection> service_protection_;
+  std::optional<ServiceProtection> protection_of(const std::string &service) const;
+  void require_protection_known(const std::string &service, const std::vector<BodyPart> &parts) const;
+  // mcptt.documents_on_notify: the sign-in waits for the MCPTT service configuration document of the configuration
+  // subscription before its keys and the service authorisation (TS 37.579-2 table 5.1.3.2-1 steps 17-19).
+  bool awaiting_mcptt_configuration_ = false;
+  void provision_for_protection();
+  void start_authorization();
+  void refresh_configuration_subscription();
+  void configuration_subscription_granted(const SipResponse &response);
+  void configuration_subscription_ended(const std::string &reason);
+  void configuration_subscription_tick();
   void read_service_configurations(std::vector<std::string> services = {});
   Json service_priorities(const std::string &service) const;
   // The MCVideo user profile document (TS 24.484 clause 9.3) as read at start-up.
@@ -599,7 +768,20 @@ class Client {
 
   bool xml_protection() const;
 
-  xmlsec::Key xml_key() const { return {csk_->key, csk_->csb_id, user()}; }
+  // TS 24.281 clauses 6.6.2.3.1 and 6.6.3.3.1: the same from the MCVideo service configuration document.
+  bool mcvideo_xml_protection() const;
+  bool mcvideo_integrity_protection() const;
+
+  static void require_xml_key(const keying::KeyMessage *csk, const char *service);
+
+  bool unprotected_subscription(const SipTransmission &transmission, const std::vector<BodyPart> &parts) const;
+
+  // TS 33.180 annex E.6.10: the CSK is not used as the XPK past its Expiry time (throws: nothing is protected or
+  // opened with it).
+  xmlsec::Key xml_key() const {
+    keying::require_in_use(*csk_, static_cast<std::uint64_t>(std::time(nullptr)));
+    return {csk_->key, csk_->csb_id, user()};
+  }
 
   static bool mcptt_xml_part(const std::string &type);
 
@@ -611,7 +793,11 @@ class Client {
 
   // TS 24.281 clauses 6.6.2.3.1 and 6.6.3.3.1: MCVideo signalling, under the MCVideo CSK and in the
   // MCVideo element names (clause 4.8); the same configuration switches it on as for MCPTT.
-  xmlsec::Key mcvideo_xml_key() const { return {mcvideo_csk_->key, mcvideo_csk_->csb_id, mcvideo_user()}; }
+  // TS 33.180 annex E.6.10: not past the MCVideo CSK's Expiry time (as xml_key()).
+  xmlsec::Key mcvideo_xml_key() const {
+    keying::require_in_use(*mcvideo_csk_, static_cast<std::uint64_t>(std::time(nullptr)));
+    return {mcvideo_csk_->key, mcvideo_csk_->csb_id, mcvideo_user()};
+  }
 
   static bool mcvideo_xml_part(const std::string &type);
 
@@ -634,6 +820,10 @@ class Client {
   Json group_documents_ = Json::object();
 
   std::string groups_xcap() const;
+  // TS 24.484 clause 7.2.2.7 items 7 and 8: the <GMS-XCAP-root-URI> (endpoints.gms) and <CMS-XCAP-root-URI>
+  // (endpoints.cms) of the initial MC UE configuration, used as given.
+  std::string gms_xcap_root() const;
+  std::string cms_xcap_root() const;
 
   void xcap_request(const std::string &method, const std::string &url, const std::string &content_type = {},
                     const std::string &body = {});
@@ -664,6 +854,9 @@ class Client {
   // through the subscription proxy function of the CMS (whose PSI this client's MCPTT server provides), and reads
   // the documents again when it is notified.
   std::string config_subscription_;
+  // When the configuration subscription ends unless refreshed (Unix seconds; 0: none), from the Expires of its last
+  // 2xx (RFC 6665 sections 4.1.2.1 and 4.1.2.2).
+  std::int64_t config_expires_at_ = 0;
   unsigned config_notifies_ = 0, config_refreshes_ = 0;
 
   // TS 24.484 clause 8.3.1A: the user's MCPTT user profile document, mcptt-user-profile-<index>.xml.
@@ -705,6 +898,9 @@ class Client {
   // TS 24.282 clauses 21.2.19 to 21.2.22: the notification channel of the message notification client.
   struct StoreChannel {
     std::string resource, channel_url, subscription;
+    // The access token the poll thread uses, and its expiry (TS 33.180 annex B.12); under store_mutex_.
+    std::string token;
+    std::int64_t token_expires = 0;
     std::shared_ptr<std::atomic<bool>> running;
     std::thread poller;
   };
@@ -1011,7 +1207,7 @@ private:
   void mcvideo_subscribe_keys();
 
   std::string mcvideo_key_group_;
-  std::uint64_t mcvideo_next_key_refresh_ = 0;
+  std::int64_t mcvideo_key_refresh_at_ = 0;
 
   SipResponse mcvideo_key_notify(const SipMessage &message);
 
@@ -1142,6 +1338,21 @@ private:
   std::string live_receive_host_;
   std::uint16_t live_receive_port_ = 0;
   unsigned live_receive_dropped_ = 0;
+  // The dialogs of MCVideo calls this client ended (mcvideo_end_call) before the SIP stack reported their end: they
+  // stay the MCVideo service's until it does, so that a late state (the CONFIRMED of an answer refused in its media
+  // callback, which PJSIP reports before the ACK is sent) or media of theirs never reaches the MCPTT call.
+  std::set<std::string> mcvideo_closing_;
+
+  // A state or the media of an MCVideo dialog in mcvideo_closing_ is consumed; its DISCONNECTED ends the entry.
+  bool mcvideo_closing(std::string_view dialog, SipCallState state) {
+    const auto found = mcvideo_closing_.find(std::string(dialog));
+    if (found == mcvideo_closing_.end()) return false;
+    if (state == SipCallState::disconnected) mcvideo_closing_.erase(found);
+    return true;
+  }
+  // Test aid ("mcvideo-refuse-control-ssrc"): the next MCVideo answer's transmission control SSRC is refused as if
+  // already used under the CSK (mcvideo_media), to exercise the refusal while an MCPTT call goes on; once.
+  bool mcvideo_refuse_control_ssrc_ = false;
 
   // Helper: while a new call in mcvideo_call_ is set up (offer, keys, INVITE), a throw drops it again, so that a
   // failed attempt does not leave "an MCVideo call is in progress" behind.
@@ -1327,7 +1538,7 @@ private:
 
   SipResponse mcvideo_conference_notify(const SipMessage &message);
 
-  void mcvideo_end_call(const std::string &reason);
+  void mcvideo_end_call(const std::string &reason, bool dialog_ended = false);
 
   void mcvideo_start_sending(std::uint32_t ssrc);
 
@@ -1427,6 +1638,21 @@ private:
 
   std::optional<xmlsec::Key> mcdata_xml_key(bool uploading = false) const;
 
+  // TS 24.282 clause 6.5.3: integrity protection of the MCData XML MIME bodies under the MCData CSK.
+  bool mcdata_integrity_protection() const;
+
+  bool mcdata_needs_csk() const;
+
+  // TS 24.379, TS 24.281 and TS 24.282 clause 7.2.5: a CSK key download from a participating function, or nothing
+  // when the request is not one.
+  std::optional<SipResponse> csk_key_download(const SipMessage &message);
+
+  std::optional<xmlsec::Key> mcdata_integrity_key(bool uploading = false) const;
+
+  void require_mcdata_csk_in_use() const;
+
+  std::vector<BodyPart> mcdata_sign_outgoing(std::vector<BodyPart> parts);
+
   static const xmlsec::Profile &mcdata_xml_profile();
 
   static bool mcdata_xml_part(const std::string &type);
@@ -1461,6 +1687,8 @@ private:
   keying::KeyParameterWireProfile payload_profile() const;
 
   void expire_data_keys();
+
+  std::uint64_t data_pck_end(const keying::KeyMessage &key) const;
 
   std::pair<keying::KeyMessage, std::string> mcdata_pck_for(const std::string &peer);
 
@@ -1898,6 +2126,9 @@ private:
 
   // ---- MCPTT call state, floor participant messages and media (mcptt/call_media.cpp) ----
   void check_remote(const MediaDescription &media, bool private_call = false);
+  // TS 24.380 clause 14.4: the negotiated media of an SDP answer (or offer) without the parameters this client did
+  // not offer.
+  MediaDescription negotiated_media(MediaDescription media) const;
 
   void call_state(std::string_view id, SipCallState state, int code);
 
@@ -1905,6 +2136,8 @@ private:
   void clear_call_state();
 
   void send_floor(FloorType type);
+  // The Floor Request, Floor Release or Floor Queue Position Request that send_floor() sends.
+  FloorPacket floor_message(FloorType type) const;
 
   void release();
 
@@ -2051,7 +2284,7 @@ private:
   void forward_live_video(const video::AccessUnit &unit, std::uint32_t timestamp);
 
   // ---- Control commands (core/commands.cpp) ----
-  void command(const std::string &cmd);
+  void command(const std::string &command_line);
 
   void run_command(const std::string &cmd);
 
@@ -2153,6 +2386,14 @@ public:
   void request_tokens(std::function<void(std::exception_ptr)> done);
 
   void take_tokens(const Json &tokens);
+  // The ID token's identities were checked at sign-in (take_tokens): a refresh without an ID token keeps them.
+  bool identity_checked_ = false;
+
+  // TS 33.180 annex B.12: the access token for a request while expires_in says it is valid; throws once it has
+  // expired, or before there is one ("no client requests shall be made using the expired token").
+  const std::string &access_token() const;
+  // RFC 6750 section 2.1 (TS 33.180 annex B.10): the Authorization header field value of the access token.
+  std::string bearer() const { return "Bearer " + access_token(); }
 
   // The worker thread of the token grants and its hand-off to the run loop (run_once). Declared after the HTTP
   // clients: it is destroyed (and its job waited for) first.

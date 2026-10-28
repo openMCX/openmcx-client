@@ -5,10 +5,12 @@
 // Small rules of the MC client without client state, kept apart from the Client class so that
 // tests/test_client_rules.cpp can check them: the notifiers of MCData disposition notifications, the warn-codes of a
 // Warning header field, when a refused refresh token is dropped, the scope of the authentication request, the percent-decoding of an XCAP selector, the
-// escaped text of a control command, the groups of an MCPTT user profile, and the retry delay of a refused initial service authorisation.
+// escaped text of a control command, the groups of an MCPTT user profile, and the retry delay of a refused initial service authorisation, the
+// implicit floor request word of a call command, the SDP answer parameters kept, the GMK of a call's group, the end of an MCData PCK context and
+// the floor control streams of a call that go on under a new CSK.
 //
-// Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19),
-// TS 24.484 V19.6.0 (Rel-19), RFC 3261, RFC 3903, RFC 3986, RFC 6749.
+// Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 24.380 V19.2.0 (Rel-19),
+// TS 33.180 V19.4.0 (Rel-19), TS 24.484 V19.6.0 (Rel-19), RFC 3261, RFC 3903, RFC 3986, RFC 6749.
 
 #pragma once
 
@@ -17,6 +19,7 @@
 #include <cstdint>
 #include <iterator>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -79,6 +82,22 @@ inline bool has_warning(std::string_view header, unsigned code) {
 // client with a password signs in with it at once.
 inline bool refresh_refusal_final(unsigned refusals, bool has_password, std::int64_t now, std::int64_t expires) {
   return has_password || refusals >= 2 || now >= expires;
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 annex B.5.1: a native MC client refreshes its access token with the refresh token; when, and how soon a
+// failed renewal is tried again, is left to the client (oauth.token_renewal_lead_s, oauth.token_renewal_halfway_below_s,
+// oauth.token_renewal_retry_ms). Defaults: default pending maintainer choice (no spec value).
+inline constexpr std::int64_t default_token_renewal_lead_s = 600;
+inline constexpr std::int64_t default_token_renewal_halfway_below_s = 1200;
+inline constexpr std::uint64_t default_token_renewal_retry_ms = 30000;
+
+//------------------------------------------------------------------------------
+// The delay, seconds, until a token with left seconds to live is renewed: lead_s before it expires, or halfway for a
+// token that lives less than halfway_below_s; never below 0.
+constexpr std::int64_t token_renewal_delay_s(std::int64_t left, std::int64_t lead_s = default_token_renewal_lead_s,
+                                             std::int64_t halfway_below_s = default_token_renewal_halfway_below_s) {
+  return std::max<std::int64_t>(left < halfway_below_s ? left / 2 : left - lead_s, 0);
 }
 
 //------------------------------------------------------------------------------
@@ -311,6 +330,89 @@ inline std::optional<std::string> alias_outcome(std::string_view status, bool de
 // entries are left out, clause 9.2.2.2.5 step 3b).
 inline bool counts_as_affiliated(std::string_view status) {
   return status != "deaffiliating" && status != "deaffiliated";
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 14.2.5 (whether a call's INVITE is an implicit floor request is an implementation option): the
+// last word of a call command, "implicit", "implicit=<WAV>" or "no-implicit", taken off (command: the rest).
+// requested: none when the command ends in no such word; rejoin: the word ends a "rejoin", which TS 24.380 clause
+// 6.2.1 item 2 never lets be an implicit floor request.
+struct ImplicitWord {
+  std::string command;
+  std::optional<bool> requested;
+  std::string wav;
+  bool rejoin = false;
+};
+
+inline ImplicitWord implicit_word(std::string_view cmd) {
+  ImplicitWord result{std::string(cmd), std::nullopt, {}, false};
+  const auto space = cmd.rfind(' ');
+  if (space == std::string_view::npos) return result;
+  const auto word = cmd.substr(space + 1);
+  const auto head = cmd.substr(0, space);
+  constexpr std::string_view wav_prefix = "implicit=";
+  if (word != "implicit" && word != "no-implicit" && !(word.starts_with(wav_prefix) && word.size() > wav_prefix.size()))
+    return result;
+  if (head == "rejoin") {
+    result.rejoin = true;
+    return result;
+  }
+  const bool call_command = head == "call" || head.starts_with("call ") || head == "chat" ||
+                            head.starts_with("chat ") || head.starts_with("private ") ||
+                            head.starts_with("private-fa ") || head.starts_with("first-to-answer ") ||
+                            head.starts_with("first-to-answer-fa ") || head.starts_with("adhoc ");
+  if (!call_command) return result;
+  result.command = std::string(head);
+  result.requested = word != "no-implicit";
+  if (word.starts_with(wav_prefix)) result.wav = std::string(word.substr(wav_prefix.size()));
+  return result;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 14.4: an fmtp parameter of the SDP answer the offer did not have is discarded ("the offerer
+// shall discard those attribute parameters"); one it had is kept as the answer says.
+constexpr bool answer_parameter_kept(bool in_answer, bool offered) { return in_answer && offered; }
+
+//------------------------------------------------------------------------------
+// TS 33.180 clauses 7.3.11 and 7.3.12: "The GMK and the GMK-ID from the identified preconfigured group shall be used"
+// for a call on a regroup using a preconfigured group; any other group's call (clauses 7.3.4 and 7.3.5: a broadcast
+// group's too) is keyed with that group's GMK. preconfigured_of: the preconfigured group of a regroup this client was
+// told of, empty for any other group.
+template <class Lookup> std::string key_group(const std::string &group, Lookup preconfigured_of) {
+  const std::string preconfigured = preconfigured_of(group);
+  return preconfigured.empty() ? group : preconfigured;
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clause 5.7 and annex E.6: among the keys for which usable(key) holds (the group among its MC group IDs,
+// active, not revoked, not expired), the one of the latest Activation time (activation(key)); null if none.
+template <class Map, class Usable, class Activation>
+const typename Map::mapped_type *newest_usable(const Map &keys, Usable usable, Activation activation) {
+  const typename Map::mapped_type *best = nullptr;
+  for (const auto &entry : keys)
+    if (usable(entry.second) && (!best || activation(entry.second) > activation(*best))) best = &entry.second;
+  return best;
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 annex E.6.10: "The 'Expiry time' element shall define the time in UTC at which the associated key shall no
+// longer be used ... A value of 0 shall imply the key shall not expire." The end of an MCData PCK context (Unix
+// seconds): the end of the local lifetime (local_end, from mcdata.pck_lifetime_s), or the PCK's own Expiry time when
+// it carries one that is earlier (key_expiry 0: none, or a PCK without Key Parameters).
+inline std::uint64_t data_pck_end(std::uint64_t local_end, std::uint64_t key_expiry) {
+  return key_expiry && key_expiry < local_end ? key_expiry : local_end;
+}
+
+//------------------------------------------------------------------------------
+// RFC 3711 section 3.4 (TS 33.180 clauses 9.4.7 and 9.4.8): "after a re-key, the SRTCP index MUST NOT be reset to zero
+// again". The floor (or transmission) control streams of the call under way that go on under a new CSK
+// (ProtectedCall::set_floor), in both directions (TS 24.380 and TS 24.581 clause 4.3.3.1: each side allocates the
+// SSRC it receives): this client's SSRC [local] and the server's [remote], once negotiated; 0 is none.
+inline std::set<std::uint32_t> call_floor_ssrcs(std::uint32_t local, std::optional<std::uint32_t> remote) {
+  std::set<std::uint32_t> ssrcs{local};
+  if (remote) ssrcs.insert(*remote);
+  ssrcs.erase(0);
+  return ssrcs;
 }
 
 } // namespace mcx::client_rules

@@ -4,7 +4,7 @@
 
 // Protected calls: private call keys (PCK), the group key subscription and protected floor control transmission.
 //
-// Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.481 V19.3.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).
+// Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.481 V19.3.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19), RFC 6665.
 
 #include "client.hpp"
 
@@ -90,27 +90,250 @@ std::string Client::xcap_root() const {
 
 //------------------------------------------------------------------------------
 // TS 24.481 clause 6.3.13.2.1: subscribe to the <GKTPs> element of the group's MCS GKTP document (xcap-diff) to
-// receive the GMK (TS 33.180 clause 5.7); without protected media, affiliate at once.
+// receive the GMK (TS 33.180 clause 5.7), with the initial SIP SUBSCRIBE request; without protected media, affiliate
+// at once. A key subscription of the group selected before is ended in its dialog first (RFC 6665 section 4.1.2.3);
+// its final NOTIFY is still answered (key_subscriptions_). The subscription is refreshed in its dialog
+// (refresh_key_subscription).
 void Client::subscribe_keys() {
   if (!protected_media()) {
     affiliate();
     return;
   }
+  if (!key_subscription_.empty()) {
+    const auto previous = std::exchange(key_subscription_, std::string{});
+    try {
+      sip_.request_in_dialog(previous, "SUBSCRIBE", "", "",
+                             {{"Event", "xcap-diff"}, {"Expires", "0"}, {"P-Preferred-Service", mcptt_icsi}});
+    } catch (const std::exception &error) {
+      event("group_key_subscription_end_failed", {{"reason", error.what()}});
+    }
+  }
+  key_refresh_at_ = 0;
+  // TS 33.180 clauses 7.3.11 and 7.3.12: a selected regroup is keyed with its preconfigured group's GMK.
+  const auto key_group = key_group_of(group());
   McpttInfo info;
   info.access_token = token_;
   info.client_id = client_id();
-  info.request_uri = group();
+  info.request_uri = key_group;
   auto parts = info_parts(info);
-  parts.push_back({"application/resource-lists+xml", keying::gktp_resource_list(group())});
+  parts.push_back({"application/resource-lists+xml", keying::gktp_resource_list(key_group)});
   const auto boundary = "mcx-" + random_id();
   key_subscription_ = sip_.subscribe(
-      service(), "xcap-diff", 60, {},
+      gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(), {},
       [this](const SipResponse &response) {
-        if (response.status_code >= 300) failure("group key subscription: " + std::to_string(response.status_code));
+        if (response.status_code < 200) return;
+        if (response.status_code >= 300) {
+          failure("group key subscription: " + std::to_string(response.status_code));
+          return;
+        }
+        key_refresh_at_ = key_refresh_time(response);
       },
       "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary));
-  key_subscriptions_[key_subscription_] = group();
-  next_key_refresh_ = monotonic_ms() + 50000;
+  key_subscriptions_[key_subscription_] = key_group;
+  update_key_subscriptions();
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clauses 7.3.11 and 7.3.12: "The GMK and the GMK-ID from the identified preconfigured group shall be used"
+// for a regroup using a preconfigured group; any other group (a monitored group, a broadcast group, clause 7.3.4
+// "the GMK associated to the broadcast group", and clause 7.3.5) is keyed with its own GMK.
+std::string Client::key_group_of(const std::string &call_group) const {
+  return client_rules::key_group(call_group, [this](const std::string &candidate) {
+    if (!regroups_.contains(candidate)) return std::string{};
+    return regroups_.at(candidate).value("preconfigured", std::string{});
+  });
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clause 5.7 with annex E.6 (MC group IDs, Activation and Expiry times, Status): the newest usable GMK of the
+// group among those received on the key subscriptions.
+keying::KeyMessage Client::gmk_for(const std::string &group_id) const {
+  const auto now = static_cast<std::uint64_t>(std::time(nullptr));
+  const auto *best = client_rules::newest_usable(
+      group_keys_,
+      [&](const keying::KeyMessage &key) {
+        try {
+          keying::require_active(key, group_id, now);
+          return true;
+        } catch (const std::exception &) {
+          return false;
+        }
+      },
+      [](const keying::KeyMessage &key) { return key.properties->activation_unix_seconds; });
+  if (!best) throw std::runtime_error("no active group key for " + group_id);
+  return *best;
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clauses 7.3.4, 7.3.5, 7.3.11, 7.3.12 and 7.4.2: the call's media is keyed with the GMK of its group
+// (key_group_of); a call whose group's GMK this client does not hold cannot be keyed (false).
+bool Client::select_call_key(const std::string &call_group) {
+  const auto key_group = key_group_of(call_group);
+  try {
+    protection_.set_group(gmk_for(key_group));
+  } catch (const std::exception &error) {
+    event("group_call_key_unavailable", {{"group_id", call_group}, {"key_group", key_group}, {"reason", error.what()}});
+    return false;
+  }
+  return true;
+}
+
+//------------------------------------------------------------------------------
+// Helper: after a call keyed with another group's GMK, the selected group's GMK (if held) is selected again; the
+// other epochs keep their replay state (ProtectedCall).
+void Client::restore_group_key() {
+  if (!protected_media()) return;
+  try {
+    protection_.set_group(gmk_for(key_group_of(group())));
+  } catch (const std::exception &) {
+    // Not received yet: the selected group's next key notification selects it.
+  }
+}
+
+//------------------------------------------------------------------------------
+// TS 24.481 clause 6.3.13.2.1 (a GMC subscribes to the <GKTPs> elements of "one or more" groups; here one subscription
+// per group, as for the selected group): the GKTP subscriptions of the monitored groups and of the preconfigured
+// groups of known regroups (TS 33.180 clauses 7.3.11 and 7.3.12: "All users invited ... shall have obtained the
+// preconfigured group configuration and GMK"). A subscription no longer needed ends (RFC 6665 section 4.1.2.3); its
+// final NOTIFY is still answered (key_subscriptions_).
+void Client::update_key_subscriptions() {
+  if (!protected_media() || !keys_ || !authorized_) return;
+  std::set<std::string> wanted(monitored_groups_.begin(), monitored_groups_.end());
+  for (const auto &[tgi, regroup] : regroups_.items())
+    if (const auto preconfigured = regroup.value("preconfigured", std::string{}); !preconfigured.empty())
+      wanted.insert(preconfigured);
+  wanted.erase(key_group_of(group()));
+  for (auto it = extra_key_subscriptions_.begin(); it != extra_key_subscriptions_.end();) {
+    if (wanted.contains(it->first)) {
+      ++it;
+      continue;
+    }
+    extra_key_refresh_at_.erase(it->second);
+    try {
+      sip_.request_in_dialog(it->second, "SUBSCRIBE", "", "",
+                             {{"Event", "xcap-diff"}, {"Expires", "0"}, {"P-Preferred-Service", mcptt_icsi}});
+    } catch (const std::exception &error) {
+      event("group_key_subscription_end_failed", {{"group_id", it->first}, {"reason", error.what()}});
+    }
+    it = extra_key_subscriptions_.erase(it);
+  }
+  for (const auto &key_group : wanted) {
+    if (extra_key_subscriptions_.contains(key_group)) continue;
+    McpttInfo info;
+    info.access_token = token_;
+    info.client_id = client_id();
+    info.request_uri = key_group;
+    auto parts = info_parts(info);
+    parts.push_back({"application/resource-lists+xml", keying::gktp_resource_list(key_group)});
+    const auto boundary = "mcx-" + random_id();
+    const auto dialog = sip_.subscribe(
+        gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(), {},
+        [this, key_group](const SipResponse &response) {
+          if (response.status_code < 200) return;
+          const auto found = extra_key_subscriptions_.find(key_group);
+          if (found == extra_key_subscriptions_.end()) return;
+          if (response.status_code >= 300) {
+            event("group_key_subscription_refused", {{"group_id", key_group}, {"status", response.status_code}});
+            key_subscriptions_.erase(found->second);
+            extra_key_refresh_at_.erase(found->second);
+            extra_key_subscriptions_.erase(found);
+            return;
+          }
+          extra_key_refresh_at_[found->second] = key_refresh_time(response);
+        },
+        "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary));
+    extra_key_subscriptions_[key_group] = dialog;
+    key_subscriptions_[dialog] = key_group;
+    event("group_key_subscription", {{"group_id", key_group}});
+  }
+}
+
+//------------------------------------------------------------------------------
+// TS 24.481 clause 6.3.13.2.1 and RFC 6665 section 4.1.2.2: a further GKTP subscription refreshed by a re-SUBSCRIBE in
+// its dialog, asking for the RFC 5875 section 4.5 default again; a refused or failed refresh ends it, and
+// update_key_subscriptions subscribes again.
+void Client::refresh_extra_key_subscription(const std::string &dialog) {
+  extra_key_refresh_at_[dialog] = 0;
+  const auto found = key_subscriptions_.find(dialog);
+  if (found == key_subscriptions_.end()) return;
+  const auto key_group = found->second;
+  auto resubscribe = [this, key_group, dialog](const std::string &reason) {
+    event("group_key_subscription_refresh_failed", {{"service", "mcptt"}, {"group_id", key_group}, {"reason", reason}});
+    const auto current = extra_key_subscriptions_.find(key_group);
+    if (current == extra_key_subscriptions_.end() || current->second != dialog) return;
+    extra_key_subscriptions_.erase(current);
+    extra_key_refresh_at_.erase(dialog);
+    schedule([this] { update_key_subscriptions(); });
+  };
+  try {
+    sip_.request_in_dialog(dialog, "SUBSCRIBE", "application/resource-lists+xml", keying::gktp_resource_list(key_group),
+                           {{"Event", "xcap-diff"}, {"Expires", std::to_string(key_subscription_expires_s())}},
+                           [this, dialog, resubscribe](const SipResponse &response) {
+                             if (response.status_code < 200 || !extra_key_refresh_at_.contains(dialog)) return;
+                             if (response.status_code >= 300) {
+                               resubscribe(std::to_string(response.status_code));
+                               return;
+                             }
+                             extra_key_refresh_at_[dialog] = key_refresh_time(response);
+                           });
+  } catch (const std::exception &error) {
+    resubscribe(error.what());
+  }
+}
+
+//------------------------------------------------------------------------------
+// RFC 6665 section 4.1.2.1: the Expires of the 2xx "indicates the actual duration for which the subscription will
+// remain active" (it "MUST contain an Expires header field"; without one, the duration asked for). The refresh is due
+// at nine tenths of it: an implementation choice within RFC 6665 4.1.2.2 (any time before expiry).
+std::int64_t Client::key_refresh_time(const SipResponse &response) const {
+  std::int64_t granted = key_subscription_expires_s();
+  try {
+    if (const auto value = get_header(response.headers, "Expires"); !value.empty())
+      granted = std::stoll(std::string(value));
+  } catch (const std::exception &) {}
+  if (granted <= 0) return 0;
+  return std::time(nullptr) + granted * 9 / 10;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.481 clause 6.3.13.2.1: the "SIP re-SUBSCRIBE request" with the application/resource-lists+xml body of the
+// subscribed <GKTPs> element, in the dialog of the subscription (RFC 6665 section 4.1.2.2: "on the same dialog"),
+// asking for the RFC 5875 section 4.5 default again. A refused or failed refresh ends that subscription (RFC 6665
+// section 4.1.2.2); a new initial SUBSCRIBE takes its place.
+void Client::refresh_key_subscription(bool mcvideo) {
+  auto &dialog = mcvideo ? mcvideo_key_subscription_ : key_subscription_;
+  (mcvideo ? mcvideo_key_refresh_at_ : key_refresh_at_) = 0;
+  if (dialog.empty()) return;
+  const auto id = dialog;
+  const auto group_id = mcvideo ? mcvideo_key_group_ : key_subscriptions_[id];
+  auto resubscribe = [this, mcvideo, id](const std::string &reason) {
+    event("group_key_subscription_refresh_failed", {{"service", mcvideo ? "mcvideo" : "mcptt"}, {"reason", reason}});
+    if ((mcvideo ? mcvideo_key_subscription_ : key_subscription_) != id) return;
+    if (mcvideo) {
+      mcvideo_key_subscription_.clear();
+      schedule([this] { mcvideo_subscribe_keys(); });
+    } else {
+      key_subscription_.clear();
+      schedule([this] { subscribe_keys(); });
+    }
+  };
+  const std::vector<SipHeader> headers{{"Event", "xcap-diff"},
+                                       {"Expires", std::to_string(key_subscription_expires_s())}};
+  try {
+    sip_.request_in_dialog(
+        id, "SUBSCRIBE", "application/resource-lists+xml", keying::gktp_resource_list(group_id), headers,
+        [this, mcvideo, id, resubscribe](const SipResponse &response) {
+          if (response.status_code < 200 || (mcvideo ? mcvideo_key_subscription_ : key_subscription_) != id) return;
+          if (response.status_code >= 300) {
+            resubscribe(std::to_string(response.status_code));
+            return;
+          }
+          (mcvideo ? mcvideo_key_refresh_at_ : key_refresh_at_) = key_refresh_time(response);
+          event("group_key_subscription_refreshed", {{"service", mcvideo ? "mcvideo" : "mcptt"}});
+        });
+  } catch (const std::exception &error) {
+    resubscribe(error.what());
+  }
 }
 
 //------------------------------------------------------------------------------

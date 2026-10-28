@@ -11,6 +11,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.openmcx.client.security.KeyMessage
+import org.openmcx.client.security.KeyProperties
 
 class CallProtectionTest {
     private val pck = KeyMessage(ByteArray(16) { it.toByte() }, ByteArray(16) { (16 + it).toByte() }, 0x10000001, 0)
@@ -51,6 +52,63 @@ class CallProtectionTest {
         assertEquals("AAEC", remote.keyMgmt)
         val clear = McvideoSdp.remote(McvideoSdp.offer(local.copy(protected = false, keyMgmt = null)))
         assertFalse(clear.protected); assertNull(clear.keyMgmt)
+    }
+
+    // TS 33.180 E.6.10 at every packet, by an injected clock: usable 1 s before the Expiry time, not from it on.
+    private val expiry = 2_000_000_000L
+    private fun dated(key: KeyMessage, type: Int, expiry: Long = this.expiry, status: Long = 1) =
+        KeyMessage(key.key, key.random, key.csbId, key.ntpSeconds, KeyProperties(type, status, 0, expiry))
+    private val rtcp = byteArrayOf(0x80.toByte(), 0xcc.toByte(), 0, 4, 0x12, 0x34, 0x56, 0x78) +
+        "MCV0".toByteArray(Charsets.ISO_8859_1) + byteArrayOf(1, 2, 3, 4, 5, 6, 7, 8)
+
+    @Test fun pckNotUsedPastItsExpiryTime() {
+        var now = expiry - 1
+        val key = dated(pck, 1)
+        val caller = CallProtection.privateCall(null, key, localInitiator = true) { now }
+        val called = CallProtection.privateCall(null, key, localInitiator = false) { now }
+        val wire = caller.protectRtp(rtp)!!
+        assertArrayEquals(rtp, called.unprotectRtp(wire))
+        val next = caller.protectRtp(rtp.copyOf().also { it[3] = 2 })!!
+        now = expiry
+        assertNull(caller.protectRtp(rtp.copyOf().also { it[3] = 3 })) // not sent, never in the clear
+        assertNull(called.unprotectRtp(next)) // dropped
+        assertEquals(0, called.failures)
+        // Expiry time 0, or no Key Parameters: the PCK never expires; a revoked one is not used.
+        now = 4_000_000_000L
+        assertTrue(CallProtection.privateCall(null, dated(pck, 1, expiry = 0), true) { now }.protectRtp(rtp) != null)
+        assertTrue(CallProtection.privateCall(null, pck, true) { now }.protectRtp(rtp) != null)
+        val revoked = dated(pck, 1, expiry = 0, status = 0)
+        assertNull(CallProtection.privateCall(null, revoked, true) { now }.protectRtp(rtp))
+    }
+
+    @Test fun cskNotUsedPastItsExpiryTime() {
+        var now = expiry - 1
+        val key = dated(csk, 2)
+        val phone = CallProtection(key, null, null, clock = { now })
+        val server = CallProtection(key, null, null, clock = { now })
+        val wire = phone.protectControl(rtcp)!!
+        assertArrayEquals(rtcp, server.unprotectControl(wire))
+        val next = phone.protectControl(rtcp)!!
+        now = expiry
+        assertNull(phone.protectControl(rtcp))
+        assertNull(server.unprotectControl(next))
+        assertArrayEquals(rtp, phone.protectRtp(rtp)) // media without a media key stays as configured (clear)
+    }
+
+    @Test fun gmkNotUsedPastItsExpiryTime() {
+        var now = expiry - 1
+        val clear = KeyMessage(ByteArray(16) { (64 + it).toByte() }, ByteArray(16) { (80 + it).toByte() }, 0x01234567,
+            0)
+        val gmk = dated(clear, 0)
+        val alice = "sip:alice.mcvideo@mcx.test"
+        val sender = CallProtection.Group(null, gmk, alice, { now }) { emptyList() }
+        val receiver = CallProtection.Group(null, gmk, "sip:bob.mcvideo@mcx.test", { now }) { listOf(alice) }
+        assertArrayEquals(rtp, receiver.unprotectRtp(sender.protectRtp(rtp)!!))
+        val next = sender.protectRtp(rtp.copyOf().also { it[3] = 2 })!!
+        now = expiry
+        assertNull(sender.protectRtp(rtp.copyOf().also { it[3] = 3 }))
+        assertNull(receiver.unprotectRtp(next))
+        assertEquals(0, receiver.failures)
     }
 
     @Test fun groupMediaByTheSendersGukId() {

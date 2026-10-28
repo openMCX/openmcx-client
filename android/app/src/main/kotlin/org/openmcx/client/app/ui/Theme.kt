@@ -39,7 +39,8 @@ data class McxColors(
     val Muted: Color,
     val Line: Color,
     val Brand: Color,
-    /** The top strip and sent message bubbles: a lighter shade of the logo's orange (a deep one in dark mode). */
+    /** The top strip and sent message bubbles: a lighter shade of the logo's orange, 60 % of it on white (a deep one in
+     *  dark mode). */
     val Strip: Color,
     // Floor states: fills.
     val Idle: Color,
@@ -68,7 +69,7 @@ data class McxColors(
 val LightMcx = McxColors(
     dark = false,
     Ivory = Color(0xFFFBF6EE), Card = Color(0xFFFFFFFF), Ink = Color(0xFF1C1917), Muted = Color(0xFF57534E),
-    Line = Color(0xFFE7DFD3), Brand = Color(0xFFFFCC80), Strip = Color(0xFFFFE6C4),
+    Line = Color(0xFFE7DFD3), Brand = Color(0xFFFFC266), Strip = Color(0xFFFFE0B3),
     Idle = Color(0xFF292524), Requesting = Color(0xFFB45309), Talking = Color(0xFFC2410C), Taken = Color(0xFF1D4ED8),
     Releasing = Color(0xFF57534E), Stop = Color(0xFFB91C1C), Peril = Color(0xFFF59E0B),
     OnIdle = Color(0xFF1C1917), OnRequesting = Color(0xFF92400E), OnTalking = Color(0xFFC2410C), OnTaken = Color(0xFF1D4ED8),
@@ -79,7 +80,7 @@ val LightMcx = McxColors(
 val DarkMcx = McxColors(
     dark = true,
     Ivory = Color(0xFF181412), Card = Color(0xFF231E1B), Ink = Color(0xFFF5EFE6), Muted = Color(0xFFB5ADA6),
-    Line = Color(0xFF3A322C), Brand = Color(0xFFFFCC80), Strip = Color(0xFF3A2A18),
+    Line = Color(0xFF3A322C), Brand = Color(0xFFFFC266), Strip = Color(0xFF3A2A18),
     // Fills keep their hue; idle and releasing are lifted so the PTT key stands out from the dark background.
     Idle = Color(0xFF4A433E), Requesting = Color(0xFFB45309), Talking = Color(0xFFC2410C), Taken = Color(0xFF1D4ED8),
     Releasing = Color(0xFF6B635D), Stop = Color(0xFFB91C1C), Peril = Color(0xFFF59E0B),

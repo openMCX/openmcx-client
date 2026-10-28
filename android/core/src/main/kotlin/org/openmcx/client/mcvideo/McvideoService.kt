@@ -6,6 +6,8 @@ package org.openmcx.client.mcvideo
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -18,6 +20,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import org.openmcx.client.body.McService
 import org.openmcx.client.body.Multipart
@@ -147,16 +150,18 @@ class McvideoService(
     /** Each group's GMKs (TS 33.180 5.7), their CSB-IDs the GMK-IDs; from the GKTP subscriptions. */
     private val groupKeys = GroupKeys()
     val groupKeyIds: Map<String, Long> get() = groupKeys.ids
-    /** The GKTP subscriptions: Call-ID to group. */
-    private val keySubscriptions = java.util.concurrent.ConcurrentHashMap<String, String>()
+    /** The GKTP subscriptions: their groups by Call-ID, and their dialogs. */
+    private val keySubscriptions = GroupKeySubscriptions()
 
     init {
-        // TS 24.281 4.7.1: once authorised, subscribe to each group's GMK at the MCVideo server, and again before it expires.
+        // TS 24.281 4.7.1: once authorised, subscribe to each group's GMK at the MCVideo server; each subscription is
+        // refreshed in its dialog before it expires (TS 24.481 §6.3.13.2.1 re-SUBSCRIBE, RFC 6665 §4.1.2.2).
         if (client.config.security?.protectMedia == true) scope.launch {
             client.status.map { it.mcvideo.authorised }.distinctUntilChanged().collect { authorised ->
-                if (!authorised) return@collect
                 keyRefresh?.cancel()
-                keyRefresh = scope.launch { while (true) { subscribeGroupKeys(); delay(KEY_SUBSCRIPTION_SECONDS * 900L) } }
+                if (!authorised) { keyRefresh = null; return@collect }
+                // A round of SUBSCRIBEs is not cut short, so each accepted subscription has its dialog to end it with.
+                keyRefresh = scope.launch { withContext(NonCancellable) { subscribeGroupKeys() }; refreshGroupKeys() }
             }
         }
     }
@@ -164,19 +169,73 @@ class McvideoService(
 
     private suspend fun subscribeGroupKeys() {
         val token = client.tokens?.accessToken ?: return
-        for (group in (config.groups + config.chatGroups).distinct()) {
-            val request = ua.newRequest("SUBSCRIBE", config.psi, NameAddr(config.psi))
+        for (group in (config.groups + config.chatGroups).distinct()) subscribeGroupKey(group, token)
+    }
+
+    /** TS 24.481 §6.3.13.2.1: the initial SIP SUBSCRIBE request for [group]'s <GKTPs>. */
+    private suspend fun subscribeGroupKey(group: String, token: String) {
+        val request = ua.newRequest("SUBSCRIBE", config.psi, NameAddr(config.psi))
+        commonHeaders(request)
+        request.headers.add("Event", GroupKeySubscriptions.EVENT).add("Accept", GroupKeySubscriptions.ACCEPT)
+            .add("Expires", GroupKeySubscriptions.EXPIRES_SECONDS.toString())
+        val (contentType, body) = Multipart.encode(listOf(
+            Part(McvideoInfo.CONTENT_TYPE, McvideoInfo(accessToken = token, requestUri = group, clientId = client.config.clientId).encode().toByteArray()),
+            Part(ResourceLists.CONTENT_TYPE, KmsDocuments.gktpResourceList(group).toByteArray())))
+        request.headers.add("Content-Type", contentType)
+        val subscribe = SipRequest(request.method, request.uri, request.headers, body)
+        keySubscriptions.sent(subscribe.callId, group)
+        val response = runCatching { ua.send(subscribe) }.getOrNull()
+        val expires = response?.headers?.get("Expires")?.let { ", $it s" } ?: ""
+        event("group key subscription for $group: ${response?.status}$expires")
+        if (response == null || !response.isSuccess) { keySubscriptions.ended(subscribe.callId); return }
+        runCatching { Dialog.fromResponse(ua.lastSent[subscribe.callId] ?: subscribe, response) }.getOrNull()
+            ?.let { keySubscriptions.accepted(it, GroupKeySubscriptions.granted(response)) }
+    }
+
+    /**
+     * RFC 6665 §4.1.2.2: each GKTP subscription is refreshed in its dialog when its refresh is due
+     * (GroupKeySubscriptions.accepted); a refresh is not cut short, so the dialog's state stays whole for log-off.
+     */
+    private suspend fun refreshGroupKeys() {
+        while (true) {
+            val next = keySubscriptions.nextRefresh() ?: return
+            delay((next - System.currentTimeMillis()).coerceAtLeast(0))
+            for ((dialog, group) in keySubscriptions.due())
+                withContext(NonCancellable) { refreshGroupKey(dialog, group) }
+        }
+    }
+
+    /**
+     * TS 24.481 §6.3.13.2.1: the SIP re-SUBSCRIBE request for [group] in [dialog], with the g.3gpp.icsi-ref media
+     * feature tag in Contact. A refused or failed refresh ends that subscription (RFC 6665 §4.1.2.2); a new initial
+     * SUBSCRIBE takes its place.
+     */
+    private suspend fun refreshGroupKey(dialog: Dialog, group: String) {
+        val request = GroupKeySubscriptions.refresh(ua, dialog, group)
+        request.headers.add("Contact", client.contactFor(McService.MCVIDEO))
+        val response = runCatching { ua.send(request, dialog) }.getOrNull()
+        event("group key subscription for $group refreshed: ${response?.status}")
+        if (response != null && response.isSuccess) {
+            keySubscriptions.accepted(dialog, GroupKeySubscriptions.granted(response))
+            return
+        }
+        keySubscriptions.ended(dialog.callId)
+        client.tokens?.accessToken?.let { subscribeGroupKey(group, it) }
+    }
+
+    /**
+     * End every GKTP subscription in its dialog (RFC 6665 §4.1.2.3, SUBSCRIBE with Expires 0): before the SIP
+     * de-REGISTER the UE releases all dialogs that use the contact address (TS 24.229 §5.1.1.6.1). The renewal stops first.
+     */
+    private suspend fun endGroupKeySubscriptions() {
+        keyRefresh?.cancelAndJoin()
+        keyRefresh = null
+        for (dialog in keySubscriptions.takeDialogs()) {
+            val group = keySubscriptions.group(dialog.callId)
+            val request = GroupKeySubscriptions.unsubscribe(ua, dialog)
             commonHeaders(request)
-            request.headers.add("Event", "xcap-diff").add("Accept", "application/xcap-diff+xml").add("Expires", KEY_SUBSCRIPTION_SECONDS.toString())
-            val (contentType, body) = Multipart.encode(listOf(
-                Part(McvideoInfo.CONTENT_TYPE, McvideoInfo(accessToken = token, requestUri = group, clientId = client.config.clientId).encode().toByteArray()),
-                Part(ResourceLists.CONTENT_TYPE, KmsDocuments.gktpResourceList(group).toByteArray())))
-            request.headers.add("Content-Type", contentType)
-            val subscribe = SipRequest(request.method, request.uri, request.headers, body)
-            keySubscriptions[subscribe.callId] = group
-            val response = runCatching { ua.send(subscribe) }.getOrNull()
-            event("group key subscription for $group: ${response?.status}")
-            if (response == null || !response.isSuccess) keySubscriptions.remove(subscribe.callId)
+            val response = runCatching { ua.send(request, dialog) }.getOrNull()
+            event("group key subscription for $group ended: ${response?.status}")
         }
     }
 
@@ -184,7 +243,7 @@ class McvideoService(
     private suspend fun keyNotify(group: String, tx: ServerTransaction) {
         val request = tx.request
         if (request.headers["Subscription-State"]?.startsWith("terminated") == true) {
-            tx.respond(200); keySubscriptions.remove(request.callId); return
+            tx.respond(200); keySubscriptions.ended(request.callId); return
         }
         val security = client.config.security
         val keys = client.videoKeys
@@ -468,7 +527,7 @@ class McvideoService(
         val request = tx.request
         if (request.method == "MESSAGE" && isMcvideo(request) && receiveAlert(tx)) return true
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "xcap-diff") {
-            val group = keySubscriptions[request.callId] ?: return false
+            val group = keySubscriptions.group(request.callId) ?: return false
             keyNotify(group, tx)
             return true
         }
@@ -866,9 +925,13 @@ class McvideoService(
 
     override suspend fun flowLost() { _calls.value.forEach { release(it, "connection lost") } }
 
-    /** The user logs off: every call is left (BYE, or CANCEL while calling); an ambient viewing call too. */
+    /**
+     * The user logs off: every call is left (BYE, or CANCEL while calling); an ambient viewing call too. Then the GKTP
+     * subscriptions end, as all dialogs are released before the SIP de-REGISTER (TS 24.229 §5.1.1.6.1).
+     */
     override suspend fun logOff() {
         _calls.value.forEach { call -> runCatching { hangup(call) }.onFailure { release(call, "logged off") } }
+        endGroupKeySubscriptions()
     }
 
     companion object {
@@ -882,8 +945,6 @@ class McvideoService(
         const val PULL_FROM_SERVER = "one-from-server video pull"
         const val AMBIENT = "ambient-viewing"
         val ONE_TO_ONE = setOf("private", PUSH, PULL, AMBIENT)
-        /** How long a GKTP subscription lasts; renewed at nine tenths of it. */
-        const val KEY_SUBSCRIPTION_SECONDS = 3600L
         /** Annex D.3: the release capability of an ambient viewing call, in Feature-Caps. */
         const val AMBIENT_RELEASE = "g.3gpp.mcvideo.ambient-viewing-call-release"
 

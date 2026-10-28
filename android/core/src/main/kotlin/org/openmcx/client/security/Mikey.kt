@@ -32,7 +32,11 @@ class IdentityKeys(val uri: String, val periodNumber: Long, val ssk: BigInteger,
 data class KeyProperties(val type: Int, val status: Long = 1, val activation: Long = 0, val expiry: Long = 0,
                          val text: String = "", val groups: List<String> = emptyList())
 
-/** A key carried in a MIKEY-SAKKE I_MESSAGE: the 128-bit key, RAND, CSB-ID (the key ID) and the NTP time. */
+/**
+ * A key carried in a MIKEY-SAKKE I_MESSAGE: the 128-bit key, RAND (RFC 3830 6.11: variable, "SHOULD be at least 16":
+ * at least 1 octet read, 16 written), CSB-ID (the key ID) and the NTP time in full seconds (every era; the wire carries
+ * the low 32 bits).
+ */
 class KeyMessage(val key: ByteArray, val random: ByteArray, val csbId: Long, val ntpSeconds: Long, val properties: KeyProperties? = null) {
     val purpose get() = (csbId ushr 28).toInt()
 }
@@ -46,6 +50,13 @@ data class WireProfile(val messageType: Int, val algorithm: Int, val keyParamete
 /** MIKEY-SAKKE (RFC 6509) I_MESSAGEs as TS 33.180 Annex E profiles them, byte for byte as OpenMCX writes them. */
 object Mikey {
     const val NTP_EPOCH = 2208988800L
+
+    /**
+     * RFC 3830 5.4: the allowable clock skew of a received I_MESSAGE's timestamp, "which is set by the local policy";
+     * it also bounds how long the replay cache remembers a message. Configurable (security.mikey_clock_skew_s);
+     * 300 s is the default pending maintainer choice (no spec value).
+     */
+    const val DEFAULT_CLOCK_SKEW_S = 300L
     private val random = SecureRandom()
 
     private fun ByteArrayOutputStream.int(value: Long, width: Int) { for (n in width - 1 downTo 0) write((value ushr (8 * n)).toInt() and 0xff) }
@@ -71,13 +82,14 @@ object Mikey {
     /** The I_MESSAGE carrying [key] from [sender] to [recipient], SAKKE-encapsulated under [recipientKms] and signed under [kms]. */
     fun create(kms: KmsPublic, sender: IdentityKeys, recipient: String, key: KeyMessage,
                profile: WireProfile? = null, recipientKms: KmsPublic = kms): ByteArray {
-        check(key.ntpSeconds in 0..0xffffffffL, "NTP era unsupported")
+        check(key.ntpSeconds >= 0 && key.random.size in 16..255, "invalid MIKEY timestamp or RAND")
         check(sender.periodNumber == kms.periodNumber(key.ntpSeconds), "identity key period mismatch")
         val encapsulated = Sakke(recipientKms.z).encapsulate(uid(recipient, recipientKms, key.ntpSeconds).toByteArray(), key.key)
         val out = ByteArrayOutputStream()
         out.bytes(byteArrayOf(1, 26, 5, 1)); out.int(key.csbId, 4); out.write(0); out.write(1)
-        out.write(11); out.write(0); out.int(key.ntpSeconds, 4); out.int(0, 4)
-        out.write(14); out.write(16); out.bytes(key.random)
+        // RFC 5905 section 6: the 32-bit seconds field holds the era offset; the receiver infers the era (ntpFromWire).
+        out.write(11); out.write(0); out.int(key.ntpSeconds and 0xffffffffL, 4); out.int(0, 4)
+        out.write(14); out.write(key.random.size); out.bytes(key.random)
         idPayload(out, 14, 1, sender.uri); idPayload(out, 14, 2, recipient)
         idPayload(out, 14, 6, kms.kmsUri); idPayload(out, 26, 7, recipientKms.kmsUri)
         val properties = key.properties
@@ -106,43 +118,76 @@ object Mikey {
             check(number(1) == next.toLong() && number(1) == role.toLong() && number(1) == 1L, "unsupported MIKEY identity payload")
             return String(take(number(2).toInt()))
         }
+        /**
+         * RFC 3830 6.1, RFC 6509 4.1, TS 33.180 E.1.2: the HDR (version 1, data type 26, next payload T), CS# 0 with
+         * CS ID map type 1; the CSB-ID. V "MUST be set to '0' and ignored by the Responder" (RFC 6509 4.1); PRF func 1
+         * (PRF-HMAC-SHA-256) is the only one implemented. Not implemented: CS# > 0 (GENERIC-ID) and an SP payload.
+         */
         fun header(): Long {
-            check(number(1) == 1L && number(1) == 26L && number(1) == 5L && number(1) == 1L, "unsupported MIKEY header")
+            check(number(1) == 1L && number(1) == 26L && number(1) == 5L, "unsupported MIKEY header")
+            check(number(1) and 0x7fL == 1L, "unsupported MIKEY PRF function")
             val csb = number(4)
             check(number(1) == 0L && number(1) == 1L, "unsupported MIKEY session map")
             return csb
+        }
+        /** RFC 3830 6.6, TS 33.180 E.1.2: the T payload, NTP-UTC; its 32-bit seconds field (the fraction unused). */
+        fun timestamp(): Long {
+            check(number(1) == 11L && number(1) == 0L, "unsupported MIKEY timestamp")
+            return number(4).also { number(4) }
+        }
+        /**
+         * RFC 3830 6.11: the RAND payload; "RAND len ... SHOULD be at least 16" (a SHOULD, not a MUST): a shorter RAND
+         * of at least one octet is read, and [open] reports it.
+         */
+        fun rand(): ByteArray {
+            check(number(1) == 14L, "unsupported MIKEY RAND")
+            val length = number(1).toInt()
+            check(length >= 1, "empty MIKEY RAND")
+            return take(length)
         }
     }
 
     /** What an I_MESSAGE says before it is authenticated: its CSB-ID, time, initiator and KMSs. */
     class Envelope(val csbId: Long, val ntpSeconds: Long, val initiator: String, val receiver: String, val initiatorKms: String, val receiverKms: String)
 
-    fun envelope(message: ByteArray): Envelope {
+    /** The [Envelope] of [message]; its time in the NTP era nearest to [nowNtp] (RFC 5905 section 6). */
+    fun envelope(message: ByteArray, nowNtp: Long = nowNtp()): Envelope {
         check(message.size <= 65535, "oversized MIKEY message")
         val r = Reader(message)
         val csb = r.header()
-        check(r.number(1) == 11L && r.number(1) == 0L, "unsupported MIKEY timestamp")
-        val ntp = r.number(4); r.number(4)
-        check(r.number(1) == 14L && r.number(1) == 16L, "unsupported MIKEY RAND")
-        r.take(16)
+        val ntp = ntpFromWire(r.timestamp(), nowNtp)
+        r.rand()
         return Envelope(csb, ntp, r.identity(1, 14), r.identity(2, 14), r.identity(6, 14), r.identity(7, 26))
     }
 
     /**
+     * RFC 5905 section 6: "the seconds field is divided into a 32-bit Era Number field and a 32-bit Era Offset field";
+     * eras "can be derived from external means", and "correct values are obtained even if the client and server are
+     * in adjacent eras". The 32-bit [seconds] of a timestamp is placed in the era nearest to the local clock [nowNtp]
+     * (full NTP seconds): the previous, the current or the next one.
+     */
+    fun ntpFromWire(seconds: Long, nowNtp: Long): Long {
+        val era = nowNtp ushr 32
+        val low = seconds and 0xffffffffL
+        return listOf(era - 1, era, era + 1).filter { it >= 0 }.map { (it shl 32) or low }
+            .minByOrNull { kotlin.math.abs(it - nowNtp) }!!
+    }
+
+    /**
      * Authenticate [message] as from [sender] (its signature under the initiator's KMS, found by [lookup]),
-     * addressed to [recipient], within [skew] seconds of [nowNtp], and open the key it carries.
+     * addressed to [recipient], within [skew] seconds of [nowNtp] (RFC 3830 5.4), and open the key it carries; an
+     * accepted but unusual value (a RAND shorter than RFC 3830 6.11 recommends) goes to [warn].
      */
     fun open(kms: KmsPublic, recipient: IdentityKeys, sender: String, message: ByteArray, nowNtp: Long,
-             profile: WireProfile? = null, skew: Long = 300, lookup: (String) -> KmsPublic? = { null }): KeyMessage {
+             profile: WireProfile? = null, skew: Long = DEFAULT_CLOCK_SKEW_S, lookup: (String) -> KmsPublic? = { null },
+             warn: (String) -> Unit = {}): KeyMessage {
         check(message.size <= 65535, "oversized MIKEY message")
         val r = Reader(message)
         val csb = r.header()
-        check(r.number(1) == 11L && r.number(1) == 0L, "unsupported MIKEY timestamp")
-        val ntp = r.number(4); r.number(4)
+        val ntp = ntpFromWire(r.timestamp(), nowNtp)
         check(kotlin.math.abs(nowNtp - ntp) <= skew, "stale or future MIKEY timestamp")
         check(recipient.periodNumber == kms.periodNumber(ntp), "identity key period mismatch")
-        check(r.number(1) == 14L && r.number(1) == 16L, "unsupported MIKEY RAND")
-        val rand = r.take(16)
+        val rand = r.rand()
         check(r.identity(1, 14) == sender, "unexpected MIKEY sender")
         check(r.identity(2, 14) == recipient.uri, "unexpected MIKEY recipient")
         val signingKmsUri = r.identity(6, 14)
@@ -151,12 +196,23 @@ object Mikey {
         val next = r.number(1).toInt()
         check((next == 4 || next == 21) && r.number(1) == 1L && r.number(1) == 2L, "unsupported SAKKE profile")
         val ciphertext = r.take(r.number(2).toInt())
+        // RFC 3830 6.15, TS 33.180 E.1.2: general extension payloads (21) up to SIGN (4): the key parameters (type 7,
+        // E.6, at most one), SAKKE-to-self (type 6, E.5, not used here, ignored) and the RFC 3830 table 6.15 types
+        // Vendor ID (0) and SDP IDs (1), skipped. Any other type is an unsupported parameter, refused: RFC 3830 5.3,
+        // "If any unsupported parameters or errors occur during the processing ... The processing is then aborted."
         var sealed: ByteArray? = null
-        if (next == 21) {
-            check(profile != null, "key properties require an explicit wire profile")
-            check(r.number(1) == 4L && r.number(1) == 7L, "unsupported MIKEY extension")
-            sealed = r.take(r.number(2).toInt())
+        var following = next
+        while (following == 21) {
+            following = r.number(1).toInt()
+            val type = r.number(1).toInt()
+            val data = r.take(r.number(2).toInt())
+            if (type == 7) {
+                check(sealed == null, "duplicate MIKEY key parameters")
+                check(profile != null, "key properties require an explicit wire profile")
+                sealed = data
+            } else check(type == 6 || type == 0 || type == 1, "unsupported MIKEY general extension")
         }
+        check(following == 4, "unsupported MIKEY payload before SIGN")
         check(r.number(2) == 0x2081L, "unsupported ECCSI SIGN")
         val signedLength = r.position
         val signature = r.take(129)
@@ -165,6 +221,8 @@ object Mikey {
         check(Eccsi(signingKms.kpak).verify(signerId, message.copyOfRange(0, signedLength), signature), "MIKEY signature invalid")
         val key = Sakke(kms.z).decapsulate(uid(recipient.uri, kms, ntp).toByteArray(), recipient.rsk, ciphertext)
             ?: throw KeyError("SAKKE decapsulation failed")
+        if (rand.size < 16)
+            warn("MIKEY RAND of ${rand.size} octets from $sender accepted (RFC 3830 6.11: SHOULD be at least 16)")
         val opened = KeyMessage(key, rand, csb, ntp)
         return if (sealed == null) opened else KeyMessage(key, rand, csb, ntp, openProperties(opened, sealed, profile!!))
     }
@@ -187,16 +245,21 @@ object Mikey {
         return out.toByteArray()
     }
 
+    /**
+     * TS 33.180 E.6.1 (table E.6.1-1): every Key Type of table E.6.11-1, the MC Group IDs for a GMK, MKFC or MuSiK
+     * only (E.6.3), and Reserved IEs (TLV-E, E.6.6, "outside of scope of the present document") skipped.
+     */
     private fun decodeProperties(data: ByteArray, profile: WireProfile): KeyProperties {
         val r = Reader(data)
         check(r.number(1) == profile.keyParametersIei.toLong(), "unexpected Key Parameters IEI")
         check(r.number(2) == (data.size - r.position).toLong(), "invalid Key Parameters length")
         val type = r.number(1).toInt()
-        check(type == 0 || type == 2, "unsupported key type")
+        // Table E.6.11-1: GMK 0, PCK 1, CSK 2, SPK 3, MKFC 4, MSCCK 5, MuSiK 6; "All other values are reserved".
+        check(type in 0..6, "reserved key type")
         val status = r.number(4); val activation = r.number(5); val expiry = r.number(5)
         val text = String(r.take(r.number(2).toInt()))
         val groups = mutableListOf<String>()
-        if (type == 0) {
+        if (type == 0 || type == 4 || type == 6) {
             val g = Reader(r.take(r.number(2).toInt()))
             repeat(g.number(1).toInt()) {
                 check(g.number(1) == 0x7bL, "unexpected MC group ID IEI")
@@ -204,7 +267,7 @@ object Mikey {
             }
             check(g.position == g.data.size, "trailing MC group IDs")
         }
-        check(r.position == data.size, "unsupported trailing key parameters")
+        while (r.position < data.size) { r.number(1); r.take(r.number(2).toInt()) }
         return KeyProperties(type, status, activation, expiry, text, groups)
     }
 
@@ -260,7 +323,7 @@ object Mikey {
         check(data.isNotEmpty() && (data[0].toInt() and 0xff) == profile.messageType, "unexpected protected payload type")
         val payload = openPayload(data, key.key, profile)
         check(payload.dppkId == key.csbId, "key properties CSB-ID mismatch")
-        check(payload.unixSeconds + NTP_EPOCH == key.ntpSeconds, "key properties timestamp mismatch")
+        // The Date and Time is not compared with the MIKEY timestamp: E.6.1 does not ask for it.
         return decodeProperties(payload.plain, profile).also { check(it.type == key.purpose, "key type disagrees with CSB-ID purpose") }
     }
 

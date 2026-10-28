@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeoutOrNull
 import org.openmcx.client.body.Affiliation
 import org.openmcx.client.body.McService
@@ -69,6 +70,23 @@ object Icsi {
     val mcdataContactTags = ";+g.3gpp.mcdata.sds;+g.3gpp.mcdata.fd;+g.3gpp.icsi-ref=\"${encoded(MCDATA)},${encoded(MCDATA_SDS)},${encoded(MCDATA_FD)}\""
 }
 
+/**
+ * The MC service a request belongs to: by its ICSI (P-Preferred-Service, P-Asserted-Service) or the MC service's media
+ * feature tags in its Accept-Contact (TS 24.379, TS 24.281 and TS 24.282 clause 6.2 and the request procedures). Null
+ * for a request of no single MC service (REGISTER) and for requests inside a dialog, which carry neither.
+ */
+fun mcServiceOf(request: SipRequest): McService? {
+    val icsis = listOfNotNull(request.headers["P-Preferred-Service"], request.headers["P-Asserted-Service"]).map { it.trim() }
+    val accept = request.headers.all("Accept-Contact").joinToString(";")
+    val tags = Regex("""g\.3gpp\.(mcptt|mcvideo|mcdata)(?![\w-])""").findAll(accept).map { it.groupValues[1] }.toSet()
+    return when {
+        Icsi.MCPTT in icsis || accept.contains(Icsi.encoded(Icsi.MCPTT)) || "mcptt" in tags -> McService.MCPTT
+        Icsi.MCVIDEO in icsis || accept.contains(Icsi.encoded(Icsi.MCVIDEO)) || "mcvideo" in tags -> McService.MCVIDEO
+        icsis.any { it.startsWith(Icsi.MCDATA) } || accept.contains(Icsi.encoded(Icsi.MCDATA)) || "mcdata" in tags -> McService.MCDATA
+        else -> null
+    }
+}
+
 /** Opens a URL in the user's browser, for the interactive login (TS 24.482, RFC 8252). */
 fun interface BrowserLauncher {
     fun open(url: String)
@@ -83,7 +101,9 @@ interface ServiceHandler {
     suspend fun logOff() {}
 }
 
-data class ServiceState(val authorised: Boolean = false, val affiliations: Map<String, String> = emptyMap())
+/** [refused]: why the client does not start the service (the system requires what the client does not support). */
+data class ServiceState(val authorised: Boolean = false, val affiliations: Map<String, String> = emptyMap(),
+    val refused: String? = null)
 
 /** What the client reports: its start-up phase and the state of each service. */
 data class ClientStatus(
@@ -106,6 +126,8 @@ data class ClientStatus(
     val nextRetryAt: Long? = null,
     /** Why IdMS signed the user out (it refused the refresh token, and there is no password): null when signed in. */
     val signedOut: String? = null,
+    /** TS 33.180 §5.1.1: registered, but the user is not (yet) signed in, so no MC service is authorised. */
+    val limitedService: Boolean = false,
 )
 
 /**
@@ -140,7 +162,7 @@ class McxClient(
                 "video".takeIf { config.mcvideo != null }),
             if (config.security == null) emptyList()
             else listOfNotNull("ptt".takeIf { config.mcptt != null }, "video".takeIf { config.mcvideo != null })),
-        clock = clock)
+        clock = clock, endpoints = config.idms.endpoints)
 
     /**
      * MCVideo's key management client (TS 24.281 4.7, TS 33.180 5.3): it keys as the MCVideo ID, and
@@ -157,7 +179,9 @@ class McxClient(
         val mcvideo = config.mcvideo ?: return
         val account = config.mcptt?.userId ?: mcvideo.userId
         val keys = videoKeys ?: KeyClient(http, security.kmsUri, mcvideo.userId, account,
-            WireProfile(security.messageType, security.algorithm, security.keyParametersIei, security.encryptedPayloadIei)).also { videoKeys = it }
+            WireProfile(security.messageType, security.algorithm, security.keyParametersIei,
+                security.encryptedPayloadIei),
+            security.mikeyClockSkewS) { event(it) }.also { videoKeys = it }
         keys.provision(token)
         if (videoCsk == null) {
             val (csk, upload) = keys.makeCsk(mcvideo.psi)
@@ -172,6 +196,8 @@ class McxClient(
     @Volatile var profile: UserProfile? = null
     /** The Resource-Priority values of the service configuration documents, by service and level (TS 24.484 §8.4). */
     @Volatile var serviceResourcePriorities: Map<String, Map<String, String>> = emptyMap()
+    /** The signalling protection (confidentiality, integrity) of each service configuration document read. */
+    @Volatile var serviceProtection: Map<String, Pair<Boolean, Boolean>> = emptyMap()
         private set
     /** The MCPTT service configuration has a floor request queue (TS 24.484 §8.4.2.1 `<floor-control-queue>`). */
     @Volatile var mcpttFloorQueue: Boolean = false
@@ -225,14 +251,14 @@ class McxClient(
     /** Start and keep the client up: on any failure, back off and start again. */
     fun start() {
         scope.launch {
-            var backoff = 2_000L
+            var backoff = config.recovery.firstRetryMs
             while (isActive) {
                 // Logged off: nothing starts again until the user logs on. Signed out by IdMS: until the user signs in.
                 if (loggedOff) logOnRequest.await()
                 if (signedOut) signInRequest.await()
                 try {
                     run()
-                    backoff = 2_000L
+                    backoff = config.recovery.firstRetryMs
                 } catch (e: kotlinx.coroutines.CancellationException) {
                     throw e
                 } catch (e: Exception) {
@@ -247,7 +273,7 @@ class McxClient(
                     ua.flow?.close(e)
                     // Back off, unless told to reconnect now (a new network, or the user's Retry now).
                     if (!reconnectNow.isCompleted) withTimeoutOrNull(backoff) { reconnectNow.await() }
-                    backoff = if (reconnectNow.isCompleted) 2_000L else (backoff * 2).coerceAtMost(60_000)
+                    backoff = nextBackoff(backoff)
                     reconnectNow = CompletableDeferred()
                 }
             }
@@ -322,18 +348,22 @@ class McxClient(
             val request = ua.newRequest("PUBLISH", psi(service), NameAddr(psi(service)))
             request.headers.add("P-Preferred-Service", icsi(service)).add("Event", "poc-settings")
                 .add("Expires", "0").add("SIP-If-Match", etag)
-            val status = runCatching { withTimeoutOrNull(10_000) { ua.send(request) }?.status }.getOrNull() ?: 0
+            // RFC 3261 §17.1.2.2: the transaction ends with its final response or at Timer F (64*T1), as every request
+            // of UserAgent; no other limit is set.
+            val status = runCatching { ua.send(request).status }.getOrNull() ?: 0
             answers[service.name.lowercase()] = status
             updateService(service) { ServiceState() }
-            event("${service.name} logged off: $status")
+            event("${service.name} MC log-off (PUBLISH Expires 0): $status")
         }
         affiliationEtags.clear()
         videoCsk = null; videoCskUpload = null
-        val deregistered = runCatching { withTimeoutOrNull(10_000) { deregister() } }.getOrNull()
+        // The SIP de-REGISTER ends likewise with its final response or at Timer F (RFC 3261 §17.1.2.2).
+        val deregistered = runCatching { deregister() }.getOrNull()
+        event("SIP de-REGISTER (REGISTER Expires 0): $deregistered")
         registration = null
         _status.update { it.copy(loggedOff = true, logOff = answers, deregistered = deregistered, registered = false,
             offlineSince = null, nextRetryAt = null) }
-        event("logged off: $answers, de-REGISTER $deregistered")
+        event("logged off")
         ua.flow?.close()
         setPhase("logged-off")
     }
@@ -409,20 +439,22 @@ class McxClient(
         }
     }
 
-    /** One life of the client: up to "ready", then held until the flow fails. */
+    /**
+     * One life of the client: up to "ready", then held until the flow fails. TS 33.180 §5.1.3.2.1: "During initial SIP
+     * registration, the SIP REGISTER message shall not be delayed for lack of an access token" (this client's
+     * REGISTER carries none; the services are authorised by PUBLISH, TS 24.379 §7.2.2): the registration comes first,
+     * then the user authentication ([authenticateUser]).
+     */
     private suspend fun run() {
-        when {
-            tokens == null -> login()
-            tokens!!.expiresAt - clock() < 600 -> refreshTokens()
-        }
         setPhase("connecting")
         val connection = connector.connect(config.sip.proxy, config.sip.proxyPort)
         val flow = SipFlow(scope, connection, ::receive, { dir, m -> trace(dir, m) }, keepaliveMs = keepaliveMs)
         ua.flow = flow
         flow.start()
         event("flow ${connection.localHost}:${connection.localPort} → ${config.sip.proxy}:${config.sip.proxyPort} ${connection.transport}")
-        register(config.sip.registerExpires)
+        nextRegisterAt = clock() + register(config.sip.registerExpires) * 2 / 3
         _status.update { it.copy(registered = true) }
+        authenticateUser(flow)
         config.mcptt?.let { bringUp(McService.MCPTT, it.groups.ifEmpty { profile?.groups ?: emptyList() }) }
         config.mcdata?.let { bringUp(McService.MCDATA, it.groups) }
         config.mcvideo?.let { bringUp(McService.MCVIDEO, it.groups) }
@@ -437,6 +469,65 @@ class McxClient(
         subscriptions.clear()
         handlers.forEach { runCatching { it.flowLost() } }
         throw IllegalStateException("flow closed: ${cause?.message ?: "locally"}")
+    }
+
+    /** When the registration is next refreshed (at two thirds of the time granted), seconds since the epoch. */
+    @Volatile private var nextRegisterAt = 0L
+
+    /**
+     * TS 33.180 §5.1.3.1 step A once registered, with the tokens kept or by refresh or password ([login]). Until it
+     * succeeds the client is in the "limited service" state of §5.1.1: registered, no MC service authorised. A failed
+     * attempt is made again after the same growing delay as a failed start-up ([start]), or at once on the user's
+     * Retry now; the registration is kept and refreshed meanwhile. A lost flow, a log-off or IdMS's sign-out ends the
+     * attempts ([start] takes over).
+     */
+    private suspend fun authenticateUser(flow: SipFlow) {
+        var backoff = config.recovery.firstRetryMs
+        while (true) {
+            val refresher = scope.launch { keepRegistered() }
+            try {
+                when {
+                    tokens == null -> login()
+                    tokens!!.expiresAt - clock() < config.idms.tokenRefreshBeforeS -> refreshTokens()
+                }
+                _status.update { it.copy(limitedService = false) }
+                return
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (loggedOff || signedOut || flow.closed.isCompleted) throw e
+                event("limited service: sign-in failed: ${e.message}")
+                _status.update { it.copy(limitedService = true, lastError = e.message, nextRetryAt = clock() + backoff / 1000) }
+                setPhase("limited-service")
+                withTimeoutOrNull(backoff) { select<Unit> { reconnectNow.onAwait {}; flow.closed.onAwait {} } }
+                if (flow.closed.isCompleted) throw IllegalStateException("flow closed in the limited service state", e)
+                backoff = nextBackoff(backoff)
+                if (reconnectNow.isCompleted) reconnectNow = CompletableDeferred()
+                _status.update { it.copy(nextRetryAt = null) }
+            } finally {
+                refresher.cancel()
+            }
+        }
+    }
+
+    /**
+     * RFC 3261 §10.2.4: the registration refreshed at [nextRegisterAt] while the user authentication runs (polled every
+     * 5 s, as [housekeeping] does); a failed refresh closes the flow, so that [start] connects again.
+     */
+    private suspend fun keepRegistered() {
+        while (scope.isActive) {
+            delay(5_000)
+            if (clock() < nextRegisterAt) continue
+            try {
+                nextRegisterAt = clock() + register(config.sip.registerExpires) * 2 / 3
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                event("registration refresh failed: ${e.message}")
+                ua.flow?.close(e)
+                return
+            }
+        }
     }
 
     private fun trace(direction: String, message: SipMessage) {
@@ -475,6 +566,7 @@ class McxClient(
             runCatching { documents.serviceConfiguration(service, t.accessToken) }
                 .mapCatching { text ->
                     if (service == "mcptt") mcpttFloorQueue = ServiceConfig.floorQueue(text)
+                    serviceProtection = serviceProtection + (service to ServiceConfig.signallingProtection(text))
                     ServiceConfig.resourcePriorities(text)
                 }
                 .onSuccess { serviceResourcePriorities = serviceResourcePriorities + (service to it)
@@ -505,8 +597,11 @@ class McxClient(
     /** The lifetime of the current access token when it was issued, seconds. */
     private var tokenLifetime = 0L
 
-    /** Renew 5 minutes before expiry, or halfway for a token that lives less than 10 minutes. */
-    private fun renewalLead(): Long = minOf(300L, tokenLifetime / 2)
+    /**
+     * Renew `idms.token_renewal_lead_s` before expiry (5 minutes), or halfway for a token that lives less than twice
+     * that (TS 33.180 annex B.5.1 leaves the time to the client; default pending maintainer choice (no spec value)).
+     */
+    private fun renewalLead(): Long = minOf(config.idms.tokenRenewalLeadS, tokenLifetime / 2)
 
     /**
      * The user signs in in the browser; the IdMS redirects to the loopback redirect URI
@@ -590,7 +685,27 @@ class McxClient(
         return SipRequest(request.method, request.uri, request.headers, body)
     }
 
-    private suspend fun authorise(service: McService) {
+    /**
+     * TS 24.379 §6.6.2.3.1 and §6.6.3.3.1 (TS 24.281 the same, TS 24.282 §6.5.2.3.1 and §6.5.3.3.1): this client has no
+     * XML signalling protection, so a service whose service configuration document enables it (or that could not be
+     * read, so that whether it does is not known) is not started: its service authorisation would go out unprotected.
+     * Null when the service may start.
+     */
+    private fun protectionRefusal(service: McService): String? {
+        val protection = serviceProtection[service.name.lowercase()]
+            ?: return "${service.name} not started: its service configuration could not be read"
+        return if (protection.first || protection.second)
+            "${service.name} not started: the system requires signalling protection, which this app does not support"
+        else null
+    }
+
+    /** The service authorisation; false (and the reason in the service's state) when the service is not started. */
+    private suspend fun authorise(service: McService): Boolean {
+        protectionRefusal(service)?.let { reason ->
+            updateService(service) { it.copy(authorised = false, refused = reason) }
+            event(reason)
+            return false
+        }
         setPhase("authorising-${service.name.lowercase()}")
         val token = tokens?.accessToken ?: throw IllegalStateException("no access token")
         val answerMode = when (service) {
@@ -622,8 +737,9 @@ class McxClient(
             (response.headers["Warning"]?.let { " ($it)" } ?: ""))
         response.headers["SIP-ETag"]?.let { authEtags[service] = it }
         if (service == McService.MCVIDEO) videoCskUpload = null // the server has the CSK
-        updateService(service) { it.copy(authorised = true) }
+        updateService(service) { it.copy(authorised = true, refused = null) }
         event("${service.name} authorised")
+        return true
     }
 
     // Affiliation (TS 24.379 §9.2.1, TS 24.282 §8.2).
@@ -685,7 +801,7 @@ class McxClient(
     }
 
     private suspend fun bringUp(service: McService, groups: List<String>) {
-        authorise(service)
+        if (!authorise(service)) return
         subscribe(service)
         if (groups.isNotEmpty()) affiliate(service, groups)
         // §9A.2.1.1: the status determination of the aliases this user may use, before any status change.
@@ -829,7 +945,7 @@ class McxClient(
 
     private suspend fun housekeeping() {
         val started = clock()
-        var nextRegister = started + config.sip.registerExpires * 2 / 3
+        var nextRegister = nextRegisterAt
         var nextSubscription = started + 3000 // the MCPTT server grants 3600 s (contract §5.1)
         while (scope.isActive) {
             delay(5_000)
@@ -859,10 +975,18 @@ class McxClient(
 
     init {
         ua.onRequest = { tx -> dispatch(tx) }
+        // A service that is not started (protectionRefusal) sends nothing: no operation of it goes out unprotected.
+        // Its requests inside a dialog need no check, as neither side can create one (outgoing: here; incoming:
+        // dispatch).
+        ua.outboundGate = { request ->
+            mcServiceOf(request)?.let { service -> protectionRefusal(service)?.let { throw IllegalStateException(it) } }
+        }
     }
 
     private suspend fun dispatch(tx: ServerTransaction) {
         val request = tx.request
+        // A request of a service that is not started gets the answer of a service this client does not run.
+        if (mcServiceOf(request)?.let { protectionRefusal(it) } != null) { notHandled(tx); return }
         val aliasChannel = aliasChannels.values.firstOrNull { it.request?.callId == request.callId }
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "presence" && aliasChannel != null) {
             tx.respond(200)
@@ -892,12 +1016,23 @@ class McxClient(
             return
         }
         for (handler in handlers) if (handler.handle(tx)) return
-        when (request.method) {
+        notHandled(tx)
+    }
+
+    private suspend fun notHandled(tx: ServerTransaction) {
+        when (tx.request.method) {
             "OPTIONS" -> tx.respond(200)
             "INVITE", "MESSAGE" -> tx.respond(488)
             else -> tx.respond(405)
         }
     }
+
+    /**
+     * The delay before the next attempt after a failed start-up or sign-in ([ClientConfig.Recovery]): the first one
+     * again when told to reconnect now, else twice the last one, up to `recovery.last_retry_ms`.
+     */
+    private fun nextBackoff(backoff: Long): Long =
+        if (reconnectNow.isCompleted) config.recovery.firstRetryMs else (backoff * 2).coerceAtMost(config.recovery.lastRetryMs)
 }
 
 /** A bounded log of client events and SIP messages, for the status view and the debug endpoint. */

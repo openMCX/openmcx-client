@@ -87,8 +87,12 @@ object KmsDocuments {
         if (set.getAttribute("Version") != "1.1.0" || set.field("KmsUri") != kms.kmsUri || set.field("UserUri") != user ||
             set.field("UserID") != uid) throw KeyError("KMS keyset identity mismatch")
         bounds(set, nowNtp)
+        // Table D.3.3.2-1: the SSK is an "OCTET STRING encoding of an integer as described in section 6 of [31]"
+        // (RFC 6090 6.2, any length k): leading zero octets are allowed; the key validation checks its value.
         val keys = try {
-            IdentityKeys(user, set.field("KeyPeriodNo").toLong(), BigInteger(1, keyField(set, "UserSigningKeySSK").also { if (it.size != 32) throw KeyError("invalid SSK size") }),
+            val ssk = BigInteger(1, keyField(set, "UserSigningKeySSK"))
+            if (ssk.bitLength() > 256) throw KeyError("invalid SSK size")
+            IdentityKeys(user, set.field("KeyPeriodNo").toLong(), ssk,
                 Eccsi.P256.decode(keyField(set, "UserPubTokenPVT")), Sakke.E.decode(keyField(set, "UserDecryptKey")))
         } catch (e: IllegalArgumentException) { throw KeyError("invalid key material") }
         if (keys.periodNumber != kms.periodNumber(nowNtp)) throw KeyError("identity key period mismatch")
@@ -137,9 +141,12 @@ object KmsDocuments {
 /**
  * One identity's key management client (TS 33.180 5.3): fetches the KMS certificate and the identity's
  * keys with the user's access token, and creates and opens the keys it sends and receives. The MCVideo
- * client keys as its MCVideo ID; the KMS init names the account ([account], the MCPTT ID).
+ * client keys as its MCVideo ID; the KMS init names the account ([account], the MCPTT ID). Received I_MESSAGEs are
+ * fresh within [skew] seconds (RFC 3830 5.4, "set by the local policy"); warnings about accepted keys go to [warn].
  */
-class KeyClient(private val http: HttpClient, kmsUri: String, val identity: String, private val account: String, val profile: WireProfile) {
+class KeyClient(private val http: HttpClient, kmsUri: String, val identity: String, private val account: String,
+                val profile: WireProfile, private val skew: Long = Mikey.DEFAULT_CLOCK_SKEW_S,
+                private val warn: (String) -> Unit = {}) {
     private val kmsUri = kmsUri.trimEnd('/')
     @Volatile var kms: KmsPublic? = null
         private set
@@ -198,18 +205,29 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
         return key to java.util.Base64.getEncoder().encodeToString(Mikey.create(k, id, recipient, key))
     }
 
-    /** Open a PCK offered by [expected] (its initiator, authenticated), refusing a replay. */
+    /** Open a PCK offered by [expected] (its initiator, authenticated), refusing a replay; key parameters allowed. */
     suspend fun acceptPck(expected: String, encoded: String): KeyMessage {
         val message = decode(encoded)
         val (k, id) = current()
-        val key = Mikey.open(k, id, expected, message, Mikey.nowNtp())
-        if (key.purpose != 1 || key.properties != null) throw KeyError("received key is not a PCK")
+        val now = Mikey.nowNtp()
+        val key = Mikey.open(k, id, expected, message, now, profile, skew, warn = warn)
+        // TS 33.180 E.1.2: an I_MESSAGE may carry key parameters (E.6); a PCK's must allow its use now (E.6.4, E.6.9,
+        // E.6.10).
+        val p = key.properties
+        if (key.purpose != 1 || (p != null && p.type != 1)) throw KeyError("received key is not a PCK")
+        if (p != null) {
+            val unix = now - Mikey.NTP_EPOCH
+            val activation = if (p.activation != 0L) p.activation else key.ntpSeconds - Mikey.NTP_EPOCH
+            if (p.status and 1L == 0L || unix < activation || (p.expiry != 0L && unix >= p.expiry))
+                throw KeyError("key inactive, expired or revoked")
+        }
         synchronized(received) {
             val now = Mikey.nowNtp()
             received.entries.removeAll { it.value <= now }
             val tag = "pck:$expected:${key.csbId}"
             if (tag in received) throw KeyError("duplicate or replayed PCK")
-            received[tag] = key.ntpSeconds + 600
+            // A replayed I_MESSAGE stays fresh for the timestamp window (the RFC 3830 5.4 clock skew either side).
+            received[tag] = key.ntpSeconds + 2 * skew
         }
         return key
     }
@@ -225,7 +243,7 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
     suspend fun openGroupMessage(gms: String, group: String, message: ByteArray): KeyMessage {
         val (k, id) = current()
         val now = Mikey.nowNtp()
-        val key = Mikey.open(k, id, gms, message, now, profile)
+        val key = Mikey.open(k, id, gms, message, now, profile, skew, warn = warn)
         val p = key.properties ?: throw KeyError("missing key properties")
         if (key.purpose != 0 || p.type != 0) throw KeyError("received key is not a GMK")
         // A GMK not yet active is kept for its Activation Time (TS 33.180 E.6.4): GroupKeys picks the key to use.

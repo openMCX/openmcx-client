@@ -58,17 +58,20 @@ void Client::mcvideo_subscribe_keys() {
   std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
                               {"application/resource-lists+xml", keying::gktp_resource_list(mcvideo_group())}};
   const auto boundary = "mcx-" + random_id();
+  mcvideo_key_refresh_at_ = 0;
   mcvideo_key_subscription_ = sip_.subscribe(
-      mcvideo_service_uri(), "xcap-diff", 60, {{"P-Preferred-Service", mcvideo_service.icsi}},
+      mcvideo_service_uri(), "xcap-diff", key_subscription_expires_s(), {{"P-Preferred-Service", mcvideo_service.icsi}},
       [this](const SipResponse &response) {
+        if (response.status_code < 200) return;
         if (response.status_code >= 300) {
           mcvideo_key_subscription_.clear();
           failure("MCVideo group key subscription: " + std::to_string(response.status_code));
+          return;
         }
+        mcvideo_key_refresh_at_ = key_refresh_time(response);
       },
       "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary));
   mcvideo_key_group_ = mcvideo_group();
-  mcvideo_next_key_refresh_ = monotonic_ms() + 50000;
 }
 
 //------------------------------------------------------------------------------

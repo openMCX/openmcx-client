@@ -76,8 +76,16 @@ void Client::end_service_subscriptions() {
   end(mcdata_subscription_, "presence", mcdata::icsi);
   key_subscriptions_.erase(key_subscription_);
   end(key_subscription_, "xcap-diff", mcptt_icsi);
+  // The further GKTP subscriptions (monitored groups, regroups' preconfigured groups).
+  for (auto &[key_group, dialog] : extra_key_subscriptions_) {
+    key_subscriptions_.erase(dialog);
+    end(dialog, "xcap-diff", mcptt_icsi);
+  }
+  extra_key_subscriptions_.clear();
+  extra_key_refresh_at_.clear();
   end(mcvideo_key_subscription_, "xcap-diff", mcvideo_service.icsi);
   end(config_subscription_, "xcap-diff", mcptt_icsi);
+  config_expires_at_ = 0;
   end(alias_status_dialog_, "presence", mcptt_icsi);
   end(mcdata_alias_dialog_, "presence", mcdata::icsi);
   subscription_expires_ = subscription_refresh_at_ = 0;
@@ -136,7 +144,7 @@ void Client::log_on_command() {
   status_["logged_off"] = false;
   status_.erase("log_off");
   status_.erase("deregistered");
-  if (mcdata_keys_ && mcdata_protects_signalling()) {
+  if (mcdata_keys_ && mcdata_needs_csk()) {
     auto [csk, upload] = mcdata_keys_->make_csk(mcdata_service());
     mcdata_csk_ = csk;
     mcdata_csk_upload_ = std::move(upload);
@@ -150,6 +158,7 @@ void Client::log_on_command() {
   }
   event("log_on_started");
   register_and_authorize();
+  if (!signed_in_) schedule([this] { sign_in(); });
 }
 
 } // namespace mcx
