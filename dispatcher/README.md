@@ -121,7 +121,9 @@ docker run ... openmcx-dispatcher:disp --listen 0.0.0.0:8080 --config /config/di
 Options: `--listen` (default 127.0.0.1:8080), `--engine`, `--config` (lab mode) or `--device` and `--data` (position
 mode), `--engine-args` (for example `--disable-tls`), `--outbox` (where uploaded files are kept for sending),
 `--idle-signout`, `--ops-agent <functional alias or MCData ID>`, `--ops-agent-name` (default "Ops agent") and
-`--ops-agent-alias` (default true; false when `--ops-agent` is an MCData ID). The browser must reach the page from a secure context
+`--ops-agent-alias` (default true; false when `--ops-agent` is an MCData ID), `--ops-agent-intro` (the line over an
+empty chat with it, `{name}` its name) and `--ops-agent-suggestions` (the questions the empty chat offers, separated by
+`|`). The browser must reach the page from a secure context
 (`https://` or `http://127.0.0.1`/`localhost`) to use the microphone. In lab mode there is no operator sign-in: publish the port on
 localhost only. Position mode has sign-in; still serve it over TLS (a proxy) when it is reached from another host.
 

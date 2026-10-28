@@ -778,7 +778,7 @@ function renderChat() {
     const preview = el('div', 'preview');
     if (c.kind === 'agent') preview.append(el('span', 'tag', 'AGENT'));
     if (c.kind === 'group') preview.append(el('span', 'tag', 'GROUP'));
-    preview.append(el('span', '', c.last ? (c.last.dir === 'out' ? 'You: ' : '') + c.last.text.split('\n')[0] : c.kind === 'agent' ? 'Ask the ops agent' : ''));
+    preview.append(el('span', '', c.last ? (c.last.dir === 'out' ? 'You: ' : '') + c.last.text.split('\n')[0] : c.kind === 'agent' ? 'Ask ' + (agentOf()?.name || 'the ops agent') : ''));
     body.append(top, preview);
     b.append(avatar(c), body);
     b.title = c.peer;
@@ -821,9 +821,9 @@ function renderThread(list) {
     const empty = el('div', 'empty');
     empty.append(avatar(c));
     if (agent) {
-      empty.append(el('div', '', 'Ask ' + agent.name + ' about incidents, units and procedures. Answers come back here as messages.'));
+      empty.append(el('div', '', (agent.intro || 'Ask ' + agent.name + '.') + ' Answers come back here as messages.'));
       const sugg = el('div', 'suggestions');
-      for (const q of ['What can you help me with?', 'Any open incidents near me?', 'Which units are available?']) {
+      for (const q of agent.suggestions || []) {
         const b = el('button', '', q);
         b.type = 'button';
         b.onclick = () => { $('text').value = q; grow(); $('text').focus(); };

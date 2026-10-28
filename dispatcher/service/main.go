@@ -46,6 +46,11 @@ func main() {
 	opsAgent := flag.String("ops-agent", "", "the ops agent the client UI's chat offers first: its functional alias or MCData ID")
 	opsAgentName := flag.String("ops-agent-name", "Ops agent", "the ops agent's name in the chat")
 	opsAgentAlias := flag.Bool("ops-agent-alias", true, "--ops-agent is a functional alias (false: an MCData ID)")
+	opsAgentIntro := flag.String("ops-agent-intro", "Ask {name} about incidents, units and procedures.",
+		"the line over an empty chat with the ops agent; {name} is its name")
+	opsAgentSuggestions := flag.String("ops-agent-suggestions",
+		"What can you help me with?|Any open incidents near me?|Which units are available?",
+		"the questions the empty chat offers, separated by |; empty: none")
 	flag.Parse()
 	if *opsAgent != "" && !word.MatchString(*opsAgent) {
 		log.Fatal("--ops-agent must be a SIP URI")
@@ -91,7 +96,14 @@ func main() {
 		}
 	}
 	if *opsAgent != "" {
-		api.opsAgent = map[string]any{"id": *opsAgent, "name": *opsAgentName, "alias": *opsAgentAlias}
+		suggestions := []string{}
+		for _, q := range strings.Split(*opsAgentSuggestions, "|") {
+			if q = strings.TrimSpace(q); q != "" {
+				suggestions = append(suggestions, q)
+			}
+		}
+		api.opsAgent = map[string]any{"id": *opsAgent, "name": *opsAgentName, "alias": *opsAgentAlias,
+			"intro": strings.ReplaceAll(*opsAgentIntro, "{name}", *opsAgentName), "suggestions": suggestions}
 	}
 	files, _ := fs.Sub(static, "static")
 	mux := http.NewServeMux()
