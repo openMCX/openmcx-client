@@ -486,6 +486,20 @@ stateDiagram-v2
   `multicast_joined`, `multicast_listening` (the server took the report), `multicast_refused` (the status code of a
   refused report), `multicast_received_packets`, and `duplicates_dropped_multicast` and
   `duplicates_dropped_unicast` (the copies dropped, by the way they came).
+- MBMS usage (`mbms`, `core/mbms.cpp`; TS 24.379 clause 14.3 for MCPTT, TS 24.281 clause 16.2 for MCVideo). The
+  `mbms` block is the emulated MBMS interface of the UE (no modem or radio): `service_areas` (the MBMS service area
+  IDs, hexBinary, the UE is in) and `interface` (default `0.0.0.0`). Without it MBMS bearer announcements are
+  answered 200 and ignored. An announcement (a SIP MESSAGE with the service's P-Asserted-Service and
+  `application/vnd.3gpp.mcptt-mbms-usage-info+xml` or `...mcvideo-mbms-usage-info+xml`) stores each
+  `<announcement>` by TMGI with its SDP, the address of its `<GPMS>` media line and the P-Asserted-Identity (the MBMS
+  PSI the reports go to); one without service areas cancels. While the UE is in one of a bearer's service areas with
+  good radio conditions the client joins its general purpose subchannel and reports "listening" with
+  `<general-purpose>` true (clause 14.3.3.1); when it stops (cancellation, bad radio, leaving the areas) it reports
+  "not-listening" with `<general-purpose>` false. A Bearer Announcement message received on the general purpose
+  subchannel (TS 24.380 clause 10.3.6) is acknowledged with a report; monitoring state inactive stops the bearer.
+  Commands: `mbms area <id>[,<id>...]|none`, `mbms quality good|bad [<TMGI>]`. Status: `mbms_areas`,
+  `mbms_bearers` (by TMGI: `service`, `general_purpose`, `joined`, `reported_listening`, `accepted`),
+  `mbms_general_purpose_received`, `mbms_general_purpose_rejected`, `mbms_bearer_announcements`.
 
 ### 3.3 Spec-literal state names and how to add a transition
 

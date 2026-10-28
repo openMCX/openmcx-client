@@ -164,6 +164,8 @@ void Client::run_command(const std::string &cmd) {
     deaffiliate_command();
   } else if (cmd.starts_with("multicast ")) {
     multicast_command(cmd);
+  } else if (cmd.starts_with("mbms ")) {
+    mbms_command(cmd);
   } else if (cmd.starts_with("monitor ")) {
     monitor_command(cmd);
   } else if (cmd.starts_with("profile-revoke ")) {

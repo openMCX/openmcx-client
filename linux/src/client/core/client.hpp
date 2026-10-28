@@ -28,6 +28,7 @@
 #include "mcx/mcdata.hpp"
 #include "mcx/media.hpp"
 #include "mcx/msrp.hpp"
+#include "mcx/mbms.hpp"
 #include "mcx/multicast.hpp"
 #include "mcx/protected_call.hpp"
 #include "mcx/runtime.hpp"
@@ -1892,6 +1893,36 @@ private:
   static bool from_server_address(const sockaddr_in &source, const std::string &address);
 
   void audio_packet(const Datagram &datagram, bool multicast = false);
+
+  // ---- MBMS usage (core/mbms.cpp): TS 24.379 clause 14.3, TS 24.281 clause 16.2, TS 24.380 clause 10.3 ----
+  // An announced bearer (by TMGI): its service, <announcement>, SDP, the MBMS public service identity that announced
+  // it, the host group and port of its general purpose subchannel and, while the emulated MBMS interface can receive
+  // it, the socket joined to it; whether "listening" was reported last, and accepted.
+  struct MbmsBearer {
+    MbmsService service = MbmsService::Mcptt;
+    MbmsAnnouncement announcement;
+    std::string sdp, psi, general_purpose_address;
+    std::uint16_t general_purpose_port = 0;
+    std::unique_ptr<UdpSocket> socket;
+    bool reported_listening = false, accepted = false;
+  };
+  bool mbms_enabled_ = false;
+  std::string mbms_interface_ = "0.0.0.0";
+  // The emulated MBMS interface: the MBMS service areas the UE is in, the TMGIs with bad radio conditions ("all":
+  // every bearer).
+  std::set<std::string> mbms_areas_, mbms_bad_;
+  std::map<std::string, MbmsBearer> mbms_bearers_;
+  // Bearers whose announcement was cancelled after "listening" was reported: service and PSI to report to.
+  std::map<std::string, std::pair<MbmsService, std::string>> mbms_cancelled_;
+  void mbms_configure();
+  [[nodiscard]] const std::string *mbms_usage_body(const SipMessage &message, MbmsService service) const;
+  SipResponse mbms_message(const SipMessage &message, MbmsService service, const std::string &body);
+  void mbms_update();
+  void mbms_report(MbmsService service, const std::string &psi, bool listening, const std::vector<std::string> &tmgis);
+  void mbms_poll();
+  void mbms_subchannel_message(const std::string &tmgi, const SubchannelMessage &message);
+  void mbms_command(const std::string &cmd);
+  void publish_mbms();
 
   // ---- IP multicast reception of group call speech (mcptt/multicast.cpp, mcptt.multicast; an OpenMCX profile,
   // include/mcx/multicast.hpp) ----
