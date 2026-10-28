@@ -3,8 +3,8 @@
 # OpenMCX Licence Information : AGPL-3.0-or-later
 #
 
-"""The agent of FIRST_AGENT.md: it answers "time", "ping" and "help" over MCData, through
-mcx-agent's MCP server over HTTP. Python standard library only.
+"""The agent of Agent Tutorial 2 (openmcx-server tutorials/agents/02-first-agent): it answers "time", "ping" and
+"help" over MCData, through mcx-agent's MCP server over HTTP. Python standard library only.
 
     chat-bot.py --url http://mcx-agent:8765/mcp --token-file token [--cursor chat-bot.cursor]
 """

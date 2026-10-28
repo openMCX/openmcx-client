@@ -12,8 +12,8 @@ It runs the Linux client `mcx-client` as its engine, like the [dispatcher](../di
 tools to agents and shells: an **MCP server** (over HTTP, or stdio) and a **CLI**; video pictures go to an HTTP
 endpoint beside MCP. The agent itself (speech to text, a model, text to speech, the camera) is yours: mcx-agent is the
 plumbing. Group SDS is outside its reach. **[API.md](API.md)** is the contract an agent builds on (version 1.1.0):
-the transports, the tools, their results and error codes. **[FIRST_AGENT.md](FIRST_AGENT.md)** builds an MCData agent
-on it step by step.
+the transports, the tools, their results and error codes. **[Agent Tutorial 2](https://github.com/openMCX/openmcx-server/blob/main/tutorials/agents/02-first-agent/README.md)** builds an MCData agent on
+it step by step.
 
 ```
 agent (other container) ──MCP over HTTP, token──────────────▶ mcx-agent daemon ──control FIFO / status / events──▶ mcx-client
@@ -133,6 +133,20 @@ holds. While the alias is not active (refused, take-over possible, or taken over
 `require_alias` is false; `status` says why. A lost or refused alias is tried again every `alias_retry_s` (30 s), so
 the agent gets it back once its holder lets it go.
 
+Field users then write to the role, not to a user: the agent can move to another MC user, or a standby can take it
+over, without telling them. The server routes a message to the alias to whoever holds it, and the agent presents the
+alias on its answers. Aliases are part of the system's configuration (`site.json`, `functional_aliases`); add one
+that the agent's MCData user may activate:
+
+```json
+{"id": "sip:ops-bot.fa@example.org", "users": [],
+ "mcdata_users": ["sip:ops-bot.mcdata@example.org"],
+ "max_simultaneous_activations": 1, "allow_takeover": false}
+```
+
+and set `"alias": "sip:ops-bot.fa@example.org"` in the agent's configuration. The agent's code does not change. The
+client page takes the alias as `--ops-agent sip:ops-bot.fa@example.org` (without `--ops-agent-alias=false`).
+
 ## Safety
 
 - Who the agent may send to: the `recipients` (MCData IDs with `*` wildcards, `sip:*.mcdata@example.org`), and with
@@ -199,7 +213,7 @@ one bot per service, each a complete agent:
 
 | Bot | Service | What it does | Transports |
 |---|---|---|---|
-| [`chat-bot.py`](examples/chat-bot.py) | MCData | Marks each message read and answers `time`, `ping` and `help` in the sender's conversation ([FIRST_AGENT.md](FIRST_AGENT.md) builds it step by step) | MCP over HTTP |
+| [`chat-bot.py`](examples/chat-bot.py) | MCData | Marks each message read and answers `time`, `ping` and `help` in the sender's conversation ([Agent Tutorial 2](https://github.com/openMCX/openmcx-server/blob/main/tutorials/agents/02-first-agent/README.md) builds it step by step) | MCP over HTTP |
 | [`voice-bot.py`](examples/voice-bot.py) | MCPTT | Plays each talk burst back after a tone, in private calls to it and its groups' calls | CLI, MCP on stdio (`--mcp`), MCP over HTTP (`--mcp-url`, `--token-file`) |
 | [`video-bot.py`](examples/video-bot.py) | MCVideo | Shows a test card (or any ffmpeg input, `--source`) in every video call it is in | MCP over HTTP, and `POST /video` |
 

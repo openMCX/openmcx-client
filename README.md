@@ -69,7 +69,7 @@ It is not an interoperability-certified implementation: see the limits in each c
 - **[Developer guide](docs/DEVELOPER_GUIDE.md)**: architecture of the three clients, request flow, state machines and how to add or fix a procedure
 - **[Android app](android/README.md)**: features, build, labs and tests; [wire contracts](android/docs/wire), [conformance](android/docs/CONFORMANCE.md), [test report](android/docs/TEST_REPORT.md)
 - **[Dispatcher](dispatcher/README.md)**: scope, limits, API and labs
-- **[mcx-agent](agent/README.md)**: MCData for AI agents over MCP and a CLI; [build your first agent](agent/FIRST_AGENT.md), [API contract](agent/API.md)
+- **[mcx-agent](agent/README.md)**: MCData for AI agents over MCP and a CLI; [build your first agent](https://github.com/openMCX/openmcx-server/blob/main/tutorials/agents/02-first-agent/README.md), [API contract](agent/API.md)
 - **[Linux client feature list](linux/docs/FEATURES.md)** and [coding style](linux/docs/CODING_STYLE.md)
 - **[Tutorials](https://github.com/openMCX/openmcx-server/blob/main/tutorials/README.md)**: the Android app and the dispatcher end to end, the Linux client in unit tests
 - **[3GPP correction candidates](https://github.com/openMCX/openmcx-server/blob/main/docs/3GPP_CORRECTION_CANDIDATES.pdf)**: Release 19, AI-assisted review, awaiting expert confirmation

@@ -44,7 +44,7 @@ users call it, and it joins its groups' calls.
    [API.md](../../API.md#building-a-chat-agent-on-it) (send only to users who wrote within `allow_senders_hours`,
    rate limits, MCP over HTTP), with `voice` and `video` on (the video bot's picture size and rate).
    Without one of the services, leave it out and remove its bot. For a role address, add `alias`
-   ([FIRST_AGENT.md](../../FIRST_AGENT.md#7-optional-a-role-address-functional-alias)).
+   ([Functional alias](../../README.md#functional-alias)).
 
 4. **The token** the agent and the daemon share:
 
