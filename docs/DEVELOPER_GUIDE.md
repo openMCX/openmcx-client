@@ -477,15 +477,18 @@ stateDiagram-v2
   MBMS PSI. Speech from the subchannel goes through `audio_packet` as unicast speech does, accepted from the server's
   media address on any port; the talker drops its own; while joined a packet of the followed SSRC not newer than the
   last one kept (RFC 3550 appendix A.1) is dropped as a copy. Unmap Group To Bearer (or a "not-listening" report on
-  the general purpose subchannel) reports "not-listening" and leaves 200 ms after the server's answer. Floor control
-  stays unicast. `mcptt.multicast` (the former static profile) is refused. Status: `multicast_joined`,
+  the general purpose subchannel) reports "not-listening" and leaves 200 ms after the server's answer. Floor Taken
+  and Floor Idle from the subchannel (`mbms_floor_packet`: the server's address, the Map Group To Bearer's SSRC, their
+  own message sequence numbers, no Floor Ack) go to the floor participant (`floor_message`); the talker's own Floor
+  Taken is ignored; the other floor messages stay unicast. Status adds `mbms_floor_received`. `mcptt.multicast` (the former static profile) is refused. Status: `multicast_joined`,
   `multicast_listening`, `multicast_refused`, `multicast_received_packets`, `duplicates_dropped_multicast` and
   `duplicates_dropped_unicast`.
 - MCVideo media over an MBMS subchannel (`mcvideo/multicast.cpp`, TS 24.581 clause 10.3): as for MCPTT, a Map Group To
   Bearer of an MCVideo bearer for the group of the active MCVideo group call joins the subchannel's video port and
   reports "listening" for the session (`application/vnd.3gpp.mcvideo-mbms-usage-info+xml`, mcvideo-info); the video
   from it is decoded as the unicast video (`mcvideo_video_packet`), the transmitting client drops its own, copies
-  are dropped by sequence number. The audio port is not joined. Status: `mcvideo_multicast_joined`,
+  are dropped by sequence number. Transmission Idle and Media Transmission Notification from the subchannel go to
+  `mcvideo_control_message` (status `mcvideo_mbms_control_received`). The audio port is not joined. Status: `mcvideo_multicast_joined`,
   `mcvideo_multicast_listening`, `mcvideo_multicast_received_packets`, `mcvideo_duplicates_dropped_multicast` and
   `mcvideo_duplicates_dropped_unicast`.
 - MBMS usage (`mbms`, `core/mbms.cpp`; TS 24.379 clause 14.3 for MCPTT, TS 24.281 clause 16.2 for MCVideo). The

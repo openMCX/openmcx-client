@@ -602,6 +602,14 @@ void Client::mcvideo_control_packet(const Datagram &datagram) {
   const auto packet =
       transmission::decode(protected_floor() ? mcvideo_protection_.unprotect_floor(datagram.bytes) : datagram.bytes);
   if (!transmission::from_server(packet.type) || packet.ssrc != call.local.floor_ssrc) return;
+  mcvideo_control_message(packet);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.581 clause 6.2: a transmission control message from the transmission control server, received by unicast or
+// (TS 24.581 clause 10.3.3, mcvideo/multicast.cpp) over the MBMS subchannel.
+void Client::mcvideo_control_message(const transmission::Packet &packet) {
+  auto &call = *mcvideo_call_;
   using transmission::Field;
   switch (packet.type) {
   case transmission::Type::Granted: {

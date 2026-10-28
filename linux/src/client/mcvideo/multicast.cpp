@@ -37,7 +37,8 @@ bool Client::mcvideo_mappable() const {
 // active call's group the subchannel is joined (a changed subchannel anew).
 void Client::mcvideo_mbms_mapped(const std::string &tmgi, const SubchannelMessage &message) {
   if (!message.subchannel) return;
-  MbmsMapping mapping{message.service, message.tmgis.empty() ? tmgi : message.tmgis.front(), *message.subchannel};
+  MbmsMapping mapping{message.service, message.tmgis.empty() ? tmgi : message.tmgis.front(), *message.subchannel,
+                      message.ssrc};
   auto &stored = mbms_video_mappings_[message.group];
   const bool changed = stored.tmgi != mapping.tmgi || stored.subchannel != mapping.subchannel;
   stored = mapping;
@@ -148,7 +149,10 @@ void Client::mcvideo_multicast_poll() {
         continue;
       }
       // RFC 5761 section 4: media control shares the subchannel's port; RTCP packet types are 200 to 204.
-      if (datagram->bytes.size() >= 2 && datagram->bytes[1] >= 200 && datagram->bytes[1] <= 204) continue;
+      if (datagram->bytes.size() >= 2 && datagram->bytes[1] >= 200 && datagram->bytes[1] <= 204) {
+        mcvideo_mbms_control_packet(*datagram);
+        continue;
+      }
       // TS 24.581 clause 10.3.3 step 1 b: the transmitting client drops its own video.
       if (mcvideo_call_->granted) continue;
       mcvideo_video_packet(*datagram, true);
@@ -156,6 +160,28 @@ void Client::mcvideo_multicast_poll() {
       event("mcvideo_video_rejected", {{"reason", error.what()}, {"multicast", true}});
     }
   }
+}
+
+//------------------------------------------------------------------------------
+// TS 24.581 clause 10.3.3: Transmission Idle and Media Transmission Notification over the joined subchannel
+// (clauses 10.2.3.2 and 10.2.3.3) go to the transmission participant as those received by unicast do, from the
+// server's media address with the participating function's SSRC of the Map Group To Bearer; the transmitter's own
+// notification is ignored, and so is anything else. Clear only: protected transmission control stays unicast.
+void Client::mcvideo_mbms_control_packet(const Datagram &datagram) {
+  auto &call = *mcvideo_call_;
+  if (!call.remote || !from_server_address(datagram.source, call.remote->address) || protected_floor()) return;
+  const auto mapping = mbms_video_mappings_.find(mcvideo_multicast_group_);
+  if (mapping == mbms_video_mappings_.end()) return;
+  const auto packet = transmission::decode(datagram.bytes);
+  using transmission::Type;
+  if (packet.ssrc != mapping->second.ssrc ||
+      (packet.type != Type::Idle && packet.type != Type::MediaTransmissionNotification))
+    return;
+  if (const auto *field = transmission::find(packet, transmission::Field::TransmittingUserId);
+      field && transmission::read_transmitting_user(*field) == mcvideo_user())
+    return;
+  status_["mcvideo_mbms_control_received"] = status_.value("mcvideo_mbms_control_received", 0ULL) + 1;
+  mcvideo_control_message(packet);
 }
 
 //------------------------------------------------------------------------------

@@ -8,8 +8,8 @@
 // session and the TMGI (TS 24.379 clause 14.3.3.1 condition 1, clause 14.3.3.2); the speech received there takes the
 // same path as the speech received by unicast (TS 24.380 clause 10.3.3), and the server stops sending it by unicast
 // once it has taken the report (TS 24.380 annex A.6.2 step 26). An Unmap Group To Bearer message ends the
-// association (clause 10.3.4): the client reports "not-listening" for the session and gets unicast again. Floor
-// control stays on the unicast media plane.
+// association (clause 10.3.4): the client reports "not-listening" for the session and gets unicast again. Floor Taken
+// and Floor Idle may come over the subchannel too (clause 10.3.3); the other floor control messages stay unicast.
 //
 // Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.380 V19.2.0 (Rel-19), RFC 1112, RFC 3550, RFC 5761.
 
@@ -44,9 +44,11 @@ static std::uint16_t rtp_sequence(std::span<const std::uint8_t> packet) {
 void Client::mbms_mapped(const std::string &tmgi, const SubchannelMessage &message) {
   if (message.service == MbmsService::Mcvideo) return mcvideo_mbms_mapped(tmgi, message);
   if (!message.subchannel) return;
-  MbmsMapping mapping{message.service, message.tmgis.empty() ? tmgi : message.tmgis.front(), *message.subchannel};
+  MbmsMapping mapping{message.service, message.tmgis.empty() ? tmgi : message.tmgis.front(), *message.subchannel,
+                      message.ssrc};
   auto &stored = mbms_mappings_[message.group];
   const bool changed = stored.tmgi != mapping.tmgi || stored.subchannel != mapping.subchannel;
+  if (stored.ssrc != mapping.ssrc) mbms_floor_sequence_.reset();
   stored = mapping;
   if (changed) event("mbms_mapped", {{"group", message.group}, {"tmgi", mapping.tmgi}});
   if (status_.value("call_state", "") != "active" || message.group != active_group()) return;
@@ -164,13 +166,37 @@ void Client::multicast_poll() {
         if (message.type == SubchannelMessageType::UnmapGroup) mbms_unmapped(message);
         continue;
       }
-      if (datagram->bytes.size() >= 2 && datagram->bytes[1] >= 200 && datagram->bytes[1] <= 204) continue;
+      if (datagram->bytes.size() >= 2 && datagram->bytes[1] >= 200 && datagram->bytes[1] <= 204) {
+        mbms_floor_packet(*datagram);
+        continue;
+      }
       audio_packet(*datagram, true);
     } catch (const std::exception &error) {
       status_["media_rejected_packets"] = status_.value("media_rejected_packets", 0ULL) + 1;
       event("media_rejected", {{"reason", error.what()}, {"multicast", true}});
     }
   }
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 10.3.3 step 1 a: Floor Taken and Floor Idle over the joined subchannel (clauses 10.2.3.2 and
+// 10.2.3.3) go to the floor participant as those received by unicast do, from the server's media address with the
+// participating function's SSRC of the Map Group To Bearer; the talker's own Floor Taken is not its own state. Any
+// other floor control message there is ignored. The subchannel's messages are clear: under protected floor control
+// the server keeps them unicast.
+void Client::mbms_floor_packet(const Datagram &datagram) {
+  if (!remote_ || !from_server_address(datagram.source, remote_->address)) return;
+  const auto mapping = mbms_mappings_.find(multicast_group_);
+  if (mapping == mbms_mappings_.end() || protected_floor()) return;
+  auto packet = decode_floor(datagram.bytes);
+  if (packet.ssrc != mapping->second.ssrc || (packet.type != FloorType::Taken && packet.type != FloorType::Idle)) return;
+  if (packet.type == FloorType::Taken)
+    for (const auto &field : packet.fields)
+      if (field.id == static_cast<std::uint8_t>(FloorFieldId::GrantedPartyIdentity) &&
+          read_granted_party_identity(field) == user())
+        return;
+  status_["mbms_floor_received"] = status_.value("mbms_floor_received", 0ULL) + 1;
+  floor_message(std::move(packet), true);
 }
 
 //------------------------------------------------------------------------------

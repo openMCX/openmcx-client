@@ -1351,6 +1351,9 @@ private:
     MbmsService service = MbmsService::Mcptt;
     std::string tmgi;
     MbmsSubchannel subchannel;
+    // The participating function's SSRC (the Map Group To Bearer header's): the media control messages over the
+    // subchannel carry it.
+    std::uint32_t ssrc = 0;
   };
 
   // ---- MCVideo media over an MBMS subchannel (mcvideo/multicast.cpp): TS 24.581 clauses 10.3.2 to 10.3.4 ----
@@ -1368,6 +1371,8 @@ private:
   void mcvideo_multicast_report(bool listening);
   void mcvideo_multicast_poll();
   [[nodiscard]] bool mcvideo_duplicate(std::span<const std::uint8_t> bytes, bool multicast);
+  void mcvideo_mbms_control_packet(const Datagram &datagram);
+  void mcvideo_control_message(const transmission::Packet &packet);
 
   void mcvideo_tick(std::uint64_t now);
 
@@ -1914,6 +1919,8 @@ private:
   mutable std::map<std::uint16_t, std::string> server_sources_;
   void floor_packet(const Datagram &datagram);
 
+  void floor_message(FloorPacket packet, bool multicast);
+
   static bool from_server_address(const sockaddr_in &source, const std::string &address);
 
   void audio_packet(const Datagram &datagram, bool multicast = false);
@@ -1958,6 +1965,9 @@ private:
   std::optional<std::pair<std::uint32_t, std::uint16_t>> last_rtp_; // SSRC, sequence number
   // The session, group and TMGI of the joined subchannel's listening status reports (TS 24.379 clause 14.3.3.2).
   std::string multicast_session_, multicast_group_, multicast_tmgi_;
+  // TS 24.380 clause 10.3.3: the message sequence numbers of the floor control messages over the joined subchannel.
+  FloorSequenceTracker mbms_floor_sequence_;
+  void mbms_floor_packet(const Datagram &datagram);
 
   void multicast_join();
 

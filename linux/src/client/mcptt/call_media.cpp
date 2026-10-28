@@ -276,6 +276,14 @@ void Client::floor_packet(const Datagram &datagram) {
   auto bytes = protected_floor() ? protection_.unprotect_floor(datagram.bytes) : datagram.bytes;
   auto packet = decode_floor(bytes);
   if (packet.ssrc != local_.floor_ssrc) return;
+  floor_message(packet, false);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 6.2.4: a floor control message from the floor control server, received by unicast or (TS 24.380
+// clause 10.3.3, mcptt/multicast.cpp) over the MBMS subchannel, whose messages have their own message sequence
+// numbers and ask for no Floor Ack.
+void Client::floor_message(FloorPacket packet, bool multicast) {
   validate_on_network_floor(packet);
   if (packet.type == FloorType::Ack) {
     floor_timers_.receive(packet, monotonic_ms());
@@ -289,7 +297,7 @@ void Client::floor_packet(const Datagram &datagram) {
     ack.fields = {source_field(0), message_type_field(packet.type)};
     transmit_floor(ack);
   }
-  if (!floor_sequence_.accept(packet)) return;
+  if (!(multicast ? mbms_floor_sequence_ : floor_sequence_).accept(packet)) return;
   floor_timers_.receive(packet, monotonic_ms());
   if (packet.type == FloorType::Granted) {
     if (talking_) return;
