@@ -111,6 +111,7 @@ void Client::call_state(std::string_view id, SipCallState state, int code) {
 // conference subscription, media, floor and priority states, keep its type and group for a rejoin, and save the
 // received audio.
 void Client::clear_call_state() {
+  end_speech("call ended");
   awaiting_answer_key_ = false;
   dialog_.clear();
   pending_answer_.reset();
@@ -314,7 +315,7 @@ void Client::floor_packet(const Datagram &datagram) {
       if (field.id == static_cast<unsigned>(FloorFieldId::RejectCause))
         status_["last_floor_reject_cause"] = read_reject_cause(field).cause; // 5 = receive only
     status_["floor_denials"] = status_["floor_denials"].get<unsigned>() + 1;
-    event("floor_denied");
+    event("floor_denied", {{"reject_cause", status_.value("last_floor_reject_cause", Json())}});
   } else if (packet.type == FloorType::Revoke) {
     release();
     event("floor_revoked");
@@ -353,6 +354,7 @@ void Client::audio_packet(const Datagram &datagram) {
   if (rtp.payload_type != local_.payload_type || !receive_ssrc_ || rtp.ssrc != receive_ssrc_) return;
   floor_timers_.media_received(monotonic_ms());
   auto pcm = codec_.decode(unpack_amr_wb(rtp.payload, local_.octet_aligned));
+  capture_speech(pcm, receive_ssrc_, sender, monotonic_ms()); // media.speech_dir: for an agent
   if (live_) {
     forward_live_audio(pcm); // live (media.live): to the dispatcher's service, not kept
   } else {

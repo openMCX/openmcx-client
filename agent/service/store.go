@@ -59,22 +59,40 @@ type outbound struct {
 	FileState string    `json:"file_state,omitempty"` // the recipient's FD notifications: accepted, rejected, deferred, completed
 }
 
+// speech is a talk burst the agent heard in an MCPTT call (voice.go); its audio is a WAV file in
+// <data_dir>/speech.
+type speech struct {
+	Seq        uint64    `json:"seq"`
+	SpeechID   string    `json:"speech_id"`
+	From       string    `json:"from,omitempty"`  // the talker's MCPTT ID (the floor owner, or the private call's peer)
+	CallType   string    `json:"call_type"`       // prearranged, chat, broadcast, private, adhoc, ...
+	Group      string    `json:"group,omitempty"` // the group of a group call
+	Peer       string    `json:"peer,omitempty"`  // the other party of a private call
+	DurationMS int       `json:"duration_ms"`
+	Received   time.Time `json:"received"`
+	File       string    `json:"file"` // in the daemon's container
+}
+
 // store holds what the agent sent and received, in a JSON file of its own, because the
 // engine keeps only the last 50 of each.
 type store struct {
-	mu      sync.Mutex
-	path    string
-	NextSeq uint64               `json:"next_seq"`
-	In      []*inbound           `json:"inbound"`
-	Out     []*outbound          `json:"outbound"`
-	Ignored map[string]time.Time `json:"ignored"` // group messages and files seen and left out
-	changed *notifier
+	mu         sync.Mutex
+	path       string
+	NextSeq    uint64               `json:"next_seq"`
+	In         []*inbound           `json:"inbound"`
+	Out        []*outbound          `json:"outbound"`
+	Ignored    map[string]time.Time `json:"ignored"` // group messages and files seen and left out
+	NextSpeech uint64               `json:"next_speech"`
+	Speech     []*speech            `json:"speech"`
+	speechKeep int                  // talk bursts kept; older ones are removed with their files
+	changed    *notifier
 }
 
 const storeLimit = 2000
 
 func openStore(path string, changed *notifier) (*store, error) {
-	s := &store{path: path, NextSeq: 1, Ignored: map[string]time.Time{}, changed: changed}
+	s := &store{path: path, NextSeq: 1, NextSpeech: 1, Ignored: map[string]time.Time{}, speechKeep: 200,
+		changed: changed}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return s, nil
@@ -88,6 +106,9 @@ func openStore(path string, changed *notifier) (*store, error) {
 	if s.Ignored == nil {
 		s.Ignored = map[string]time.Time{}
 	}
+	if s.NextSpeech == 0 {
+		s.NextSpeech = 1
+	}
 	return s, nil
 }
 
@@ -98,6 +119,12 @@ func (s *store) save() error {
 	}
 	if len(s.Out) > storeLimit {
 		s.Out = s.Out[len(s.Out)-storeLimit:]
+	}
+	if extra := len(s.Speech) - s.speechKeep; extra > 0 {
+		for _, old := range s.Speech[:extra] {
+			_ = os.Remove(old.File)
+		}
+		s.Speech = s.Speech[extra:]
 	}
 	for id, at := range s.Ignored {
 		if time.Since(at) > 24*time.Hour {

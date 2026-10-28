@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -26,7 +27,9 @@ type engine struct {
 	path, config string
 	args         []string
 	fifo, status string
-	userID       string // mcdata.user_id: the agent's MCData ID
+	userID       string // mcdata.user_id: the agent's MCData ID; empty without MCData
+	mcpttID      string // mcptt.user_id
+	mcvideoID    string // mcvideo.user_id; empty without MCVideo
 	onEvent      func(fields map[string]any)
 	onExit       func()
 
@@ -44,12 +47,67 @@ func newEngine(path, config string, args []string) (*engine, error) {
 	e := &engine{path: path, config: config, args: args}
 	e.fifo, _ = cfg["control_fifo"].(string)
 	e.status, _ = cfg["status_file"].(string)
-	mcdata, _ := cfg["mcdata"].(map[string]any)
-	e.userID, _ = mcdata["user_id"].(string)
-	if e.fifo == "" || e.status == "" || e.userID == "" {
-		return nil, errors.New("the engine configuration needs control_fifo, status_file and mcdata.user_id")
+	e.userID = userID(cfg, "mcdata")
+	e.mcpttID = userID(cfg, "mcptt")
+	e.mcvideoID = userID(cfg, "mcvideo")
+	if e.fifo == "" || e.status == "" {
+		return nil, errors.New("the engine configuration needs control_fifo and status_file")
 	}
 	return e, nil
+}
+
+// userID is the user_id of a service's part of the engine configuration, empty without it.
+func userID(cfg map[string]any, service string) string {
+	part, _ := cfg[service].(map[string]any)
+	id, _ := part["user_id"].(string)
+	return id
+}
+
+// runtimeConfig is the engine configuration the daemon runs: the configured one, and for voice or video a copy in
+// data_dir with the agent's media settings: received talk bursts as WAV files in speechDir (media.speech_dir), no
+// call recording, incoming calls answered at once; pictures from videoFIFO (mcvideo.live), received video not taken.
+func runtimeConfig(c *config, speechDir, videoFIFO string) (string, error) {
+	if !c.Voice.Enabled && !c.Video.Enabled {
+		return c.Engine.Config, nil
+	}
+	cfg, err := readJSON(c.Engine.Config)
+	if err != nil {
+		return "", err
+	}
+	part := func(name string) map[string]any {
+		m, _ := cfg[name].(map[string]any)
+		if m == nil {
+			m = map[string]any{}
+			cfg[name] = m
+		}
+		return m
+	}
+	if c.Voice.Enabled {
+		media := part("media")
+		media["speech_dir"] = speechDir
+		media["keep_received_audio"] = false
+		if _, set := part("mcptt")["answer_mode"]; !set {
+			part("mcptt")["answer_mode"] = "auto"
+		}
+	}
+	if c.Video.Enabled {
+		if cfg["mcvideo"] == nil {
+			return "", errors.New("video needs MCVideo in the engine configuration (mcvideo)")
+		}
+		mcvideo := part("mcvideo")
+		mcvideo["live"] = map[string]any{"fifo": videoFIFO, "width": c.Video.Width, "height": c.Video.Height,
+			"frame_rate": c.Video.FrameRate, "bitrate": c.Video.Bitrate}
+		mcvideo["auto_receive"] = false // the agent shows its video; it does not watch others'
+		if _, set := mcvideo["answer_mode"]; !set {
+			mcvideo["answer_mode"] = "auto"
+		}
+	}
+	raw, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	file := filepath.Join(c.DataDir, "engine.json")
+	return file, writeAtomic(file, raw)
 }
 
 func readJSON(path string) (map[string]any, error) {

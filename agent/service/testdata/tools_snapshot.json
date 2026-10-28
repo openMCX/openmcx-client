@@ -1,7 +1,7 @@
 {
   "tools": [
     {
-      "description": "The agent's MCData state: whether it can send, its MCData ID, its functional alias, unread messages.",
+      "description": "The agent's state: the services it uses and whether each is ready; for MCData whether it can send, its MCData ID, its functional alias, unread messages.",
       "inputSchema": {
         "additionalProperties": false,
         "properties": {},
@@ -278,7 +278,154 @@
         "type": "object"
       },
       "name": "respond_file"
+    },
+    {
+      "description": "The agent's MCPTT call: idle, calling or active, its type, group or peer, who has the floor, whether the agent is speaking, and the seq of the last talk burst heard.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "call_status"
+    },
+    {
+      "description": "Wait for the next talk burst the agent hears in an MCPTT call (private or group) and return it: who spoke, in which call, and the speech as a 16 kHz mono WAV (base64). Returns timed_out when none comes. Without 'since', only what is heard after the call.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "audio": {
+            "default": "inline",
+            "description": "inline: the WAV in the result, base64; none: only its file in the daemon's container",
+            "enum": [
+              "inline",
+              "none"
+            ],
+            "type": "string"
+          },
+          "from": {
+            "description": "only from this MCPTT ID",
+            "type": "string"
+          },
+          "since": {
+            "description": "return the first burst with a higher seq, even one already heard",
+            "type": "integer"
+          },
+          "timeout_s": {
+            "default": 60,
+            "description": "how long to wait, in seconds (1 to 300, default 60)",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "wait_speech"
+    },
+    {
+      "description": "Say something in the agent's MCPTT call: the speech (a 16-bit PCM WAV, any rate, mono or stereo) is sent as a talk burst once the floor is granted, and the floor released at its end. Returns the outcome: spoken, granted, denied, revoked, floor_busy, no_grant, call_ended.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "audio_base64": {
+            "description": "the WAV file, base64",
+            "type": "string"
+          },
+          "file": {
+            "description": "or a WAV file's name in the outbox directory",
+            "type": "string"
+          },
+          "timeout_s": {
+            "default": 30,
+            "description": "how long to wait, in seconds (1 to 300, default 30)",
+            "type": "integer"
+          },
+          "wait": {
+            "default": "done",
+            "description": "return once the floor is granted, or once the speech has been sent",
+            "enum": [
+              "granted",
+              "done"
+            ],
+            "type": "string"
+          },
+          "wait_idle": {
+            "default": true,
+            "description": "wait for the floor to be free before asking for it (another user talking)",
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "speak"
+    },
+    {
+      "description": "Stop the agent's talk burst at once and release the floor (e.g. when the user talks over it).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "stop_speaking"
+    },
+    {
+      "description": "Leave or end the MCPTT call the agent is in.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "hangup"
+    },
+    {
+      "description": "The MCVideo call the agent is in and its transmission (whether its video is being sent), and its feed of pictures: the format POST /video takes (I420, size, frame rate) and what has arrived.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "video_status"
+    },
+    {
+      "description": "Ask for the permission to transmit the agent's video in the MCVideo call it is in (a call to it, or a group call of its groups it joined). Returns granted, rejected, queued or no_answer.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "timeout_s": {
+            "default": 10,
+            "description": "how long to wait, in seconds (1 to 300, default 10)",
+            "type": "integer"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "name": "video_transmit"
+    },
+    {
+      "description": "Stop transmitting the agent's video; the call goes on.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "video_stop"
+    },
+    {
+      "description": "Leave or end the agent's MCVideo call.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "name": "video_hangup"
     }
   ],
-  "version": "1.0.0"
+  "version": "1.1.0"
 }

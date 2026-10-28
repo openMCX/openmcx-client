@@ -183,6 +183,17 @@ class Client {
   bool live_talk_ = false;
   std::string live_host_;
   std::uint16_t live_port_ = 0;
+
+  // Received talk bursts for an agent (media.speech_dir, mcptt/speech_capture.cpp; off unless configured): the
+  // speech of each received talk burst, written as a WAV file and reported (speech_received) when the burst ends.
+  struct SpeechBurst {
+    std::uint32_t ssrc = 0;
+    std::string from;
+    std::vector<std::int16_t> pcm;
+    std::uint64_t last = 0; // when its last frame arrived
+  };
+
+  std::optional<SpeechBurst> speech_;
   AmrWbCodec codec_;
   FloorSequenceTracker floor_sequence_;
   FloorParticipantTimers floor_timers_;
@@ -1116,6 +1127,13 @@ private:
   };
 
   std::optional<McvideoCall> mcvideo_call_;
+  // Live video for an agent (mcvideo.live, mcvideo/live_video.cpp; off unless configured): I420 pictures of the
+  // configured size written to a FIFO are transmitted in place of the test pattern, the latest one at each frame.
+  int live_video_fd_ = -1;
+  std::vector<std::uint8_t> live_video_partial_;
+  std::optional<video::Frame> live_video_frame_;
+  unsigned live_video_frames_ = 0;
+  std::uint64_t live_video_at_ = 0;
 
   // Helper: while a new call in mcvideo_call_ is set up (offer, keys, INVITE), a throw drops it again, so that a
   // failed attempt does not leave "an MCVideo call is in progress" behind.
@@ -1876,6 +1894,25 @@ private:
   void receive_live_audio();
   // The next 20 ms frame of the microphone, silence when none has arrived.
   void live_speech_tick(std::uint64_t now);
+
+  // ---- Received talk bursts for an agent (mcptt/speech_capture.cpp, media.speech_dir) ----
+  // Keep a received speech frame of the talker; a new talker ends the burst before.
+  void capture_speech(const std::vector<std::int16_t> &pcm, std::uint32_t ssrc, const std::string &from,
+                      std::uint64_t now);
+  // End the burst when the floor passed on or went idle, or after a gap without floor control.
+  void speech_capture_tick(std::uint64_t now);
+  // Write the burst as a WAV file and report it (speech_received).
+  void end_speech(const char *reason);
+
+  // ---- Live video for an agent (mcvideo/live_video.cpp, mcvideo.live) ----
+  // Open the FIFO of mcvideo.live; without mcvideo.live nothing.
+  void open_live_video();
+  // Read the pictures written to the FIFO; the latest complete one is transmitted.
+  void receive_live_video();
+  // The encoder settings: mcvideo.live's picture size, frame rate and bit rate, else the defaults.
+  video::EncoderOptions mcvideo_encoder_options() const;
+  // The picture to transmit next: the latest live picture, or without mcvideo.live the test pattern.
+  video::Frame mcvideo_picture(const video::EncoderOptions &options, std::uint32_t index) const;
 
   // ---- Control commands (core/commands.cpp) ----
   void command(const std::string &cmd);

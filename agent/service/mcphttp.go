@@ -45,17 +45,30 @@ func readToken(file string) (string, error) {
 	return token, nil
 }
 
-func newMCPHTTP(token string, origins []string, call toolCaller) http.Handler {
+// newMCPHTTP serves /mcp and, with video, the agent's stream of pictures at /video (video.go); both need the token.
+func newMCPHTTP(token string, origins []string, call toolCaller, video *videoFeed) http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+	// allowed checks the origin and the bearer token, and answers a request that fails either.
+	allowed := func(w http.ResponseWriter, r *http.Request) bool {
 		if origin := r.Header.Get("Origin"); origin != "" && !slices.Contains(origins, origin) {
 			http.Error(w, "origin not allowed", http.StatusForbidden)
-			return
+			return false
 		}
 		given, found := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !found || subtle.ConstantTimeCompare([]byte(given), []byte(token)) != 1 {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="mcx-agent"`)
 			http.Error(w, "a bearer token is needed", http.StatusUnauthorized)
+			return false
+		}
+		return true
+	}
+	mux.HandleFunc("POST /video", func(w http.ResponseWriter, r *http.Request) {
+		if allowed(w, r) {
+			video.serve(w, r)
+		}
+	})
+	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
+		if !allowed(w, r) {
 			return
 		}
 		switch r.Method {
@@ -69,7 +82,7 @@ func newMCPHTTP(token string, origins []string, call toolCaller) http.Handler {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<20))
+		raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBytes))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
 			return

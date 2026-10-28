@@ -22,10 +22,23 @@ const (
 // startDaemon runs a daemon on the fake engine and waits until it can send.
 func startDaemon(t *testing.T, fake map[string]any, edit func(*config)) *daemon {
 	t.Helper()
+	return startDaemonWith(t, nil, fake, edit)
+}
+
+// startDaemonWith is startDaemon with more of the engine configuration (a nil part removed).
+func startDaemonWith(t *testing.T, extra, fake map[string]any, edit func(*config)) *daemon {
+	t.Helper()
 	dir := t.TempDir()
 	engineConfig := map[string]any{
 		"control_fifo": filepath.Join(dir, "control"), "status_file": filepath.Join(dir, "status.json"),
 		"mcdata": map[string]any{"user_id": agentID}, "fake": fake,
+	}
+	for key, v := range extra {
+		if v == nil {
+			delete(engineConfig, key)
+		} else {
+			engineConfig[key] = v
+		}
 	}
 	raw, _ := json.Marshal(engineConfig)
 	if err := os.WriteFile(filepath.Join(dir, "engine.json"), raw, 0o600); err != nil {

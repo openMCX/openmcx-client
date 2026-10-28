@@ -23,7 +23,8 @@ type param struct {
 type tool struct {
 	name, description string
 	params            []param
-	acts              bool // it acts on the network: audited
+	acts              bool   // it acts on the network: audited
+	service           string // the MC service it needs (mcdata, mcptt, mcvideo): enabled, registered and authorised
 	run               func(d *daemon, a args) (any, error)
 }
 
@@ -118,9 +119,10 @@ var timeoutParam = func(def int) param {
 
 var tools = []tool{
 	{
-		name:        "status",
-		description: "The agent's MCData state: whether it can send, its MCData ID, its functional alias, unread messages.",
-		run:         (*daemon).toolStatus,
+		name: "status",
+		description: "The agent's state: the services it uses and whether each is ready; for MCData whether it can " +
+			"send, its MCData ID, its functional alias, unread messages.",
+		run: (*daemon).toolStatus,
 	},
 	{
 		name: "send_message",
@@ -135,8 +137,9 @@ var tools = []tool{
 				description: "return once the message is sent (the network accepted it), delivered or read; none returns at once"},
 			timeoutParam(30),
 		},
-		acts: true,
-		run:  (*daemon).toolSendMessage,
+		acts:    true,
+		service: "mcdata",
+		run:     (*daemon).toolSendMessage,
 	},
 	{
 		name:        "reply_message",
@@ -150,13 +153,15 @@ var tools = []tool{
 				description: "return once the reply is sent, delivered or read; none returns at once"},
 			timeoutParam(30),
 		},
-		acts: true,
-		run:  (*daemon).toolReplyMessage,
+		acts:    true,
+		service: "mcdata",
+		run:     (*daemon).toolReplyMessage,
 	},
 	{
 		name:        "message_status",
 		description: "What is known of a sent or received message or file: network answer, delivered, read, file state.",
 		params:      []param{{name: "message_id", kind: "string", required: true, description: "the message ID"}},
+		service:     "mcdata",
 		run:         (*daemon).toolMessageStatus,
 	},
 	{
@@ -170,7 +175,8 @@ var tools = []tool{
 			{name: "unread_only", kind: "boolean", def: false, description: "only messages not marked read"},
 			{name: "limit", kind: "integer", def: 20, description: "at most this many items (1 to 200)"},
 		},
-		run: (*daemon).toolInbox,
+		service: "mcdata",
+		run:     (*daemon).toolInbox,
 	},
 	{
 		name: "wait_message",
@@ -182,15 +188,17 @@ var tools = []tool{
 			{name: "since", kind: "integer", description: "return the first item with a higher seq, even one already received"},
 			timeoutParam(60),
 		},
-		run: (*daemon).toolWaitMessage,
+		service: "mcdata",
+		run:     (*daemon).toolWaitMessage,
 	},
 	{
 		name: "mark_read",
 		description: "Mark a received message read. Sends the read report when the sender asked for one; " +
 			"reading the inbox never does.",
-		params: []param{{name: "message_id", kind: "string", required: true, description: "the received message's ID"}},
-		acts:   true,
-		run:    (*daemon).toolMarkRead,
+		params:  []param{{name: "message_id", kind: "string", required: true, description: "the received message's ID"}},
+		acts:    true,
+		service: "mcdata",
+		run:     (*daemon).toolMarkRead,
 	},
 	{
 		name: "send_file",
@@ -202,8 +210,9 @@ var tools = []tool{
 			{name: "mandatory", kind: "boolean", def: false, description: "the recipient downloads it without asking its user"},
 			timeoutParam(60),
 		},
-		acts: true,
-		run:  (*daemon).toolSendFile,
+		acts:    true,
+		service: "mcdata",
+		run:     (*daemon).toolSendFile,
 	},
 	{
 		name:        "respond_file",
@@ -213,8 +222,97 @@ var tools = []tool{
 			{name: "action", kind: "string", required: true, enum: []string{"accept", "reject", "defer"}, description: "what to do"},
 			timeoutParam(120),
 		},
-		acts: true,
-		run:  (*daemon).toolRespondFile,
+		acts:    true,
+		service: "mcdata",
+		run:     (*daemon).toolRespondFile,
+	},
+
+	// ---- Voice (MCPTT, voice.go) ----
+	{
+		name: "call_status",
+		description: "The agent's MCPTT call: idle, calling or active, its type, group or peer, who has the floor, " +
+			"whether the agent is speaking, and the seq of the last talk burst heard.",
+		service: "mcptt",
+		run:     (*daemon).toolCallStatus,
+	},
+	{
+		name: "wait_speech",
+		description: "Wait for the next talk burst the agent hears in an MCPTT call (private or group) and return " +
+			"it: who spoke, in which call, and the speech as a 16 kHz mono WAV (base64). Returns timed_out when " +
+			"none comes. Without 'since', only what is heard after the call.",
+		params: []param{
+			{name: "since", kind: "integer", description: "return the first burst with a higher seq, even one already heard"},
+			{name: "from", kind: "string", description: "only from this MCPTT ID"},
+			{name: "audio", kind: "string", enum: []string{"inline", "none"}, def: "inline",
+				description: "inline: the WAV in the result, base64; none: only its file in the daemon's container"},
+			timeoutParam(60),
+		},
+		service: "mcptt",
+		run:     (*daemon).toolWaitSpeech,
+	},
+	{
+		name: "speak",
+		description: "Say something in the agent's MCPTT call: the speech (a 16-bit PCM WAV, any rate, mono or " +
+			"stereo) is sent as a talk burst once the floor is granted, and the floor released at its end. " +
+			"Returns the outcome: spoken, granted, denied, revoked, floor_busy, no_grant, call_ended.",
+		params: []param{
+			{name: "audio_base64", kind: "string", description: "the WAV file, base64"},
+			{name: "file", kind: "string", description: "or a WAV file's name in the outbox directory"},
+			{name: "wait", kind: "string", enum: []string{"granted", "done"}, def: "done",
+				description: "return once the floor is granted, or once the speech has been sent"},
+			{name: "wait_idle", kind: "boolean", def: true,
+				description: "wait for the floor to be free before asking for it (another user talking)"},
+			timeoutParam(30),
+		},
+		acts:    true,
+		service: "mcptt",
+		run:     (*daemon).toolSpeak,
+	},
+	{
+		name:        "stop_speaking",
+		description: "Stop the agent's talk burst at once and release the floor (e.g. when the user talks over it).",
+		acts:        true,
+		service:     "mcptt",
+		run:         (*daemon).toolStopSpeaking,
+	},
+	{
+		name:        "hangup",
+		description: "Leave or end the MCPTT call the agent is in.",
+		acts:        true,
+		service:     "mcptt",
+		run:         (*daemon).toolHangup,
+	},
+
+	// ---- Video (MCVideo, video.go) ----
+	{
+		name: "video_status",
+		description: "The MCVideo call the agent is in and its transmission (whether its video is being sent), and its feed of " +
+			"pictures: the format POST /video takes (I420, size, frame rate) and what has arrived.",
+		service: "mcvideo",
+		run:     (*daemon).toolVideoStatus,
+	},
+	{
+		name: "video_transmit",
+		description: "Ask for the permission to transmit the agent's video in the MCVideo call it is in (a call to " +
+			"it, or a group call of its groups it joined). Returns granted, rejected, queued or no_answer.",
+		params:  []param{timeoutParam(10)},
+		acts:    true,
+		service: "mcvideo",
+		run:     (*daemon).toolVideoTransmit,
+	},
+	{
+		name:        "video_stop",
+		description: "Stop transmitting the agent's video; the call goes on.",
+		acts:        true,
+		service:     "mcvideo",
+		run:         (*daemon).toolVideoStop,
+	},
+	{
+		name:        "video_hangup",
+		description: "Leave or end the agent's MCVideo call.",
+		acts:        true,
+		service:     "mcvideo",
+		run:         (*daemon).toolVideoHangup,
 	},
 }
 
@@ -232,14 +330,29 @@ func (d *daemon) toolStatus(args) (any, error) {
 	ready, alias := d.ready, d.alias
 	d.mu.Unlock()
 	running, _ := d.eng.running()
+	svc := map[string]any{}
+	allReady := ready
+	for name, s := range services {
+		entry := map[string]any{"enabled": d.enabled(name)}
+		if d.enabled(name) {
+			entry["ready"] = d.serviceReady(name) == nil
+			entry["authorized"] = st[s.authorized] == true
+			allReady = allReady && entry["ready"] == true
+		}
+		svc[name] = entry
+	}
+	svc["mcdata"].(map[string]any)["id"] = d.eng.userID
+	svc["mcptt"].(map[string]any)["id"] = d.eng.mcpttID
+	svc["mcvideo"].(map[string]any)["id"] = d.eng.mcvideoID
 	out := map[string]any{
 		"version":           version,
-		"ready":             ready,
+		"ready":             allReady,
 		"engine_running":    running,
 		"mcdata_id":         d.eng.userID,
 		"registered":        st["registered"] == true,
 		"mcdata_authorized": st["mcdata_authorized"] == true,
 		"last_error":        st["last_error"],
+		"services":          svc,
 	}
 	if exit := d.eng.lastExit(); exit != "" && !running {
 		out["engine_exit"] = exit
@@ -248,7 +361,10 @@ func (d *daemon) toolStatus(args) (any, error) {
 		out["alias"] = map[string]any{"id": d.cfg.Alias, "state": alias, "active": d.aliasActive(st), "required": *d.cfg.RequireAlias}
 	}
 	_, err := d.sendingAlias()
-	out["can_send"] = ready && err == nil
+	if mcdata := d.serviceReady("mcdata"); mcdata != nil {
+		err = mcdata
+	}
+	out["can_send"] = err == nil
 	if err != nil {
 		out["cannot_send_because"] = err.Error()
 	}

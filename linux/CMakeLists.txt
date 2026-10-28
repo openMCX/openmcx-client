@@ -42,10 +42,12 @@ add_executable(mcx-client
     src/client/mcptt/private_services.cpp
     src/client/mcptt/regroup.cpp
     src/client/mcptt/service.cpp
+    src/client/mcptt/speech_capture.cpp
     # mcvideo
     src/client/mcvideo/call.cpp
     src/client/mcvideo/functional_alias.cpp
     src/client/mcvideo/group_selection.cpp
+    src/client/mcvideo/live_video.cpp
     src/client/mcvideo/location.cpp
     src/client/mcvideo/service.cpp
     src/client/mcvideo/session.cpp

@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -39,8 +40,12 @@ type daemon struct {
 
 	mu     sync.Mutex
 	status map[string]any // the engine's last status document
-	ready  bool           // registered and authorised for MCData
+	ready  bool           // the engine runs and is registered
 	alias  string         // the alias state: "", activating, active, or why it is not
+
+	speakMu   sync.Mutex // one speech at a time (voice.go)
+	speechDir string     // where the engine writes received talk bursts
+	video     *videoFeed // the pictures streamed to the engine (video.go)
 }
 
 func newDaemon(cfg *config) (*daemon, error) {
@@ -50,24 +55,61 @@ func newDaemon(cfg *config) (*daemon, error) {
 	if err := os.MkdirAll(cfg.OutboxDir, 0o700); err != nil {
 		return nil, err
 	}
-	eng, err := newEngine(cfg.Engine.Path, cfg.Engine.Config, cfg.Engine.Args)
+	speechDir := filepath.Join(cfg.DataDir, "speech-in")
+	for _, dir := range []string{speechDir, filepath.Join(cfg.DataDir, "speech"), filepath.Join(cfg.DataDir, "speech-out")} {
+		if cfg.Voice.Enabled {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return nil, err
+			}
+		}
+	}
+	fifo := filepath.Join(cfg.DataDir, "video.fifo")
+	engineConfig, err := runtimeConfig(cfg, speechDir, fifo)
 	if err != nil {
 		return nil, err
+	}
+	eng, err := newEngine(cfg.Engine.Path, engineConfig, cfg.Engine.Args)
+	if err != nil {
+		return nil, err
+	}
+	if eng.userID == "" && cfg.Alias != "" {
+		return nil, errors.New("an alias needs MCData in the engine configuration (mcdata.user_id)")
 	}
 	changed := newNotifier()
 	st, err := openStore(filepath.Join(cfg.DataDir, "store.json"), changed)
 	if err != nil {
 		return nil, err
 	}
+	st.speechKeep = cfg.Voice.Keep
 	audit, err := openAudit(filepath.Join(cfg.DataDir, "audit.jsonl"))
 	if err != nil {
 		return nil, err
 	}
 	d := &daemon{cfg: cfg, eng: eng, journal: newJournal(changed), store: st, changed: changed,
-		limit: &limiter{total: cfg.RatePerMin, perRecipient: cfg.RatePerRecipient}, audit: audit, quit: make(chan struct{})}
-	eng.onEvent = d.journal.append
+		limit: &limiter{total: cfg.RatePerMin, perRecipient: cfg.RatePerRecipient}, audit: audit, quit: make(chan struct{}),
+		speechDir: speechDir}
+	if cfg.Video.Enabled {
+		d.video = &videoFeed{fifo: fifo, frameBytes: cfg.Video.frameBytes(), frameRate: cfg.Video.FrameRate}
+	}
+	eng.onEvent = d.engineEvent
 	eng.onExit = changed.fire
 	return d, nil
+}
+
+// engineEvent takes an engine event into the journal; a received talk burst goes into the store, and with
+// video.auto_transmit an MCVideo call asks for the permission to transmit.
+func (d *daemon) engineEvent(fields map[string]any) {
+	switch fields["event"] {
+	case "speech_received":
+		if d.cfg.Voice.Enabled {
+			d.absorbSpeech(fields)
+		}
+	case "mcvideo_call_active":
+		if d.cfg.Video.AutoTransmit {
+			go d.autoTransmit()
+		}
+	}
+	d.journal.append(fields)
 }
 
 func runDaemon(args []string) int {
@@ -97,7 +139,7 @@ func runDaemon(args []string) int {
 			log.Printf("mcp_http: %v", err)
 			return 1
 		}
-		server := &http.Server{Addr: cfg.MCPHTTP.Listen, Handler: newMCPHTTP(token, cfg.MCPHTTP.AllowedOrigins, d.call),
+		server := &http.Server{Addr: cfg.MCPHTTP.Listen, Handler: newMCPHTTP(token, cfg.MCPHTTP.AllowedOrigins, d.call, d.video),
 			ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 		go func() { log.Printf("mcp_http: %v", server.ListenAndServe()) }()
 		log.Printf("mcx-agent: MCP over HTTP on %s/mcp", cfg.MCPHTTP.Listen)
@@ -111,7 +153,7 @@ func runDaemon(args []string) int {
 		d.shutdown()
 		_ = listener.Close()
 	}()
-	log.Printf("mcx-agent: %s as %s, socket %s", cfg.Engine.Config, d.eng.userID, listener.Addr())
+	log.Printf("mcx-agent: %s as %s, socket %s", cfg.Engine.Config, d.identity(), listener.Addr())
 	err = http.Serve(listener, d.handler())
 	if errors.Is(err, net.ErrClosed) {
 		return 0
@@ -168,8 +210,19 @@ func (d *daemon) latest() map[string]any {
 	return d.status
 }
 
-// supervise runs the engine for good: it starts it, waits for registration and MCData
-// authorisation, activates the alias, and starts it again three seconds after it ends.
+// identity is the agent's IDs for the log.
+func (d *daemon) identity() string {
+	ids := []string{}
+	for _, id := range []string{d.eng.userID, d.eng.mcpttID, d.eng.mcvideoID} {
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return strings.Join(ids, ", ")
+}
+
+// supervise runs the engine for good: it starts it, waits for registration, activates the
+// alias once MCData is authorised, and starts it again three seconds after it ends.
 func (d *daemon) supervise() {
 	for {
 		select {
@@ -189,7 +242,7 @@ func (d *daemon) supervise() {
 		_, done := d.eng.running()
 		if d.waitReady(done) {
 			d.setState(true, "")
-			log.Print("MCData ready")
+			log.Print("engine registered")
 			if d.cfg.Alias != "" {
 				go d.keepAlias(done)
 			}
@@ -203,8 +256,7 @@ func (d *daemon) supervise() {
 	}
 }
 
-// waitReady waits until the engine is registered and authorised for MCData; false when the
-// engine ends first.
+// waitReady waits until the engine is registered; false when the engine ends first.
 func (d *daemon) waitReady(done chan struct{}) bool {
 	for {
 		select {
@@ -214,7 +266,7 @@ func (d *daemon) waitReady(done chan struct{}) bool {
 		}
 		err := d.changed.waitUntil(time.Second, func() (bool, error) {
 			st := d.latest()
-			return st["registered"] == true && st["mcdata_authorized"] == true, nil
+			return st["registered"] == true, nil
 		})
 		if err == nil {
 			return true
@@ -239,6 +291,17 @@ func (d *daemon) setAlias(state string) {
 func (d *daemon) keepAlias(done chan struct{}) {
 	retry := time.Duration(max(d.cfg.AliasRetryS, 1)) * time.Second
 	for {
+		if d.serviceReady("mcdata") != nil {
+			// Not authorised for MCData (yet): look again in a second.
+			select {
+			case <-done:
+				return
+			case <-d.quit:
+				return
+			case <-time.After(time.Second):
+			}
+			continue
+		}
 		if !d.aliasActive(d.latest()) {
 			d.mu.Lock()
 			lost := d.alias == "active"
@@ -321,6 +384,7 @@ func (d *daemon) sendingAlias() (string, error) {
 	return "", nil
 }
 
+// readiness reports whether the engine runs and is registered.
 func (d *daemon) readiness() error {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -332,7 +396,45 @@ func (d *daemon) readiness() error {
 		if exit := d.eng.lastExit(); exit != "" {
 			reason += ": " + exit
 		}
-		return fail(codeNotReady, "the MCData service is not ready (%s)", reason)
+		return fail(codeNotReady, "the engine is not ready (%s)", reason)
+	}
+	return nil
+}
+
+// services are the MC services a tool needs: the name in errors and the engine's status key of its authorisation.
+var services = map[string]struct{ name, authorized string }{
+	"mcdata":  {"MCData", "mcdata_authorized"},
+	"mcptt":   {"MCPTT", "authorized"},
+	"mcvideo": {"MCVideo", "mcvideo_authorized"},
+}
+
+// enabled reports whether the agent uses a service: MCData with mcdata.user_id, voice (MCPTT) and video (MCVideo)
+// when the configuration turns them on.
+func (d *daemon) enabled(service string) bool {
+	switch service {
+	case "mcdata":
+		return d.eng.userID != ""
+	case "mcptt":
+		return d.cfg.Voice.Enabled
+	case "mcvideo":
+		return d.cfg.Video.Enabled
+	}
+	return false
+}
+
+// serviceReady reports whether the agent can use a service: enabled, the engine registered and authorised for it.
+func (d *daemon) serviceReady(service string) error {
+	s := services[service]
+	if !d.enabled(service) {
+		what := map[string]string{"mcdata": "MCData (no mcdata.user_id in the engine configuration)",
+			"mcptt": "voice (voice.enabled)", "mcvideo": "video (video.enabled)"}[service]
+		return fail(codeNotEnabled, "this agent does not use %s", what)
+	}
+	if err := d.readiness(); err != nil {
+		return err
+	}
+	if d.latest()[s.authorized] != true {
+		return fail(codeNotReady, "the %s service is not ready (not authorised yet)", s.name)
 	}
 	return nil
 }
@@ -371,6 +473,9 @@ func (d *daemon) transact(line string, timeout time.Duration,
 	return result, err
 }
 
+// maxRequestBytes bounds a tool call's request: speech travels in it, base64 encoded.
+const maxRequestBytes = 32 << 20
+
 // fire writes a command that reports nothing when it succeeds: no client_error within half a
 // second is success. The engine runs a command within one pass of its loop.
 func (d *daemon) fire(line string) error {
@@ -391,13 +496,14 @@ func (d *daemon) handler() http.Handler {
 			Tool string         `json:"tool"`
 			Args map[string]any `json:"args"`
 		}
-		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64*1024)).Decode(&req); err != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxRequestBytes)).Decode(&req); err != nil {
 			writeReply(w, nil, fail(codeInvalidArgument, "bad request: %v", err))
 			return
 		}
 		result, err := d.call(req.Tool, req.Args)
 		writeReply(w, result, err)
 	})
+	mux.HandleFunc("POST /video", d.video.serve)
 	return mux
 }
 
@@ -422,6 +528,11 @@ func (d *daemon) call(name string, raw map[string]any) (any, error) {
 	a, err := t.bind(raw)
 	if err != nil {
 		return nil, err
+	}
+	if t.service != "" {
+		if err := d.serviceReady(t.service); err != nil {
+			return nil, err
+		}
 	}
 	result, err := t.run(d, a)
 	if t.acts {

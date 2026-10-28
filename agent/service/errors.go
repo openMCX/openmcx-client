@@ -18,7 +18,10 @@ const (
 	codeNotAllowed      = "not_allowed"      // the configuration does not allow this recipient
 	codeRateLimited     = "rate_limited"     // too many sends in the last minute; try again later
 	codeAliasInactive   = "alias_inactive"   // the agent's functional alias is not active, so it may not send
-	codeNotReady        = "engine_not_ready" // the engine is starting, not registered or not authorised for MCData
+	codeNotReady        = "engine_not_ready" // the engine is starting, not registered or not authorised for the service
+	codeNotEnabled      = "not_enabled"      // the agent's configuration does not use this service (MCData, voice, video)
+	codeNoCall          = "no_call"          // the tool needs a call the agent is in, and there is none
+	codeBusy            = "busy"             // the agent is already doing it: speaking, in a call, streaming video
 	codeEngineRefused   = "engine_refused"   // the engine refused the command (its client_error)
 	codeSendFailed      = "send_failed"      // the network refused the message or the recipient never got it
 	codeTransferFailed  = "transfer_failed"  // a file upload or download failed
@@ -55,7 +58,7 @@ func exitStatus(code string) int {
 	switch code {
 	case codeInvalidArgument, codeUnknownTool:
 		return 2
-	case codeNotAllowed, codeRateLimited, codeAliasInactive:
+	case codeNotAllowed, codeRateLimited, codeAliasInactive, codeNotEnabled:
 		return 3
 	case codeNotReady:
 		return 4

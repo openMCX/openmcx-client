@@ -25,7 +25,7 @@ func TestMCPHTTP(t *testing.T) {
 		}
 		return nil, fail(codeNotAllowed, "sip:x@y is not among the recipients the agent may send to")
 	}
-	server := httptest.NewServer(newMCPHTTP(testToken, []string{"https://ops.example.org"}, call))
+	server := httptest.NewServer(newMCPHTTP(testToken, []string{"https://ops.example.org"}, call, nil))
 	defer server.Close()
 	post := func(body, token, origin string) (*http.Response, string) {
 		req, _ := http.NewRequest(http.MethodPost, server.URL+"/mcp", strings.NewReader(body))

@@ -1,16 +1,25 @@
-# mcx-agent: MCData for AI agents
+# mcx-agent: MCData, voice and video for AI agents
 
-`mcx-agent` lets an AI agent (or a script) exchange **MCData one-to-one short data (SDS) and files** through an
-OpenMCX MC system. It runs the Linux client `mcx-client` as its engine, like the [dispatcher](../dispatcher) does, and
-offers the same tools to agents and shells: an **MCP server** (over HTTP, or stdio) and a **CLI**. MCPTT, MCVideo and
-group SDS are outside its reach. **[API.md](API.md)** is the contract an agent builds on (version 1.0.0): the
-transports, the tools, their results and error codes. **[FIRST_AGENT.md](FIRST_AGENT.md)** builds an agent on it step
-by step.
+`mcx-agent` lets an AI agent (or a script) take part in an OpenMCX MC system as an MC user:
+
+- **MCData**: one-to-one short data (SDS) and files, for a chat agent;
+- **voice (MCPTT)**: the talk bursts it hears in private and group calls, and speech it says in them, for a voice
+  agent users talk to with push to talk;
+- **video (MCVideo)**: pictures it streams, transmitted in the private and group calls it is in, for a drone or a robot
+  that shows what its camera sees.
+
+It runs the Linux client `mcx-client` as its engine, like the [dispatcher](../dispatcher) does, and offers the same
+tools to agents and shells: an **MCP server** (over HTTP, or stdio) and a **CLI**; video pictures go to an HTTP
+endpoint beside MCP. The agent itself (speech to text, a model, text to speech, the camera) is yours: mcx-agent is the
+plumbing. Group SDS is outside its reach. **[API.md](API.md)** is the contract an agent builds on (version 1.1.0):
+the transports, the tools, their results and error codes. **[FIRST_AGENT.md](FIRST_AGENT.md)** builds an MCData agent
+on it step by step.
 
 ```
 agent (other container) ──MCP over HTTP, token──────────────▶ mcx-agent daemon ──control FIFO / status / events──▶ mcx-client
-agent ──stdio MCP──▶ mcx-agent mcp ──┐                            ▲
-shell ─────────────▶ mcx-agent <tool> ┴──────── unix socket ───────┘
+                        ──POST /video, I420 pictures, token──▶   │  ▲          ──pictures FIFO (mcvideo.live)──────▶
+agent ──stdio MCP──▶ mcx-agent mcp ──┐                            │  │          ◀──talk bursts as WAV (media.speech_dir)──
+shell ─────────────▶ mcx-agent <tool> ┴──────── unix socket ───────┘  │
 ```
 
 The engine answers nothing on its control FIFO, so the daemon makes each tool a transaction: it writes one command at
@@ -30,6 +39,13 @@ every message in its own store (`<data_dir>/store.json`), because the engine kee
 | `mark_read` | Marks a message read and sends the read report when the sender asked for one (`sds-display`); reading the inbox never does |
 | `send_file` | File distribution over HTTP (`fd-send`) of a file in the outbox directory |
 | `respond_file` | Accept (download), reject or defer a file offer (`fd-accept`, `fd-reject`, `fd-defer`) |
+| `call_status` | The MCPTT call: idle, calling or active, its type, group or peer, who has the floor, whether the agent speaks |
+| `wait_speech` | Waits for the next talk burst heard in a call: who spoke, in which call, the speech as a WAV (base64) |
+| `speak` | Says a WAV in the call: asks for the floor, sends it as a talk burst (`ptt <wav>`), releases the floor at its end |
+| `stop_speaking` | Ends the agent's talk burst at once (`release`) |
+| `hangup` | Leaves or ends the MCPTT call the agent is in |
+| `video_status` | The MCVideo call and transmission, and the feed of pictures: the format `POST /video` takes, what arrived |
+| `video_transmit`, `video_stop`, `video_hangup` | Asks for the permission to transmit in the call the agent is in, ends the transmission, leaves the call |
 
 `mcx-agent tools` lists the arguments. In the CLI, `--name value`; tool and argument names take `-` or `_`; the
 result is JSON on stdout. Text may have line breaks: the daemon passes it to the engine with its `escaped` option
@@ -40,6 +56,56 @@ mcx-agent send-message --to sip:alice.mcdata@example.org --text "unit 4 report p
 mcx-agent wait-message --timeout-s 120
 mcx-agent mark-read --message-id 6f1c…
 ```
+
+## Voice: MCPTT for a voice agent
+
+With `voice.enabled`, the engine writes the speech of every talk burst it receives as a WAV file (16 kHz, 16-bit,
+mono) and reports it with the talker: the floor owner of a group call, the peer of a private call. A burst ends when
+the floor passes on or goes idle (without floor control, after 1.5 s without speech). The daemon keeps the last
+`voice.keep` (200) with their files in `<data_dir>/speech`; `wait_speech` returns each with its audio inline.
+Push to talk is a turn-taking conversation, so the agent works in bursts: hear one, answer it with `speak`.
+
+- Calls to the agent are answered at once (`mcptt.answer_mode` auto unless the engine configuration says otherwise);
+  the group calls of the groups the agent is affiliated to reach it as they reach any member. The MC system decides
+  who may call the agent (the users' profiles), as for any user.
+- `speak` takes a 16-bit PCM WAV of any rate, mono or stereo (base64, or a file in the outbox), converts it to 16 kHz
+  mono, waits for another talker to finish (`wait_idle`), asks for the floor, and sends it; the floor is released at
+  its end. The outcome says whether it was said: `spoken`, `denied`, `revoked` (a talker of higher priority took the
+  floor), `floor_busy`, `no_grant`, `call_ended`. At most `voice.max_speech_s` (60) seconds.
+- The agent makes no calls of its own: it answers calls to it and joins its groups' calls, and can leave them
+  (`hangup`).
+
+```bash
+mcx-agent wait-speech --audio none --timeout-s 120     # who spoke, where; the WAV's file in the container
+mcx-agent speak --file answer.wav                      # a WAV in the outbox
+```
+
+[`examples/voice-bot.py`](examples/voice-bot.py) is the hello-world voice agent: it plays back every burst it hears,
+after a short tone. Its `respond()` is where speech to text, a model and text to speech go.
+
+## Video: MCVideo for a camera agent
+
+With `video.enabled`, the engine transmits the agent's own pictures in place of its test pattern: the agent streams
+them to `POST /video` (MCP over HTTP's listener, with its token; or the unix socket, `mcx-agent video-feed`), raw I420
+pictures of `video.width` x `video.height` (320 x 240) one after another, and while the agent has the permission to
+transmit the engine encodes the latest one at each frame (`video.frame_rate`, 15) as H.264 at `video.bitrate`
+(300 kbit/s). Before the first picture it sends black, and when the stream stops its last picture goes on. The
+video other users transmit is not received: a drone does not watch.
+
+- The agent makes no calls of its own: a user calls it (a private MCVideo call) or starts a group call of its
+  groups, which it joins; calls are answered at once. `video_transmit` asks for the permission to transmit in them
+  (or `video.auto_transmit`, as soon as it is in one).
+- Any camera works through ffmpeg: `ffmpeg -i rtsp://drone/live -vf scale=320:240 -r 15 -pix_fmt yuv420p -f rawvideo
+  - | curl -T - -H "Authorization: Bearer $TOKEN" http://mcx-agent:8765/video`; `?pace=true` plays a recorded file
+  at the frame rate.
+
+```bash
+ffmpeg -i /dev/video0 -vf scale=320:240 -r 15 -pix_fmt yuv420p -f rawvideo - | mcx-agent video-feed
+mcx-agent video-transmit                               # in the call a user made to the agent
+```
+
+[`examples/video-feed.py`](examples/video-feed.py) is the hello-world camera agent: it streams a generated test card
+(or, with `--source`, any ffmpeg input) and transmits in every call it is in.
 
 ## Errors
 
@@ -73,8 +139,11 @@ the agent gets it back once its holder lets it go.
   the size of an SDS still apply (`send_failed` with its Warning).
 - `rate_per_recipient_per_minute` (10) limits sends to one user, `rate_per_minute` (60) all sends and files together.
 - Files are sent only from `outbox_dir` (`<data_dir>/outbox`): plain names, no symbolic links out of it.
+- The agent never makes a call: no tool starts one. It answers calls to it and joins its groups' calls; who may
+  call it is the MC system's decision (the users' profiles).
 - No emergency or imminent-peril priority, no alerts, no raw engine commands.
-- `<data_dir>/audit.jsonl` records every call of a tool that acts on the network, with its arguments and outcome.
+- `<data_dir>/audit.jsonl` records every call of a tool that acts on the network, with its arguments and outcome
+  (the audio of `speak` only by its size).
 - The socket is owner only (0600); credentials stay in the engine's configuration, out of the agent's reach.
 
 ## Configuration
@@ -83,13 +152,19 @@ the agent gets it back once its holder lets it go.
 
 | Key | Meaning |
 |---|---|
-| `engine.path`, `engine.config`, `engine.args` | `mcx-client` (default `/usr/local/bin/mcx-client`), its configuration, and further arguments (e.g. `--disable-tls`); the configuration needs `control_fifo`, `status_file` and `mcdata.user_id` |
+| `engine.path`, `engine.config`, `engine.args` | `mcx-client` (default `/usr/local/bin/mcx-client`), its configuration, and further arguments (e.g. `--disable-tls`); the configuration needs `control_fifo` and `status_file`; MCData is used when it has `mcdata.user_id`, video needs its `mcvideo` part |
 | `socket` | The daemon's unix socket (default `/run/mcx-agent/agent.sock`; clients also read `MCX_AGENT_SOCKET`) |
 | `data_dir` | Store and audit log |
 | `outbox_dir` | Where files are sent from |
 | `alias`, `require_alias`, `alias_retry_s` | The functional alias to send as; refuse to send without it (default true when an alias is set); how often a lost alias is tried again |
 | `recipients`, `allow_senders_hours`, `rate_per_recipient_per_minute`, `rate_per_minute`, `max_text_bytes` | See Safety |
-| `mcp_http` | `{"listen", "token_file", "allowed_origins"}`: MCP over HTTP at `/mcp`, with the bearer token of `token_file` ([API.md](API.md#mcp-over-http)) |
+| `mcp_http` | `{"listen", "token_file", "allowed_origins"}`: MCP over HTTP at `/mcp`, with the bearer token of `token_file` ([API.md](API.md#mcp-over-http)); also `/video` |
+| `voice` | `{"enabled", "max_speech_s", "keep"}`: MCPTT for a voice agent (off); the longest speech it may say (60 s); the talk bursts kept (200) |
+| `video` | `{"enabled", "width", "height", "frame_rate", "bitrate", "auto_transmit"}`: MCVideo for a camera agent (off); the pictures' size (320 x 240, even, at most 1280 x 720) and rate (15, at most 30), the H.264 bit rate (300000); ask to transmit in every call |
+
+With voice or video on, the daemon runs the engine on a copy of its configuration in `<data_dir>/engine.json` with
+the agent's media settings: `media.speech_dir`, `mcvideo.live` (a FIFO in `data_dir`), automatic answering, no
+call recording, no video reception.
 
 Downloads land where the engine puts them: `downloads/` beside its status file.
 
@@ -135,6 +210,14 @@ docker build -t openmcx-agent:<tag> --build-arg CLIENT_IMAGE=openmcx-client:<tag
 cd ../openmcx-server && tools/regress.py --images <tag> --client-image openmcx-agent:<tag> --select =mcdata-agent
 ```
 
+The lab scenario `voice_video_agent_scenario` (lab `voice-video-agent`) runs a voice and video agent the same way,
+with the voice bot and the camera agent in another client's container: private and group calls of users who talk
+to the bot and hear its answers, and private and group MCVideo calls of users who decode the agent's pictures:
+
+```bash
+cd ../openmcx-server && tools/regress.py --images <tag> --client-image openmcx-agent:<tag> --select =voice-video-agent
+```
+
 `go test` checks the tools against the committed contract (`service/testdata/tools_snapshot.json`; after a
 deliberate change, raise `version` in `main.go` and run `UPDATE_SNAPSHOT=1 go test -run TestToolsSnapshot ./...`),
 the MCP transports, and runs the daemon against a fake engine ([`service/testdata/fake-engine`](service/testdata/fake-engine)) that
@@ -151,5 +234,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD/agent/service:/
 - A `client_error` from something else (a token renewal, say) while a command is outstanding is taken for that
   command's failure.
 - If more than 50 messages arrive between two status reads (200 ms), the oldest of them are missed.
+- One MCPTT call and one MCVideo call at a time, as for the engine; one speech and one stream of pictures at a time.
+- Speech is in talk bursts: a burst reaches the agent when it ends, not while the user speaks.
 - `mark_read` on a message the engine no longer holds (its last 50) marks it read in the store only; the result says
   the report was not sent.

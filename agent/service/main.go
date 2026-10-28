@@ -3,7 +3,9 @@
 //
 
 // Command mcx-agent gives an AI agent MCData one-to-one short data (SDS) and file
-// distribution (FD) through the MCX client engine (mcx-client). One binary, three modes:
+// distribution (FD), MCPTT voice (the talk bursts it hears, the speech it says) and MCVideo
+// (the pictures it streams, transmitted in calls) through the MCX client engine (mcx-client).
+// One binary, three modes:
 //
 //   - mcx-agent daemon --config <agent.json>: runs the engine for good, activates the
 //     agent's functional alias, keeps every message in its own store and serves the tools
@@ -12,7 +14,7 @@
 //   - mcx-agent <tool> [--<argument> <value>]...: one tool call from a shell, JSON out.
 //
 // The CLI and the MCP server are clients of the daemon, so a tool behaves the same in both.
-// Group SDS, MCPTT and MCVideo are outside the agent's reach.
+// Group SDS is outside the agent's reach.
 package main
 
 import (
@@ -25,7 +27,7 @@ const defaultSocket = "/run/mcx-agent/agent.sock"
 // version is the version of the API contract (API.md): the tools, their arguments and results,
 // the error codes. A tool or argument added raises the minor version; one changed or removed
 // raises the major. tools_snapshot.json holds the tools of this version.
-const version = "1.0.0"
+const version = "1.1.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -49,6 +51,7 @@ func usage() {
   mcx-agent daemon --config <agent.json>
   mcx-agent mcp [--socket <path>]
   mcx-agent [--socket <path>] <tool> [--<argument> <value>]...
+  mcx-agent [--socket <path>] video-feed [--file <path>|-] [--pace]
   mcx-agent tools [--json]
 
 The socket is %s unless --socket or MCX_AGENT_SOCKET says otherwise.

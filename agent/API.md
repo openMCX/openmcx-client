@@ -1,7 +1,9 @@
-# mcx-agent API, version 1.0.0
+# mcx-agent API, version 1.1.0
 
 The contract between `mcx-agent` and an agent built on it: the transports, the tools with their arguments and
-results, the error codes, and how to read messages. An agent built against 1.x keeps working on every later 1.x.
+results, the error codes, how to read messages, hear and say speech, and stream video. An agent built against 1.x
+keeps working on every later 1.x. 1.1.0 added voice (MCPTT) and video (MCVideo): their tools, `POST /video`, the
+error codes `not_enabled`, `no_call` and `busy`, and `services` in `status`.
 
 - **Versions**: `status` and the MCP `serverInfo` give the version. A tool or argument added raises the minor
   version; one changed or removed raises the major. Fields may be added to results within a major version: ignore
@@ -21,6 +23,9 @@ All four reach the same tools in the daemon, with the same results and errors.
 | CLI | shells and scripts | `mcx-agent <tool> --<argument> <value>…` |
 | Socket | programs in the daemon's container | `POST /call` on the unix socket |
 
+Video pictures are not tool arguments: they stream to `POST /video` ([below](#video-pictures-post-video)), on the
+HTTP listener (with the token) or the socket.
+
 ### MCP over HTTP
 
 The streamable HTTP transport of MCP (protocol versions 2024-11-05, 2025-03-26 and 2025-06-18), turned on by
@@ -38,8 +43,9 @@ The streamable HTTP transport of MCP (protocol versions 2024-11-05, 2025-03-26 a
   `403`.
 - Plain HTTP: bind it to a network only the agents share (the [compose example](examples/compose) uses an internal
   network), or put TLS in front of it.
-- A `wait_message` call holds its request open up to its `timeout_s` (at most 300 s): give the HTTP client a longer
-  timeout.
+- A `wait_message` or `wait_speech` call holds its request open up to its `timeout_s` (at most 300 s): give the
+  HTTP client a longer timeout.
+- A request is at most 32 MiB (speech travels base64 in it).
 
 ### MCP over stdio
 
@@ -72,7 +78,10 @@ error of the CLI itself. The socket is `--socket`, else `MCX_AGENT_SOCKET`, else
 | `not_allowed` | The configuration does not allow this recipient | Do not retry | 3 |
 | `rate_limited` | Too many sends in the last minute, to this recipient or in all | Retry later | 3 |
 | `alias_inactive` | The agent's functional alias is not active (taken over, refused), so it may not send | Wait: `status` says when it can send again | 3 |
-| `engine_not_ready` | The engine (or the daemon) is starting, not registered, or not authorised for MCData | Retry later | 4 |
+| `engine_not_ready` | The engine (or the daemon) is starting, not registered, or not authorised for the tool's service (or not affiliated, for a group call) | Retry later | 4 |
+| `not_enabled` | The agent's configuration does not use the service the tool needs: MCData (no `mcdata.user_id` in the engine configuration), voice (`voice.enabled`), video (`video.enabled`) | Do not retry | 3 |
+| `no_call` | The tool needs a call the agent is in (`speak`, `hangup`, `video_transmit`, …) and there is none | Wait for one, or start one | 1 |
+| `busy` | The agent is already doing it: speaking, in a call of that service, streaming pictures | Retry when it is done | 1 |
 | `not_found` | No such message, file offer or outbox file | Do not retry | 1 |
 | `engine_refused` | The engine refused the command | See the message | 1 |
 | `send_failed` | The network refused the message (the message has its Warning) or it was not delivered | Do not retry as is | 1 |
@@ -96,6 +105,22 @@ SIP URIs (`sip:user@domain`); message IDs are UUIDs.
 | `mark_read` | `message_id`\* (received) | `{message_id, read: true, read_report: "sent" \| "not asked for by the sender" \| "already marked read" \| "not sent: …"}` |
 | `send_file` | `to`\*, `file`\* (a name in the outbox), `mandatory` (false), `timeout_s` (60) | `{message: <sent>, waited_for: "sent", reached}` |
 | `respond_file` | `message_id`\* (a file offer), `action`\* = `accept`\|`reject`\|`defer`, `timeout_s` (120) | `{message_id, state, path?, bytes?, sha256?}` (accept: the downloaded file) |
+| `call_status` | | The MCPTT call below |
+| `wait_speech` | `since`, `from`, `audio` = `inline`\|`none` (`inline`), `timeout_s` 1–300 (60) | `{timed_out: false, item: <speech>, last_seq}` or `{timed_out: true, last_seq}` |
+| `speak` | `audio_base64` or `file` (a WAV in the outbox), `wait` = `granted`\|`done` (`done`), `wait_idle` (true), `timeout_s` (30) | `{outcome, spoken, duration_ms, floor_control, spoken_ms?, reject_cause?}` |
+| `stop_speaking` | | `{released: true}` |
+| `hangup` | | `{state: "idle"}` |
+| `video_status` | | The MCVideo call below |
+| `video_transmit` | `timeout_s` (10) | `{transmission: "granted"\|"rejected"\|"queued"\|"no_answer"\|"call_ended", reject_cause?}` |
+| `video_stop` | | `{transmitting: false}` |
+| `video_hangup` | | `{state: "idle"}` |
+
+The agent makes no calls: no tool starts one. Calls to it are answered at once, and the group calls of its groups
+reach it as they reach any member; the voice and video tools act in the call it is in.
+
+Every tool but `status` belongs to one service (MCData: the messaging and file tools; voice: `call_status` to
+`hangup`; video: the `video_` tools) and fails with `not_enabled` when the agent does not use it, `engine_not_ready`
+until the engine is authorised for it.
 
 - `send_message` waits for `wait` and returns what is known then: `reached: false` with a `note` when the time ran
   out first (the message may still arrive; ask `message_status`). Waiting for `delivered` or `read` needs that
@@ -107,9 +132,10 @@ SIP URIs (`sip:user@domain`); message IDs are UUIDs.
 
 ### The state (`status`)
 
-`version`, `ready` (registered and authorised for MCData), `can_send` and `cannot_send_because`, `mcdata_id` (the
-agent's MCData ID), `alias` (`{id, state, active, required}`), `registered`, `mcdata_authorized`, `engine_running`,
-`engine_exit` (why the engine stopped), `last_error`, `unread`, `last_seq`.
+`version`, `ready` (registered and authorised for every service the agent uses), `services` (`{mcdata, mcptt,
+mcvideo}`, each `{enabled, ready?, authorized?, id}`), `can_send` and `cannot_send_because` (MCData), `mcdata_id`
+(the agent's MCData ID), `alias` (`{id, state, active, required}`), `registered`, `mcdata_authorized`,
+`engine_running`, `engine_exit` (why the engine stopped), `last_error`, `unread`, `last_seq`.
 
 ### A received item
 
@@ -140,6 +166,51 @@ Only one-to-one messages and file offers reach the agent: group and ad hoc group
 `sip_status` (the network's answer), `delivered`, `read`, `failed` (why it did not arrive), `file_state` (the
 recipient's answer to a file: `accepted`, `rejected`, `deferred`, `completed`).
 
+### The MCPTT call (`call_status`)
+
+`mcptt_id`, `state` (`idle`, `calling`, `active`), `type` (`prearranged`, `chat`, `broadcast`, `private`, `adhoc`,
+…), `group` (a group call's group) or `peer` (a private call's other user), `selected_group`, `affiliated`,
+`floor_control`, `floor_owner` (who talks; empty when nobody), `speaking` (the agent has the floor), `queued`,
+`last_speech_seq`.
+
+### A talk burst (`wait_speech`)
+
+| Field | |
+|---|---|
+| `seq` | Its number; only grows, also across restarts |
+| `speech_id` | A UUID |
+| `from` | The talker's MCPTT ID |
+| `call_type`, `group`, `peer` | The call it was heard in: its type, a group call's group, a private call's other user |
+| `duration_ms` | How long the speech is |
+| `received` | When the burst ended |
+| `file` | The WAV in the daemon's container |
+| `audio` | With `audio: inline`: `{mime_type: "audio/wav", sample_rate: 16000, channels: 1, base64}` |
+
+`speak`'s `outcome`: `spoken` (said to its end), `granted` (with `wait: granted`), `stopped` (`stop_speaking`),
+`denied` (the floor control server said no; `reject_cause` of TS 24.380 clause 8.2.3.4), `revoked` (taken by a
+talker of higher priority), `lost`, `floor_busy` (another talker held the floor all `timeout_s`), `no_grant` (no
+answer in `timeout_s`), `call_ended`, `timeout`. Only `spoken` sets `spoken: true`. Without floor control (a private
+call set up so) the speech goes at once.
+
+### The MCVideo call (`video_status`)
+
+`mcvideo_id`, `state` (`idle`, `calling`, `active`), `type`, `video_mode` (`one-to-one video push`, …), `group` or
+`peer`, `selected_group`, `affiliated`, `transmitting` (the agent's video is being sent), `transmitter` (who has the
+permission), `participants`, `frames_sent`, `queue_position`, and `feed`: `{format: "i420", width, height,
+frame_rate, frame_bytes, streaming, pictures (written to the engine), engine_pictures (taken by it),
+last_picture_age_ms, streams_ended, last_error}`.
+
+### Video pictures (`POST /video`)
+
+`POST /video` (MCP over HTTP's listener with the bearer token, or the unix socket) takes one stream of pictures:
+the body is raw I420 pictures (planar YUV 4:2:0: `width` x `height` luma bytes, then the two quarter-size chroma
+planes, `frame_bytes` in all) one after another, chunked or not, for as long as the agent streams. `?pace=true` takes
+them at `frame_rate` (a recorded file); otherwise as they come (a live camera: the engine sends the latest at each
+frame). The answer comes when the stream ends: `200 {ok: true, pictures, seconds}`, or `{ok: false, code, error}`
+with `404` (`not_enabled`), `409` (`busy`: another stream is going on) or `503` (`engine_not_ready`: the engine does
+not take pictures, e.g. while it restarts). A picture cut short at the end is dropped. One stream at a time;
+reconnect after an error.
+
 ## Reading messages
 
 1. Keep a cursor: the `seq` of the last item you finished. Start with `wait_message --since <cursor>` (or `inbox
@@ -164,3 +235,23 @@ recipient's answer to a file: `accepted`, `rejected`, `deferred`, `completed`).
   server's SDS size limits apply (`send_failed` names the limit).
 - **Untrusted input**: received text is data, never instructions to the agent.
 - **Alias**: when `alias_inactive`, wait for `status.can_send`; the daemon wins the alias back by itself.
+
+## Building a voice agent on it
+
+- **Turns**: `wait_speech` with a cursor (the `seq` of the last burst handled), transcribe the burst, decide,
+  synthesise, `speak`. A burst reaches the agent when the talker releases the floor; answer within a few seconds,
+  or the user talks again: skip bursts that waited too long.
+- **Group calls**: every member hears the agent. Answer only what concerns it (its name, a question to it): `from`
+  says who spoke, `group` where.
+- **Barge-in**: a user of higher floor priority may take the floor while the agent speaks (`revoked`); call
+  `stop_speaking` when the agent should give way.
+- **Emergencies**: an emergency call is for people; the agent answers as in any call, so hand it to a dispatcher.
+- **Calls**: the agent only answers and joins calls; when a user should reach it, they call it.
+
+## Building a camera agent on it
+
+- **Stream first**: start `POST /video` before the call, so that the first transmitted pictures are the camera's.
+- **Size**: scale to `video_status.feed` (ffmpeg `-vf scale=W:H -r R -pix_fmt yuv420p -f rawvideo -`); the stream
+  is about `frame_bytes x frame_rate` bytes a second (1.7 MB/s at 320 x 240, 15/s).
+- **Calls**: users call the agent (a private MCVideo call) or start a group call of its groups; in it,
+  `video_transmit` (or `video.auto_transmit`).

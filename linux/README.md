@@ -49,6 +49,20 @@ The [dispatcher](../dispatcher) uses the client as its engine, through settings 
 `oauth.authorization` with `--authorization-request` (sign-in on IdMS's page).
 Without them the client behaves as a plain client.
 
+### Settings for an agent
+
+[mcx-agent](../agent) uses the client as the engine of a voice or camera agent, through settings that are off unless
+configured:
+
+- `media.speech_dir`: each talk burst received in an MCPTT call is written there as a WAV file (16 kHz, 16-bit,
+  mono) when it ends (the floor passes on or goes idle; without floor control after `media.speech_gap_ms`, 1500 ms;
+  at `media.speech_max_s`, 120 s), with a `speech_received` event naming the file, the talker, the call type and its
+  group or peer.
+- `mcvideo.live` `{fifo, width, height, frame_rate, bitrate, key_frame_interval}`: while the client has the
+  permission to transmit, its MCVideo pictures are the latest raw I420 picture written to the FIFO (created if
+  missing) instead of the test pattern, encoded at that size (default 320 x 240, even, at most 1280 x 720) and rate
+  (15, at most 30); black before the first. The status file's `mcvideo_live` counts the pictures taken.
+
 ### IMS AKA (3GPP access)
 
 On 3GPP access (TS 33.180 clause 6.2.1) the client authenticates to the SIP core with IMS AKA instead of digest over

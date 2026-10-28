@@ -41,7 +41,32 @@ type config struct {
 	// mcp_http: the MCP server over streamable HTTP as well, for an agent in another container (mcphttp.go).
 	MCPHTTP      *mcpHTTPConfig `json:"mcp_http"`
 	MaxTextBytes int            `json:"max_text_bytes"`
+	// voice: MCPTT for a voice agent (voice.go): the talk bursts it hears, the speech it sends.
+	Voice voiceConfig `json:"voice"`
+	// video: MCVideo for an agent that shows its camera (video.go): the pictures it streams, transmitted in calls.
+	Video videoConfig `json:"video"`
 }
+
+// voiceConfig is the configuration's "voice".
+type voiceConfig struct {
+	Enabled    bool `json:"enabled"`
+	MaxSpeechS int  `json:"max_speech_s"` // the longest speech the agent may send (60 s)
+	Keep       int  `json:"keep"`         // received talk bursts kept, the oldest removed (200)
+}
+
+// videoConfig is the configuration's "video": the pictures' size and rate (I420), the encoder's bit rate.
+type videoConfig struct {
+	Enabled   bool `json:"enabled"`
+	Width     int  `json:"width"`      // 320
+	Height    int  `json:"height"`     // 240
+	FrameRate int  `json:"frame_rate"` // 15
+	Bitrate   int  `json:"bitrate"`    // 300000 bit/s
+	// auto_transmit: ask for the permission to transmit as soon as the agent is in an MCVideo call.
+	AutoTransmit bool `json:"auto_transmit"`
+}
+
+// frameBytes is the size of one I420 picture.
+func (v videoConfig) frameBytes() int { return v.Width * v.Height * 3 / 2 }
 
 const hardTextLimit = 3000 // well inside one control FIFO line
 
@@ -87,7 +112,26 @@ func loadConfig(file string) (*config, error) {
 	if c.MaxTextBytes <= 0 || c.MaxTextBytes > hardTextLimit {
 		c.MaxTextBytes = 1000
 	}
+	if c.Voice.MaxSpeechS <= 0 || c.Voice.MaxSpeechS > maxSpeechS {
+		c.Voice.MaxSpeechS = 60
+	}
+	if c.Voice.Keep <= 0 {
+		c.Voice.Keep = 200
+	}
+	v := &c.Video
+	v.Width, v.Height, v.FrameRate, v.Bitrate = or(v.Width, 320), or(v.Height, 240), or(v.FrameRate, 15), or(v.Bitrate, 300000)
+	if v.Width%2 != 0 || v.Height%2 != 0 || v.Width > 1280 || v.Height > 720 || v.FrameRate > 30 {
+		return nil, errors.New("video: the picture size is even, at most 1280 x 720, frame_rate at most 30")
+	}
 	return c, nil
+}
+
+// or is v, or def when v is not set.
+func or(v, def int) int {
+	if v <= 0 {
+		return def
+	}
+	return v
 }
 
 // MCData IDs and functional aliases are SIP URIs: one word, so they cannot add an option to
@@ -216,7 +260,15 @@ func openAudit(file string) (*auditLog, error) {
 }
 
 func (a *auditLog) record(tool string, args map[string]any, result any, err error) {
-	entry := map[string]any{"time": time.Now().UTC().Format(time.RFC3339Nano), "tool": tool, "args": args}
+	// Audio is not logged, only its size.
+	logged := map[string]any{}
+	for name, v := range args {
+		if s, ok := v.(string); ok && len(s) > 512 {
+			v = fmt.Sprintf("<%d bytes>", len(s))
+		}
+		logged[name] = v
+	}
+	entry := map[string]any{"time": time.Now().UTC().Format(time.RFC3339Nano), "tool": tool, "args": logged}
 	if err != nil {
 		entry["error"] = err.Error()
 	} else {

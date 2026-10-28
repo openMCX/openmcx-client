@@ -11,11 +11,14 @@
 
 #include "client.hpp"
 
+#include <unistd.h>
+
 namespace mcx {
 
 //------------------------------------------------------------------------------
 // Helper: stop the message store poll thread; it ends with its next poll and the process does not wait for it.
 Client::~Client() {
+  if (live_video_fd_ >= 0) ::close(live_video_fd_);
   if (store_channel_.running) *store_channel_.running = false;
   if (store_channel_.poller.joinable()) store_channel_.poller.detach();
 }
@@ -62,6 +65,7 @@ void Client::tick() {
     failure("service authorization expired");
   }
   if (remote_ && !no_floor()) floor_participant_tick(now);
+  speech_capture_tick(now);
   if (talking_ && remote_ && now >= next_audio_) {
     if (live_talk_)
       live_speech_tick(now);
@@ -284,6 +288,7 @@ Client::Client(Json cfg, bool disable_tls)
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
   local_.protected_media = protected_media();
   open_live_audio();
+  if (mcvideo_enabled()) open_live_video();
   floor_timers_ = participant_timers();
   status_ = {{"sip_transport", disable_tls ? "tcp" : "tls"},
              {"instance_id", random_id()},
@@ -642,6 +647,7 @@ void Client::run_once() {
     }
   }
   receive_live_audio();
+  if (mcvideo_enabled()) receive_live_video();
   for (int index = 0; index < 32; index++) {
     auto datagram = audio_.receive();
     if (!datagram) break;

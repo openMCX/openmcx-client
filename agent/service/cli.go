@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net"
 	"net/http"
@@ -64,6 +65,9 @@ func runCLI(argv []string) int {
 	if len(argv) == 0 {
 		usage()
 		return 2
+	}
+	if argv[0] == "video-feed" {
+		return runVideoFeed(socketPath(socket), argv[1:])
 	}
 	if argv[0] == "tools" {
 		if len(argv) > 1 && argv[1] == "--json" {
@@ -170,4 +174,50 @@ func printTools() {
 			fmt.Printf("    --%s (%s%s): %s\n", p.name, p.kind, extra, p.description)
 		}
 	}
+}
+
+// runVideoFeed streams pictures to the daemon: mcx-agent video-feed [--file <path>] [--pace]. The pictures are raw
+// I420 of the size video_status gives, one after another, from the file or stdin (e.g. ffmpeg ... -f rawvideo
+// -pix_fmt yuv420p -s 320x240 -). --pace writes them at the frame rate, for a recorded file.
+func runVideoFeed(socket string, argv []string) int {
+	flags := flag.NewFlagSet("video-feed", flag.ContinueOnError)
+	file := flags.String("file", "-", "the pictures; - is stdin")
+	pace := flags.Bool("pace", false, "write the pictures at the frame rate, not as they come")
+	if flags.Parse(argv) != nil {
+		return 2
+	}
+	in := os.Stdin
+	if *file != "-" {
+		f, err := os.Open(*file)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+		defer f.Close()
+		in = f
+	}
+	url := "http://mcx-agent/video"
+	if *pace {
+		url += "?pace=true"
+	}
+	resp, err := newDaemonClient(socket).http.Post(url, "application/octet-stream", in)
+	if err != nil {
+		code := codeNotReady
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]any{"ok": false, "code": code,
+			"error": fmt.Sprintf("the mcx-agent daemon is not reachable: %v", err)})
+		return exitStatus(code)
+	}
+	defer resp.Body.Close()
+	var reply map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&reply); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	out := json.NewEncoder(os.Stdout)
+	out.SetIndent("", "  ")
+	_ = out.Encode(reply)
+	if reply["ok"] != true {
+		return exitStatus(str(reply["code"]))
+	}
+	return 0
 }

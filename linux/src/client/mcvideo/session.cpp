@@ -526,14 +526,14 @@ void Client::mcvideo_end_call(const std::string &reason) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.581 clause 6.2.4.5.2: in 'U: has permission to transmit', send RTP media: the test pattern with this SSRC,
-// starting with an IDR picture so that receivers can decode at once.
+// TS 24.581 clause 6.2.4.5.2: in 'U: has permission to transmit', send RTP media: the test pattern (or the pictures
+// of mcvideo.live) with this SSRC, starting with an IDR picture so that receivers can decode at once.
 void Client::mcvideo_start_sending(std::uint32_t ssrc) {
   auto &call = *mcvideo_call_;
   call.granted = true;
   call.video_ssrc = ssrc;
   if (!call.encoder) {
-    call.encoder = std::make_unique<video::Encoder>();
+    call.encoder = std::make_unique<video::Encoder>(mcvideo_encoder_options());
     call.reference = std::make_unique<video::Decoder>();
   }
   call.encoder->request_key_frame();
@@ -759,7 +759,8 @@ void Client::mcvideo_video_packet(const Datagram &datagram) {
 }
 
 //------------------------------------------------------------------------------
-// TS 26.281 clause 4.1.1: H.264 frames of the test pattern (15 per second) while granted, in RTP by RFC 6184.
+// TS 26.281 clause 4.1.1: H.264 frames of the test pattern, or of mcvideo.live (15 per second unless configured), while
+// granted, in RTP by RFC 6184.
 void Client::mcvideo_tick(std::uint64_t now) {
   if (!mcvideo_call_) return;
   auto &call = *mcvideo_call_;
@@ -767,8 +768,7 @@ void Client::mcvideo_tick(std::uint64_t now) {
   const auto rate = call.encoder->options().frame_rate;
   call.next_frame = now + 1000 / rate;
   const auto timestamp = call.frame * (90000 / rate);
-  const auto unit = call.encoder->encode(
-      video::test_pattern(call.encoder->options().width, call.encoder->options().height, call.frame), now);
+  const auto unit = call.encoder->encode(mcvideo_picture(call.encoder->options(), call.frame), now);
   ++call.frame;
   if (unit.empty()) return;
   for (const auto &payload : video::packetize(unit)) {
@@ -882,6 +882,14 @@ void Client::mcvideo_call_status() {
     status_["mcvideo_participant_aliases"] = call.participant_aliases;
   }
   status_["mcvideo_last_call"] = mcvideo_last_call_;
+  if (live_video_fd_ >= 0) {
+    const auto options = mcvideo_encoder_options();
+    status_["mcvideo_live"] = {{"width", options.width},
+                               {"height", options.height},
+                               {"frame_rate", options.frame_rate},
+                               {"pictures", live_video_frames_},
+                               {"age_ms", live_video_at_ ? Json(monotonic_ms() - live_video_at_) : Json()}};
+  }
 }
 
 } // namespace mcx
