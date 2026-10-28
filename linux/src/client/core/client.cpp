@@ -66,6 +66,7 @@ void Client::tick() {
   }
   if (remote_ && !no_floor()) floor_participant_tick(now);
   speech_capture_tick(now);
+  if (!held_rtp_.empty()) release_held_rtp(now);
   if (talking_ && remote_ && now >= next_audio_) {
     if (live_talk_)
       live_speech_tick(now);

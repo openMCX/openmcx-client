@@ -93,7 +93,6 @@ void Client::mcvideo_multicast_leave(bool report) {
   if (!mcvideo_multicast_socket_) return;
   status_["mcvideo_multicast_listening"] = false;
   if (report) return mcvideo_multicast_report(false);
-  mcvideo_last_rtp_.reset();
   mcvideo_multicast_socket_.reset();
   status_["mcvideo_multicast_joined"] = "";
   event("mcvideo_multicast_left");
@@ -199,21 +198,22 @@ void Client::mcvideo_mbms_control_packet(const Datagram &datagram) {
 }
 
 //------------------------------------------------------------------------------
-// RFC 3550 appendix A.1: while the client has joined a subchannel, a video packet of the stream it follows that is not
-// newer than the last one kept is a copy that came the other way during a change: dropped before reassembly.
+// RFC 3550 appendix A.1: while the client has joined a subchannel, a video packet of the stream it follows that was
+// kept already (client_rules::RtpReceiveWindow) is a copy that came the other way during a change: dropped before
+// reassembly. A late one the radio delayed past a unicast copy of a newer one is not a copy. Unicast packets are kept
+// in the window too: once joined, the radio still delivers what the server sent there just before.
 bool Client::mcvideo_duplicate(std::span<const std::uint8_t> bytes, bool multicast) {
   // RFC 3550 section 5.1: the sequence number in octets 2 and 3, the SSRC in octets 8 to 11 (clear under SRTP too).
-  if (!mcvideo_multicast_socket_ || bytes.size() < 12) return false;
+  if (bytes.size() < 12) return false;
   const auto sequence = static_cast<std::uint16_t>((bytes[2] << 8) | bytes[3]);
   const auto ssrc = (static_cast<std::uint32_t>(bytes[8]) << 24) | (static_cast<std::uint32_t>(bytes[9]) << 16) |
                     (static_cast<std::uint32_t>(bytes[10]) << 8) | bytes[11];
-  if (mcvideo_last_rtp_ && mcvideo_last_rtp_->first == ssrc &&
-      !client_rules::rtp_sequence_newer(sequence, mcvideo_last_rtp_->second)) {
+  if (mcvideo_multicast_socket_ && !mcvideo_rtp_window_.fresh(ssrc, sequence)) {
     const char *counter = multicast ? "mcvideo_duplicates_dropped_multicast" : "mcvideo_duplicates_dropped_unicast";
     status_[counter] = status_.value(counter, 0ULL) + 1;
     return true;
   }
-  mcvideo_last_rtp_ = {ssrc, sequence};
+  mcvideo_rtp_window_.keep(ssrc, sequence);
   if (multicast)
     status_["mcvideo_multicast_received_packets"] = status_.value("mcvideo_multicast_received_packets", 0ULL) + 1;
   return false;

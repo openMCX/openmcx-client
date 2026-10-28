@@ -19,6 +19,8 @@
 #include "mcx/mbms.hpp"
 #include "mcx/mbms_usage.hpp"
 
+#include <algorithm>
+
 namespace mcx {
 
 //------------------------------------------------------------------------------
@@ -110,8 +112,8 @@ void Client::multicast_leave(bool report) {
   if (!multicast_socket_) return;
   status_["multicast_listening"] = false;
   if (report) return multicast_report(false);
-  last_rtp_.reset();
   multicast_socket_.reset();
+  release_held_rtp(0, true);
   status_["multicast_joined"] = "";
   event("multicast_left");
 }
@@ -218,15 +220,13 @@ void Client::mbms_floor_packet(const Datagram &datagram) {
 }
 
 //------------------------------------------------------------------------------
-// RFC 3550 appendix A.1: while the client has joined a subchannel, a packet of the SSRC it follows that is not newer
-// than the last one kept is a copy that arrived the other way (unicast or multicast) during a change, or an old one:
-// it is dropped before it reaches the SRTP replay check (TS 24.380 annex A.6.2 step 22). Without a subchannel nothing
-// is dropped.
+// RFC 3550 appendix A.1: while the client has joined a subchannel, a packet of the SSRC it follows that was kept
+// already (client_rules::RtpReceiveWindow) is a copy that arrived the other way (unicast or multicast) during a change,
+// or an old one: it is dropped before it reaches the SRTP replay check (TS 24.380 annex A.6.2 step 22). A late one
+// the radio delayed past a unicast copy of a newer one is not a copy. Without a subchannel nothing is dropped.
 bool Client::duplicate_rtp(std::span<const std::uint8_t> packet, bool multicast) {
   if (!multicast_socket_ || packet.size() < rtp_fixed_header_bytes) return false;
-  const auto ssrc = wire_ssrc(packet, false);
-  if (!last_rtp_ || last_rtp_->first != ssrc) return false;
-  if (client_rules::rtp_sequence_newer(rtp_sequence(packet), last_rtp_->second)) return false;
+  if (rtp_window_.fresh(wire_ssrc(packet, false), rtp_sequence(packet))) return false;
   // Counted by the way the dropped copy came, so that the copies the server sent each way can be accounted for.
   const char *counter = multicast ? "duplicates_dropped_multicast" : "duplicates_dropped_unicast";
   status_[counter] = status_.value(counter, 0ULL) + 1;
@@ -234,11 +234,60 @@ bool Client::duplicate_rtp(std::span<const std::uint8_t> packet, bool multicast)
 }
 
 //------------------------------------------------------------------------------
-// Helper: a packet that passed every check (SSRC, SRTP authentication, payload type) becomes the last one kept;
-// only such a packet moves the sequence number on, so that a forged one cannot hold back the speech.
+// TS 24.379 clause 14.3.3.2: around a change between the subchannel and unicast the speech comes two ways, the
+// subchannel's delayed by the radio (an MCH scheduling period and more), so a unicast packet can overtake the last
+// ones sent over the subchannel. While the client has joined a subchannel, a packet that comes ahead of a gap is held
+// until the missing ones arrive or rtp_reorder_hold_ms has passed, so the speech is decoded in order.
+bool Client::hold_rtp(const Datagram &datagram, bool multicast) {
+  if (!multicast_socket_ || releasing_held_rtp_ || datagram.bytes.size() < rtp_fixed_header_bytes) return false;
+  if (rtp_window_.ahead(wire_ssrc(datagram.bytes, false), rtp_sequence(datagram.bytes)) < 2) return false;
+  const auto sequence = rtp_sequence(datagram.bytes);
+  if (std::ranges::any_of(held_rtp_, [&](const HeldRtp &held) { return rtp_sequence(held.datagram.bytes) == sequence; }))
+    return true; // the other way's copy of a held one
+  held_rtp_.push_back({monotonic_ms(), datagram, multicast});
+  status_["rtp_reordered"] = status_.value("rtp_reordered", 0ULL) + 1;
+  return true;
+}
+
+//------------------------------------------------------------------------------
+// Helper: the held packets that follow the last one kept, in order; with all (or once the oldest has waited
+// rtp_reorder_hold_ms) the lowest one too, giving up on the gap before it.
+void Client::release_held_rtp(std::uint64_t now, bool all) {
+  constexpr std::uint64_t rtp_reorder_hold_ms = 160;
+  while (!held_rtp_.empty()) {
+    auto next = std::ranges::min_element(held_rtp_, [this](const HeldRtp &a, const HeldRtp &b) {
+      return rtp_window_.ahead(wire_ssrc(a.datagram.bytes, false), rtp_sequence(a.datagram.bytes)) <
+             rtp_window_.ahead(wire_ssrc(b.datagram.bytes, false), rtp_sequence(b.datagram.bytes));
+    });
+    const auto step = rtp_window_.ahead(wire_ssrc(next->datagram.bytes, false), rtp_sequence(next->datagram.bytes));
+    const auto oldest = std::ranges::min_element(held_rtp_, {}, &HeldRtp::since)->since;
+    if (step > 1 && !all && now < oldest + rtp_reorder_hold_ms) return;
+    auto held = std::move(*next);
+    held_rtp_.erase(next);
+    const auto ssrc = wire_ssrc(held.datagram.bytes, false);
+    const auto sequence = rtp_sequence(held.datagram.bytes);
+    // Not ahead any more (kept meanwhile, or the window has moved to another SSRC): a copy is dropped. Anything else
+    // goes through the checks as received, without being held again; only a packet that passes them moves the
+    // window on (kept_rtp), past the gap given up on.
+    if (step == 0 && !rtp_window_.fresh(ssrc, sequence)) continue;
+    releasing_held_rtp_ = true;
+    try {
+      audio_packet(held.datagram, held.multicast);
+    } catch (const std::exception &error) {
+      status_["media_rejected_packets"] = status_.value("media_rejected_packets", 0ULL) + 1;
+      event("media_rejected", {{"reason", error.what()}, {"multicast", held.multicast}});
+    }
+    releasing_held_rtp_ = false;
+  }
+}
+
+//------------------------------------------------------------------------------
+// Helper: a packet that passed every check (SSRC, SRTP authentication, payload type) is kept in the window; only such
+// a packet moves the sequence number on, so that a forged one cannot hold back the speech. Kept by unicast too: once
+// the client joins a subchannel the radio still delivers what the server sent there just before, which it has had.
 void Client::kept_rtp(std::span<const std::uint8_t> packet) {
-  if (multicast_socket_ && packet.size() >= rtp_fixed_header_bytes)
-    last_rtp_ = {wire_ssrc(packet, false), rtp_sequence(packet)};
+  if (packet.size() >= rtp_fixed_header_bytes)
+    rtp_window_.keep(wire_ssrc(packet, false), rtp_sequence(packet));
 }
 
 } // namespace mcx

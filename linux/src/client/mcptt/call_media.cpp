@@ -338,7 +338,9 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     release();
     event("floor_revoked");
   } else if (packet.type == FloorType::Idle) {
-    if (talking_) release();
+    // TS 24.380 clause 6.2.4.4: 'U: has permission' takes no Floor Idle. One over the subchannel can be a T7
+    // repetition sent before the server granted this user's request, overtaken by the unicast Floor Granted.
+    if (talking_ && !multicast) release();
     status_["floor_owner"] = "";
     receive_ssrc_ = 0;
   } else if (packet.type == FloorType::Taken) {
@@ -369,7 +371,7 @@ void Client::audio_packet(const Datagram &datagram, bool multicast) {
   // heard is followed (TS 24.379 clause 11.1.2).
   if (no_floor() && !receive_ssrc_) receive_ssrc_ = wire_ssrc(datagram.bytes, false);
   if (!receive_ssrc_ || wire_ssrc(datagram.bytes, false) != receive_ssrc_) return;
-  if (duplicate_rtp(datagram.bytes, multicast)) return;
+  if (duplicate_rtp(datagram.bytes, multicast) || hold_rtp(datagram, multicast)) return;
   const auto sender = no_floor() ? private_peer_ : status_.value("floor_owner", std::string{});
   auto bytes = protected_media() ? protection_.unprotect_media(datagram.bytes, sender) : datagram.bytes;
   auto rtp = decode_rtp(bytes);
@@ -395,6 +397,7 @@ void Client::audio_packet(const Datagram &datagram, bool multicast) {
   }
   status_["received_packets"] = status_["received_packets"].get<unsigned>() + 1;
   if (multicast) status_["multicast_received_packets"] = status_.value("multicast_received_packets", 0ULL) + 1;
+  if (!held_rtp_.empty()) release_held_rtp(monotonic_ms());
 }
 
 } // namespace mcx

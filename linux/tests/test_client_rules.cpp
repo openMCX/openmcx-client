@@ -170,6 +170,25 @@ void test_rtp_sequence() {
   check(rtp_sequence_newer(0, 65535), "the sequence number wraps");
   check(!rtp_sequence_newer(65535, 0), "an older packet across the wrap is not newer");
   check(!rtp_sequence_newer(10 + 0x8000, 10), "half the sequence space ahead is not newer");
+
+  // A change from the subchannel to unicast: unicast 69 and 70 come before the radio's late 68.
+  mcx::client_rules::RtpReceiveWindow window;
+  check(window.fresh(7, 60), "the first packet is fresh");
+  for (std::uint16_t sequence = 60; sequence <= 67; sequence++) window.keep(7, sequence);
+  check(window.ahead(7, 68) == 1 && window.ahead(7, 69) == 2, "a gap ahead is measured");
+  window.keep(7, 69);
+  window.keep(7, 70);
+  check(window.fresh(7, 68), "a late packet within the window is fresh");
+  window.keep(7, 68);
+  check(!window.fresh(7, 68) && !window.fresh(7, 69), "a packet kept is a copy");
+  check(window.ahead(7, 68) == 0, "an older packet is not ahead");
+  check(!window.fresh(7, static_cast<std::uint16_t>(70 - 64)), "a packet the window behind is too old");
+  check(window.fresh(8, 1), "another SSRC starts again");
+  window.keep(9, 65535);
+  window.keep(9, 1);
+  check(window.fresh(9, 0) && !window.fresh(9, 65535), "the window wraps with the sequence number");
+  window.keep(9, 2000);
+  check(!window.fresh(9, 1) && window.fresh(9, 1999), "a jump past the window forgets the older packets");
 }
 
 } // namespace

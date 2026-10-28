@@ -1362,7 +1362,7 @@ private:
   std::map<std::string, MbmsMapping> mbms_video_mappings_;
   std::unique_ptr<UdpSocket> mcvideo_multicast_socket_;
   std::string mcvideo_multicast_session_, mcvideo_multicast_group_, mcvideo_multicast_tmgi_;
-  std::optional<std::pair<std::uint32_t, std::uint16_t>> mcvideo_last_rtp_;
+  client_rules::RtpReceiveWindow mcvideo_rtp_window_;
   [[nodiscard]] bool mcvideo_mappable() const;
   void mcvideo_mbms_mapped(const std::string &tmgi, const SubchannelMessage &message);
   void mcvideo_mbms_unmapped(const SubchannelMessage &message);
@@ -1979,11 +1979,19 @@ private:
   // ---- MCPTT media over an MBMS subchannel (mcptt/multicast.cpp): TS 24.380 clauses 10.3.2 to 10.3.4 ----
   // The subchannels the Map Group To Bearer messages on the general purpose subchannels associated with groups
   // (TS 24.380 clause 10.3.2), by group URI. While the call of a mapped group is active the client has joined its
-  // subchannel (multicast_socket_) and keeps the SSRC and sequence number last received so that a packet that arrives
-  // both by unicast and over the subchannel is kept once.
+  // subchannel (multicast_socket_) and keeps the window of sequence numbers received so that a packet that arrives
+  // both by unicast and over the subchannel is kept once; the packets that come ahead of a gap wait a little for the
+  // ones the radio still delays (held_rtp_).
   std::map<std::string, MbmsMapping> mbms_mappings_;
   std::unique_ptr<UdpSocket> multicast_socket_;
-  std::optional<std::pair<std::uint32_t, std::uint16_t>> last_rtp_; // SSRC, sequence number
+  client_rules::RtpReceiveWindow rtp_window_;
+  struct HeldRtp {
+    std::uint64_t since;
+    Datagram datagram;
+    bool multicast;
+  };
+  std::vector<HeldRtp> held_rtp_;
+  bool releasing_held_rtp_ = false;
   // The session, group and TMGI of the joined subchannel's listening status reports (TS 24.379 clause 14.3.3.2).
   std::string multicast_session_, multicast_group_, multicast_tmgi_;
   // TS 24.380 clause 10.3.3: the message sequence numbers of the floor control messages over the joined subchannel.
@@ -2003,6 +2011,10 @@ private:
   void mbms_unmapped(const SubchannelMessage &message);
 
   [[nodiscard]] bool duplicate_rtp(std::span<const std::uint8_t> packet, bool multicast);
+
+  [[nodiscard]] bool hold_rtp(const Datagram &datagram, bool multicast);
+
+  void release_held_rtp(std::uint64_t now, bool all = false);
 
   void kept_rtp(std::span<const std::uint8_t> packet);
 
