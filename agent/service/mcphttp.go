@@ -67,6 +67,11 @@ func newMCPHTTP(token string, origins []string, call toolCaller, video *videoFee
 			video.serve(w, r)
 		}
 	})
+	mux.HandleFunc("GET /video/received", func(w http.ResponseWriter, r *http.Request) {
+		if allowed(w, r) {
+			video.serveReceived(w, r)
+		}
+	})
 	mux.HandleFunc("/mcp", func(w http.ResponseWriter, r *http.Request) {
 		if !allowed(w, r) {
 			return

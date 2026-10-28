@@ -9,6 +9,9 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -300,5 +303,49 @@ func decode(t *testing.T, resp *http.Response, v any) {
 	defer resp.Body.Close()
 	if err := json.NewDecoder(resp.Body).Decode(v); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestVideoReceived(t *testing.T) {
+	probe, _ := net.ListenPacket("udp", "127.0.0.1:0")
+	port := probe.LocalAddr().(*net.UDPAddr).Port
+	_ = probe.Close()
+	d := startMedia(t, true, func(c *config) { c.Video.Receive, c.Video.ReceivePort = true, port })
+	cfg, err := readJSON(d.eng.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mcvideo := cfg["mcvideo"].(map[string]any)
+	if mcvideo["auto_receive"] != true || mcvideo["live_receive"].(map[string]any)["send_port"] != float64(port) {
+		t.Fatalf("engine configuration %v", mcvideo)
+	}
+	server := httptest.NewServer(d.handler())
+	defer server.Close()
+	engine, _ := net.Dial("udp", fmt.Sprintf("127.0.0.1:%d", port))
+	defer engine.Close()
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		for _, picture := range [][]byte{
+			{0, 0, 0, 0, 1, 0, 0, 0, 1, 0x41, 0xAA}, // a picture before the first IDR picture: skipped
+			{1, 0, 0, 0, 2, 0, 0, 0, 1, 0x67, 0, 0, 0, 1, 0x65, 0xBB},
+			{0, 0, 0, 0, 3, 0, 0, 0, 1, 0x41, 0xCC},
+		} {
+			_, _ = engine.Write(picture)
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+	resp, err := http.Get(server.URL + "/video/received?seconds=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	want := []byte{0, 0, 0, 1, 0x67, 0, 0, 0, 1, 0x65, 0xBB, 0, 0, 0, 1, 0x41, 0xCC}
+	if resp.Header.Get("Content-Type") != "video/h264" || !bytes.Equal(body, want) {
+		t.Fatalf("stream %x (%s), want %x", body, resp.Header.Get("Content-Type"), want)
+	}
+	received := call(t, d, "video_status", nil)["received"].(map[string]any)
+	if received["enabled"] != true || received["pictures"] != 3.0 {
+		t.Fatalf("received %v", received)
 	}
 }

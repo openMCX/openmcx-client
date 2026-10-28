@@ -97,7 +97,11 @@ func runtimeConfig(c *config, speechDir, videoFIFO string) (string, error) {
 		mcvideo := part("mcvideo")
 		mcvideo["live"] = map[string]any{"fifo": videoFIFO, "width": c.Video.Width, "height": c.Video.Height,
 			"frame_rate": c.Video.FrameRate, "bitrate": c.Video.Bitrate}
-		mcvideo["auto_receive"] = false // the agent shows its video; it does not watch others'
+		// An agent that shows its video does not watch others'; one with video.receive does (mcvideo.live_receive).
+		mcvideo["auto_receive"] = c.Video.Receive
+		if c.Video.Receive {
+			mcvideo["live_receive"] = map[string]any{"send_host": "127.0.0.1", "send_port": c.Video.ReceivePort}
+		}
 		if _, set := mcvideo["answer_mode"]; !set {
 			mcvideo["answer_mode"] = "auto"
 		}

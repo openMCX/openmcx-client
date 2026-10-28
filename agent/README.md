@@ -104,6 +104,10 @@ ffmpeg -i /dev/video0 -vf scale=320:240 -r 15 -pix_fmt yuv420p -f rawvideo - | m
 mcx-agent video-transmit                               # in the call a user made to the agent
 ```
 
+With `video.receive` the agent also watches: the video others transmit in its calls streams as H.264 from
+`GET /video/received` (e.g. `curl -H "Authorization: Bearer $TOKEN" "http://mcx-agent:8765/video/received?seconds=10"
+> clip.h264`), for a model that describes it; `video_status.transmitter` says who sends.
+
 [`examples/video-feed.py`](examples/video-feed.py) is the hello-world camera agent: it streams a generated test card
 (or, with `--source`, any ffmpeg input) and transmits in every call it is in.
 
@@ -160,7 +164,7 @@ the agent gets it back once its holder lets it go.
 | `recipients`, `allow_senders_hours`, `rate_per_recipient_per_minute`, `rate_per_minute`, `max_text_bytes` | See Safety |
 | `mcp_http` | `{"listen", "token_file", "allowed_origins"}`: MCP over HTTP at `/mcp`, with the bearer token of `token_file` ([API.md](API.md#mcp-over-http)); also `/video` |
 | `voice` | `{"enabled", "max_speech_s", "keep"}`: MCPTT for a voice agent (off); the longest speech it may say (60 s); the talk bursts kept (200) |
-| `video` | `{"enabled", "width", "height", "frame_rate", "bitrate", "auto_transmit"}`: MCVideo for a camera agent (off); the pictures' size (320 x 240, even, at most 1280 x 720) and rate (15, at most 30), the H.264 bit rate (300000); ask to transmit in every call |
+| `video` | `{"enabled", "width", "height", "frame_rate", "bitrate", "auto_transmit", "receive", "receive_port"}`: MCVideo for a camera agent (off); the pictures' size (320 x 240, even, at most 1280 x 720) and rate (15, at most 30), the H.264 bit rate (300000); ask to transmit in every call; also take the video others transmit, on `GET /video/received` (the engine sends it to `receive_port`, 7202, on the loopback) |
 
 With voice or video on, the daemon runs the engine on a copy of its configuration in `<data_dir>/engine.json` with
 the agent's media settings: `media.speech_dir`, `mcvideo.live` (a FIFO in `data_dir`), automatic answering, no

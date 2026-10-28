@@ -27,7 +27,7 @@ const defaultSocket = "/run/mcx-agent/agent.sock"
 // version is the version of the API contract (API.md): the tools, their arguments and results,
 // the error codes. A tool or argument added raises the minor version; one changed or removed
 // raises the major. tools_snapshot.json holds the tools of this version.
-const version = "1.1.0"
+const version = "1.2.0"
 
 func main() {
 	if len(os.Args) < 2 {

@@ -34,6 +34,8 @@ type videoFeed struct {
 	last      time.Time // when the last one was written
 	streams   int       // streams that ended
 	lastError string    // why the last stream ended early
+
+	received *videoReceiver // the video others transmit (video.receive); nil without it
 }
 
 // state is the feed as video_status shows it.
@@ -144,6 +146,14 @@ func (d *daemon) toolVideoStatus(args) (any, error) {
 	if live, ok := st["mcvideo_live"].(map[string]any); ok {
 		feed["engine_pictures"] = live["pictures"]
 	}
+	received := map[string]any{"enabled": d.video.received != nil}
+	if r := d.video.received; r != nil {
+		pictures, last := r.counts()
+		received["pictures"] = pictures
+		if !last.IsZero() {
+			received["last_picture_age_ms"] = time.Since(last).Milliseconds()
+		}
+	}
 	out := map[string]any{
 		"mcvideo_id":     d.eng.mcvideoID,
 		"state":          state,
@@ -151,6 +161,7 @@ func (d *daemon) toolVideoStatus(args) (any, error) {
 		"affiliated":     st["mcvideo_affiliated"] == true,
 		"transmitting":   st["mcvideo_transmitting"] == true,
 		"feed":           feed,
+		"received":       received,
 	}
 	if state != "idle" {
 		out["type"] = str(st["mcvideo_call_type"])

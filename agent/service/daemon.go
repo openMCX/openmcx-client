@@ -90,6 +90,11 @@ func newDaemon(cfg *config) (*daemon, error) {
 		speechDir: speechDir}
 	if cfg.Video.Enabled {
 		d.video = &videoFeed{fifo: fifo, frameBytes: cfg.Video.frameBytes(), frameRate: cfg.Video.FrameRate}
+		if cfg.Video.Receive {
+			if d.video.received, err = newVideoReceiver(fmt.Sprintf("127.0.0.1:%d", cfg.Video.ReceivePort)); err != nil {
+				return nil, err
+			}
+		}
 	}
 	eng.onEvent = d.engineEvent
 	eng.onExit = changed.fire
@@ -504,6 +509,7 @@ func (d *daemon) handler() http.Handler {
 		writeReply(w, result, err)
 	})
 	mux.HandleFunc("POST /video", d.video.serve)
+	mux.HandleFunc("GET /video/received", d.video.serveReceived)
 	return mux
 }
 

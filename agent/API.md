@@ -1,9 +1,10 @@
-# mcx-agent API, version 1.1.0
+# mcx-agent API, version 1.2.0
 
 The contract between `mcx-agent` and an agent built on it: the transports, the tools with their arguments and
 results, the error codes, how to read messages, hear and say speech, and stream video. An agent built against 1.x
 keeps working on every later 1.x. 1.1.0 added voice (MCPTT) and video (MCVideo): their tools, `POST /video`, the
-error codes `not_enabled`, `no_call` and `busy`, and `services` in `status`.
+error codes `not_enabled`, `no_call` and `busy`, and `services` in `status`. 1.2.0 added received video
+(`video.receive`): `GET /video/received` and `received` in `video_status`.
 
 - **Versions**: `status` and the MCP `serverInfo` give the version. A tool or argument added raises the minor
   version; one changed or removed raises the major. Fields may be added to results within a major version: ignore
@@ -210,6 +211,15 @@ frame). The answer comes when the stream ends: `200 {ok: true, pictures, seconds
 with `404` (`not_enabled`), `409` (`busy`: another stream is going on) or `503` (`engine_not_ready`: the engine does
 not take pictures, e.g. while it restarts). A picture cut short at the end is dropped. One stream at a time;
 reconnect after an error.
+
+### Received video (`GET /video/received`)
+
+With `video.receive`, the agent also takes the video others transmit in its MCVideo calls (an agent that watches).
+`GET /video/received` (MCP over HTTP's listener with the bearer token, or the unix socket) answers `video/h264`: an
+H.264 elementary stream (annex B, Constrained Baseline) from the next IDR picture on, which ffmpeg reads as is
+(`-f h264`). `?seconds=N` (1–300) ends it after N seconds; it also ends when no picture comes for `?idle_s` (10)
+seconds after the first, or when the client goes. `video_status.received` is `{enabled, pictures, last_picture_age_ms}`
+and `video_status.transmitter` says who sends. `404` (`not_enabled`) without `video.receive`.
 
 ## Reading messages
 

@@ -63,6 +63,10 @@ type videoConfig struct {
 	Bitrate   int  `json:"bitrate"`    // 300000 bit/s
 	// auto_transmit: ask for the permission to transmit as soon as the agent is in an MCVideo call.
 	AutoTransmit bool `json:"auto_transmit"`
+	// receive: the agent also takes the video others transmit in its calls, as H.264 on GET /video/received
+	// (an agent that watches); the engine sends it to receive_port (7202) on the loopback.
+	Receive     bool `json:"receive"`
+	ReceivePort int  `json:"receive_port"`
 }
 
 // frameBytes is the size of one I420 picture.
@@ -120,6 +124,7 @@ func loadConfig(file string) (*config, error) {
 	}
 	v := &c.Video
 	v.Width, v.Height, v.FrameRate, v.Bitrate = or(v.Width, 320), or(v.Height, 240), or(v.FrameRate, 15), or(v.Bitrate, 300000)
+	v.ReceivePort = or(v.ReceivePort, 7202)
 	if v.Width%2 != 0 || v.Height%2 != 0 || v.Width > 1280 || v.Height > 720 || v.FrameRate > 30 {
 		return nil, errors.New("video: the picture size is even, at most 1280 x 720, frame_rate at most 30")
 	}
