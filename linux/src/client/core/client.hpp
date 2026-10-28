@@ -1953,6 +1953,11 @@ private:
   std::unique_ptr<ProtectedCall> mbms_musik_, mcvideo_mbms_musik_;
   [[nodiscard]] std::vector<std::uint8_t> mbms_open_control(std::span<const std::uint8_t> bytes, const MbmsBearer &bearer);
   [[nodiscard]] static std::uint8_t mbms_mki_purpose(std::span<const std::uint8_t> bytes);
+  // TS 24.379 clause 14.3.3.1: the bearers reported as about to be suspended.
+  std::set<std::string> mbms_suspending_;
+  void mbms_suspension_report(const std::string &tmgi, bool suspending);
+  void mbms_group_dynamic_data(MbmsService service, std::span<const std::uint8_t> bytes);
+  void mbms_paged(const SubchannelMessage &message);
   void mbms_configure();
   [[nodiscard]] const std::string *mbms_usage_body(const SipMessage &message, MbmsService service) const;
   SipResponse mbms_message(const SipMessage &message, MbmsService service, const std::string &body);

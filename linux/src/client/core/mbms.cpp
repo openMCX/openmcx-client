@@ -319,6 +319,14 @@ void Client::mbms_poll() {
       if (!datagram) break;
       status_["mbms_general_purpose_received"] = status_.value("mbms_general_purpose_received", 0ULL) + 1;
       try {
+        // TS 24.380 clause 8.5 (TS 24.581 clause 9.4): an MBMS notification, clear or SRTCP under the MuSiK.
+        const auto &bytes = datagram->bytes;
+        const bool clear_notification = bytes.size() >= 12 && std::string_view(
+                                                                   reinterpret_cast<const char *>(bytes.data()) + 8, 4) == "MCNC";
+        if (clear_notification || (mbms_mki_purpose(bytes) == 6 && !is_subchannel_message(bytes))) {
+          mbms_group_dynamic_data(bearer.service, bytes);
+          continue;
+        }
         const auto message = decode_subchannel(mbms_open_control(datagram->bytes, bearer));
         if (message.service != bearer.service) throw std::runtime_error("subchannel control of another service");
         mbms_subchannel_message(tmgi, message);
@@ -359,6 +367,7 @@ std::vector<std::uint8_t> Client::mbms_open_control(std::span<const std::uint8_t
 void Client::mbms_subchannel_message(const std::string &tmgi, const SubchannelMessage &message) {
   if (message.type == SubchannelMessageType::MapGroup) return mbms_mapped(tmgi, message);
   if (message.type == SubchannelMessageType::UnmapGroup) return mbms_unmapped(message);
+  if (message.type == SubchannelMessageType::ApplicationPaging) return mbms_paged(message);
   if (message.type != SubchannelMessageType::Announcement) return;
   status_["mbms_bearer_announcements"] = status_.value("mbms_bearer_announcements", 0ULL) + 1;
   const auto &bearer = mbms_bearers_.at(tmgi);
@@ -374,8 +383,73 @@ void Client::mbms_subchannel_message(const std::string &tmgi, const SubchannelMe
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clauses 14.3.3.1 and 14.3.3.2 (TS 24.281 clause 16.2.3): the RAN (here "mbms suspend" and "mbms resume")
+// says a bearer the client reported listening to is about to be suspended, or no longer: unless the announcement said
+// <report-suspension> false, the client reports it: <mbms-suspension-status> "suspending" or "not-suspending" with
+// the TMGI in <suspended-TMGI>. The actual suspension is a loss of the bearer ("mbms quality bad").
+void Client::mbms_suspension_report(const std::string &tmgi, bool suspending) {
+  const auto found = mbms_bearers_.find(tmgi);
+  if (found == mbms_bearers_.end()) throw std::runtime_error("no announced bearer " + tmgi);
+  const auto &bearer = found->second;
+  if (suspending ? !mbms_suspending_.insert(tmgi).second : !mbms_suspending_.erase(tmgi)) return;
+  if (!bearer.reported_listening || bearer.announcement.report_suspension == false) {
+    event("mbms_suspension_not_reported", {{"tmgi", tmgi}, {"suspending", suspending}});
+    return;
+  }
+  const auto &profile = profile_of(bearer.service);
+  MbmsUsageInfo usage;
+  usage.suspension_status = MbmsSuspensionStatus{suspending, tmgi, {}};
+  McpttInfo info;
+  info.request_uri = bearer.service == MbmsService::Mcvideo ? mcvideo_user() : user();
+  const std::vector<BodyPart> parts{{profile.info_mime, service_info_xml(info, profile)},
+                                    {mbms_usage_type(bearer.service).mime, mbms_usage_xml(usage, bearer.service)}};
+  const auto boundary = "mcx-" + random_id();
+  sip_.request("MESSAGE", bearer.psi, "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
+               {{"Accept-Contact", std::string("*;+g.3gpp.icsi-ref=\"") + profile.icsi_encoded + "\";require;explicit"},
+                {"P-Preferred-Service", profile.icsi}},
+               [this, tmgi, suspending](const SipResponse &response) {
+                 if (response.status_code < 200) return;
+                 event("mbms_suspension_answered",
+                       {{"tmgi", tmgi}, {"suspending", suspending}, {"status", response.status_code}});
+               });
+  status_["mbms_suspension_reports"] = status_.value("mbms_suspension_reports", 0ULL) + 1;
+  event("mbms_suspension_reported", {{"tmgi", tmgi}, {"suspending", suspending}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 10.3.5 (TS 24.581 clause 10.3.5): an Application Paging message: a client in idle mode would make a
+// service request to enter RRC connected mode; the emulated MBMS interface is always connected, so it is counted.
+void Client::mbms_paged(const SubchannelMessage &message) {
+  status_["mbms_paging_received"] = status_.value("mbms_paging_received", 0ULL) + 1;
+  event("mbms_paged", {{"group", message.group}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 10A.1 and clause 8.5.4 (TS 24.581 clauses 10.5.1 and 9.4.4): a Group Dynamic Data Notify over a
+// general purpose subchannel, SRTCP under the service's MuSiK when there is one: the group's status, who set it,
+// whether a call is ongoing and its aliases, kept by group in the status.
+void Client::mbms_group_dynamic_data(MbmsService service, std::span<const std::uint8_t> bytes) {
+  const auto &musik = service == MbmsService::Mcvideo ? mcvideo_mbms_musik_ : mbms_musik_;
+  const auto clear = bytes.size() >= 12 && std::string_view(reinterpret_cast<const char *>(bytes.data()) + 8, 4) == "MCNC";
+  if (!clear && !musik) throw std::runtime_error("protected notification without a MuSiK");
+  if (clear && musik) throw std::runtime_error("clear notification under a MuSiK");
+  const auto data = decode_group_dynamic_data(clear ? std::vector<std::uint8_t>(bytes.begin(), bytes.end())
+                                                    : musik->unprotect_floor(bytes));
+  Json entry = {{"service", profile_of(service).name}};
+  if (data.call_ongoing) entry["call_ongoing"] = *data.call_ongoing;
+  if (data.status) entry["status"] = *data.status == 0 ? "emergency" : "in-peril";
+  if (!data.status_changer.empty()) entry["status_changer"] = data.status_changer;
+  if (!data.broadcast_alias.empty()) entry["broadcast_alias"] = data.broadcast_alias;
+  if (!data.regroup_alias.empty()) entry["regroup_alias"] = data.regroup_alias;
+  status_["mbms_group_dynamic_data"][data.group] = entry;
+  status_["mbms_group_dynamic_data_received"] = status_.value("mbms_group_dynamic_data_received", 0ULL) + 1;
+  event("mbms_group_dynamic_data", {{"group", data.group}, {"data", entry}});
+}
+
+//------------------------------------------------------------------------------
 // Helper: the emulated MBMS interface: "mbms area <id>[,<id>...]|none" sets the MBMS service areas the UE is in,
-// "mbms quality good|bad [<TMGI>]" the radio conditions of one bearer or of all of them (TS 24.379 clause 14.3.3.1).
+// "mbms quality good|bad [<TMGI>]" the radio conditions of one bearer or of all of them (TS 24.379 clause 14.3.3.1),
+// "mbms suspend|resume <TMGI>" the RAN's notice that a bearer is about to be suspended, or no longer.
 void Client::mbms_command(const std::string &cmd) {
   if (!mbms_enabled_) throw std::runtime_error("mbms not configured");
   std::istringstream words(cmd);
@@ -399,8 +473,12 @@ void Client::mbms_command(const std::string &cmd) {
     } else {
       mbms_bad_.erase(key);
     }
+  } else if ((what == "suspend" || what == "resume") && !value.empty()) {
+    mbms_suspension_report(tmgi_hex(value), what == "suspend");
+    return;
   } else {
-    throw std::runtime_error("usage: mbms area <id>[,<id>...]|none, mbms quality good|bad [<TMGI>]");
+    throw std::runtime_error(
+        "usage: mbms area <id>[,<id>...]|none, mbms quality good|bad [<TMGI>], mbms suspend|resume <TMGI>");
   }
   event("mbms_interface", {{"command", cmd}});
   mbms_update();

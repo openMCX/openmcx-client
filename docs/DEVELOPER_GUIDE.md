@@ -508,9 +508,14 @@ stateDiagram-v2
   tag 5; the Bearer Announcement message stays clear). A MuSiK download (`<mbms-defaultMuSiK-download>` or
   `<mbms-explicitMuSiK-download>` with an application/mikey body) is opened the same way and keys the SRTCP of the
   floor (transmission) control over the subchannels (MKI purpose tag 6) when floor control is protected.
-  Commands: `mbms area <id>[,<id>...]|none`, `mbms quality good|bad [<TMGI>]`. Status: `mbms_areas`,
+  `mbms suspend|resume <TMGI>` (the RAN's notice that a bearer is about to be suspended, or no longer) sends the
+  suspension status report ("suspending"/"not-suspending", TS 24.379 clause 14.3.3) unless the announcement said
+  `<report-suspension>` false. Application Paging (TS 24.380 clause 10.3.5) is counted; Group Dynamic Data Notify
+  (clear, or SRTCP under the MuSiK) is kept by group in `mbms_group_dynamic_data`.
+  Commands: `mbms area <id>[,<id>...]|none`, `mbms quality good|bad [<TMGI>]`, `mbms suspend|resume <TMGI>`. Status: `mbms_areas`,
   `mbms_bearers` (by TMGI: `service`, `general_purpose`, `joined`, `mscck`, `reported_listening`, `accepted`),
-  `mbms_musik_id`, `mcvideo_mbms_musik_id`,
+  `mbms_musik_id`, `mcvideo_mbms_musik_id`, `mbms_suspension_reports`, `mbms_paging_received`,
+  `mbms_group_dynamic_data`, `mbms_group_dynamic_data_received`,
   `mbms_general_purpose_received`, `mbms_general_purpose_rejected`, `mbms_bearer_announcements`.
 
 ### 3.3 Spec-literal state names and how to add a transition

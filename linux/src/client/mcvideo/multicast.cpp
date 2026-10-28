@@ -152,6 +152,7 @@ void Client::mcvideo_multicast_poll() {
           const auto message = decode_subchannel(mbms_open_control(datagram->bytes, bearer->second));
           if (message.service == MbmsService::Mcvideo && message.type == SubchannelMessageType::UnmapGroup)
             mcvideo_mbms_unmapped(message);
+          if (message.type == SubchannelMessageType::ApplicationPaging) mbms_paged(message);
         } else if (!control) {
           mcvideo_mbms_control_packet(*datagram);
         }

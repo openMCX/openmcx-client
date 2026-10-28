@@ -169,6 +169,7 @@ void Client::multicast_poll() {
         if (control && bearer != mbms_bearers_.end()) {
           const auto message = decode_subchannel(mbms_open_control(datagram->bytes, bearer->second));
           if (message.type == SubchannelMessageType::UnmapGroup) mbms_unmapped(message);
+          if (message.type == SubchannelMessageType::ApplicationPaging) mbms_paged(message);
         } else if (!control) {
           mbms_floor_packet(*datagram);
         }
