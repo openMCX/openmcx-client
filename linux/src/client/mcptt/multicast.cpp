@@ -44,8 +44,11 @@ static std::uint16_t rtp_sequence(std::span<const std::uint8_t> packet) {
 void Client::mbms_mapped(const std::string &tmgi, const SubchannelMessage &message) {
   if (message.service == MbmsService::Mcvideo) return mcvideo_mbms_mapped(tmgi, message);
   if (!message.subchannel) return;
-  MbmsMapping mapping{message.service, message.tmgis.empty() ? tmgi : message.tmgis.front(), *message.subchannel,
-                      message.ssrc};
+  // TS 24.380 clause 10B: a MapGroupToSessionStream names the MBS session instead of a TMGI.
+  const auto bearer_id = !message.mbs_session_id.empty() ? message.mbs_session_id
+                         : message.tmgis.empty()         ? tmgi
+                                                         : message.tmgis.front();
+  MbmsMapping mapping{message.service, bearer_id, *message.subchannel, message.ssrc};
   auto &stored = mbms_mappings_[message.group];
   const bool changed = stored.tmgi != mapping.tmgi || stored.subchannel != mapping.subchannel;
   if (stored.ssrc != mapping.ssrc) mbms_floor_sequence_.reset();
@@ -92,6 +95,9 @@ void Client::multicast_join() {
   multicast_tmgi_ = mapping->second.tmgi;
   status_["multicast_joined"] = channel.address + ":" + std::to_string(channel.media_port);
   event("multicast_joined", {{"group", group}, {"subchannel", status_["multicast_joined"]}});
+  // TS 24.379 clause 14B.3.5.1 condition 1: a multicast MBS session asking for it gets the join for the session.
+  if (bearer->second.mbs && bearer->second.mode == "multicast" && bearer->second.report_join.value_or(false))
+    mbs_join_notification(multicast_tmgi_, true, multicast_session_);
   multicast_report(true);
 }
 
@@ -119,11 +125,12 @@ void Client::multicast_report(bool listening) {
   MbmsListeningStatus report{listening, multicast_session_, std::nullopt, {multicast_tmgi_}, std::nullopt};
   McpttInfo info;
   info.request_uri = user();
+  const auto bearer = mbms_bearers_.find(multicast_tmgi_);
+  const bool mbs = bearer != mbms_bearers_.end() && bearer->second.mbs;
   const std::vector<BodyPart> parts{{mcptt_mime, mcptt_info_xml(info)},
-                                    {mbms_usage_mime, mbms_listening_status_xml(report)}};
+                                    mbms_status_part(MbmsService::Mcptt, mbs, report)};
   const auto boundary = "mcx-" + random_id();
   const auto session = multicast_session_;
-  const auto bearer = mbms_bearers_.find(multicast_tmgi_);
   const auto psi = bearer == mbms_bearers_.end() ? service() : bearer->second.psi;
   sip_.request("MESSAGE", psi, "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
                {{"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(mcptt_icsi) + "\";require;explicit"},
@@ -165,7 +172,11 @@ void Client::multicast_poll() {
         // TS 24.380 clause 13.3.3: an Unmap Group To Bearer (clear, or SRTCP under the bearer's MSCCK) or a floor
         // control message (clear, or SRTCP under the MuSiK).
         const auto bearer = mbms_bearers_.find(multicast_tmgi_);
-        const bool control = is_subchannel_message(datagram->bytes) || mbms_mki_purpose(datagram->bytes) == 5;
+        // The MKI's purpose tag tells SRTCP under the MSCCK only when the bearer has one: a clear message's last
+        // octets are not an MKI.
+        const bool control = is_subchannel_message(datagram->bytes) ||
+                             (bearer != mbms_bearers_.end() && bearer->second.mscck &&
+                              mbms_mki_purpose(datagram->bytes) == 5);
         if (control && bearer != mbms_bearers_.end()) {
           const auto message = decode_subchannel(mbms_open_control(datagram->bytes, bearer->second));
           if (message.type == SubchannelMessageType::UnmapGroup) mbms_unmapped(message);

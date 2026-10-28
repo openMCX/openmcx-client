@@ -1936,6 +1936,11 @@ private:
     std::uint16_t general_purpose_port = 0;
     std::unique_ptr<UdpSocket> socket;
     bool reported_listening = false, accepted = false;
+    // TS 24.379 clause 14B.3.2: a 5G MBS session (keyed by its MBS session ID) rather than an MBMS bearer, its mode
+    // and whether the server wants UE session join notifications (clause 14B.3.5).
+    bool mbs = false;
+    std::string mode;
+    std::optional<bool> report_join;
     // TS 24.379 clause 14.3.2 step 1 f: the MSCCK of the general purpose subchannel's "a=key-mgmt", whose SRTCP
     // protects the bearer's subchannel control messages (TS 24.380 clause 13.3.3); none when they are clear.
     std::unique_ptr<ProtectedCall> mscck;
@@ -1947,7 +1952,7 @@ private:
   std::set<std::string> mbms_areas_, mbms_bad_;
   std::map<std::string, MbmsBearer> mbms_bearers_;
   // Bearers whose announcement was cancelled after "listening" was reported: service and PSI to report to.
-  std::map<std::string, std::pair<MbmsService, std::string>> mbms_cancelled_;
+  std::map<std::string, std::tuple<MbmsService, std::string, bool>> mbms_cancelled_;
   // TS 24.379 clause 14.3.4 (TS 24.281 clause 16.2.4): the MuSiK of each service's key download, whose SRTCP protects
   // the floor (transmission) control over the subchannels (TS 33.180 clause 9.2.2).
   std::unique_ptr<ProtectedCall> mbms_musik_, mcvideo_mbms_musik_;
@@ -1960,9 +1965,12 @@ private:
   void mbms_paged(const SubchannelMessage &message);
   void mbms_configure();
   [[nodiscard]] const std::string *mbms_usage_body(const SipMessage &message, MbmsService service) const;
-  SipResponse mbms_message(const SipMessage &message, MbmsService service, const std::string &body);
+  SipResponse mbms_message(const SipMessage &message, MbmsService service, const std::string &body, bool mbs);
   void mbms_update();
-  void mbms_report(MbmsService service, const std::string &psi, bool listening, const std::vector<std::string> &tmgis);
+  void mbms_report(MbmsService service, const std::string &psi, bool listening, const std::vector<std::string> &tmgis,
+                   bool mbs = false);
+  [[nodiscard]] static BodyPart mbms_status_part(MbmsService service, bool mbs, const MbmsListeningStatus &status);
+  void mbs_join_notification(const std::string &session, bool join, const std::string &mcptt_session = {});
   void mbms_poll();
   void mbms_subchannel_message(const std::string &tmgi, const SubchannelMessage &message);
   void mbms_command(const std::string &cmd);

@@ -512,8 +512,14 @@ stateDiagram-v2
   suspension status report ("suspending"/"not-suspending", TS 24.379 clause 14.3.3) unless the announcement said
   `<report-suspension>` false. Application Paging (TS 24.380 clause 10.3.5) is counted; Group Dynamic Data Notify
   (clear, or SRTCP under the MuSiK) is kept by group in `mbms_group_dynamic_data`.
+  A 5G MBS session announcement (`application/vnd.3gpp.mcptt-mbs-usage-info+xml` or `...mcvideo-mbs-usage-info+xml`,
+  TS 24.379 clause 14B) is stored the same way, keyed by its MBS session ID; its reports use the MBS body (listening
+  status with `<unicast-listening-status>`, de-announcement status for `mbms suspend|resume`), "MCSC"/"MCV5" messages
+  map its subchannels, and a multicast session whose announcement asks for it gets UE session join notifications
+  (clause 14B.3.5) for the general purpose subchannel and for each joined session.
   Commands: `mbms area <id>[,<id>...]|none`, `mbms quality good|bad [<TMGI>]`, `mbms suspend|resume <TMGI>`. Status: `mbms_areas`,
-  `mbms_bearers` (by TMGI: `service`, `general_purpose`, `joined`, `mscck`, `reported_listening`, `accepted`),
+  `mbms_bearers` (by TMGI or MBS session ID: `service`, `system`, `general_purpose`, `joined`, `mscck`,
+  `reported_listening`, `accepted`), `mbs_join_notifications`,
   `mbms_musik_id`, `mcvideo_mbms_musik_id`, `mbms_suspension_reports`, `mbms_paging_received`,
   `mbms_group_dynamic_data`, `mbms_group_dynamic_data_received`,
   `mbms_general_purpose_received`, `mbms_general_purpose_rejected`, `mbms_bearer_announcements`.

@@ -37,8 +37,10 @@ bool Client::mcvideo_mappable() const {
 // active call's group the subchannel is joined (a changed subchannel anew).
 void Client::mcvideo_mbms_mapped(const std::string &tmgi, const SubchannelMessage &message) {
   if (!message.subchannel) return;
-  MbmsMapping mapping{message.service, message.tmgis.empty() ? tmgi : message.tmgis.front(), *message.subchannel,
-                      message.ssrc};
+  const auto bearer_id = !message.mbs_session_id.empty() ? message.mbs_session_id
+                         : message.tmgis.empty()         ? tmgi
+                                                         : message.tmgis.front();
+  MbmsMapping mapping{message.service, bearer_id, *message.subchannel, message.ssrc};
   auto &stored = mbms_video_mappings_[message.group];
   const bool changed = stored.tmgi != mapping.tmgi || stored.subchannel != mapping.subchannel;
   stored = mapping;
@@ -105,12 +107,12 @@ void Client::mcvideo_multicast_report(bool listening) {
                              std::nullopt};
   McpttInfo info;
   info.request_uri = mcvideo_user();
-  const std::vector<BodyPart> parts{
-      {mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
-      {mbms_usage_type(MbmsService::Mcvideo).mime, mbms_listening_status_xml(report, MbmsService::Mcvideo)}};
+  const auto bearer = mbms_bearers_.find(mcvideo_multicast_tmgi_);
+  const bool mbs = bearer != mbms_bearers_.end() && bearer->second.mbs;
+  const std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
+                                    mbms_status_part(MbmsService::Mcvideo, mbs, report)};
   const auto boundary = "mcx-" + random_id();
   const auto session = mcvideo_multicast_session_;
-  const auto bearer = mbms_bearers_.find(mcvideo_multicast_tmgi_);
   const auto psi = bearer == mbms_bearers_.end() ? mcvideo_service_uri() : bearer->second.psi;
   sip_.request("MESSAGE", psi, "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
                mcvideo_call_headers(), [this, listening, session](const SipResponse &response) {
@@ -147,7 +149,11 @@ void Client::mcvideo_multicast_poll() {
       // under the MuSiK; TS 24.581 clause 10.3.3).
       if (datagram->bytes.size() >= 2 && datagram->bytes[1] >= 200 && datagram->bytes[1] <= 204) {
         const auto bearer = mbms_bearers_.find(mcvideo_multicast_tmgi_);
-        const bool control = is_subchannel_message(datagram->bytes) || mbms_mki_purpose(datagram->bytes) == 5;
+        // The MKI's purpose tag tells SRTCP under the MSCCK only when the bearer has one: a clear message's last
+        // octets are not an MKI.
+        const bool control = is_subchannel_message(datagram->bytes) ||
+                             (bearer != mbms_bearers_.end() && bearer->second.mscck &&
+                              mbms_mki_purpose(datagram->bytes) == 5);
         if (control && bearer != mbms_bearers_.end()) {
           const auto message = decode_subchannel(mbms_open_control(datagram->bytes, bearer->second));
           if (message.service == MbmsService::Mcvideo && message.type == SubchannelMessageType::UnmapGroup)

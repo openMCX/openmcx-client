@@ -113,7 +113,7 @@ const std::string *Client::mbms_usage_body(const SipMessage &message, MbmsServic
 // identity asserted by the sender (steps 1 c to 1 e); one without service areas discards the stored one (step 2).
 // The conditions of clause 14.3.3.1 are then checked. A message without an announcement (a MuSiK download) is
 // accepted and left to later procedures.
-SipResponse Client::mbms_message(const SipMessage &message, MbmsService service, const std::string &body) {
+SipResponse Client::mbms_message(const SipMessage &message, MbmsService service, const std::string &body, bool mbs) {
   SipResponse response;
   response.status_code = 200;
   const auto &profile = profile_of(service);
@@ -121,9 +121,27 @@ SipResponse Client::mbms_message(const SipMessage &message, MbmsService service,
     response.status_code = 403;
     return response;
   }
+  // TS 24.379 clause 14B.3.2 and annex L.3.4: an MBS announcement is taken as the MBMS one, the MBS session ID for the
+  // TMGI and the de-announcement acknowledgement for the suspension report; its own fields are kept with the bearer.
   MbmsUsageInfo usage;
+  std::map<std::string, MbsAnnouncement> sessions;
   try {
-    usage = parse_mbms_usage_info(body, service);
+    if (mbs) {
+      const auto parsed = parse_mbs_usage_info(body, service);
+      usage.musik_download = parsed.musik_download;
+      for (const auto &session : parsed.announcements) {
+        MbmsAnnouncement announcement;
+        announcement.tmgi = session.session_id;
+        announcement.frequency = session.frequency;
+        announcement.service_areas = session.service_areas;
+        announcement.gpms = session.gpms;
+        announcement.report_suspension = session.de_announcement_ack;
+        usage.announcements.push_back(std::move(announcement));
+        sessions[session.session_id] = session;
+      }
+    } else {
+      usage = parse_mbms_usage_info(body, service);
+    }
   } catch (const std::exception &error) {
     event("mbms_announcement_refused", {{"reason", error.what()}});
     response.status_code = 400;
@@ -163,7 +181,7 @@ SipResponse Client::mbms_message(const SipMessage &message, MbmsService service,
     if (announcement.cancellation()) {
       if (const auto found = mbms_bearers_.find(announcement.tmgi); found != mbms_bearers_.end()) {
         if (found->second.reported_listening)
-          mbms_cancelled_[announcement.tmgi] = {found->second.service, found->second.psi};
+          mbms_cancelled_[announcement.tmgi] = {found->second.service, found->second.psi, found->second.mbs};
         mbms_bearers_.erase(found);
       }
       event("mbms_announcement_cancelled", {{"tmgi", announcement.tmgi}});
@@ -174,6 +192,11 @@ SipResponse Client::mbms_message(const SipMessage &message, MbmsService service,
     bearer.announcement = announcement;
     bearer.psi = psi;
     bearer.sdp = sdp_body;
+    if (mbs) {
+      bearer.mbs = true;
+      bearer.mode = sessions.at(announcement.tmgi).mode;
+      bearer.report_join = sessions.at(announcement.tmgi).report_join;
+    }
     MediaLine line;
     try {
       if (!announcement.gpms) throw std::runtime_error("announcement without GPMS");
@@ -226,7 +249,7 @@ SipResponse Client::mbms_message(const SipMessage &message, MbmsService service,
 // cancelled, the radio conditions turned bad, or the UE left the service areas. A cancelled bearer it never reported
 // listening to needs no report.
 void Client::mbms_update() {
-  std::map<std::pair<MbmsService, std::string>, std::vector<std::string>> start, stop;
+  std::map<std::tuple<MbmsService, std::string, bool>, std::vector<std::string>> start, stop;
   for (auto &[tmgi, bearer] : mbms_bearers_) {
     const bool in_area = std::ranges::any_of(bearer.announcement.service_areas,
                                              [&](const auto &area) { return mbms_areas_.contains(area); });
@@ -245,14 +268,30 @@ void Client::mbms_update() {
       bearer.socket.reset();
       event("mbms_general_purpose_left", {{"tmgi", tmgi}});
     }
-    if (receivable && !bearer.reported_listening) start[{bearer.service, bearer.psi}].push_back(tmgi);
-    if (!receivable && bearer.reported_listening) stop[{bearer.service, bearer.psi}].push_back(tmgi);
+    if (receivable && !bearer.reported_listening) start[{bearer.service, bearer.psi, bearer.mbs}].push_back(tmgi);
+    if (!receivable && bearer.reported_listening) stop[{bearer.service, bearer.psi, bearer.mbs}].push_back(tmgi);
   }
   // Bearers dropped by a cancellation while reported: their last state is kept to report "not-listening".
   for (auto it = mbms_cancelled_.begin(); it != mbms_cancelled_.end(); it = mbms_cancelled_.erase(it))
     stop[it->second].push_back(it->first);
-  for (const auto &[key, tmgis] : start) mbms_report(key.first, key.second, true, tmgis);
-  for (const auto &[key, tmgis] : stop) mbms_report(key.first, key.second, false, tmgis);
+  // TS 24.379 clause 14B.3.3.1 condition 2 b and clause 14B.3.5: a multicast MBS session whose announcement asks for
+  // it gets the UE session join notification before the listening report, and "ue-session-leave" when the client
+  // stops listening.
+  for (const auto &[key, tmgis] : start) {
+    for (const auto &tmgi : tmgis)
+      if (const auto &bearer = mbms_bearers_.at(tmgi);
+          bearer.mbs && bearer.mode == "multicast" && bearer.report_join.value_or(false))
+        mbs_join_notification(tmgi, true);
+    mbms_report(std::get<0>(key), std::get<1>(key), true, tmgis, std::get<2>(key));
+  }
+  for (const auto &[key, tmgis] : stop) {
+    mbms_report(std::get<0>(key), std::get<1>(key), false, tmgis, std::get<2>(key));
+    for (const auto &tmgi : tmgis)
+      if (const auto found = mbms_bearers_.find(tmgi); found != mbms_bearers_.end() && found->second.mbs &&
+                                                        found->second.mode == "multicast" &&
+                                                        found->second.report_join.value_or(false))
+        mbs_join_notification(tmgi, false);
+  }
   publish_mbms();
 }
 
@@ -261,8 +300,50 @@ void Client::mbms_update() {
 // subchannel: a SIP MESSAGE to the MBMS public service identity of the announcement (step 1 a), with the
 // service's Accept-Contact and P-Preferred-Service (steps 1 b and 1 d), the MBMS usage information (<general-purpose>
 // and the TMGIs; steps 1 e to 1 g) and the service information naming the user (step 1 h).
+BodyPart Client::mbms_status_part(MbmsService service, bool mbs, const MbmsListeningStatus &status) {
+  if (!mbs) return {mbms_usage_type(service).mime, mbms_listening_status_xml(status, service)};
+  // TS 24.379 annex F.2A.3 item 1: <unicast-listening-status> is mandatory without semantics of its own
+  // (docs/3GPP_CORRECTION_CANDIDATES.md M23): "listening" except when the client reports listening to a session's
+  // MBS subchannel, which replaces the unicast delivery.
+  MbsUsageInfo usage;
+  usage.listening_status = MbsListeningStatus{status.listening, !(status.listening && !status.session_id.empty()),
+                                              status.session_id, status.general_purpose, status.tmgis};
+  return {mbs_usage_type(service).mime, mbs_usage_xml(usage, service)};
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 14B.3.5.2 (TS 24.281 clause 16A.2.4): the UE session join notification, a SIP MESSAGE to the MBS
+// public service identity of the announcement with <ue-session-join-notification> ("ue-session-join" or
+// "ue-session-leave", the MBS session ID and, for an ongoing conversation, the MC service session) and the service
+// information naming the user.
+void Client::mbs_join_notification(const std::string &session, bool join, const std::string &mcptt_session) {
+  const auto found = mbms_bearers_.find(session);
+  if (found == mbms_bearers_.end()) return;
+  const auto &bearer = found->second;
+  const auto &profile = profile_of(bearer.service);
+  MbsUsageInfo usage;
+  usage.join_notification = UeSessionJoin{join, session, mcptt_session};
+  McpttInfo info;
+  info.request_uri = bearer.service == MbmsService::Mcvideo ? mcvideo_user() : user();
+  const std::vector<BodyPart> parts{{profile.info_mime, service_info_xml(info, profile)},
+                                    {mbs_usage_type(bearer.service).mime, mbs_usage_xml(usage, bearer.service)}};
+  const auto boundary = "mcx-" + random_id();
+  sip_.request("MESSAGE", bearer.psi, "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
+               {{"Accept-Contact", std::string("*;+g.3gpp.icsi-ref=\"") + profile.icsi_encoded + "\";require;explicit"},
+                {"P-Preferred-Service", profile.icsi}},
+               [this, session, join](const SipResponse &response) {
+                 if (response.status_code < 200) return;
+                 event("mbs_join_answered", {{"mbs_session_id", session}, {"join", join}, {"status", response.status_code}});
+               });
+  status_["mbs_join_notifications"] = status_.value("mbs_join_notifications", 0ULL) + 1;
+  event("mbs_join_sent", {{"mbs_session_id", session}, {"join", join}, {"session", mcptt_session}});
+}
+
+//------------------------------------------------------------------------------
+// The listening status report on the general purpose subchannel (TS 24.379 clause 14.3.3.2; an MBS session's with the
+// MBS usage information, clause 14B.3.3.2).
 void Client::mbms_report(MbmsService service, const std::string &psi, bool listening,
-                         const std::vector<std::string> &tmgis) {
+                         const std::vector<std::string> &tmgis, bool mbs) {
   const auto &profile = profile_of(service);
   for (const auto &tmgi : tmgis)
     if (auto found = mbms_bearers_.find(tmgi); found != mbms_bearers_.end())
@@ -274,7 +355,7 @@ void Client::mbms_report(MbmsService service, const std::string &psi, bool liste
   McpttInfo info;
   info.request_uri = service == MbmsService::Mcvideo ? mcvideo_user() : user();
   const std::vector<BodyPart> parts{{profile.info_mime, service_info_xml(info, profile)},
-                                    {mbms_usage_type(service).mime, mbms_listening_status_xml(status, service)}};
+                                    mbms_status_part(service, mbs, status)};
   const auto boundary = "mcx-" + random_id();
   sip_.request("MESSAGE", psi, "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
                {{"Accept-Contact", std::string("*;+g.3gpp.icsi-ref=\"") + profile.icsi_encoded + "\";require;explicit"},
@@ -323,7 +404,8 @@ void Client::mbms_poll() {
         const auto &bytes = datagram->bytes;
         const bool clear_notification = bytes.size() >= 12 && std::string_view(
                                                                    reinterpret_cast<const char *>(bytes.data()) + 8, 4) == "MCNC";
-        if (clear_notification || (mbms_mki_purpose(bytes) == 6 && !is_subchannel_message(bytes))) {
+        const auto &musik = bearer.service == MbmsService::Mcvideo ? mcvideo_mbms_musik_ : mbms_musik_;
+        if (clear_notification || (musik && mbms_mki_purpose(bytes) == 6 && !is_subchannel_message(bytes))) {
           mbms_group_dynamic_data(bearer.service, bytes);
           continue;
         }
@@ -378,7 +460,7 @@ void Client::mbms_subchannel_message(const std::string &tmgi, const SubchannelMe
   const bool active = message.monitoring.value_or(true);
   if (!active)
     for (const auto &named : known) mbms_bad_.insert(named);
-  mbms_report(bearer.service, bearer.psi, active, known);
+  mbms_report(bearer.service, bearer.psi, active, known, bearer.mbs);
   if (!active) schedule([this] { mbms_update(); });
 }
 
@@ -397,12 +479,19 @@ void Client::mbms_suspension_report(const std::string &tmgi, bool suspending) {
     return;
   }
   const auto &profile = profile_of(bearer.service);
-  MbmsUsageInfo usage;
-  usage.suspension_status = MbmsSuspensionStatus{suspending, tmgi, {}};
   McpttInfo info;
   info.request_uri = bearer.service == MbmsService::Mcvideo ? mcvideo_user() : user();
-  const std::vector<BodyPart> parts{{profile.info_mime, service_info_xml(info, profile)},
-                                    {mbms_usage_type(bearer.service).mime, mbms_usage_xml(usage, bearer.service)}};
+  std::vector<BodyPart> parts{{profile.info_mime, service_info_xml(info, profile)}};
+  if (bearer.mbs) {
+    // TS 24.379 clause 14B.3.3.2 and annex L.3.4: for an MBS session, the de-announcement status ("deleting").
+    MbsUsageInfo usage;
+    usage.de_announcement_status = MbsDeAnnouncementStatus{suspending, tmgi, {}};
+    parts.push_back({mbs_usage_type(bearer.service).mime, mbs_usage_xml(usage, bearer.service)});
+  } else {
+    MbmsUsageInfo usage;
+    usage.suspension_status = MbmsSuspensionStatus{suspending, tmgi, {}};
+    parts.push_back({mbms_usage_type(bearer.service).mime, mbms_usage_xml(usage, bearer.service)});
+  }
   const auto boundary = "mcx-" + random_id();
   sip_.request("MESSAGE", bearer.psi, "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
                {{"Accept-Contact", std::string("*;+g.3gpp.icsi-ref=\"") + profile.icsi_encoded + "\";require;explicit"},
@@ -495,6 +584,7 @@ void Client::publish_mbms() {
         {"general_purpose", bearer.general_purpose_address + ":" + std::to_string(bearer.general_purpose_port)},
         {"joined", bearer.socket != nullptr},
         {"mscck", bearer.mscck != nullptr},
+        {"system", bearer.mbs ? "mbs" : "mbms"},
         {"reported_listening", bearer.reported_listening},
         {"accepted", bearer.accepted}};
   status_["mbms_areas"] = std::vector<std::string>(mbms_areas_.begin(), mbms_areas_.end());
