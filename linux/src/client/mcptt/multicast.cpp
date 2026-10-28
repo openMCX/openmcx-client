@@ -82,7 +82,7 @@ void Client::multicast_leave(bool report) {
 // A refused "listening" report, and any answer to a "not-listening" one, leave the host group: the call goes on by
 // unicast.
 void Client::multicast_report(bool listening) {
-  MbmsListeningStatus report{listening, multicast_session_, std::nullopt, {multicast_tmgi_}};
+  MbmsListeningStatus report{listening, multicast_session_, std::nullopt, {multicast_tmgi_}, std::nullopt};
   McpttInfo info;
   info.request_uri = user();
   const std::vector<BodyPart> parts{{mcptt_mime, mcptt_info_xml(info)},
