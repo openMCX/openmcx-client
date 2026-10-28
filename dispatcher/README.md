@@ -130,9 +130,16 @@ localhost only. Position mode has sign-in; still serve it over TLS (a proxy) whe
 Besides the dispatcher position at `/`, the service serves an MC user's client at `/client/`, drawn as the Android
 app (its colours, top strip, tabs, floor states and PTT key, in light and dark): the same engine, API and audio.
 
-- **Call**: the groups of the user profile with their affiliation, a call on one (normal, broadcast, imminent peril,
+- **Voice**: call a user by name (`alice` is `sip:alice.mcptt@<your domain>`) or full MCPTT ID, recent users one tap
+  away; the groups of the user profile with their affiliation, a call on one (normal, broadcast, imminent peril,
   emergency), private calls (ring first, without floor control, emergency); the call in progress with its floor
   state, a press-and-hold PTT key (or Space), emergency and imminent peril, speaker and hang up; incoming calls ring.
+- **Video**: watch a user's camera (an MCVideo private call, by name or MCVideo ID) or a group's video (a group call
+  on a group of the profile); the video received is decoded in the browser (WebCodecs, H.264 Constrained Baseline),
+  with a live badge, the picture size and frame rate, full screen, and a note when the call ends. The page sends no
+  video. Needs `mcvideo.live_receive` in the engine configuration (e.g. `{"send_host": "127.0.0.1", "send_port":
+  7102}`): the pictures reach the page over `/api/video`. A call that starts brings its tab forward, and a dot on the
+  Voice or Video tab shows a call in progress.
 - **Chat**: conversations over MCData SDS with users, groups and functional aliases, the ops agent first
   (`--ops-agent`): sent messages ask for delivery and read reports, shown as ticks; a received message on screen is
   marked read (`sds-display`); line breaks kept; between the agent's read report and its answer, "working on it".

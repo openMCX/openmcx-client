@@ -85,6 +85,11 @@ func main() {
 		log.Fatal(err)
 	}
 	api := &api{engine: e, audio: audio, outbox: *outbox, pos: pos}
+	if e.videoOut != "" {
+		if api.video, err = newVideoBridge(e.videoOut); err != nil {
+			log.Fatal(err)
+		}
+	}
 	if *opsAgent != "" {
 		api.opsAgent = map[string]any{"id": *opsAgent, "name": *opsAgentName, "alias": *opsAgentAlias}
 	}

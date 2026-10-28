@@ -27,6 +27,7 @@ import (
 type api struct {
 	engine *engine
 	audio  *audioBridge
+	video  *videoBridge // received MCVideo pictures; nil without mcvideo.live_receive
 	outbox string
 	pos    *position // nil in lab mode
 	// The ops agent the client UI's chat offers first (--ops-agent): an MCData ID, or a functional alias the
@@ -48,6 +49,7 @@ func (a *api) routes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/msgstore/upload", a.guard(a.storeFile))
 	mux.HandleFunc("GET /api/files/{id}", a.guard(a.receivedFile))
 	mux.Handle("GET /api/audio", websocket.Server{Handshake: a.audioHandshake, Handler: a.audioSocket})
+	mux.Handle("GET /api/video", websocket.Server{Handshake: a.audioHandshake, Handler: a.videoSocket})
 }
 
 // guard admits a request in lab mode, or with the signed-in operator's session cookie.
@@ -205,7 +207,10 @@ func (a *api) view(r *http.Request) (map[string]any, error) {
 		"mcdata_ipconn", "mcdata_ipconn_pings", "mcdata_ipconn_counters",
 		"mcdata_authorized", "mcdata_affiliated", "mcdata_inbox",
 		"mcdata_sent", "mcdata_last_result", "mcdata_files", "mcdata_files_sent", "mcdata_fd_last_result",
-		"mcdata_notifications", "mcdata_undelivered", "last_error")
+		"mcdata_notifications", "mcdata_undelivered", "last_error",
+		"mcvideo_authorized", "mcvideo_affiliated", "mcvideo_selected_group", "mcvideo_call_state", "mcvideo_call_type",
+		"mcvideo_video_mode", "mcvideo_peer", "mcvideo_group", "mcvideo_transmitter", "mcvideo_transmitting",
+		"mcvideo_receiving", "mcvideo_frames_received")
 	v["session"] = session
 	if a.opsAgent != nil {
 		v["ops_agent"] = a.opsAgent
@@ -865,6 +870,25 @@ func commandLine(req map[string]any) (string, error) {
 		}
 		return line, nil
 	case "answer", "reject", "hangup", "release":
+		return action, nil
+	// TS 24.281 clauses 9.2.1.2.1.1 and 10.2.2.2.1: an MCVideo group call (on a group of the profile) or private
+	// call, its end; received video goes to /api/video.
+	case "mcvideo-call":
+		if str("group") != "" {
+			group, err := id("group")
+			if err != nil {
+				return "", err
+			}
+			return "mcvideo-call group=" + group, nil
+		}
+		return "mcvideo-call", nil
+	case "mcvideo-private":
+		target, err := id("target")
+		if err != nil {
+			return "", err
+		}
+		return "mcvideo-private " + target, nil
+	case "mcvideo-hangup":
 		return action, nil
 	case "ptt":
 		return "ptt live", nil

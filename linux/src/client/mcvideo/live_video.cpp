@@ -12,6 +12,11 @@
 // Configuration: mcvideo.live {fifo (created if missing), width (320), height (240), frame_rate (15),
 // bitrate (300000), key_frame_interval (30)}. The picture size is even, at most 1280 x 720 (level 3.1).
 //
+// The other way, for the client page (mcvideo.live_receive {send_host (127.0.0.1), send_port}): each received H.264
+// picture that is decoded (from an IDR picture on) goes in one UDP datagram to send_port: a byte 1 for an IDR picture
+// (else 0), the RTP timestamp (4 bytes, big-endian), then the picture's NAL units in H.264 annex B (each after the
+// start code 00 00 00 01). A picture too large for a datagram is dropped (mcvideo_live_receive_dropped).
+//
 // Specifications: TS 26.281 V19.0.0 (Rel-19), TS 24.581 V19.2.0 (Rel-19).
 
 #include "client.hpp"
@@ -50,8 +55,14 @@ video::EncoderOptions Client::mcvideo_encoder_options() const {
 }
 
 //------------------------------------------------------------------------------
-// Helper: open (and create) the FIFO of mcvideo.live; without mcvideo.live nothing.
+// Helper: open (and create) the FIFO of mcvideo.live, and the socket of mcvideo.live_receive; without them nothing.
 void Client::open_live_video() {
+  const auto receive = cfg_.at("mcvideo").value("live_receive", Json::object());
+  if (!receive.empty()) {
+    live_receive_ = std::make_unique<UdpSocket>("127.0.0.1", 0);
+    live_receive_host_ = receive.value("send_host", std::string("127.0.0.1"));
+    live_receive_port_ = receive.at("send_port").get<std::uint16_t>();
+  }
   const auto live = cfg_.at("mcvideo").value("live", Json::object());
   if (live.empty()) return;
   const auto options = mcvideo_encoder_options();
@@ -105,6 +116,26 @@ video::Frame Client::mcvideo_picture(const video::EncoderOptions &options, std::
   return video::Frame{options.width, options.height, std::vector<std::uint8_t>(luma, black_luma),
                       std::vector<std::uint8_t>(luma / 4, neutral_chroma),
                       std::vector<std::uint8_t>(luma / 4, neutral_chroma)};
+}
+
+//------------------------------------------------------------------------------
+// Helper: a received picture to the client page's service (mcvideo.live_receive), in one datagram.
+void Client::forward_live_video(const video::AccessUnit &unit, std::uint32_t timestamp) {
+  if (!live_receive_) return;
+  constexpr std::size_t max_datagram = 65000;
+  constexpr unsigned byte_bits = 8;
+  std::vector<std::uint8_t> datagram{static_cast<std::uint8_t>(video::is_key_frame(unit) ? 1 : 0)};
+  for (int shift = 3 * byte_bits; shift >= 0; shift -= byte_bits)
+    datagram.push_back(static_cast<std::uint8_t>(timestamp >> shift));
+  for (const auto &nal : unit) {
+    datagram.insert(datagram.end(), {0, 0, 0, 1});
+    datagram.insert(datagram.end(), nal.begin(), nal.end());
+  }
+  if (datagram.size() > max_datagram) {
+    status_["mcvideo_live_receive_dropped"] = ++live_receive_dropped_;
+    return;
+  }
+  live_receive_->send(datagram, live_receive_host_, live_receive_port_);
 }
 
 } // namespace mcx

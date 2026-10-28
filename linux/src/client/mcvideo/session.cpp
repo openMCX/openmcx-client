@@ -746,6 +746,7 @@ void Client::mcvideo_video_packet(const Datagram &datagram) {
       continue;
     }
     call.awaiting_key = false;
+    forward_live_video(unit, packet.timestamp); // mcvideo.live_receive: to the client page
     const auto picture = call.decoder->decode(unit);
     if (!picture) {
       ++call.undecoded;

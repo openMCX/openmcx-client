@@ -1134,6 +1134,12 @@ private:
   std::optional<video::Frame> live_video_frame_;
   unsigned live_video_frames_ = 0;
   std::uint64_t live_video_at_ = 0;
+  // Received video for the client page (mcvideo.live_receive, mcvideo/live_video.cpp; off unless configured): each
+  // received H.264 picture, from an IDR picture on, goes to a local UDP port for the browser to decode.
+  std::unique_ptr<UdpSocket> live_receive_;
+  std::string live_receive_host_;
+  std::uint16_t live_receive_port_ = 0;
+  unsigned live_receive_dropped_ = 0;
 
   // Helper: while a new call in mcvideo_call_ is set up (offer, keys, INVITE), a throw drops it again, so that a
   // failed attempt does not leave "an MCVideo call is in progress" behind.
@@ -1913,6 +1919,8 @@ private:
   video::EncoderOptions mcvideo_encoder_options() const;
   // The picture to transmit next: the latest live picture, or without mcvideo.live the test pattern.
   video::Frame mcvideo_picture(const video::EncoderOptions &options, std::uint32_t index) const;
+  // mcvideo.live_receive: a received picture (an access unit) to the client page's service.
+  void forward_live_video(const video::AccessUnit &unit, std::uint32_t timestamp);
 
   // ---- Control commands (core/commands.cpp) ----
   void command(const std::string &cmd);

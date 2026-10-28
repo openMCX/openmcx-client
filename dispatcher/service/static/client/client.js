@@ -128,6 +128,7 @@ function render(s) {
   $('offline-detail').textContent = s.last_error ? String(s.last_error) : 'The client keeps trying by itself.';
   renderIncoming(s);
   renderCall(s);
+  renderVideo(s);
   chat.merge(s);
   renderChat();
   renderStatus(s);
@@ -146,6 +147,7 @@ function renderIncoming(s) {
 
 // ---- Call tab ----
 const callActive = (s) => !!s.call_state && s.call_state !== 'idle' && s.call_state !== 'ringing';
+let voiceWasActive = false;
 let activeSince = 0, pendingGroupCall = null, dismissedFailure = saved.get('mcx-dismissed-failure', '');
 
 // How a floor state looks: the fill for the key and badge, the text colour on the background, a sign
@@ -256,6 +258,9 @@ function renderCall(s) {
     }
   }
   const active = callActive(s);
+  $('voice-live').hidden = !active;
+  if (active && !voiceWasActive && currentTab !== 'voice') showTab('voice');
+  voiceWasActive = active;
   $('call-idle').hidden = active;
   $('call-active').hidden = !active;
   if (!active) {
@@ -310,11 +315,52 @@ $('call-failure-dismiss').onclick = () => {
   $('call-failure').hidden = true;
 };
 
+// ---- users by name: "alice" is sip:alice.mcptt@<this user's domain> (or .mcvideo for video) ----
+function domain() {
+  const user = (state.identity || {}).user || '';
+  return user.includes('@') ? user.split('@').pop() : '';
+}
+function userId(text, service) {
+  let t = text.trim();
+  if (!t) return '';
+  if (!t.startsWith('sip:') && !t.startsWith('sips:')) t = t.includes('@') ? 'sip:' + t : `sip:${t}.${service}@${domain()}`;
+  // An MCPTT ID typed for video (or the other way) names the same user.
+  return t.replace(/\.(mcptt|mcvideo)@/, `.${service}@`);
+}
+
+// Recent users, per service, kept in this browser: one tap calls them again.
+function recents(service) { return saved.get('mcx-recent-' + service, []); }
+function remember(service, id) {
+  saved.set('mcx-recent-' + service, [id, ...recents(service).filter((r) => r !== id)].slice(0, 6));
+  renderRecents(service);
+}
+function renderRecents(service) {
+  const box = $(service === 'mcvideo' ? 'video-recent' : 'voice-recent');
+  const list = recents(service);
+  box.hidden = !list.length;
+  box.replaceChildren(el('div', 'chips-label', 'Recent'));
+  for (const id of list) {
+    const chip = el('button', 'chip');
+    chip.type = 'button';
+    chip.title = id;
+    chip.append(el('span', 'avatar', short(id).slice(0, 1).toUpperCase()), document.createTextNode(short(id)));
+    chip.onclick = () => (service === 'mcvideo' ? videoCall(id) : privateCall({}, id));
+    box.append(chip);
+  }
+  $(service === 'mcvideo' ? 'video-known' : 'voice-known').replaceChildren(...list.map((id) => {
+    const o = el('option');
+    o.value = id;
+    return o;
+  }));
+}
+
 // Private calls: automatic commencement, or ring first, without floor control, or emergency.
-function privateCall(extra = {}) {
-  const target = $('private-target').value.trim();
+function privateCall(extra = {}, given = '') {
+  const target = given || userId($('private-target').value, 'mcptt');
   if (!target) { $('private-target').focus(); return; }
   audio();
+  remember('mcptt', target);
+  $('private-target').value = '';
   tryAct({ action: 'private', target, ...extra });
 }
 $('private-form').onsubmit = (e) => { e.preventDefault(); privateCall(); };
@@ -336,6 +382,163 @@ function showSpeaker() {
 }
 showSpeaker();
 $('speaker').onclick = () => { speakerOn = !speakerOn; saved.set('mcx-speaker', speakerOn); showSpeaker(); };
+
+// ---- video: the MCVideo call, its pictures over /api/video decoded with WebCodecs ----
+// Each message is one H.264 picture as the engine received it: a byte 1 for an IDR picture, the RTP timestamp (90 kHz,
+// 4 bytes big-endian), the NAL units in annex B. Decoding starts, and starts again after an error, at an IDR picture.
+let videoSocket = null, decoder = null, needKey = true, videoSince = 0, pictures = 0;
+let lastPicture = 0, fps = 0, fpsCount = 0, videoWas = 'idle', videoWith = '';
+
+function videoCall(given = '') {
+  const target = given || userId($('video-target').value, 'mcvideo');
+  if (!target) { $('video-target').focus(); return; }
+  remember('mcvideo', target);
+  $('video-target').value = '';
+  $('video-ended').hidden = true;
+  tryAct({ action: 'mcvideo-private', target });
+}
+$('video-form').onsubmit = (e) => { e.preventDefault(); videoCall(); };
+$('video-ended-dismiss').onclick = () => { $('video-ended').hidden = true; };
+
+let videoGroupsShown = '';
+function renderVideoGroups(s) {
+  const selected = s.mcvideo_selected_group || '';
+  const groups = [...new Set([...(selected ? [selected] : []), ...(s.profile_groups || [])])];
+  const key = JSON.stringify([groups, selected, s.mcvideo_affiliated, s.registered]);
+  if (key === videoGroupsShown) return;
+  videoGroupsShown = key;
+  const list = $('video-groups');
+  list.replaceChildren();
+  if (!groups.length) list.append(el('p', 'hint', 'No groups in your profile.'));
+  for (const g of groups) {
+    const row = el('div', 'list-row');
+    const text = el('div', 'grow');
+    text.append(el('div', 'name', short(g)));
+    const on = g === selected && s.mcvideo_affiliated;
+    const affil = el('span', 'affil' + (on ? ' on' : ''));
+    affil.append(el('i'), document.createTextNode(on ? 'affiliated for video' : 'not affiliated for video'));
+    text.append(affil);
+    text.title = g;
+    const call = el('button', 'btn outline', 'Video call');
+    call.disabled = !s.registered;
+    call.onclick = () => { $('video-ended').hidden = true; tryAct({ action: 'mcvideo-call', group: g }); };
+    row.append(text, call);
+    list.append(row);
+  }
+}
+
+function renderVideo(s) {
+  const st = s.mcvideo_call_state || 'idle';
+  const on = st !== 'idle';
+  const priv = s.mcvideo_call_type === 'private';
+  const other = short(priv ? s.mcvideo_peer : s.mcvideo_group);
+  // A call that starts brings its tab forward; one that ends says so.
+  if (on && videoWas === 'idle' && currentTab !== 'video') showTab('video');
+  if (!on && videoWas !== 'idle' && videoWith) {
+    const lasted = videoSince ? ' after ' + clockOf(Date.now() - videoSince) : '';
+    $('video-ended-text').textContent = videoWas === 'active' ? `Video call with ${videoWith} ended${lasted}.`
+      : `The video call to ${videoWith} did not connect.`;
+    $('video-ended').hidden = false;
+  }
+  videoWas = st;
+  if (on) videoWith = other;
+  $('video-live').hidden = st !== 'active';
+  $('video-idle').hidden = on;
+  $('video-active').hidden = !on;
+  if (!on) { stopVideo(); videoSince = 0; renderVideoGroups(s); return; }
+  if (st === 'active' && !videoSince) videoSince = Date.now();
+  $('video-kind').textContent = s.mcvideo_video_mode === 'one-to-one video push' ? 'Video pushed to you'
+    : priv ? 'Private video call' : 'Group video call';
+  $('video-title').textContent = other;
+  showPictureState(s);
+  startVideo();
+}
+
+// The badge, the overlay on the picture and the line under it: calling, waiting for a picture, live.
+function showPictureState(s = state) {
+  const st = s.mcvideo_call_state || 'idle';
+  const flowing = pictures && Date.now() - lastPicture < 2000;
+  const sender = s.mcvideo_transmitter ? short(s.mcvideo_transmitter) : '';
+  const badge = $('video-badge');
+  badge.className = 'video-badge' + (flowing ? ' live' : '');
+  badge.textContent = st !== 'active' ? 'Calling…' : flowing ? 'LIVE' : sender ? 'Starting' : 'No video';
+  $('video-overlay').hidden = !!flowing;
+  $('video-overlay-text').textContent = st !== 'active' ? 'Calling ' + short(s.mcvideo_peer || s.mcvideo_group) + '…'
+    : sender ? `Waiting for ${sender}'s video…` : 'Nobody is sending video in this call.';
+  const canvas = $('video-canvas');
+  $('video-info').textContent = flowing
+    ? `${sender ? 'From ' + sender + ' · ' : ''}${canvas.width}×${canvas.height} · ${fps} fps` : '';
+}
+setInterval(() => {
+  $('video-clock').textContent = videoSince ? clockOf(Date.now() - videoSince) : '';
+  fps = fpsCount;
+  fpsCount = 0;
+  if (!$('video-active').hidden) showPictureState();
+}, 1000);
+
+function startVideo() {
+  if (videoSocket) return;
+  if (!('VideoDecoder' in window)) {
+    $('video-overlay-text').textContent = 'This browser cannot show the video (no WebCodecs H.264): use Chrome or Edge.';
+    return;
+  }
+  videoSocket = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/api/video');
+  videoSocket.binaryType = 'arraybuffer';
+  videoSocket.onmessage = (e) => picture(new Uint8Array(e.data));
+  videoSocket.onclose = () => { videoSocket = null; };
+}
+
+function stopVideo() {
+  if (videoSocket) { videoSocket.onclose = null; videoSocket.close(); videoSocket = null; }
+  if (decoder && decoder.state !== 'closed') decoder.close();
+  decoder = null;
+  needKey = true;
+  pictures = 0;
+  if (document.fullscreenElement) document.exitFullscreen();
+}
+
+function newDecoder() {
+  const canvas = $('video-canvas');
+  decoder = new VideoDecoder({
+    output: (frame) => {
+      if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+        canvas.width = frame.displayWidth;
+        canvas.height = frame.displayHeight;
+        $('video-frame').style.aspectRatio = `${frame.displayWidth} / ${frame.displayHeight}`; // no black bars
+      }
+      canvas.getContext('2d').drawImage(frame, 0, 0);
+      frame.close();
+      lastPicture = Date.now();
+      fpsCount++;
+      if (!pictures++) showPictureState();
+    },
+    error: (err) => { log('video: ' + err.message, true); decoder = null; needKey = true; },
+  });
+  decoder.configure({ codec: 'avc1.42e01f', optimizeForLatency: true }); // TS 26.281: Constrained Baseline 3.1
+}
+
+function picture(bytes) {
+  if (bytes.length < 6) return;
+  const key = bytes[0] === 1;
+  if (needKey && !key) return;
+  if (!decoder || decoder.state === 'closed') newDecoder();
+  needKey = false;
+  const timestamp = ((bytes[1] << 24) | (bytes[2] << 16) | (bytes[3] << 8) | bytes[4]) >>> 0;
+  if (decoder.decodeQueueSize > 10) { // behind: start again at the next IDR picture
+    decoder.close();
+    needKey = true;
+    if (!key) return;
+    newDecoder();
+    needKey = false;
+  }
+  decoder.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: Math.round(timestamp * 1000 / 90), data: bytes.subarray(5) }));
+}
+
+$('video-hangup').onclick = () => tryAct({ action: 'mcvideo-hangup' });
+$('video-full').onclick = () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else $('video-frame').requestFullscreen().catch(() => {});
+};
 
 // ---- audio: the browser microphone and speaker, bridged to the engine's live audio ----
 let ctx, socket, mic, talking = false, playAt = 0;
@@ -407,7 +610,7 @@ ptt.addEventListener('contextmenu', (e) => e.preventDefault());
 // Space is the PTT key while the Call tab shows (not while typing); with no call it calls the selected group.
 const typing = (t) => t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable);
 document.addEventListener('keydown', (e) => {
-  if (e.code !== 'Space' || e.repeat || typing(e.target) || currentTab !== 'call' || !$('settings').hidden) return;
+  if (e.code !== 'Space' || e.repeat || typing(e.target) || currentTab !== 'voice' || !$('settings').hidden) return;
   e.preventDefault();
   if (callActive(state)) pttDown(e);
   else if (state.registered && (state.identity || {}).group) groupCall(state.identity.group, 'normal');
@@ -761,20 +964,24 @@ $('clear-chat').onclick = () => {
 $('signout').onclick = () => post('/api/logout', {}).then(() => { $('settings').hidden = true; connect(); }).catch((e) => log('error: ' + e.message, true));
 
 // ---- tabs ----
-let currentTab = saved.get('mcx-tab', 'call');
+const TABS = ['voice', 'video', 'chat', 'logs'];
+let currentTab = saved.get('mcx-tab', 'voice');
+if (!TABS.includes(currentTab)) currentTab = 'voice'; // "call" before the voice and video tabs
 function showTab(name) {
   currentTab = name;
   saved.set('mcx-tab', name);
-  for (const t of ['call', 'chat', 'logs']) {
+  for (const t of TABS) {
     $('tab-' + t).hidden = t !== name;
     $('tab-btn-' + t).setAttribute('aria-selected', String(t === name));
   }
-  if (name !== 'call' && talking) pttUp();
+  if (name !== 'voice' && talking) pttUp();
   chatShown = '';
   if (state.session) renderChat();
 }
-for (const t of ['call', 'chat', 'logs']) $('tab-btn-' + t).onclick = () => showTab(t);
+for (const t of TABS) $('tab-btn-' + t).onclick = () => showTab(t);
 showTab(currentTab);
+renderRecents('mcptt');
+renderRecents('mcvideo');
 
 // ---- sign-in: a few seconds, while the engine signs in at IdMS and registers ----
 function gate(form, url, fields) {

@@ -62,6 +62,9 @@ configured:
   permission to transmit, its MCVideo pictures are the latest raw I420 picture written to the FIFO (created if
   missing) instead of the test pattern, encoded at that size (default 320 x 240, even, at most 1280 x 720) and rate
   (15, at most 30); black before the first. The status file's `mcvideo_live` counts the pictures taken.
+- `mcvideo.live_receive` `{send_host, send_port}` (for the [client page](../dispatcher)): each received MCVideo picture,
+  from an IDR picture on, goes in one UDP datagram to that port: a byte 1 for an IDR picture (else 0), the RTP
+  timestamp (4 bytes, big-endian), then the picture's NAL units in H.264 annex B.
 
 ### IMS AKA (3GPP access)
 

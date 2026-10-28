@@ -28,6 +28,7 @@ type engine struct {
 	fifo, status string
 	liveIn       string // the engine's media.live port: microphone PCM to it
 	liveOut      string // where the engine sends received PCM: this service
+	videoOut     string // where the engine sends received MCVideo pictures (mcvideo.live_receive); none without it
 	onLine       func(line string)
 
 	mu     sync.Mutex
@@ -58,6 +59,14 @@ func newEngine(path, base string, args []string) (*engine, error) {
 	}
 	e.liveIn = fmt.Sprintf("%s:%v", host("listen", "127.0.0.1"), live["port"])
 	e.liveOut = fmt.Sprintf("%s:%v", host("send_host", "127.0.0.1"), live["send_port"])
+	mcvideo, _ := cfg["mcvideo"].(map[string]any)
+	if receive, _ := mcvideo["live_receive"].(map[string]any); receive != nil {
+		sendHost, _ := receive["send_host"].(string)
+		if sendHost == "" {
+			sendHost = "127.0.0.1"
+		}
+		e.videoOut = fmt.Sprintf("%s:%v", sendHost, receive["send_port"])
+	}
 	return e, nil
 }
 
