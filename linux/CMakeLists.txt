@@ -53,6 +53,7 @@ add_executable(mcx-client
     src/client/mcvideo/location.cpp
     src/client/mcvideo/service.cpp
     src/client/mcvideo/session.cpp
+    src/client/mcvideo/multicast.cpp
     # mcdata
     src/client/mcdata/alert.cpp
     src/client/mcdata/dispatch.cpp

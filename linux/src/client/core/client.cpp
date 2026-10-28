@@ -655,6 +655,7 @@ void Client::run_once() {
   if (mcvideo_enabled()) receive_live_video();
   multicast_poll();
   mbms_poll();
+  mcvideo_multicast_poll();
   for (int index = 0; index < 32; index++) {
     auto datagram = audio_.receive();
     if (!datagram) break;

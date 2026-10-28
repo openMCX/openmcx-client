@@ -1343,7 +1343,31 @@ private:
 
   void mcvideo_control_packet(const Datagram &datagram);
 
-  void mcvideo_video_packet(const Datagram &datagram);
+  void mcvideo_video_packet(const Datagram &datagram, bool multicast = false);
+
+  // The MBMS subchannel a Map Group To Bearer message associated with a group (TS 24.380 clause 10.3.2, TS 24.581
+  // clause 10.3.2): the bearer's service and TMGI, and the subchannel.
+  struct MbmsMapping {
+    MbmsService service = MbmsService::Mcptt;
+    std::string tmgi;
+    MbmsSubchannel subchannel;
+  };
+
+  // ---- MCVideo media over an MBMS subchannel (mcvideo/multicast.cpp): TS 24.581 clauses 10.3.2 to 10.3.4 ----
+  // The subchannels mapped to MCVideo groups, and the one joined for the active group call (its video port), with the
+  // session, group and TMGI of its reports and the stream's last SSRC and sequence number.
+  std::map<std::string, MbmsMapping> mbms_video_mappings_;
+  std::unique_ptr<UdpSocket> mcvideo_multicast_socket_;
+  std::string mcvideo_multicast_session_, mcvideo_multicast_group_, mcvideo_multicast_tmgi_;
+  std::optional<std::pair<std::uint32_t, std::uint16_t>> mcvideo_last_rtp_;
+  [[nodiscard]] bool mcvideo_mappable() const;
+  void mcvideo_mbms_mapped(const std::string &tmgi, const SubchannelMessage &message);
+  void mcvideo_mbms_unmapped(const SubchannelMessage &message);
+  void mcvideo_multicast_join();
+  void mcvideo_multicast_leave(bool report);
+  void mcvideo_multicast_report(bool listening);
+  void mcvideo_multicast_poll();
+  [[nodiscard]] bool mcvideo_duplicate(std::span<const std::uint8_t> bytes, bool multicast);
 
   void mcvideo_tick(std::uint64_t now);
 
@@ -1929,11 +1953,6 @@ private:
   // (TS 24.380 clause 10.3.2), by group URI. While the call of a mapped group is active the client has joined its
   // subchannel (multicast_socket_) and keeps the SSRC and sequence number last received so that a packet that arrives
   // both by unicast and over the subchannel is kept once.
-  struct MbmsMapping {
-    MbmsService service = MbmsService::Mcptt;
-    std::string tmgi;
-    MbmsSubchannel subchannel;
-  };
   std::map<std::string, MbmsMapping> mbms_mappings_;
   std::unique_ptr<UdpSocket> multicast_socket_;
   std::optional<std::pair<std::uint32_t, std::uint16_t>> last_rtp_; // SSRC, sequence number

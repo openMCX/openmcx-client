@@ -228,6 +228,13 @@ void Client::mbms_report(MbmsService service, const std::string &psi, bool liste
                      found->second.accepted = listening && response.status_code < 300;
                  // TS 24.379 clause 14.2.3 NOTE 2: "not-listening" on the general purpose subchannel ends the
                  // listening to the bearer's MBMS subchannels; the joined one is left after the grace.
+                 if (!listening && mcvideo_multicast_socket_ &&
+                     std::ranges::find(tmgis, mcvideo_multicast_tmgi_) != tmgis.end()) {
+                   status_["mcvideo_multicast_listening"] = false;
+                   schedule_after(200, [this, session = mcvideo_multicast_session_] {
+                     if (session == mcvideo_multicast_session_) mcvideo_multicast_leave(false);
+                   });
+                 }
                  if (!listening && multicast_socket_ && std::ranges::find(tmgis, multicast_tmgi_) != tmgis.end()) {
                    status_["multicast_listening"] = false;
                    schedule_after(200, [this, session = multicast_session_] {

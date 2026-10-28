@@ -481,6 +481,13 @@ stateDiagram-v2
   stays unicast. `mcptt.multicast` (the former static profile) is refused. Status: `multicast_joined`,
   `multicast_listening`, `multicast_refused`, `multicast_received_packets`, `duplicates_dropped_multicast` and
   `duplicates_dropped_unicast`.
+- MCVideo media over an MBMS subchannel (`mcvideo/multicast.cpp`, TS 24.581 clause 10.3): as for MCPTT, a Map Group To
+  Bearer of an MCVideo bearer for the group of the active MCVideo group call joins the subchannel's video port and
+  reports "listening" for the session (`application/vnd.3gpp.mcvideo-mbms-usage-info+xml`, mcvideo-info); the video
+  from it is decoded as the unicast video (`mcvideo_video_packet`), the transmitting client drops its own, copies
+  are dropped by sequence number. The audio port is not joined. Status: `mcvideo_multicast_joined`,
+  `mcvideo_multicast_listening`, `mcvideo_multicast_received_packets`, `mcvideo_duplicates_dropped_multicast` and
+  `mcvideo_duplicates_dropped_unicast`.
 - MBMS usage (`mbms`, `core/mbms.cpp`; TS 24.379 clause 14.3 for MCPTT, TS 24.281 clause 16.2 for MCVideo). The
   `mbms` block is the emulated MBMS interface of the UE (no modem or radio): `service_areas` (the MBMS service area
   IDs, hexBinary, the UE is in) and `interface` (default `0.0.0.0`). Without it MBMS bearer announcements are

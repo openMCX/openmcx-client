@@ -42,7 +42,8 @@ static std::uint16_t rtp_sequence(std::span<const std::uint8_t> packet) {
 // late joiner hears it too. A mapping for the group of the active call joins its subchannel (TS 24.379 clause
 // 14.3.3.1 condition 1); a changed subchannel is joined anew.
 void Client::mbms_mapped(const std::string &tmgi, const SubchannelMessage &message) {
-  if (message.service != MbmsService::Mcptt || !message.subchannel) return;
+  if (message.service == MbmsService::Mcvideo) return mcvideo_mbms_mapped(tmgi, message);
+  if (!message.subchannel) return;
   MbmsMapping mapping{message.service, message.tmgis.empty() ? tmgi : message.tmgis.front(), *message.subchannel};
   auto &stored = mbms_mappings_[message.group];
   const bool changed = stored.tmgi != mapping.tmgi || stored.subchannel != mapping.subchannel;
@@ -56,7 +57,8 @@ void Client::mbms_mapped(const std::string &tmgi, const SubchannelMessage &messa
 // TS 24.380 clause 10.3.4: Unmap Group To Bearer removes the association; a client on that subchannel reports
 // "not-listening" for the session (TS 24.379 clause 14.3.3.2 step 1 g iii) and leaves it.
 void Client::mbms_unmapped(const SubchannelMessage &message) {
-  if (message.service != MbmsService::Mcptt || !mbms_mappings_.erase(message.group)) return;
+  if (message.service == MbmsService::Mcvideo) return mcvideo_mbms_unmapped(message);
+  if (!mbms_mappings_.erase(message.group)) return;
   event("mbms_unmapped", {{"group", message.group}});
   if (multicast_socket_ && multicast_group_ == message.group) multicast_leave(true);
 }
