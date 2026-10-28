@@ -3,8 +3,8 @@
 #
 
 """A small client of mcx-agent for the examples: tool calls over MCP on HTTP (an agent in another container), MCP on
-stdio, or the CLI, and the stream of pictures to POST /video. Standard library only; the echo bot carries its own
-copy of the same transports, to stay one file."""
+stdio, or the CLI, and the stream of pictures to POST /video. Standard library only; the chat bot carries its own
+copy of MCP over HTTP, to stay one file."""
 
 import http.client
 import json

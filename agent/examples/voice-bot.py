@@ -11,7 +11,7 @@ the heard WAV and returns the WAV to say.
 It reaches the daemon over MCP on HTTP from another container (--mcp-url, --token-file), MCP on stdio (--mcp) or
 the CLI (default). Standard library only.
 
-    voice-bot.py [--mcp | --mcp-url URL --token-file FILE] [--max-reply-s 10]
+    voice-bot.py [--mcp | --mcp-url URL --token-file FILE] [--max-reply-s 10] [--outbox DIR (with the CLI)]
 
 Talk bursts heard while it answers wait for the next turn; one heard while the floor is busy is answered once the
 floor is free (speak waits for it). A burst older than --stale-s seconds when its turn comes is skipped.
@@ -21,6 +21,7 @@ import argparse
 import base64
 import io
 import math
+import os
 import re
 import struct
 import sys
@@ -28,7 +29,7 @@ import time
 import wave
 from datetime import UTC, datetime
 
-from mcxagent import ToolError, connect, wait_ready
+from mcxagent import CliAgent, ToolError, connect, wait_ready
 
 RATE = 16000
 
@@ -59,6 +60,19 @@ def respond(item, heard_wav, max_seconds):
     return out.getvalue()
 
 
+def speak(agent, wav, outbox, seq):
+    """Say the WAV in the call. The CLI takes it from the outbox: inline, it would not fit on a command line."""
+    if not isinstance(agent, CliAgent):
+        return agent.call('speak', audio_base64=base64.b64encode(wav).decode(), timeout_s=30)
+    name = f'voice-bot-{seq}.wav'
+    with open(os.path.join(outbox, name), 'wb') as f:
+        f.write(wav)
+    try:
+        return agent.call('speak', file=name, timeout_s=30)
+    finally:
+        os.remove(os.path.join(outbox, name))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--mcp', action='store_true', help='use the MCP server on stdio instead of the CLI')
@@ -67,6 +81,8 @@ def main():
     parser.add_argument('--agent', default='mcx-agent', help='the mcx-agent program')
     parser.add_argument('--max-reply-s', type=float, default=10, help='the longest speech played back')
     parser.add_argument('--stale-s', type=float, default=30, help='skip a burst heard longer ago than this')
+    parser.add_argument('--outbox', default='/var/lib/mcx-agent/outbox',
+                        help="with the CLI: the daemon's outbox_dir, where the answer is written for speak")
     args = parser.parse_args()
     if args.mcp_url and not args.token_file:
         parser.error('--mcp-url needs --token-file')
@@ -94,7 +110,7 @@ def main():
             continue
         answer = respond(item, base64.b64decode(item['audio']['base64']), args.max_reply_s)
         try:
-            said = agent.call('speak', audio_base64=base64.b64encode(answer).decode(), timeout_s=30)
+            said = speak(agent, answer, args.outbox, item['seq'])
             print(f"spoke to {where}: {said['outcome']} ({said['duration_ms']} ms)", flush=True)
         except ToolError as error:
             print(f'speak: {error}', flush=True)  # e.g. no_call: the user hung up meanwhile

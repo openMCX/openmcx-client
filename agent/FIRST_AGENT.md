@@ -1,12 +1,12 @@
 # Build your first agent on mcx-agent
 
 This guide takes you from an MC system to an agent that field users chat with over MCData. The agent is
-[`examples/first-agent.py`](examples/first-agent.py): about a hundred lines of Python, standard library only. It
+[`examples/chat-bot.py`](examples/chat-bot.py): about a hundred lines of Python, standard library only. It
 answers `time`, `ping` and `help`. Once it runs, replace its `answer()` function with your own logic: a language
 model, a lookup in your systems, anything.
 
 ```
-field user (Android app, client page) ──MCData──▶ MC system ◀──SIP── mcx-agent ◀──MCP over HTTP── first-agent.py
+field user (Android app, client page) ──MCData──▶ MC system ◀──SIP── mcx-agent ◀──MCP over HTTP── chat-bot.py
                                                                      (mcx-client inside, the agent's MC identity)
 ```
 
@@ -85,7 +85,7 @@ a failure gives `{"ok": false, "code": ...}` (the codes are in [API.md](API.md#e
 
 ## 4. The agent, step by step
 
-[`examples/first-agent.py`](examples/first-agent.py) does what you just did by hand, in a loop.
+[`examples/chat-bot.py`](examples/chat-bot.py) does what you just did by hand, in a loop.
 
 **Connect.** MCP over HTTP is JSON-RPC: one POST to `/mcp` per request, with `Authorization: Bearer <token>`. The
 script sends `initialize`, then calls tools with `tools/call`; each result's `structuredContent` is the tool's JSON.
@@ -117,12 +117,12 @@ because delivery is at least once.
 On the `agents` network, with the token:
 
 ```bash
-docker run -d --name first-agent --network agents -v $PWD:/agent:ro -v first-agent:/data -w /data \
-  python:3.12-alpine python3 -u /agent/first-agent.py --url http://mcx-agent:8765/mcp --token-file /agent/token
-docker logs -f first-agent
+docker run -d --name chat-bot --network agents -v $PWD:/agent:ro -v chat-bot:/data -w /data \
+  python:3.12-alpine python3 -u /agent/chat-bot.py --url http://mcx-agent:8765/mcp --token-file /agent/token
+docker logs -f chat-bot
 ```
 
-(Copy `examples/first-agent.py` beside your token first, or mount it from the image: it is in
+(Copy `examples/chat-bot.py` beside your token first, or mount it from the image: it is in
 `/usr/local/share/mcx-agent/examples/`.) The log says `ready as <agent's MCData ID>, alias none`. Write `ping`,
 `time` and `hello` to the agent's MCData ID from a field user:
 
@@ -183,5 +183,5 @@ takes the alias as `--ops-agent sip:ops-bot.fa@example.org` (without `--ops-agen
 | `not_allowed` on a reply | The sender wrote more than `allow_senders_hours` ago |
 | `rate_limited` | `rate_per_recipient_per_minute`, `rate_per_minute` |
 
-[examples/compose](examples/compose) runs all of this from one `docker compose up`, with the echo bot
-([`examples/echo-bot.py`](examples/echo-bot.py), which also shows the CLI and MCP over stdio) as the agent.
+[examples/compose](examples/compose) runs all of this from one `docker compose up`, with this chat bot, and the
+voice and video bots beside it ([`examples/voice-bot.py`](examples/voice-bot.py) also shows the CLI and MCP over stdio).

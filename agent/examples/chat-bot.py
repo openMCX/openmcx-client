@@ -6,7 +6,7 @@
 """The agent of FIRST_AGENT.md: it answers "time", "ping" and "help" over MCData, through
 mcx-agent's MCP server over HTTP. Python standard library only.
 
-    first-agent.py --url http://mcx-agent:8765/mcp --token-file token [--cursor first-agent.cursor]
+    chat-bot.py --url http://mcx-agent:8765/mcp --token-file token [--cursor chat-bot.cursor]
 """
 
 import argparse
@@ -28,7 +28,7 @@ class Mcx:
             'initialize',
             protocolVersion='2025-06-18',
             capabilities={},
-            clientInfo={'name': 'first-agent', 'version': '1'},
+            clientInfo={'name': 'chat-bot', 'version': '1'},
         )
         self.post({'jsonrpc': '2.0', 'method': 'notifications/initialized'})
 
@@ -75,7 +75,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--url', required=True, help='e.g. http://mcx-agent:8765/mcp')
     parser.add_argument('--token-file', required=True)
-    parser.add_argument('--cursor', default='first-agent.cursor', help='keeps the seq of the last message handled')
+    parser.add_argument('--cursor', default='chat-bot.cursor', help='keeps the seq of the last message handled')
     args = parser.parse_args()
     with open(args.token_file) as f:
         mcx = Mcx(args.url, f.readline().strip())

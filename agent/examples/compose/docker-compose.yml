@@ -2,13 +2,14 @@
 # OpenMCX Licence Information : AGPL-3.0-or-later
 #
 
-# An MCData agent next to an MC system: mcx-agent (the plumbing, with mcx-client as its engine) and a third-party
-# agent in a container of its own that reaches it over MCP on HTTP, here the hello-world echo bot. With the profile
-# "ui", also the OpenMCX client page (the dispatcher service at /client/) as a user who chats with the agent.
+# Agents next to an MC system: mcx-agent (the plumbing, with mcx-client as its engine) and three third-party agents,
+# each in a container of its own that reaches it over MCP on HTTP: the chat bot (MCData), the voice bot (MCPTT) and
+# the video bot (MCVideo). With the profile "ui", also the OpenMCX client page (the dispatcher service at /client/)
+# as a user who chats, talks and watches.
 # See README.md in this directory.
 #
 #   openssl rand -hex 32 > secrets/mcx-agent-token
-#   docker compose up -d                  # mcx-agent and the echo bot
+#   docker compose up -d                  # mcx-agent and the three bots
 #   docker compose --profile ui up -d     # and the client page on http://127.0.0.1:8080/client/
 
 services:
@@ -30,21 +31,48 @@ services:
     networks: [mc, agents]
     restart: unless-stopped
 
-  # The third-party agent: nothing of OpenMCX inside, only the MCP endpoint and the token.
-  echo-bot:
+  # The third-party agents: nothing of OpenMCX inside, only the MCP endpoint and the token, and the agents network
+  # only: no route to the MC system. All three share the agent's MC identity, each on its own service.
+  chat-bot:                                    # MCData: answers time, ping and help
     image: python:3.12-alpine
-    command: ["python", "/bot/echo-bot.py", "--mcp-url", "http://mcx-agent:8765/mcp",
-              "--token-file", "/run/secrets/mcx_agent_token", "--cursor", "/state/echo.cursor"]
+    command: ["python", "-u", "/bots/chat-bot.py", "--url", "http://mcx-agent:8765/mcp",
+              "--token-file", "/run/secrets/mcx_agent_token", "--cursor", "/state/chat.cursor"]
     volumes:
-      - ../echo-bot.py:/bot/echo-bot.py:ro
+      - ../chat-bot.py:/bots/chat-bot.py:ro
       - bot-state:/state
     secrets:
       - mcx_agent_token
-    networks: [agents]                         # the agents network only: no route to the MC system
+    networks: [agents]
     depends_on: [mcx-agent]
     restart: unless-stopped
 
-  # A user of the MC system in the browser, who chats with the agent (another MC identity).
+  voice-bot:                                   # MCPTT: plays each talk burst back, in private and group calls
+    image: python:3.12-alpine
+    command: ["python", "-u", "/bots/voice-bot.py", "--mcp-url", "http://mcx-agent:8765/mcp",
+              "--token-file", "/run/secrets/mcx_agent_token"]
+    volumes:
+      - ../voice-bot.py:/bots/voice-bot.py:ro
+      - ../mcxagent.py:/bots/mcxagent.py:ro
+    secrets:
+      - mcx_agent_token
+    networks: [agents]
+    depends_on: [mcx-agent]
+    restart: unless-stopped
+
+  video-bot:                                   # MCVideo: shows a test card in every video call it is in
+    image: python:3.12-alpine
+    command: ["python", "-u", "/bots/video-bot.py", "--mcp-url", "http://mcx-agent:8765/mcp",
+              "--token-file", "/run/secrets/mcx_agent_token"]
+    volumes:
+      - ../video-bot.py:/bots/video-bot.py:ro
+      - ../mcxagent.py:/bots/mcxagent.py:ro
+    secrets:
+      - mcx_agent_token
+    networks: [agents]
+    depends_on: [mcx-agent]
+    restart: unless-stopped
+
+  # A user of the MC system in the browser, who chats, talks and watches (another MC identity).
   client:
     profiles: [ui]
     image: ${OPENMCX_DISPATCHER_IMAGE:-openmcx-dispatcher:0.1}

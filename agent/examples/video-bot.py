@@ -12,7 +12,7 @@ The pictures are a generated test card (moving bars and a clock), or with --sour
 /dev/video0, an RTSP stream rtsp://drone/live, a file), converted by ffmpeg to the size and rate the daemon takes.
 Standard library only (ffmpeg for --source).
 
-    video-feed.py --mcp-url http://mcx-agent:8765/mcp --token-file token [--source URL] [--seconds N]
+    video-bot.py --mcp-url http://mcx-agent:8765/mcp --token-file token [--source URL] [--seconds N]
 """
 
 import argparse
@@ -79,7 +79,7 @@ def main():
     parser.add_argument('--source', help='an ffmpeg input (camera, RTSP URL, file) instead of the test card')
     parser.add_argument('--seconds', type=float, default=0, help='stop after this long (0: never)')
     args = parser.parse_args()
-    agent = connect(args.mcp_url, args.token_file, name='video-feed')
+    agent = connect(args.mcp_url, args.token_file, name='video-bot')
     wait_ready(agent, 'mcvideo')
     feed = agent.call('video_status')['feed']
     width, height, rate = feed['width'], feed['height'], feed['frame_rate']

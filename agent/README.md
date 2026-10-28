@@ -108,7 +108,7 @@ With `video.receive` the agent also watches: the video others transmit in its ca
 `GET /video/received` (e.g. `curl -H "Authorization: Bearer $TOKEN" "http://mcx-agent:8765/video/received?seconds=10"
 > clip.h264`), for a model that describes it; `video_status.transmitter` says who sends.
 
-[`examples/video-feed.py`](examples/video-feed.py) is the hello-world camera agent: it streams a generated test card
+[`examples/video-bot.py`](examples/video-bot.py) is the hello-world camera agent: it streams a generated test card
 (or, with `--source`, any ffmpeg input) and transmits in every call it is in.
 
 ## Errors
@@ -182,7 +182,7 @@ docker run -d --name mcx-agent -v $PWD/agent-config:/etc/mcx-agent:ro -v mcx-age
 ```
 
 An agent in another container connects to MCP over HTTP (`mcp_http`): **[examples/compose](examples/compose)** is
-the template, with the echo bot as the agent on a network of its own. Claude Code, over HTTP or the container's
+the template, with the three example bots as the agents on a network of their own. Claude Code, over HTTP or the container's
 stdio:
 
 ```bash
@@ -192,15 +192,22 @@ claude mcp add mcx -- docker exec -i mcx-agent mcx-agent mcp
 
 The server speaks MCP (protocol versions 2024-11-05 to 2025-06-18) and offers tools only.
 
-## Hello world: the echo bot
+## Hello world: the example bots
 
-[`examples/echo-bot.py`](examples/echo-bot.py) (Python standard library only, in the image under
-`/usr/local/share/mcx-agent/examples/`) is the smallest complete agent: it waits for messages, marks each read, answers
-"Hello <sender>, you said: <text>" in the sender's conversation, and accepts files. It talks to the daemon through the
-CLI, MCP on stdio (`--mcp`), or MCP over HTTP (`--mcp-url`, `--token-file`), the ways an agent can integrate:
+In [`examples/`](examples) (Python standard library only, in the image under `/usr/local/share/mcx-agent/examples/`),
+one bot per service, each a complete agent:
+
+| Bot | Service | What it does | Transports |
+|---|---|---|---|
+| [`chat-bot.py`](examples/chat-bot.py) | MCData | Marks each message read and answers `time`, `ping` and `help` in the sender's conversation ([FIRST_AGENT.md](FIRST_AGENT.md) builds it step by step) | MCP over HTTP |
+| [`voice-bot.py`](examples/voice-bot.py) | MCPTT | Plays each talk burst back after a tone, in private calls to it and its groups' calls | CLI, MCP on stdio (`--mcp`), MCP over HTTP (`--mcp-url`, `--token-file`) |
+| [`video-bot.py`](examples/video-bot.py) | MCVideo | Shows a test card (or any ffmpeg input, `--source`) in every video call it is in | MCP over HTTP, and `POST /video` |
+
+The voice and video bots share [`mcxagent.py`](examples/mcxagent.py), a small client of the three transports. In the
+daemon's container, through the CLI:
 
 ```bash
-docker exec -d mcx-agent python3 /usr/local/share/mcx-agent/examples/echo-bot.py --cursor /var/lib/mcx-agent/echo.cursor
+docker exec -d mcx-agent python3 /usr/local/share/mcx-agent/examples/voice-bot.py --outbox /var/lib/mcx-agent/outbox
 ```
 
 ## Tests
