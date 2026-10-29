@@ -251,11 +251,14 @@ def main():
     check("DSP-07b file to the dispatcher accepted and saved from the browser", status == 200 and content == b"field note\n" * 20,
           f"{offer} {status} {len(content)}")
 
-    # DSP-08: only dispatcher actions pass, and only from the page.
-    refused = [lab.act(action="quit"), lab.act(action="sds", target=a_data, text="x\nquit"),
+    # DSP-08: only dispatcher actions pass, and only from the page. A multi-line SDS goes to the engine escaped (one
+    # command line), so its second line is text, not a command (DSP-08b: the engine is still registered).
+    refused = [lab.act(action="quit"), lab.act(action="sds", target=a_data, text="x\x1bquit"),
                lab.api("POST", "/api/command", {"action": "call"}, headers={"X-Dispatcher": ""})[0],
                lab.act(action="private", target="a b")]
-    check("DSP-08 unknown, multi-line and cross-site commands refused", refused == [400, 400, 403, 400], str(refused))
+    check("DSP-08 unknown, control-character and cross-site commands refused", refused == [400, 400, 403, 400],
+          str(refused))
+    check("DSP-08 multi-line SDS sent escaped", lab.act(action="sds", target=a_data, text="x\nquit") == 202)
     alive = lab.state().get("registered")
     check("DSP-08b engine still registered after the refused commands", alive)
 
