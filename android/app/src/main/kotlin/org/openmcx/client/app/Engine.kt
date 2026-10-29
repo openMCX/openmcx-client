@@ -163,9 +163,14 @@ object Engine {
         val settings = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
         val aliasKey = KNOWN_ALIASES + config.sip.publicUserId
         val known = settings.getString(aliasKey, null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
-        val c = McxClient(scope, config, SocketHttpClient(ssl, endpoints), SocketConnector(config.sip.transport, ssl, endpoints = endpoints),
+        // TS 24.482 annex A.2.1.2: with a home HTTP proxy, the CMS, GMS and MCData requests go through it; the IdMS's
+        // and the KMS's stay direct.
+        config.httpProxy?.let { log.add("HTTP proxy: $it") }
+        val c = McxClient(scope, config, SocketHttpClient(ssl, endpoints, proxy = config.httpProxy),
+            SocketConnector(config.sip.transport, ssl, endpoints = endpoints),
             log, browser = customTabBrowser(context.applicationContext), knownAliases = known,
-            idmsHttp = SocketHttpClient(provisioning.idmsSslContext(), endpoints))
+            idmsHttp = SocketHttpClient(provisioning.idmsSslContext(), endpoints),
+            kmsHttp = SocketHttpClient(ssl, endpoints))
         client = c
         scope.launch { c.aliases.collect { settings.edit().putString(aliasKey, it.available.joinToString("\n")).apply() } }
         val store = HistoryStore(context).also { history = it }
@@ -215,7 +220,7 @@ object Engine {
             }
             mcdata = service
             c.handlers += service
-            val files = FdService(scope, ClientFdPeer(c), it.fd, SocketFileHttpClient(ssl, endpoints, it.fd.transferTimeoutMs),
+            val files = FdService(scope, ClientFdPeer(c), it.fd, SocketFileHttpClient(ssl, endpoints, it.fd.transferTimeoutMs, config.httpProxy),
                 AttachmentFiles.fdDirectory(context), AttachmentStore(context))
             files.onOffer = { record ->
                 store.put(fileEntry(record))

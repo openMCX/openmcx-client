@@ -105,6 +105,8 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
                                                 "jwks_uri") if key in oauth}},
         "cms": ref["endpoints"]["cms"],
         "gms": ref["endpoints"]["gms"],
+        # TS 24.482 annex A.2.1.2: the home HTTP proxy of a forward-mode lab (--http-proxy-mode forward).
+        **({"http": ref["http"]} if "proxy" in ref.get("http", {}) else {}),
         "mcptt": {"user_id": mcptt["user_id"], "psi": mcptt["service_uri"], "groups": [mcptt["group_id"]],
                   "answer_mode": "automatic", "session_expires": 1800, "manual_answer_timeout": 20,
                   # The functional aliases this user may activate (TS 24.379 clause 9A), from the site's definitions.
@@ -265,6 +267,9 @@ def create(args) -> None:
                "--project", f"mcxandroid-{args.name}", "--adhoc", "--mcdata", "--image", args.server_image]
     if args.debug_sip:
         command.append("--debug-sip")
+    if args.http_proxy_mode == "forward":
+        # The clients send their HTTP through the home HTTP proxy in absolute-form (TS 24.482 annex A.2.1.2).
+        command += ["--http-proxy-mode", "forward", "--log-level", "debug"]
     if args.mcvideo:
         command.append("--mcvideo")
     if args.location:
@@ -798,6 +803,9 @@ def main() -> None:
     c.add_argument("--openmcx", default=str(ROOT.parents[1] / "openmcx-server"), help="the openmcx-server checkout (default: ../openmcx-server)")
     c.add_argument("--name", default="a1")
     c.add_argument("--debug-sip", action="store_true", help="clear SIP over TCP for capture-based checks")
+    c.add_argument("--http-proxy-mode", choices=("path", "forward"), default="path",
+                   help="forward: the clients name each server by its URI and send their HTTP requests (but the "
+                   "IdMS's and the KMS's) through the home HTTP proxy (TS 24.482 annex A.2.1.2)")
     c.add_argument("--server-image", default="openmcx-all:0.1",
                    help="the openMCX application image of the lab, with every program (openmcx-server tools/build-images, docs/BUILD.md)")
     c.add_argument("--redroid", default=REDROID)

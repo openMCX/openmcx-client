@@ -148,6 +148,12 @@ class McxClient(
     knownAliases: List<String> = emptyList(),
     /** HTTP to IdMS, which may trust more CAs than the other servers ([http] by default). */
     idmsHttp: HttpClient = http,
+    /**
+     * HTTP to the KMS: direct, also with a home HTTP proxy ([http] by default). TS 24.482 annex A.2.1.2
+     * sends every request but the IdMS's through the proxy, TS 33.180 §5.3.2 lets a KMS be used without
+     * it, and nothing configured tells the UE which applies: a spec conflict, today's direct connection stays.
+     */
+    private val kmsHttp: HttpClient = http,
 ) {
     val scope = CoroutineScope(parent.coroutineContext + SupervisorJob())
     private val _status = MutableStateFlow(ClientStatus())
@@ -178,7 +184,7 @@ class McxClient(
         val security = config.security ?: return
         val mcvideo = config.mcvideo ?: return
         val account = config.mcptt?.userId ?: mcvideo.userId
-        val keys = videoKeys ?: KeyClient(http, security.kmsUri, mcvideo.userId, account,
+        val keys = videoKeys ?: KeyClient(kmsHttp, security.kmsUri, mcvideo.userId, account,
             WireProfile(security.messageType, security.algorithm, security.keyParametersIei,
                 security.encryptedPayloadIei),
             security.mikeyClockSkewS) { event(it) }.also { videoKeys = it }

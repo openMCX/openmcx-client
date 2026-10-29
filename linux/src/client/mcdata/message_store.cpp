@@ -145,8 +145,9 @@ void Client::store_subscribe() {
   // not poll while it has expired (it looks again every second, as after a failed poll).
   store_channel_.poller = std::thread([this, running = store_channel_.running, url = store_channel_.channel_url,
                                        ca = cfg_.at("tls").at("ca_file").get<std::string>(), map = address_map(cfg_),
-                                       crls = crl_file(cfg_)] {
+                                       crls = crl_file(cfg_), proxy = http_proxy(cfg_)] {
     HttpClient client(ca, {}, map, HttpTrust::configured, crls);
+    client.use_proxy(proxy); // TS 24.482 annex A.2.1.2
     while (*running) {
       std::string token;
       {

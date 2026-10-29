@@ -289,6 +289,10 @@ Client::Client(Json cfg, bool disable_tls)
                  HttpTimeouts{cfg_.value("http", Json::object()).value("connect_timeout_ms", 2000L),
                               cfg_.value("http", Json::object()).value("timeout_ms", 15000L)},
                  address_map(cfg_), HttpTrust::configured_and_system, crl_file(cfg_)),
+      kms_http_(cfg_.at("tls").at("ca_file"),
+                HttpTimeouts{cfg_.value("http", Json::object()).value("connect_timeout_ms", 2000L),
+                             cfg_.value("http", Json::object()).value("timeout_ms", 15000L)},
+                address_map(cfg_), HttpTrust::configured, crl_file(cfg_)),
       control_(cfg_.at("control_fifo")),
       sip_(client_sip_config(cfg_, disable_tls),
            {[this](const SipMessage &message) { return incoming(message); },
@@ -326,6 +330,9 @@ Client::Client(Json cfg, bool disable_tls)
             {}}), // no ACK callback
       local_(local_media(cfg_)), audio_(cfg_.at("media").at("bind"), local_.audio_port),
       floor_(cfg_.at("media").at("bind"), local_.floor_port) {
+  // TS 24.482 annex A.2.1.2: with a home HTTP proxy, the requests of http_ (CMS, GMS, content server, message store,
+  // location) go through it; the IdMS's and the KMS's stay direct.
+  http_.use_proxy(http_proxy(cfg_));
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
   local_.protected_media = protected_media();
   if (cfg_.at("mcptt").contains("multicast"))
@@ -647,7 +654,7 @@ void Client::group_from_profile() {
 // the CSKs this client uploads at service authorisation.
 void Client::provision_keys() {
   const auto key_warning = [](std::string_view text) { event("key_warning", {{"reason", text}}); };
-  keys_ = std::make_unique<KeyClient>(http_, cfg_.at("security"), user());
+  keys_ = std::make_unique<KeyClient>(kms_http_, cfg_.at("security"), user());
   keys_->set_warning_handler(key_warning);
   keys_->provision(access_token());
   status_["key_management"] = {{"kms_uri", cfg_.at("security").at("kms_uri")},
@@ -655,7 +662,7 @@ void Client::provision_keys() {
                                {"own_kms", keys_->kms_uri_of(user())}};
   // TS 24.282 clause 6.6: the MCData client signs and receives PCKs as its MCData ID.
   if (mcdata_protected() || mcdata_needs_csk() || mcdata_authenticates()) {
-    mcdata_keys_ = std::make_unique<KeyClient>(http_, cfg_.at("security"), mcdata_user(), user());
+    mcdata_keys_ = std::make_unique<KeyClient>(kms_http_, cfg_.at("security"), mcdata_user(), user());
     mcdata_keys_->set_warning_handler(key_warning);
     mcdata_keys_->provision(access_token());
   }
@@ -667,7 +674,7 @@ void Client::provision_keys() {
   // TS 24.281 clause 4.7 with TS 33.180 clause 9.4: the MCVideo client keys as its MCVideo ID, and
   // uploads its own CSK for transmission control at MCVideo service authorisation.
   if (mcvideo_enabled()) {
-    mcvideo_keys_ = std::make_unique<KeyClient>(http_, cfg_.at("security"), mcvideo_user(), user());
+    mcvideo_keys_ = std::make_unique<KeyClient>(kms_http_, cfg_.at("security"), mcvideo_user(), user());
     mcvideo_keys_->set_warning_handler(key_warning);
     mcvideo_keys_->provision(access_token());
     auto [video_csk, video_upload] = mcvideo_keys_->make_csk(mcvideo_service_uri());
@@ -691,7 +698,7 @@ void Client::provision_identity_keys() {
   const auto security = cfg_.value("security", Json::object());
   if (security.value("kms_uri", std::string{}).empty()) return;
   try {
-    keys_ = std::make_unique<KeyClient>(http_, security, user());
+    keys_ = std::make_unique<KeyClient>(kms_http_, security, user());
     keys_->provision(access_token());
     status_["key_management"] = {{"kms_uri", security.at("kms_uri")},
                                  {"home_kms_uri", security.value("home_kms_uri", "")},

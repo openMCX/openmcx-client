@@ -8,6 +8,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.openmcx.client.client.ClientConfig
@@ -72,5 +73,31 @@ class ActivationTest {
         val signature = bits.copyOfRange(1 + bitsLenBytes + 1, bits.size)
         assertTrue(verifier.verify(signature))
         assertTrue(Csr.pem(der).startsWith("-----BEGIN CERTIFICATE REQUEST-----\n"))
+    }
+
+    /** A UE initial configuration (TS 24.484 §7.2.2.1) with [proxy] and [mutual] in <App-Server-Info>. */
+    private fun initial(proxy: String, mutual: String) = """<mcptt-UE-initial-configuration xmlns="urn:3gpp:mcptt:mcpttUEinitConfig:1.0" domain="mcx.test"><on-network>""" +
+        "<App-Server-Info><idms-auth-endpoint>https://idms/a</idms-auth-endpoint><idms-token-endpoint>https://idms/t</idms-token-endpoint>" +
+        "$proxy<gms>https://gms</gms><cms>https://cms</cms><kms>https://kms</kms><tls-tunnel-auth-method>$mutual" +
+        "</tls-tunnel-auth-method></App-Server-Info><GMS-URI>sip:mcptt@mcx.test</GMS-URI></on-network></mcptt-UE-initial-configuration>"
+
+    /**
+     * TS 24.484 §7.2.2.1 item 3 c), g): the package's <http-proxy> becomes http.proxy with one-way TLS tunnel
+     * authentication; an empty one names none; mutual authentication is refused.
+     */
+    @Test fun homeHttpProxyFromTheInitialConfiguration() {
+        val withProxy = Json.parseToJsonElement(pkg.toString().removeSuffix("}") +
+            ",\"ue_initial_configuration\":" + Json.encodeToString(kotlinx.serialization.json.JsonPrimitive(
+                initial("<http-proxy>https://proxy.mcx.test:8443</http-proxy>", "<mutual-authentication>false</mutual-authentication>"))) + "}").jsonObject
+        val config = ClientConfig.parse(Activation.bundle(withProxy, "secret-password", "erin", "sip-secret").toString())
+        assertEquals("https://proxy.mcx.test:8443", config.httpProxy)
+        assertEquals(null, ClientConfig.parse(Activation.bundle(pkg, "secret-password", "erin", "sip-secret").toString()).httpProxy)
+        assertEquals(null, Activation.initialHttpProxy(initial("<http-proxy/>", "<mutual-authentication>0</mutual-authentication>")))
+        assertThrows(IllegalArgumentException::class.java) {
+            Activation.initialHttpProxy(initial("<http-proxy>https://p</http-proxy>", "<mutual-authentication>true</mutual-authentication><x509>MII</x509>"))
+        }
+        assertThrows(IllegalArgumentException::class.java) {
+            Activation.initialHttpProxy(initial("", "<mutual-authentication>false</mutual-authentication>"))
+        }
     }
 }

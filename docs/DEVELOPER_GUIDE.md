@@ -98,6 +98,11 @@ clause 7.2.2.7 items 7 and 8, used as given, e.g. `https://http-proxy:8443/cms/x
 `<idms-auth-endpoint>` and `<idms-token-endpoint>` of TS 24.484 clause 7.2.2.7 item 4, and `oauth.jwks_uri`; each one
 left out comes from the discovery document of `oauth.issuer`), the SIP core (`sip.core_uri`, which must use `transport=tls`), the trusted core address
 (`trusted_core`) and the PSIs of the MC servers (`mcptt.service_uri`, `mcdata.service_uri`, `mcvideo.service_uri`).
+With a home HTTP proxy (`http.proxy`, an https URI with the proxy's FQDN and port, the `<http-proxy>` of TS 24.484
+clause 7.2.2.1 item 3, taken from the activation package), every HTTP request but the IdMS's and the KMS's goes over a
+TLS tunnel to the proxy, checked against the proxy's name, with the target URI in absolute-form (TS 24.482 annex
+A.2.1.2, RFC 9112 section 3.2.2); the endpoints then name the servers themselves (e.g. `https://cms:8443/xcap-root`).
+`http.tunnel_auth` is `one-way` only (see LIMITATIONS).
 The optional `tls.crl_file` (PEM) holds the CRLs every HTTPS request checks the server's certificate chain against
 (TS 33.180 clause 6.1.1, TS 33.310 clauses 6.1.1 and 6.1a): each certificate of the chain needs a current CRL of its
 issuer there, and a listed or uncovered certificate fails the request.

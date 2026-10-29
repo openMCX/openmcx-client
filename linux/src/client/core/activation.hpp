@@ -31,6 +31,11 @@ HttpAddressMap address_map(const nlohmann::json &cfg);
 // TS 33.180 clause 6.1.1 (TS 33.310 clause 6.1.1): the configuration's CRL file ("tls.crl_file", PEM) that every
 // HTTPS request checks the server's certificate chain against; empty without one.
 std::string crl_file(const nlohmann::json &cfg);
+// TS 24.482 annex A.2.1.2: the configuration's home HTTP proxy ("http.proxy", an https URI; empty without one) that
+// every HTTP request except the IdMS's goes through. "http.tunnel_auth" names the TLS tunnel authentication method:
+// "one-way" (the default; the proxy's certificate). Mutual authentication is refused: TS 24.484 clause 7.2.2.7 g)
+// gives no private key for the <x509> certificate and no identity for the <key> pre-shared key (spec gaps).
+std::string http_proxy(const nlohmann::json &cfg);
 // Whether a configuration was written by an activation.
 bool activated(const nlohmann::json &cfg);
 // The configuration completed from the activation URL's bootstrap package, the

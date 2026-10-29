@@ -41,20 +41,37 @@ fun interface Endpoints {
  * HTTP/1.1 over plain or TLS sockets (RFC 9112), one request per connection. Unlike
  * HttpURLConnection it can connect to a provisioned address while presenting and checking the
  * server's name. Redirects are not followed.
+ *
+ * With a home HTTP [proxy] (TS 24.482 annex A.2.1.2, an https URI with its FQDN and port), every
+ * request goes over a TLS tunnel to the proxy, checked against the proxy's FQDN and not against
+ * the target's ("shall not check the portion of dereferenced HTTP URL"), http targets too ("all
+ * HTTP messages via the TLS tunnel"); the request line carries the target URI in absolute-form
+ * (RFC 9112 section 3.2.2) and Host the target's authority. No CONNECT: the tunnel ends at the
+ * proxy.
  */
 class SocketHttpClient(
     private val ssl: SSLContext?,
     private val endpoints: Endpoints = Endpoints.DIRECT,
     private val timeoutMs: Int = 15_000,
+    private val proxy: String? = null,
 ) : HttpClient {
+    private val via: URI? = proxy?.let { proxyUri(it) }
+
     override suspend fun request(method: String, url: String, headers: Map<String, String>, body: ByteArray?): HttpResponse =
         withContext(Dispatchers.IO) {
             val uri = URI(url)
-            val https = uri.scheme.equals("https", true)
-            val host = uri.host ?: throw HttpError("no host in $url")
-            val port = if (uri.port > 0) uri.port else if (https) 443 else 80
-            val (address, targetPort) = endpoints.resolve(host, port)
-            val plain = Socket().apply { soTimeout = timeoutMs; connect(InetSocketAddress(address, targetPort), timeoutMs) }
+            val targetHttps = uri.scheme.equals("https", true)
+            val targetHost = uri.host ?: throw HttpError("no host in $url")
+            val targetPort = if (uri.port > 0) uri.port else if (targetHttps) 443 else 80
+            if (via != null && (!(targetHttps || uri.scheme.equals("http", true)) || uri.rawUserInfo != null || uri.rawFragment != null))
+                throw HttpError("not an http(s) URI for the proxy: $url")
+            // The connection: to the proxy when there is one, else to the target.
+            val connection = via ?: uri
+            val https = via != null || targetHttps
+            val host = connection.host
+            val port = if (connection.port > 0) connection.port else if (https) 443 else 80
+            val (address, mappedPort) = endpoints.resolve(host, port)
+            val plain = Socket().apply { soTimeout = timeoutMs; connect(InetSocketAddress(address, mappedPort), timeoutMs) }
             val socket = if (https) {
                 val context = ssl ?: SSLContext.getDefault()
                 (context.socketFactory.createSocket(plain, host, port, true) as SSLSocket).apply {
@@ -65,9 +82,10 @@ class SocketHttpClient(
             } else plain
             socket.use {
                 val path = (uri.rawPath?.ifEmpty { "/" } ?: "/") + (uri.rawQuery?.let { "?$it" } ?: "")
-                val defaultPort = if (https) 443 else 80
-                val head = StringBuilder("$method $path HTTP/1.1\r\n")
-                    .append("Host: ").append(if (port == defaultPort) host else "$host:$port").append("\r\n")
+                val target = if (via != null) "${uri.scheme.lowercase()}://${uri.rawAuthority}$path" else path
+                val defaultPort = if (targetHttps) 443 else 80
+                val head = StringBuilder("$method $target HTTP/1.1\r\n")
+                    .append("Host: ").append(if (targetPort == defaultPort) targetHost else "$targetHost:$targetPort").append("\r\n")
                     .append("Connection: close\r\n")
                 headers.forEach { (k, v) -> head.append(k).append(": ").append(v).append("\r\n") }
                 if (body != null) head.append("Content-Length: ").append(body.size).append("\r\n")
@@ -121,6 +139,19 @@ class SocketHttpClient(
             out.write(b)
         }
     }
+}
+
+/**
+ * TS 24.482 annex A.2.1.2, TS 24.484 clause 7.2.2.7 c): the home HTTP proxy's URI, https with
+ * its FQDN and an optional port (RFC 9110 section 4.2.2: 443 when absent), nothing else.
+ */
+internal fun proxyUri(value: String): URI {
+    val uri = runCatching { URI(value.removeSuffix("/")) }.getOrNull()
+    require(
+        uri != null && uri.scheme.equals("https", true) && uri.host != null && uri.rawUserInfo == null &&
+            uri.rawPath.isNullOrEmpty() && uri.rawQuery == null && uri.rawFragment == null,
+    ) { "HTTP proxy: an https URI with the proxy's FQDN and port only: $value" }
+    return uri!!
 }
 
 /**

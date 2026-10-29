@@ -43,6 +43,12 @@ data class ClientConfig(
     val endpoints: Map<String, String> = emptyMap(),
     /** The delays of the new attempts after a failed start-up or sign-in (`recovery`). */
     val recovery: Recovery = Recovery(),
+    /**
+     * TS 24.482 annex A.2.1.2: the home HTTP proxy (`http.proxy`, an https URI) every HTTP request but
+     * the IdMS's and the KMS's goes through; null: direct requests. `http.tunnel_auth` is "one-way"
+     * only (TS 24.484 §7.2.2.7 g) gives no private key and no pre-shared key identity for mutual).
+     */
+    val httpProxy: String? = null,
 ) {
     data class Sip(
         val publicUserId: String, val privateUserId: String, val password: String,
@@ -172,6 +178,12 @@ data class ClientConfig(
                         } ?: Mikey.DEFAULT_CLOCK_SKEW_S)
                 },
                 endpoints = (root["endpoints"] as? JsonObject)?.mapValues { it.value.jsonPrimitive.content } ?: emptyMap(),
+                httpProxy = (root["http"] as? JsonObject)?.let { http ->
+                    val method = http.optStr("tunnel_auth") ?: "one-way"
+                    if (method != "one-way")
+                        throw ConfigError("http.tunnel_auth \"$method\": only one-way TLS tunnel authentication is supported")
+                    http.optStr("proxy")?.ifEmpty { null }
+                },
                 recovery = (root["recovery"] as? JsonObject)?.let {
                     val first = it.count("first_retry_ms", DEFAULT_FIRST_RETRY_MS, 1)
                     Recovery(first, it.count("last_retry_ms", maxOf(first, DEFAULT_LAST_RETRY_MS), first))

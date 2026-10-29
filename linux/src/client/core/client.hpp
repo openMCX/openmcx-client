@@ -111,6 +111,10 @@ class Client {
   // example) with a certificate of a public CA (HttpTrust::configured_and_system); the other common services the
   // configured CA only.
   HttpClient idms_http_;
+  // KMS (key management client): direct, also with a home HTTP proxy. TS 24.482 annex A.2.1.2 sends every request but
+  // the IdMS's through the proxy, TS 33.180 clause 5.3.2 lets a KMS be used without it, and no configuration item
+  // tells the UE which applies: a spec conflict, so today's direct connection stays (Known limitations).
+  HttpClient kms_http_;
   Control control_;
   SipEngine sip_;
   std::unique_ptr<KeyClient> keys_;

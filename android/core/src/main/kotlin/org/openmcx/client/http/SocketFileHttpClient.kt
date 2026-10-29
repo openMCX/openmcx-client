@@ -14,9 +14,14 @@ import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
 import org.openmcx.client.security.TlsProfile
 
-/** Streaming HTTP/1.1 for FD, retaining the name checks and endpoint map of SocketHttpClient. */
+/**
+ * Streaming HTTP/1.1 for FD, retaining the name checks, endpoint map and home HTTP proxy (TS 24.482
+ * annex A.2.1.2: TLS tunnel to the proxy, absolute-form request target) of SocketHttpClient.
+ */
 class SocketFileHttpClient(private val ssl: SSLContext?, private val endpoints: Endpoints = Endpoints.DIRECT,
-                           private val timeoutMs: Int = 15_000) : FileHttpClient {
+                           private val timeoutMs: Int = 15_000, proxy: String? = null) : FileHttpClient {
+    private val via: URI? = proxy?.let { proxyUri(it) }
+
     override suspend fun upload(url: String, headers: Map<String, String>, info: ByteArray, file: File,
                                 filename: String, progress: (Long) -> Unit): HttpResponse {
         require(filename.isNotBlank() && filename.none { it.isISOControl() }) { "invalid filename" }
@@ -69,19 +74,22 @@ class SocketFileHttpClient(private val ssl: SSLContext?, private val endpoints: 
         coroutineScope {
             val uri = URI(url)
             require(uri.scheme in listOf("https", "http") && uri.host != null && uri.userInfo == null && uri.fragment == null) { "invalid file URL" }
-            val port = uri.port.takeIf { it > 0 } ?: if (uri.scheme == "https") 443 else 80
+            // The connection: to the proxy when there is one (always TLS), else to the file's server.
+            val connection = via ?: uri
+            val https = via != null || uri.scheme == "https"
+            val port = connection.port.takeIf { it > 0 } ?: if (https) 443 else 80
             val plain = Socket()
             // Cancellation resumes this sibling and closes blocking socket I/O immediately.
             val closer = launch(start = CoroutineStart.UNDISPATCHED) {
                 try { awaitCancellation() } finally { runCatching { plain.close() } }
             }
             try {
-                val (address, targetPort) = endpoints.resolve(uri.host, port)
+                val (address, targetPort) = endpoints.resolve(connection.host, port)
                 plain.soTimeout = timeoutMs
                 plain.connect(InetSocketAddress(address, targetPort), timeoutMs)
-                val socket = if (uri.scheme == "https") {
+                val socket = if (https) {
                     val context = ssl ?: SSLContext.getDefault()
-                    (context.socketFactory.createSocket(plain, uri.host, port, true) as SSLSocket).apply {
+                    (context.socketFactory.createSocket(plain, connection.host, port, true) as SSLSocket).apply {
                         soTimeout = timeoutMs
                         sslParameters = sslParameters.apply { endpointIdentificationAlgorithm = "HTTPS" }
                         TlsProfile.apply(this)
@@ -98,7 +106,8 @@ class SocketFileHttpClient(private val ssl: SSLContext?, private val endpoints: 
 
     private fun writeHead(out: OutputStream, uri: URI, method: String, headers: Map<String, String>, length: Long?) {
         val path = (uri.rawPath.takeUnless { it.isNullOrEmpty() } ?: "/") + (uri.rawQuery?.let { "?$it" } ?: "")
-        val head = StringBuilder("$method $path HTTP/1.1\r\nHost: ${uri.rawAuthority}\r\nConnection: close\r\n")
+        val target = if (via != null) "${uri.scheme}://${uri.rawAuthority}$path" else path
+        val head = StringBuilder("$method $target HTTP/1.1\r\nHost: ${uri.rawAuthority}\r\nConnection: close\r\n")
         headers.forEach { (name, value) ->
             require(name.matches(Regex("[A-Za-z0-9-]+")) && value.none { it == '\r' || it == '\n' }) { "invalid HTTP header" }
             require(!name.equals("Host", true) && !name.equals("Content-Length", true) && !name.equals("Transfer-Encoding", true)) { "reserved HTTP header" }

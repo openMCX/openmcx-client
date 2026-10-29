@@ -118,6 +118,19 @@ std::string crl_file(const nlohmann::json &cfg) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.482 annex A.2.1.2: the configuration's home HTTP proxy ("http.proxy") with its TLS tunnel authentication
+// method ("http.tunnel_auth", "one-way" only); empty without a proxy.
+std::string http_proxy(const nlohmann::json &cfg) {
+  const auto http = cfg.value("http", nlohmann::json::object());
+  const auto method = http.value("tunnel_auth", std::string("one-way"));
+  if (method != "one-way")
+    throw std::runtime_error("http.tunnel_auth \"" + method +
+                             "\": only one-way TLS tunnel authentication is supported (TS 24.484 clause 7.2.2.7 g) "
+                             "defines no private key for the certificate and no pre-shared key identity)");
+  return http.value("proxy", std::string());
+}
+
+//------------------------------------------------------------------------------
 // Helper: whether the configuration has been activated already.
 bool activated(const nlohmann::json &cfg) { return cfg.value("activated", false); }
 
@@ -198,6 +211,21 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
   // is the GMS subscription proxy PSI of the group document and group key subscriptions.
   if (boot.contains("ue_initial_configuration"))
     cfg["gms"]["subscription_psi"] = parse_initial_gms_uri(boot.at("ue_initial_configuration").get<std::string>());
+  // TS 24.484 clause 7.2.2.1 item 3 c), g) (TS 24.482 annex A.2.1.2): the home HTTP proxy and its TLS tunnel
+  // authentication; an empty <http-proxy> names none (direct requests). Mutual authentication is refused at activation.
+  if (boot.contains("ue_initial_configuration")) {
+    const auto proxy = parse_initial_http_proxy(boot.at("ue_initial_configuration").get<std::string>());
+    if (proxy.mutual)
+      throw std::runtime_error("activation: the UE initial configuration asks for mutual TLS tunnel authentication "
+                               "with the HTTP proxy, which this client does not support");
+    if (!proxy.uri.empty()) {
+      cfg["http"]["proxy"] = proxy.uri;
+      cfg["http"]["tunnel_auth"] = "one-way";
+    } else if (cfg.contains("http")) {
+      cfg["http"].erase("proxy");
+      cfg["http"].erase("tunnel_auth");
+    }
+  }
 
   // Sign in (TS 24.482 clause 6.2.1), with the scope of the services of the package, and ask the Credential Service
   // for the SIP credential.

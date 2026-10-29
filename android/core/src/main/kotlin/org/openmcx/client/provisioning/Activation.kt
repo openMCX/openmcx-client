@@ -19,6 +19,9 @@ import org.openmcx.client.http.HttpClient
 import org.openmcx.client.http.SocketHttpClient
 import org.openmcx.client.idms.IdmsClient
 import org.openmcx.client.idms.IdmsEndpoints
+import org.openmcx.client.body.Xml
+import org.openmcx.client.body.child
+import org.openmcx.client.body.childText
 import org.openmcx.client.security.Pem
 import java.net.URI
 import java.net.URL
@@ -146,8 +149,36 @@ object Activation {
                 }
             }
             pkg["address_map"]?.jsonObject?.let { put("endpoints", it) }
+            // TS 24.484 §7.2.2.1 item 3 c), g) (TS 24.482 annex A.2.1.2): the home HTTP proxy of the UE initial
+            // configuration, with one-way TLS tunnel authentication; an empty <http-proxy> names none.
+            pkg.opt("ue_initial_configuration")?.let(::initialHttpProxy)?.let { proxy ->
+                putJsonObject("http") { put("proxy", proxy); put("tunnel_auth", "one-way") }
+            }
         }
     }
+
+    /**
+     * TS 24.484 §7.2.2.1 item 3: <on-network>/<App-Server-Info>/<http-proxy>, null when empty. Mutual TLS
+     * tunnel authentication (<mutual-authentication> "true") is refused: §7.2.2.7 g) gives no private key for the
+     * <x509> certificate and no identity for the <key> pre-shared key.
+     */
+    internal fun initialHttpProxy(xml: String): String? {
+        val root = Xml.parse(xml)
+        require(root.localName == "mcptt-UE-initial-configuration" && root.namespaceURI == INITIAL_NS) {
+            "wrong UE initial configuration root"
+        }
+        val server = root.child("on-network")?.child("App-Server-Info")
+            ?: throw IllegalArgumentException("the UE initial configuration has no App-Server-Info")
+        val mutual = server.child("tls-tunnel-auth-method")?.childText("mutual-authentication")
+        require(mutual in listOf("true", "false", "1", "0")) { "invalid mutual-authentication" }
+        require(mutual == "false" || mutual == "0") {
+            "the UE initial configuration asks for mutual TLS tunnel authentication with the HTTP proxy, which this client does not support"
+        }
+        val proxy = server.child("http-proxy") ?: throw IllegalArgumentException("the UE initial configuration has no http-proxy")
+        return proxy.textContent.trim().ifEmpty { null }
+    }
+
+    private const val INITIAL_NS = "urn:3gpp:mcptt:mcpttUEinitConfig:1.0"
 
     private fun JsonObject.str(key: String) = opt(key) ?: throw IllegalArgumentException("the package has no $key")
     private fun JsonObject.opt(key: String) = (this[key] as? JsonPrimitive)?.content
