@@ -140,6 +140,22 @@ func TestAliasLostAndRegained(t *testing.T) {
 	}
 }
 
+// The earlier refusal stays in the engine's state until the new activation's outcome lands: it is not this
+// activation's outcome.
+func TestAliasActivatedAfterRefusalLandsLate(t *testing.T) {
+	d := startDaemon(t, map[string]any{"alias_outcome": "refused"}, func(c *config) { c.AliasRetryS = 1 })
+	if st := call(t, d, "status", nil); st["can_send"] != false {
+		t.Fatalf("status %v", st)
+	}
+	_ = d.eng.command("fake-alias-delay 1500")
+	_ = d.eng.command("fake-alias-outcome activated")
+	if err := d.changed.waitUntil(10*time.Second, func() (bool, error) {
+		return call(t, d, "status", nil)["can_send"] == true, nil
+	}); err != nil {
+		t.Fatalf("the alias active in the engine is not used: %v", call(t, d, "status", nil))
+	}
+}
+
 func TestSendMessage(t *testing.T) {
 	d := startDaemon(t, nil, nil)
 	out := call(t, d, "send_message", map[string]any{"to": alice, "text": "  unit 4 report position  ", "wait": "delivered"})

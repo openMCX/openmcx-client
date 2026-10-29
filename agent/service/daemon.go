@@ -316,6 +316,10 @@ func (d *daemon) keepAlias(done chan struct{}) {
 				d.setAlias("lost: taken over or deactivated")
 			}
 			d.activateAlias()
+		} else if d.aliasState() != "active" {
+			// The engine holds the alias although the last activation did not see it land (its outcome came
+			// after the wait): present it.
+			d.useAlias()
 		}
 		select {
 		case <-done:
@@ -332,12 +336,18 @@ func (d *daemon) keepAlias(done chan struct{}) {
 func (d *daemon) activateAlias() {
 	alias := d.cfg.Alias
 	d.setAlias("activating")
+	// The outcome of an earlier request (e.g. a refusal) stays in the state until the engine sends this one: only a
+	// result with another PUBLISH id than the one before the command is this request's.
+	earlier := faPublishID(d.latest())
 	outcome, err := d.transact("mcdata-fa activate "+alias, 30*time.Second,
 		func(_ []engineEvent, st map[string]any) (any, bool, error) {
 			if d.aliasActive(st) {
 				return "activated", true, nil
 			}
 			last, _ := st["mcdata_fa_last_result"].(map[string]any)
+			if id := faPublishID(st); id == "" || id == earlier {
+				return nil, false, nil
+			}
 			outcomes, _ := last["outcomes"].(map[string]any)
 			if o := str(outcomes[alias]); o != "" && o != "activated" {
 				return o, true, nil
@@ -347,16 +357,36 @@ func (d *daemon) activateAlias() {
 	if err == nil && outcome != "activated" {
 		err = fmt.Errorf("%v", outcome)
 	}
-	if err == nil {
-		err = d.fire("mcdata-fa use " + alias)
-	}
 	if err != nil {
+		log.Printf("alias %s: %v", alias, err)
+		d.setAlias("not active: " + err.Error())
+		return
+	}
+	d.useAlias()
+}
+
+// useAlias presents the active alias on what the agent sends.
+func (d *daemon) useAlias() {
+	alias := d.cfg.Alias
+	if err := d.fire("mcdata-fa use " + alias); err != nil {
 		log.Printf("alias %s: %v", alias, err)
 		d.setAlias("not active: " + err.Error())
 		return
 	}
 	log.Printf("alias %s active", alias)
 	d.setAlias("active")
+}
+
+// faPublishID is the PUBLISH id of the engine's last functional alias request, empty without one.
+func faPublishID(st map[string]any) string {
+	last, _ := st["mcdata_fa_last_result"].(map[string]any)
+	return str(last["p_id_fa"])
+}
+
+func (d *daemon) aliasState() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.alias
 }
 
 // aliasActive reports whether the engine holds the agent's alias active: another user may

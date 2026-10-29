@@ -9,6 +9,7 @@
 #   fake-forget <message ID>                       the engine drops a received message (its last 50)
 #   fake-alias-outcome <outcome>                   the outcome of the next alias activations
 #   fake-lose-alias <alias>                        another user takes the alias over
+#   fake-alias-delay <ms>                          the outcome of the next alias activations lands that much later
 #   fake-speech <from> <ms>                        a talk burst is heard (media.speech_dir)
 #   fake-floor-owner <MCPTT ID>|none               another user has the floor, or nobody
 #   fake-revoke                                    the floor is revoked while the agent talks
@@ -212,10 +213,19 @@ def command(line):
         event("mcvideo_call_ended", reason="hangup")
     elif verb == "mcdata-fa" and rest[0] == "activate":
         outcome = fake.get("alias_outcome", "activated")
-        st["mcdata_fa_last_result"] = {"action": "activate", "aliases": rest[1:], "status": 200,
-                                       "outcomes": {a: outcome for a in rest[1:]}}
-        if outcome == "activated":
-            st["mcdata_functional_aliases"] += rest[1:]
+
+        def land():
+            with lock:
+                st["mcdata_fa_last_result"] = {"action": "activate", "aliases": rest[1:], "status": 200,
+                                               "p_id_fa": uuid.uuid4().hex, "outcomes": {a: outcome for a in rest[1:]}}
+                if outcome == "activated":
+                    st["mcdata_functional_aliases"] += rest[1:]
+                save_locked()
+
+        if fake.get("alias_delay_ms"):
+            threading.Timer(fake["alias_delay_ms"] / 1000, land).start()
+        else:
+            land()
         event("mcdata_functional_alias_requested", action="activate", aliases=rest[1:])
     elif verb == "mcdata-fa" and rest[0] == "use":
         pass
@@ -293,6 +303,8 @@ def command(line):
         st["mcdata_notifications"].append({"from": "x", "group": "", "type": 3, "message_id": rest[0]})
     elif verb == "fake-alias-outcome":
         fake["alias_outcome"] = rest[0]
+    elif verb == "fake-alias-delay":
+        fake["alias_delay_ms"] = int(rest[0])
     elif verb == "fake-lose-alias":
         st["mcdata_functional_aliases"] = [a for a in st["mcdata_functional_aliases"] if a != rest[0]]
     elif verb == "fake-forget":
