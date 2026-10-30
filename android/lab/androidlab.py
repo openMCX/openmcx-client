@@ -334,7 +334,8 @@ def create(args) -> None:
         keycloak_at_host(fixture, compose, hostip, args.idms_port)
     fd = None
     if args.fd_max_bytes:
-        users = [json.loads((generated / f"{r}.json").read_text())["mcdata"]["user_id"] for r in phones]
+        # The phones' users, or the redroid clients' in a lab without phones.
+        users = [json.loads((generated / f"{r}.json").read_text())["mcdata"]["user_id"] for r in (phones or CLIENTS)]
         fd = file_distribution(fixture, compose, users, args.fd_max_bytes, args.fd_availability_seconds, args.file_transfer_timeout_ms)
         site = json.loads((generated / "site.json").read_text())
     for role in CLIENTS:
