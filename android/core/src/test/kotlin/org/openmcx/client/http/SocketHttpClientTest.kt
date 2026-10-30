@@ -8,62 +8,11 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.net.ServerSocket
-import java.security.KeyStore
-import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
-import javax.net.ssl.TrustManagerFactory
 import kotlin.concurrent.thread
 import org.junit.Assert.assertThrows
 
 class SocketHttpClientTest {
-    /** A one-shot server answering with [response]; returns its port and a holder for the request it saw. */
-    private fun serve(response: String): Pair<Int, StringBuilder> {
-        val server = ServerSocket(0)
-        val seen = StringBuilder()
-        thread(isDaemon = true) {
-            server.use { s -> s.accept().use { c ->
-                val input = c.getInputStream().bufferedReader()
-                while (true) { val l = input.readLine() ?: break; if (l.isEmpty()) break; seen.append(l).append('\n') }
-                c.getOutputStream().write(response.toByteArray())
-            } }
-        }
-        return server.localPort to seen
-    }
-
-    @Test
-    fun contentLengthAndHostName() = runBlocking {
-        val (port, seen) = serve("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
-        // The name "idms" does not resolve here: the endpoint map sends the connection to loopback.
-        val client = SocketHttpClient(null, Endpoints.of(mapOf("idms:8443" to "127.0.0.1:$port")))
-        val r = client.get("http://idms:8443/.well-known/openid-configuration", mapOf("Authorization" to "Bearer t"))
-        assertEquals(200, r.status)
-        assertEquals("{}", r.text)
-        assertEquals("application/json", r.header("content-type"))
-        assertEquals("GET /.well-known/openid-configuration HTTP/1.1", seen.lines().first())
-        assertEquals(true, seen.contains("Host: idms:8443\n") && seen.contains("Authorization: Bearer t\n"))
-    }
-
-    @Test
-    fun chunkedBodyAndRedirectNotFollowed() = runBlocking {
-        val (port, _) = serve("HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:8900/callback?code=c\r\nTransfer-Encoding: chunked\r\n\r\n" +
-            "4\r\nWiki\r\n5;x=1\r\npedia\r\n0\r\n\r\n")
-        val r = SocketHttpClient(null).postForm("http://127.0.0.1:$port/login", mapOf("a" to "b"))
-        assertEquals(302, r.status)
-        assertEquals("http://127.0.0.1:8900/callback?code=c", r.header("Location"))
-        assertEquals("Wikipedia", r.text)
-    }
-
-    /** A TLS context with the test-only key and certificate of proxy.test (test resource), trusting that certificate. */
-    private fun proxyTls(): SSLContext {
-        val store = KeyStore.getInstance("PKCS12").apply {
-            SocketHttpClientTest::class.java.classLoader!!.getResourceAsStream("proxy-test.p12").use { load(it, "test".toCharArray()) }
-        }
-        return SSLContext.getInstance("TLS").apply {
-            init(KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply { init(store, "test".toCharArray()) }.keyManagers,
-                TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(store) }.trustManagers, null)
-        }
-    }
-
     /** A one-shot TLS server (proxy.test's certificate) answering with [response]; its port and the request it saw. */
     private fun serveTls(context: SSLContext, response: String): Pair<Int, StringBuilder> {
         val server = context.serverSocketFactory.createServerSocket(0)
@@ -76,6 +25,43 @@ class SocketHttpClientTest {
             } } }
         }
         return server.localPort to seen
+    }
+
+    private fun proxyTls() = TestTls.context
+
+    @Test
+    fun contentLengthAndHostName() = runBlocking {
+        val (port, seen) = serveTls(proxyTls(), "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
+        // The name does not resolve here: the endpoint map sends the connection to loopback.
+        val client = SocketHttpClient(proxyTls(), TestTls.endpoints(port))
+        val r = client.get("https://proxy.test:$port/.well-known/openid-configuration", mapOf("Authorization" to "Bearer t"))
+        assertEquals(200, r.status)
+        assertEquals("{}", r.text)
+        assertEquals("application/json", r.header("content-type"))
+        assertEquals("GET /.well-known/openid-configuration HTTP/1.1", seen.lines().first())
+        assertEquals(true, seen.contains("Host: proxy.test:$port\n") && seen.contains("Authorization: Bearer t\n"))
+    }
+
+    @Test
+    fun chunkedBodyAndRedirectNotFollowed() = runBlocking {
+        val (port, _) = serveTls(proxyTls(), "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:8900/callback?code=c\r\nTransfer-Encoding: chunked\r\n\r\n" +
+            "4\r\nWiki\r\n5;x=1\r\npedia\r\n0\r\n\r\n")
+        val r = SocketHttpClient(proxyTls(), TestTls.endpoints(port)).postForm("https://proxy.test:$port/login", mapOf("a" to "b"))
+        assertEquals(302, r.status)
+        assertEquals("http://127.0.0.1:8900/callback?code=c", r.header("Location"))
+        assertEquals("Wikipedia", r.text)
+    }
+
+    /** TS 33.180 clauses 6.1.1 and 6.1.2: without a home HTTP proxy, an http target is refused before any connection. */
+    @Test
+    fun plainHttpRefusedWithoutProxy() {
+        ServerSocket(0).use { server ->
+            for (client in listOf(SocketHttpClient(null, Endpoints.of(mapOf("cms.test:80" to "127.0.0.1:${server.localPort}"))),
+                UrlConnectionHttpClient(null)))
+                assertThrows(HttpError::class.java) { runBlocking { client.get("http://cms.test/xcap-root/a") } }
+            server.soTimeout = 200
+            assertThrows(java.net.SocketTimeoutException::class.java) { server.accept() }
+        }
     }
 
     /**

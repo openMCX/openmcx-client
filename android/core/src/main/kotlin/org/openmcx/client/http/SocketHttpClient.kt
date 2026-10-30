@@ -38,7 +38,7 @@ fun interface Endpoints {
 }
 
 /**
- * HTTP/1.1 over plain or TLS sockets (RFC 9112), one request per connection. Unlike
+ * HTTP/1.1 over TLS sockets (RFC 9112), one request per connection. Unlike
  * HttpURLConnection it can connect to a provisioned address while presenting and checking the
  * server's name. Redirects are not followed.
  *
@@ -47,7 +47,8 @@ fun interface Endpoints {
  * the target's ("shall not check the portion of dereferenced HTTP URL"), http targets too ("all
  * HTTP messages via the TLS tunnel"); the request line carries the target URI in absolute-form
  * (RFC 9112 section 3.2.2) and Host the target's authority. No CONNECT: the tunnel ends at the
- * proxy.
+ * proxy. Without a proxy only https targets are reached (TS 33.180 clause 6.1.1: one of the TLS authentication
+ * mechanisms "shall be performed" between the UE's HTTP client and the HTTP server endpoint; clause 6.1.2).
  */
 class SocketHttpClient(
     private val ssl: SSLContext?,
@@ -65,6 +66,7 @@ class SocketHttpClient(
             val targetPort = if (uri.port > 0) uri.port else if (targetHttps) 443 else 80
             if (via != null && (!(targetHttps || uri.scheme.equals("http", true)) || uri.rawUserInfo != null || uri.rawFragment != null))
                 throw HttpError("not an http(s) URI for the proxy: $url")
+            if (via == null && !targetHttps) throw HttpError("not an https URI (TS 33.180 clause 6.1.1): $url")
             // The connection: to the proxy when there is one, else to the target.
             val connection = via ?: uri
             val https = via != null || targetHttps

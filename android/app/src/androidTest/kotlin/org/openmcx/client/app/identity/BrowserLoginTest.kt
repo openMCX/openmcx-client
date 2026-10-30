@@ -19,9 +19,13 @@ import org.openmcx.client.security.b64urlEncode
 import java.net.ServerSocket
 import java.net.URLDecoder
 import java.security.KeyPairGenerator
+import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.Signature
 import java.security.interfaces.RSAPublicKey
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.TrustManagerFactory
 import kotlin.concurrent.thread
 
 /**
@@ -30,12 +34,26 @@ import kotlin.concurrent.thread
  * (RFC 8252 §7.3), and the app exchanges the code. The IdMS here is a minimal one in the test
  * process, standing in for an IdMS with a login page (the OpenMCX lab IdMS has none). Its
  * authorization endpoint answers as for a user who has already signed in.
+ *
+ * The app's own requests (discovery, token, JWKS) go over TLS (TS 33.180 §6.1.1), to the test certificate of
+ * 127.0.0.1 (androidTest asset idms-test.p12), which the app's HTTP client is given as its trust. The authorization
+ * endpoint is only opened by the browser, which cannot be given that trust: it is served on a second, plain loopback
+ * listener.
  */
 @RunWith(AndroidJUnit4::class)
 class BrowserLoginTest {
     private val context = InstrumentationRegistry.getInstrumentation().targetContext
-    private val server = ServerSocket(0, 10, java.net.InetAddress.getByName("127.0.0.1"))
-    private val issuer = "http://127.0.0.1:${server.localPort}"
+    private val tls = SSLContext.getInstance("TLS").apply {
+        val store = KeyStore.getInstance("PKCS12").apply {
+            InstrumentationRegistry.getInstrumentation().context.assets.open("idms-test.p12").use { load(it, "test".toCharArray()) }
+        }
+        init(KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply { init(store, "test".toCharArray()) }.keyManagers,
+            TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm()).apply { init(store) }.trustManagers, null)
+    }
+    private val localhost = java.net.InetAddress.getByName("127.0.0.1")
+    private val server = tls.serverSocketFactory.createServerSocket(0, 10, localhost)
+    private val browserSide = ServerSocket(0, 10, localhost)
+    private val issuer = "https://127.0.0.1:${server.localPort}"
     private val keys = KeyPairGenerator.getInstance("RSA").apply { initialize(2048) }.generateKeyPair()
     private var authorize: Map<String, String> = emptyMap()
     @Volatile private var browserVisited = false
@@ -50,9 +68,10 @@ class BrowserLoginTest {
         return "$input.${b64urlEncode(sig)}"
     }
 
-    private val idms = thread(isDaemon = true) {
-        while (!server.isClosed) {
-            val socket = runCatching { server.accept() }.getOrNull() ?: break
+    /** [browser]: the browser's listener, with the authorization endpoint only; else the app's, without it. */
+    private fun serve(listener: ServerSocket, browser: Boolean) = thread(isDaemon = true) {
+        while (!listener.isClosed) {
+            val socket = runCatching { listener.accept() }.getOrNull() ?: break
             // One thread per connection: browsers open speculative connections that never send a request.
             thread(isDaemon = true) { try { socket.soTimeout = 30_000; socket.use {
                 val input = it.getInputStream().bufferedReader()
@@ -66,9 +85,9 @@ class BrowserLoginTest {
                 val body = CharArray(length).also { buf -> var n = 0; while (n < length) n += input.read(buf, n, length - n) }.concatToString()
                 val target = request.split(' ')[1]
                 val path = target.substringBefore('?')
-                val (status, headers, content) = when (path) {
+                val (status, headers, content) = when (if (browser == (path == "/authorize")) path else "") {
                     "/.well-known/openid-configuration" -> Triple("200 OK", "Content-Type: application/json\r\n",
-                        """{"issuer":"$issuer","authorization_endpoint":"$issuer/authorize","token_endpoint":"$issuer/token","jwks_uri":"$issuer/jwks"}""")
+                        """{"issuer":"$issuer","authorization_endpoint":"http://127.0.0.1:${browserSide.localPort}/authorize","token_endpoint":"$issuer/token","jwks_uri":"$issuer/jwks"}""")
                     "/authorize" -> {
                         browserVisited = true
                         authorize = query(target.substringAfter('?'))
@@ -98,13 +117,16 @@ class BrowserLoginTest {
         }
     }
 
+    private val idms = serve(server, browser = false)
+    private val browserIdms = serve(browserSide, browser = true)
+
     @After
-    fun stop() = server.close()
+    fun stop() { server.close(); browserSide.close() }
 
     @Test
     fun signsInThroughTheBrowserAndLoopbackRedirect() = runBlocking {
         LoopbackRedirect("http://127.0.0.1:0/callback").use { loopback ->
-            val client = IdmsClient(UrlConnectionHttpClient(null), issuer, "mcx-lab-client", loopback.boundUri)
+            val client = IdmsClient(UrlConnectionHttpClient(tls), issuer, "mcx-lab-client", loopback.boundUri)
             val request = client.authorizationUrl()
             customTabBrowser(context).open(request.url)
             val redirect = withTimeout(60_000) { loopback.await() }

@@ -6,7 +6,6 @@ package org.openmcx.client.http
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.net.HttpURLConnection
 import java.net.URI
 import java.net.URLEncoder
 import javax.net.ssl.HttpsURLConnection
@@ -37,13 +36,18 @@ interface HttpClient {
     }
 }
 
-/** [HttpClient] on HttpURLConnection, with the TLS client certificate and trust of [ssl]. */
+/**
+ * [HttpClient] on HttpURLConnection, with the TLS client certificate and trust of [ssl]; https targets only (TS 33.180
+ * clauses 6.1.1 and 6.1.2).
+ */
 class UrlConnectionHttpClient(private val ssl: SSLContext?, private val timeoutMs: Int = 15_000) : HttpClient {
     override suspend fun request(method: String, url: String, headers: Map<String, String>, body: ByteArray?): HttpResponse =
         withContext(Dispatchers.IO) {
-            val connection = URI(url).toURL().openConnection() as HttpURLConnection
+            val uri = URI(url)
+            if (!uri.scheme.equals("https", true)) throw HttpError("not an https URI (TS 33.180 clause 6.1.1): $url")
+            val connection = uri.toURL().openConnection() as HttpsURLConnection
             try {
-                if (connection is HttpsURLConnection) connection.sslSocketFactory = TlsProfile.socketFactory(ssl ?: SSLContext.getDefault())
+                connection.sslSocketFactory = TlsProfile.socketFactory(ssl ?: SSLContext.getDefault())
                 connection.instanceFollowRedirects = false
                 connection.requestMethod = method
                 connection.connectTimeout = timeoutMs

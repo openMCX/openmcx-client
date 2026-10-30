@@ -74,6 +74,9 @@ class SocketFileHttpClient(private val ssl: SSLContext?, private val endpoints: 
         coroutineScope {
             val uri = URI(url)
             require(uri.scheme in listOf("https", "http") && uri.host != null && uri.userInfo == null && uri.fragment == null) { "invalid file URL" }
+            // TS 33.180 clauses 6.1.1 and 6.1.2: TLS to the HTTP server endpoint; an http file URL only inside the
+            // TLS tunnel to the home HTTP proxy.
+            if (via == null && uri.scheme != "https") throw HttpError("not an https URI (TS 33.180 clause 6.1.1): $url")
             // The connection: to the proxy when there is one (always TLS), else to the file's server.
             val connection = via ?: uri
             val https = via != null || uri.scheme == "https"

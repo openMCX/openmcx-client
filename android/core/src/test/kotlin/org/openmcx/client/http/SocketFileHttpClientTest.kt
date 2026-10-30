@@ -8,7 +8,6 @@ import kotlinx.coroutines.*
 import org.junit.Assert.*
 import org.junit.Test
 import java.io.*
-import java.net.ServerSocket
 import java.net.Socket
 import java.security.MessageDigest
 import java.util.concurrent.CompletableFuture
@@ -33,13 +32,15 @@ class SocketFileHttpClientTest {
         return values
     }
     private fun peer(handler: (Socket) -> Unit): Pair<Int, CompletableFuture<Unit>> {
-        val server = ServerSocket(0); val done = CompletableFuture<Unit>()
+        val server = TestTls.context.serverSocketFactory.createServerSocket(0); val done = CompletableFuture<Unit>()
         thread(isDaemon = true) {
             try { server.use { it.accept().use(handler) }; done.complete(Unit) }
             catch (e: Throwable) { done.completeExceptionally(e) }
         }
         return server.localPort to done
     }
+    /** The client of the TLS peer on [port] (proxy.test's certificate). */
+    private fun client(port: Int) = SocketFileHttpClient(TestTls.context, TestTls.endpoints(port))
     private fun response(text: String) = peer { socket ->
         headers(socket.getInputStream()); socket.getOutputStream().write(text.toByteArray())
     }
@@ -72,7 +73,7 @@ class SocketFileHttpClientTest {
                 socket.getOutputStream().write("HTTP/1.1 201 Created\r\nLocation: https://proxy/content/f\r\nContent-Length: 0\r\n\r\n".toByteArray())
             }
             var progress = 0L
-            val result = SocketFileHttpClient(null).upload("http://127.0.0.1:$port/files", mapOf("Authorization" to "Bearer test"),
+            val result = client(port).upload("https://proxy.test:$port/files", mapOf("Authorization" to "Bearer test"),
                 "<info/>".toByteArray(), file, "binary.bin") { progress = it }
             assertEquals(201, result.status); assertEquals(file.length(), progress)
             val request = seen.get(5, TimeUnit.SECONDS)
@@ -93,7 +94,7 @@ class SocketFileHttpClientTest {
             val file = File.createTempFile("fd-download", ".bin")
             try {
                 var progress = 0L
-                val r = SocketFileHttpClient(null).download("http://127.0.0.1:$port/f", emptyMap(), file, 9) { progress = it }
+                val r = client(port).download("https://proxy.test:$port/f", emptyMap(), file, 9) { progress = it }
                 assertEquals(200, r.status); assertEquals("Wikipedia", file.readText()); assertEquals(9L, progress)
                 assertEquals(0, r.body.size); done.get(5, TimeUnit.SECONDS)
             } finally { file.delete() }
@@ -107,7 +108,7 @@ class SocketFileHttpClientTest {
             val file = File.createTempFile("fd-partial", ".bin")
             try {
                 assertThrows(HttpError::class.java) { runBlocking {
-                    SocketFileHttpClient(null).download("http://127.0.0.1:$port/f", emptyMap(), file, 9) {}
+                    client(port).download("https://proxy.test:$port/f", emptyMap(), file, 9) {}
                 } }
                 assertFalse(file.exists())
             } finally { file.delete() }
@@ -120,10 +121,12 @@ class SocketFileHttpClientTest {
             headers(socket.getInputStream())
             socket.getOutputStream().write("HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\na".toByteArray())
             socket.getOutputStream().flush(); started.countDown()
-            assertEquals(-1, socket.getInputStream().read())
+            // The client's close ends the TLS stream, with or without close_notify.
+            val end = runCatching { socket.getInputStream().read() }
+            assertTrue(end.isFailure || end.getOrNull() == -1)
         }
         val file = File.createTempFile("fd-cancel", ".bin")
-        val job = launch(Dispatchers.IO) { SocketFileHttpClient(null, timeoutMs = 20_000).download("http://127.0.0.1:$port/f", emptyMap(), file, null) {} }
+        val job = launch(Dispatchers.IO) { SocketFileHttpClient(TestTls.context, TestTls.endpoints(port), timeoutMs = 20_000).download("https://proxy.test:$port/f", emptyMap(), file, null) {} }
         assertTrue(started.await(5, TimeUnit.SECONDS))
         withTimeout(3000) { job.cancelAndJoin() }
         assertFalse(file.exists()); done.get(3, TimeUnit.SECONDS)
@@ -132,15 +135,25 @@ class SocketFileHttpClientTest {
     @Test fun redirectDoesNotForwardAuthorization() = runBlocking<Unit> {
         val (port, done) = response("HTTP/1.1 302 Found\r\nLocation: https://untrusted.invalid/f\r\nContent-Length: 0\r\n\r\n")
         val file = File.createTempFile("fd-redirect", ".bin")
-        val result = SocketFileHttpClient(null).download("http://127.0.0.1:$port/f", mapOf("Authorization" to "Bearer test"), file, 99) {}
+        val result = client(port).download("https://proxy.test:$port/f", mapOf("Authorization" to "Bearer test"), file, 99) {}
         assertEquals(302, result.status); assertFalse(file.exists()); done.get(3, TimeUnit.SECONDS)
+    }
+
+    /** TS 33.180 clauses 6.1.1 and 6.1.2: without a home HTTP proxy, an http file URL is refused. */
+    @Test fun plainHttpRefusedWithoutProxy() {
+        val file = File.createTempFile("fd-plain", ".bin")
+        try {
+            assertThrows(HttpError::class.java) { runBlocking {
+                SocketFileHttpClient(null).download("http://127.0.0.1:9/f", emptyMap(), file, 9) {}
+            } }
+        } finally { file.delete() }
     }
 
     @Test fun filenameCannotInjectHeaders() {
         val file = File.createTempFile("fd-name", ".bin")
         try {
             assertThrows(IllegalArgumentException::class.java) { runBlocking {
-                SocketFileHttpClient(null).upload("http://127.0.0.1:9/files", emptyMap(), ByteArray(0), file, "a\r\nInjected: yes") {}
+                SocketFileHttpClient(null).upload("https://127.0.0.1:9/files", emptyMap(), ByteArray(0), file, "a\r\nInjected: yes") {}
             } }
         } finally { file.delete() }
     }
