@@ -381,6 +381,11 @@ def create(args) -> None:
             # Docker's embedded resolver, so the lab's service names resolve.
             "command": ["androidboot.redroid_gpu_mode=guest", "androidboot.redroid_net_ndns=1",
                         "androidboot.redroid_net_dns1=127.0.0.11", "androidboot.use_memfd=true"],
+            # The host's power supplies stay hidden: through them Android 12 (redroid) requests a low-battery
+            # shutdown at every boot (sys.shutdown.requested "0battery") that a container never completes, which
+            # leaves a dim layer over the screen and holds an app start for up to a minute. Without a power supply
+            # the health service reports no battery and nothing is requested.
+            "tmpfs": ["/sys/class/power_supply"],
         }
     if phones:
         # The phone reaches the servers through the host: publish the SIP core, the IdMS, the HTTP
@@ -527,6 +532,8 @@ class Device:
             if self.redroid or ":" in self.serial:
                 subprocess.run([str(ADB), "connect", self.serial], capture_output=True, text=True)
             if self.adb("shell", "getprop", "sys.boot_completed", check=False).strip() == "1":
+                if self.redroid and (reason := self.adb("shell", "getprop", "sys.shutdown.requested", check=False).strip()):
+                    raise RuntimeError(f"{self.client}: Android requested a shutdown at boot ({reason})")
                 return
             time.sleep(2)
         raise RuntimeError(f"{self.client}: Android did not boot within {timeout:.0f} s")
