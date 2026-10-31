@@ -80,9 +80,9 @@ class BrowserLoginTest {
                         if (form["code"] != "c1" || challenge != authorize["code_challenge"]) Triple("400 Bad Request", "", "")
                         else {
                             val now = System.currentTimeMillis() / 1000
-                            val id = jwt("""{"iss":"$issuer","aud":"mcx-lab-client","exp":${now + 3600},"nonce":"${authorize["nonce"]}",""" +
+                            val id = jwt("""{"iss":"$issuer","sub":"alice","aud":"mcx-lab-client","iat":$now,"exp":${now + 3600},"nonce":"${authorize["nonce"]}",""" +
                                 """"mcptt_id":"sip:alice.mcptt@mcx.test","client_id":"urn:uuid:1"}""")
-                            Triple("200 OK", "Content-Type: application/json\r\n", """{"access_token":"AT","expires_in":3600,"id_token":"$id"}""")
+                            Triple("200 OK", "Content-Type: application/json\r\n", """{"access_token":"AT","token_type":"Bearer","expires_in":3600,"id_token":"$id"}""")
                         }
                     }
                     "/jwks" -> {
