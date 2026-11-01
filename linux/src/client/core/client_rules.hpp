@@ -7,7 +7,7 @@
 // Warning header field, when a refused refresh token is dropped, the scope of the authentication request, the percent-decoding of an XCAP selector, the
 // escaped text of a control command, the groups of an MCPTT user profile, and the retry delay of a refused initial service authorisation, the
 // implicit floor request word of a call command, the SDP answer parameters kept, the GMK of a call's group, the end of an MCData PCK context and
-// the floor control streams of a call that go on under a new CSK, and the reg event timing, version and contact rules.
+// the floor control streams of a call that go on under a new CSK, and the reg event timing and contact rules.
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 24.380 V19.2.0 (Rel-19),
 // TS 33.180 V19.4.0 (Rel-19), TS 24.484 V19.6.0 (Rel-19), TS 24.229 V19.7.0 (Rel-19), RFC 3261, RFC 3680, RFC 3903,
@@ -426,14 +426,6 @@ inline std::set<std::uint32_t> call_floor_ssrcs(std::uint32_t local, std::option
 inline std::uint64_t refresh_delay_s(std::uint64_t duration, std::uint64_t remaining) {
   const std::uint64_t before = duration > 1200 ? 600 : duration / 2;
   return remaining > before ? remaining - before : 0;
-}
-
-//------------------------------------------------------------------------------
-// RFC 3680 section 5.2: "If the value in the document is less than the local version, the document is discarded
-// without processing"; one equal to it is the same document again. Whether a received reginfo document is processed:
-// the first one of a subscription always.
-inline bool reginfo_version_new(std::optional<std::uint32_t> local, std::uint32_t received) {
-  return !local || received > *local;
 }
 
 //------------------------------------------------------------------------------

@@ -170,14 +170,15 @@ SipResponse Client::reg_notify(const SipMessage &message) {
       response.status_code = 400;
       return response;
     }
-    if (!client_rules::reginfo_version_new(reg_version_, info.version)) {
+    if (reg_version_ && compare_reginfo_version(info.version, *reg_version_) <= 0) {
       // RFC 3680 section 5.2: "If the value in the document is less than the local version, the document is discarded
-      // without processing" (one equal to it is the same document again).
+      // without processing" (one equal to it is the same document again); the first one of a subscription always
+      // counts. Versions are compared on any number of digits (section 5.4: xs:nonNegativeInteger).
       event("reg_notify_discarded", {{"version", info.version}, {"local_version", *reg_version_}});
     } else {
       // RFC 3680 section 5.2: "If the version is more than one higher than the local version, the subscriber SHOULD
       // generate a refresh request to trigger a full state notification".
-      const bool gap = reg_version_ && info.version > *reg_version_ + 1;
+      const bool gap = reg_version_ && reginfo_version_gap(*reg_version_, info.version);
       reg_version_ = info.version;
       schedule([this, info = std::move(info), gap, generation] {
         if (generation != reg_generation_) return;

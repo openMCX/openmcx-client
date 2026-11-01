@@ -1397,7 +1397,7 @@ private:
   // The reg event subscription's dialog, its document version (RFC 3680 section 5.2), the generation of the
   // subscription and the tokens of its refresh and of a reregistration asked by the network.
   std::string reg_subscription_;
-  std::optional<std::uint32_t> reg_version_;
+  std::optional<std::string> reg_version_;
   std::uint64_t reg_generation_ = 0, reg_refresh_token_ = 0, reg_reregister_token_ = 0, reg_valid_until_ = 0;
   // The initial subscription's duration and whether a NOTIFY gave the expiry since the last SUBSCRIBE (TS 24.229
   // clause 5.1.1.3); the duration of the previous registration (clause 5.1.1.4.1), from its 200 (OK).

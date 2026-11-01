@@ -352,20 +352,16 @@ void test_call_floor_ssrcs() {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.229 clauses 5.1.1.3, 5.1.1.4.1 and 5.1.1.5A, RFC 3680 section 5.2.
+// TS 24.229 clauses 5.1.1.3, 5.1.1.4.1 and 5.1.1.5A.
 void test_reg_event_rules() {
   using mcx::client_rules::contact_address;
   using mcx::client_rules::refresh_delay_s;
-  using mcx::client_rules::reginfo_version_new;
   check(refresh_delay_s(600000, 600000) == 599400, "a long subscription is refreshed 600 s before its expiry");
   check(refresh_delay_s(3600, 1000) == 400, "a long subscription keeps the 600 s rule late in its life");
   check(refresh_delay_s(1200, 1200) == 600, "a subscription of 1200 s is refreshed at half time");
   check(refresh_delay_s(60, 60) == 30, "a short registration is refreshed at half time");
   check(refresh_delay_s(3600, 120) == 0, "a shortened long registration is renewed at once");
   check(refresh_delay_s(600, 120) == 0, "a shortened short registration past half time is renewed at once");
-  check(reginfo_version_new(std::nullopt, 7), "the first document of a subscription is processed");
-  check(reginfo_version_new(1, 2) && !reginfo_version_new(2, 2) && !reginfo_version_new(3, 2),
-        "older and repeated documents are discarded");
   check(contact_address("<sip:alice@192.0.2.1:5064;transport=tcp>;expires=60") == "alice@192.0.2.1:5064",
         "contact address from a Contact value");
   check(contact_address("sips:alice@192.0.2.1:5061;ob") == "alice@192.0.2.1:5061", "contact address of a SIPS URI");
