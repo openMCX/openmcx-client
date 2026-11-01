@@ -152,6 +152,8 @@ data class UiState(
     val signedOut: String? = null,
     /** The user logged off the MC services (TS 24.379 §7.2.1A step 4), until they log on again. */
     val loggedOff: Boolean = false,
+    /** The network ended this phone's registration (unregistered, rejected or deactivated), until it is back. */
+    val networkDeregistered: String? = null,
     val groups: List<GroupItem> = emptyList(),
     val privateTargets: List<String> = emptyList(),
     val call: CallItem? = null,
@@ -440,6 +442,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         phase = status.phase,
         registered = status.registered,
         loggedOff = status.loggedOff,
+        networkDeregistered = status.networkDeregistered,
         offlineSince = status.offlineSince,
         nextRetryAt = status.nextRetryAt,
         signedOut = status.signedOut,

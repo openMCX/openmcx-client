@@ -196,6 +196,7 @@ object Tags {
     const val SERVER_ADDRESS = "server-address"
     const val SERVER_ADDRESS_EDIT = "server-address-edit"
     const val LOG_OFF = "log-off"
+    const val LOG_OFF_STATE = "log-off-state"
     const val LOG_OFF_CONFIRM = "log-off-confirm"
     const val LOGGED_OFF_STATUS = "logged-off-status"
     const val OFFLINE_BANNER = "offline-banner"
@@ -446,7 +447,11 @@ private fun LogOff(state: UiState, actions: UiActions) {
     )
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
-            Text(if (state.loggedOff) "Logged off" else "Logged on as ${state.user}")
+            Text(when {
+                state.loggedOff && state.networkDeregistered != null -> "Deregistered by the network"
+                state.loggedOff -> "Logged off"
+                else -> "Logged on as ${state.user}"
+            }, modifier = Modifier.testTag(Tags.LOG_OFF_STATE))
             Text(if (state.loggedOff) "No calls or messages reach this phone until you log on." else
                 "Log off before another device takes this account: the servers accept one device at a time.",
                 style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)

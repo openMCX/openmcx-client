@@ -22,6 +22,7 @@ import org.openmcx.client.body.McService
 import org.openmcx.client.body.Multipart
 import org.openmcx.client.body.Part
 import org.openmcx.client.body.PocSettings
+import org.openmcx.client.body.RegInfo
 import org.openmcx.client.body.SimpleFilter
 import org.openmcx.client.documents.DocumentClient
 import org.openmcx.client.documents.GroupDocument
@@ -51,6 +52,7 @@ import org.openmcx.client.sip.SipRequest
 import org.openmcx.client.sip.SipResponse
 import org.openmcx.client.sip.UaIdentity
 import org.openmcx.client.sip.UserAgent
+import java.math.BigInteger
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
@@ -128,6 +130,13 @@ data class ClientStatus(
     val signedOut: String? = null,
     /** TS 33.180 §5.1.1: registered, but the user is not (yet) signed in, so no MC service is authorised. */
     val limitedService: Boolean = false,
+    /**
+     * TS 24.229 §5.1.1.7: the network deregistered this client ("unregistered", "rejected" or "deactivated" in its reg
+     * event), until it registers again ("deactivated": at once) or the user logs on.
+     */
+    val networkDeregistered: String? = null,
+    /** TS 24.229 §5.1.1.3: the client holds its reg event subscription. */
+    val regSubscribed: Boolean = false,
 )
 
 /**
@@ -204,7 +213,7 @@ class McxClient(
     @Volatile var serviceResourcePriorities: Map<String, Map<String, String>> = emptyMap()
     /** The signalling protection (confidentiality, integrity) of each service configuration document read. */
     @Volatile var serviceProtection: Map<String, Pair<Boolean, Boolean>> = emptyMap()
-        private set
+        internal set // set by the module's tests too
     /** The MCPTT service configuration has a floor request queue (TS 24.484 §8.4.2.1 `<floor-control-queue>`). */
     @Volatile var mcpttFloorQueue: Boolean = false
         private set
@@ -214,6 +223,30 @@ class McxClient(
 
     val handlers = mutableListOf<ServiceHandler>()
     private var registration: SipRequest? = null
+    /** The duration granted to the last registration, seconds (TS 24.229 §5.1.1.4.1 "the previous registration was for"). */
+    @Volatile private var registrationDurationS = 0L
+
+    /**
+     * The reg event subscription (TS 24.229 §5.1.1.3): its SUBSCRIBE (by Call-ID: a NOTIFY may beat the 2xx), its dialog
+     * once answered, the version of the last document (RFC 3680 §5.2), the duration of the initial subscription, whether
+     * a NOTIFY gave the expiry since the last SUBSCRIBE, and until when it is valid (seconds since the epoch).
+     */
+    private class RegSubscription(val request: SipRequest) {
+        @Volatile var dialog: Dialog? = null
+        @Volatile var version: BigInteger? = null
+        @Volatile var durationS = 0L
+        @Volatile var notifyExpiry = false
+        @Volatile var validUntil = 0L
+        @Volatile var refreshToken = 0L
+        @Volatile var refresh: Job? = null
+    }
+    @Volatile private var regSubscription: RegSubscription? = null
+    /**
+     * The Call-IDs of subscriptions this client ended (its unsubscribes at log-off, those dropped at a network
+     * deregistration): their final NOTIFY is answered 200 (RFC 6665 §4.1.2.3: the subscription lasts until it). Cleared
+     * with each new flow, which no NOTIFY of them reaches.
+     */
+    private val endingSubscriptions: MutableSet<String> = ConcurrentHashMap.newKeySet()
     private val subscriptions = ConcurrentHashMap<McService, Subscription>()
     private val authEtags = ConcurrentHashMap<McService, String>()
     private val affiliationEtags = ConcurrentHashMap<McService, String>()
@@ -342,11 +375,15 @@ class McxClient(
         setPhase("logging-off")
         handlers.forEach { runCatching { it.logOff() } }
         for (channel in aliasChannels.values) {
+            channel.request?.callId?.let(endingSubscriptions::add)
             channel.dialog?.let { unsubscribe(it, channel.service, FunctionalAliasPidf.CONTENT_TYPE) }
             channel.dialog = null; channel.request = null
             channel.state.update { it.copy(subscribed = false) }
         }
-        for ((service, subscription) in subscriptions) subscription.dialog?.let { unsubscribe(it, service, Affiliation.CONTENT_TYPE) }
+        for ((service, subscription) in subscriptions) {
+            endingSubscriptions.add(subscription.request.callId)
+            subscription.dialog?.let { unsubscribe(it, service, Affiliation.CONTENT_TYPE) }
+        }
         subscriptions.clear()
         val answers = mutableMapOf<String, Int>()
         for (service in listOf(McService.MCVIDEO, McService.MCDATA, McService.MCPTT)) {
@@ -366,6 +403,8 @@ class McxClient(
         // The SIP de-REGISTER ends likewise with its final response or at Timer F (RFC 3261 §17.1.2.2).
         val deregistered = runCatching { deregister() }.getOrNull()
         event("SIP de-REGISTER (REGISTER Expires 0): $deregistered")
+        // TS 24.229 §5.1.1.6.1: with the de-registration the reg event subscription is "considered cancelled".
+        regCancel()
         registration = null
         _status.update { it.copy(loggedOff = true, logOff = answers, deregistered = deregistered, registered = false,
             offlineSince = null, nextRetryAt = null) }
@@ -378,7 +417,7 @@ class McxClient(
     fun logOn() {
         if (!loggedOff) throw IllegalStateException("not logged off")
         loggedOff = false
-        _status.update { it.copy(loggedOff = false, logOff = emptyMap(), deregistered = null) }
+        _status.update { it.copy(loggedOff = false, logOff = emptyMap(), deregistered = null, networkDeregistered = null) }
         event("logging on")
         logOnRequest.complete(Unit)
     }
@@ -458,8 +497,12 @@ class McxClient(
         ua.flow = flow
         flow.start()
         event("flow ${connection.localHost}:${connection.localPort} → ${config.sip.proxy}:${config.sip.proxyPort} ${connection.transport}")
-        nextRegisterAt = clock() + register(config.sip.registerExpires) * 2 / 3
-        _status.update { it.copy(registered = true) }
+        endingSubscriptions.clear()
+        register(config.sip.registerExpires)
+        _status.update { it.copy(registered = true, networkDeregistered = null) }
+        // TS 24.229 §5.1.1.3: subscribe "upon receipt of a 2xx response to the initial registration" (and on a new
+        // flow, whose registration binds a new flow, the subscription of the old one being gone); not awaited.
+        scope.launch { regSubscribe() }
         authenticateUser(flow)
         config.mcptt?.let { bringUp(McService.MCPTT, it.groups.ifEmpty { profile?.groups ?: emptyList() }) }
         config.mcdata?.let { bringUp(McService.MCDATA, it.groups) }
@@ -472,12 +515,13 @@ class McxClient(
         housekeeping?.cancel()
         _status.update { it.copy(registered = false) }
         setPhase("flow-lost")
+        regCancel()
         subscriptions.clear()
         handlers.forEach { runCatching { it.flowLost() } }
         throw IllegalStateException("flow closed: ${cause?.message ?: "locally"}")
     }
 
-    /** When the registration is next refreshed (at two thirds of the time granted), seconds since the epoch. */
+    /** When the registration is next refreshed (TS 24.229 §5.1.1.4.1, set by [register]), seconds since the epoch. */
     @Volatile private var nextRegisterAt = 0L
 
     /**
@@ -525,7 +569,7 @@ class McxClient(
             delay(5_000)
             if (clock() < nextRegisterAt) continue
             try {
-                nextRegisterAt = clock() + register(config.sip.registerExpires) * 2 / 3
+                register(config.sip.registerExpires)
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -648,6 +692,11 @@ class McxClient(
         val mine = response.headers.values("Contact").map(NameAddr::parse)
             .firstOrNull { it.params["+sip.instance"]?.contains(config.clientId) == true }
         val granted = mine?.params?.get("expires")?.toIntOrNull() ?: response.headers["Expires"]?.toIntOrNull() ?: expires
+        // TS 24.229 §5.1.1.4.1: reregister "600 seconds before the expiration time if the previous registration was for
+        // greater than 1200 seconds, or when half of the time has expired if the previous registration was for 1200
+        // seconds or less" (keepRegistered and housekeeping poll the time every 5 s).
+        registrationDurationS = granted.toLong()
+        nextRegisterAt = clock() + RegEventRules.refreshDelayS(granted.toLong(), granted.toLong())
         event("registered for $granted s")
         return granted
     }
@@ -659,6 +708,249 @@ class McxClient(
             callId = previous.callId, cseq = (ua.lastSent[previous.callId] ?: previous).cseq.number + 1)
         request.headers.add("Contact", registerContact()).add("Expires", "0")
         return ua.send(request).status
+    }
+
+    // The reg event package (TS 24.229 §5.1.1.3, §5.1.1.5A, §5.1.1.7; RFC 3680, RFC 6665).
+
+    /** The event package of a request: its Event header field without parameters. */
+    private fun eventPackage(request: SipRequest) = request.headers["Event"]?.substringBefore(';')?.trim()
+
+    /**
+     * TS 24.229 §5.1.1.3: subscribe to the reg event package for the default public user identity (this client has
+     * one): Request-URI, From and To that identity, Event "reg", Expires 600 000 (items a) to e)), and Accept
+     * application/reginfo+xml (RFC 3680 §4.3). A refused SUBSCRIBE leaves the client without the subscription until its
+     * next initial registration (no retry is given).
+     */
+    private suspend fun regSubscribe() {
+        if (regSubscription != null || loggedOff) return
+        val aor = config.sip.publicUserId
+        val request = runCatching { ua.newRequest("SUBSCRIBE", aor, NameAddr(aor)) }.getOrNull() ?: return
+        request.headers.add("Contact", "<${ua.contactUri()}>").add("Event", RegEventRules.EVENT)
+            .add("Accept", RegInfo.CONTENT_TYPE).add("Expires", RegEventRules.SUBSCRIPTION_EXPIRES_S.toString())
+        val subscription = RegSubscription(request)
+        regSubscription = subscription
+        event("reg event subscription: SUBSCRIBE Expires ${RegEventRules.SUBSCRIPTION_EXPIRES_S}")
+        val response = runCatching { ua.send(request) }.getOrElse {
+            if (regSubscription === subscription) regSubscription = null
+            event("reg event subscription: ${it.message}")
+            return
+        }
+        if (regSubscription !== subscription) return
+        if (!response.isSuccess) {
+            regSubscription = null
+            event("reg event subscription refused: ${response.status} ${response.reason}")
+            return
+        }
+        subscription.dialog = Dialog.fromResponse(ua.lastSent[request.callId] ?: request, response)
+        _status.update { it.copy(regSubscribed = true) }
+        regGranted(subscription, response)
+    }
+
+    /**
+     * TS 24.229 §5.1.1.3 item 2): the expiration time "as indicated in the "expires" header field parameter of the
+     * Subscription-State header field, if present, of the NOTIFY request. Otherwise the expiration time is retrieved
+     * from the Expires header field of the 2xx response": the 2xx counts only when no NOTIFY gave the time since the
+     * SUBSCRIBE went out (the NOTIFY may come first).
+     */
+    private fun regGranted(subscription: RegSubscription, response: SipResponse) {
+        val expires = response.headers["Expires"]?.trim()?.toLongOrNull() ?: return
+        event("reg event subscription granted for $expires s")
+        if (expires > 0 && !subscription.notifyExpiry) regScheduleRefresh(subscription, expires)
+    }
+
+    /**
+     * TS 24.229 §5.1.1.3: the refresh, replacing any refresh scheduled before: "600 seconds before the expiration time
+     * if the initial subscription was for greater than 1200 seconds, or when half of the time has expired if the initial
+     * subscription was for 1200 seconds or less" ([RegEventRules.refreshDelayS]); the initial subscription's duration is
+     * its first known expiry.
+     */
+    private fun regScheduleRefresh(subscription: RegSubscription, expires: Long) {
+        if (subscription.durationS == 0L) subscription.durationS = expires
+        subscription.validUntil = clock() + expires
+        val token = ++subscription.refreshToken
+        val delayS = RegEventRules.refreshDelayS(subscription.durationS, expires)
+        subscription.refresh?.cancel()
+        subscription.refresh = scope.launch {
+            delay(delayS * 1000)
+            if (token == subscription.refreshToken && regSubscription === subscription) regRefresh(subscription)
+        }
+    }
+
+    /**
+     * TS 24.229 §5.1.1.3: the refresh in the subscription's dialog. "If a SUBSCRIBE request to refresh a subscription
+     * fails with a non-481 response, the UE shall still consider the original subscription valid for the duration of the
+     * most recently known "Expires" value according to RFC 6665. Otherwise, the UE shall consider the subscription
+     * invalid and start a new initial subscription"; no answer (RFC 3261 Timer F) is not a 481 either. Nothing once
+     * logged off.
+     */
+    private suspend fun regRefresh(subscription: RegSubscription) {
+        if (regSubscription !== subscription || loggedOff) return
+        val dialog = subscription.dialog ?: return
+        subscription.notifyExpiry = false
+        val request = ua.inDialog(dialog, "SUBSCRIBE")
+        request.headers.add("Contact", "<${ua.contactUri()}>").add("Event", RegEventRules.EVENT)
+            .add("Accept", RegInfo.CONTENT_TYPE).add("Expires", RegEventRules.SUBSCRIPTION_EXPIRES_S.toString())
+        val response = runCatching { ua.send(request, dialog) }.getOrNull()
+        if (regSubscription !== subscription) return
+        if (response != null && response.isSuccess) {
+            event("reg event subscription refreshed")
+            regGranted(subscription, response)
+            return
+        }
+        event("reg event subscription refresh failed: ${response?.status ?: "no answer"}")
+        if (response?.status == 481) {
+            regSubscription = null
+            _status.update { it.copy(regSubscribed = false) }
+            regSubscribe()
+            return
+        }
+        // Valid until its last known expiry; then a new initial subscription.
+        val token = ++subscription.refreshToken
+        val leftS = (subscription.validUntil - clock()).coerceAtLeast(0)
+        subscription.refresh = scope.launch {
+            delay(leftS * 1000)
+            if (token != subscription.refreshToken || regSubscription !== subscription) return@launch
+            regSubscription = null
+            _status.update { it.copy(regSubscribed = false) }
+            regSubscribe()
+        }
+    }
+
+    /**
+     * TS 24.229 §5.1.1.6.1: "If all public user identities are deregistered and all security association or TLS session
+     * is removed, then the UE shall consider subscription to the reg event package cancelled": with the client's own
+     * de-registration (log-off), the network's, or a lost flow. A final NOTIFY on its dialog is answered 200
+     * ([endingSubscriptions]).
+     */
+    private fun regCancel() {
+        val subscription = regSubscription ?: return
+        regSubscription = null
+        subscription.refreshToken++
+        subscription.refresh?.cancel()
+        endingSubscriptions.add(subscription.request.callId)
+        _status.update { it.copy(regSubscribed = false) }
+    }
+
+    /**
+     * A NOTIFY of the reg event (RFC 6665 §4.1.3, RFC 3680 §4.8 and §5.2): 200, or 400 for a document that is not a
+     * reginfo document, or 481 for no subscription of this client. Then, after the response: the expiry of
+     * Subscription-State, the document in version order (a version gap asks for a refresh, RFC 3680 §5.2) and what it
+     * asks of this client ([regDocument]), and the end of the subscription.
+     */
+    private suspend fun regNotify(tx: ServerTransaction) {
+        val request = tx.request
+        val state = request.headers["Subscription-State"]?.trim() ?: ""
+        val subscription = regSubscription?.takeIf { it.request.callId == request.callId }
+        if (subscription == null) {
+            val ended = request.callId in endingSubscriptions
+            tx.respond(if (ended) 200 else 481)
+            if (ended && state.startsWith("terminated")) endingSubscriptions.remove(request.callId)
+            return
+        }
+        val text = if (request.body.isEmpty()) null else
+            Multipart.parse(request.contentType, request.body).firstOrNull { it.mediaType == RegInfo.CONTENT_TYPE }?.text
+        val info = text?.let { body ->
+            runCatching { RegInfo.parse(body) }.getOrElse {
+                event("reg event NOTIFY refused: ${it.message}")
+                tx.respond(400)
+                return
+            }
+        }
+        val expires = RegEventRules.stateExpires(state)
+        if (expires != null) subscription.notifyExpiry = true
+        tx.respond(200)
+        if (info != null) {
+            if (!RegEventRules.versionNew(subscription.version, info.version)) {
+                event("reg event document discarded: version ${info.version}, local ${subscription.version}")
+            } else {
+                val gap = RegEventRules.versionGap(subscription.version, info.version)
+                subscription.version = info.version
+                if (gap) {
+                    event("reg event version gap at ${info.version}: refresh")
+                    scope.launch { regRefresh(subscription) }
+                }
+                regDocument(info)
+            }
+        }
+        if (regSubscription !== subscription) return
+        if (state.startsWith("terminated")) {
+            // RFC 6665 §4.1.3: the subscriber "MUST consider the subscription terminated".
+            regSubscription = null
+            subscription.refreshToken++
+            subscription.refresh?.cancel()
+            _status.update { it.copy(regSubscribed = false) }
+            event("reg event subscription ended: $state")
+            return
+        }
+        if (expires != null) regScheduleRefresh(subscription, expires)
+    }
+
+    /**
+     * TS 24.229 §5.1.1.5A and §5.1.1.7: what a reginfo document asks of this client's own contact
+     * ([RegEventRules.action]). A shortened registration is renewed "at the appropriate time ... by initiating a
+     * reregistration as described in subclause 5.1.1.4": at the §5.1.1.4.1 time for the adjusted expiration time, from
+     * the duration of the registration before (the "previous registration"). Nothing during the client's own log-off,
+     * whose de-REGISTER ends the registration.
+     */
+    private suspend fun regDocument(info: RegInfo) {
+        if (loggedOff) return
+        val own = runCatching { RegEventRules.contactAddress(ua.contactUri()) }.getOrNull() ?: return
+        when (val action = RegEventRules.action(info, config.sip.publicUserId, own) ?: return) {
+            is RegEventRules.Action.Shortened -> {
+                val delayS = RegEventRules.refreshDelayS(registrationDurationS, action.expires)
+                nextRegisterAt = clock() + delayS
+                event("registration shortened to ${action.expires} s: reregistration in $delayS s")
+            }
+            is RegEventRules.Action.Deregistered -> networkDeregistration(action.event)
+        }
+    }
+
+    /**
+     * TS 24.229 §5.1.1.7: the network deregistered this client's public user identity: "the UE shall remove all
+     * registration details relating to the respective public user identity" (the next REGISTER is an initial one, with
+     * a new Call-ID), and the reg event subscription ends with it. "In case of a "rejected" event attribute, the UE
+     * shall release all dialogs related to those public user identities": the calls end ([ServiceHandler.logOff]) while
+     * the flow still carries their requests. The subscriptions and the service state go locally: the MC servers removed
+     * the binding with the deregistration (TS 24.229 §5.4.1.7 f)). "The UE shall delete all security associations or
+     * TLS sessions towards the P-CSCF ... after the server transaction ... pertaining to the received NOTIFY request
+     * terminates": the flow closes, the NOTIFY already answered. "In case of a "deactivated" event attribute, the UE
+     * shall start the initial registration procedure as described in subclause 5.1.1.2": at once, on a new flow
+     * ([start]). After "rejected" or "unregistered" the client stays off until the user logs on ([logOn]).
+     */
+    private suspend fun networkDeregistration(reason: String) {
+        event("deregistered by the network: $reason")
+        housekeeping?.cancel()
+        registration = null
+        regCancel()
+        val staysOff = reason != "deactivated"
+        if (staysOff) {
+            loggedOff = true
+            logOnRequest = CompletableDeferred()
+        }
+        if (reason == "rejected") handlers.forEach { runCatching { it.logOff() } }
+        dropServiceState()
+        _status.update { it.copy(registered = false, networkDeregistered = reason, loggedOff = staysOff || it.loggedOff,
+            offlineSince = null, nextRetryAt = null) }
+        if (!staysOff) reconnectNow.complete(Unit)
+        ua.flow?.close(IllegalStateException("deregistered by the network ($reason)"))
+    }
+
+    /**
+     * The subscriptions and service state the MC servers dropped with a network deregistration: ended locally (their
+     * final NOTIFYs answered 200), the publications forgotten (a new service authorisation follows a new
+     * registration), the MCVideo CSK with them (TS 33.180 §9: a new CSK with the new authorisation).
+     */
+    private fun dropServiceState() {
+        for (channel in aliasChannels.values) {
+            channel.request?.callId?.let(endingSubscriptions::add)
+            channel.dialog = null; channel.request = null
+            channel.state.update { it.copy(subscribed = false) }
+        }
+        for (subscription in subscriptions.values) endingSubscriptions.add(subscription.request.callId)
+        subscriptions.clear()
+        authEtags.clear(); affiliationEtags.clear()
+        videoCsk = null; videoCskUpload = null
+        for (service in McService.entries) updateService(service) { ServiceState() }
     }
 
     // Service authorisation: PUBLISH poc-settings (TS 24.379 §7.2.2, TS 24.282 §7.2.2).
@@ -951,7 +1243,6 @@ class McxClient(
 
     private suspend fun housekeeping() {
         val started = clock()
-        var nextRegister = nextRegisterAt
         var nextSubscription = started + 3000 // the MCPTT server grants 3600 s (contract §5.1)
         while (scope.isActive) {
             delay(5_000)
@@ -961,9 +1252,8 @@ class McxClient(
                 renewToken()
                 setPhase("ready")
             }
-            if (now >= nextRegister) {
-                val granted = register(config.sip.registerExpires)
-                nextRegister = now + granted * 2 / 3
+            if (now >= nextRegisterAt) {
+                register(config.sip.registerExpires)
                 setPhase("ready")
             }
             if (now >= nextSubscription) {
@@ -993,6 +1283,13 @@ class McxClient(
         val request = tx.request
         // A request of a service that is not started gets the answer of a service this client does not run.
         if (mcServiceOf(request)?.let { protectionRefusal(it) } != null) { notHandled(tx); return }
+        if (request.method == "NOTIFY" && eventPackage(request) == RegEventRules.EVENT) { regNotify(tx); return }
+        // RFC 6665 §4.1.2.3: a subscription this client ended lasts until its final NOTIFY, which is answered 200.
+        if (request.method == "NOTIFY" && request.callId in endingSubscriptions) {
+            tx.respond(200)
+            if ((request.headers["Subscription-State"] ?: "").trim().startsWith("terminated")) endingSubscriptions.remove(request.callId)
+            return
+        }
         val aliasChannel = aliasChannels.values.firstOrNull { it.request?.callId == request.callId }
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "presence" && aliasChannel != null) {
             tx.respond(200)

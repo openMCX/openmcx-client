@@ -878,6 +878,73 @@ class Lab:
         self.wait("the aliases are deactivated", lambda: incident_commander not in fa(A)["active"] and duty_officer not in fa(B)["active"])
         self.check("alice and bob deactivate their aliases", True)
 
+    # The reg event package (openmcx-server docs/USAGE.md: the operator commands of the SIP core).
+    def sip_core(self, *command: str) -> str:
+        container = f"{meta(self.name)['project']}-sip-core-1"
+        out = subprocess.run(["docker", "exec", container, *command], capture_output=True, text=True, timeout=60)
+        return (out.stdout + out.stderr).strip()
+
+    def events_after(self, client: str, marker: str) -> list[str] | None:
+        """The client's events after the last one containing [marker]; None when there is none."""
+        events = self.cmd(client, "events", "400")
+        at = max((i for i, e in enumerate(events) if marker in e), default=None)
+        return None if at is None else events[at + 1:]
+
+    def s19_reg_event(self) -> None:
+        # TS 24.229 §5.1.1.3: subscribed to its own reg event once registered.
+        for c in (A, B):
+            self.ready(c)
+            ok = bool(self.wait(f"{c} reg event subscription", lambda c=c: self.status(c).get("reg_subscribed"), timeout=30))
+            self.check(f"{c} holds its reg event subscription", ok)
+        # §5.1.1.5A: alice's 3600 s registration shortened to 120 s is renewed at once (600 s before an expiry 120 s away).
+        out = self.sip_core("/opt/kamailio/sbin/kamcmd", "-s", "unix:/tmp/kamailio_ctl", "reginfo.shorten", "location",
+                            "alice@mcx.test", "120")
+        self.check("the SIP core shortened alice's registration", "shortened" in out, out=out)
+        try:
+            after = self.wait("alice reregisters", lambda: (e := self.events_after(A, "registration shortened")) is not None
+                              and any("registered for" in x for x in e) and e, timeout=30)
+        except Failed:
+            after = None
+        self.check("alice reregistered after the shortening", after is not None,
+                   events=[e for e in self.cmd(A, "events", "400") if "shortened" in e or "registered for" in e][-4:])
+        self.check("alice stays ready after the shortening", self.status(A)["phase"] == "ready")
+        # §5.1.1.7 "rejected" during a call: no call left, alice off (shown) until she logs on.
+        self.cmd(A, "private", MCPTT[B], "auto")
+        self.established(B)
+        out = self.sip_core("sipcore-deregister", "alice@mcx.test", "rejected")
+        try:
+            s = self.wait("alice deregistered (rejected)", lambda: (s := self.status(A))["logged_off"]
+                          and s.get("network_deregistered") == "rejected" and s, timeout=30)
+        except Failed:
+            s = self.status(A)
+        self.check("alice is off after 'rejected', with the reason", s["logged_off"] and s.get("network_deregistered") == "rejected",
+                   status={k: s.get(k) for k in ("phase", "logged_off", "network_deregistered", "registered")}, core=out)
+        self.check("alice's services are no longer authorised", not s["mcptt"]["authorised"] and not s["mcdata"]["authorised"])
+        self.idle_everywhere([A, B])
+        self.check("no call left after 'rejected'", self.call(A) is None and self.call(B) is None)
+        time.sleep(5)
+        self.check("alice stays off until she logs on", self.status(A)["phase"] == "logged-off")
+        self.cmd(A, "log-on")
+        s = self.ready(A)
+        self.wait("alice reg event subscription again", lambda: self.status(A).get("reg_subscribed"), timeout=30)
+        self.check("alice is back after log-on", s["registered"] and self.status(A).get("network_deregistered") is None)
+        # §5.1.1.7 "deactivated": bob's TLS session goes, then an initial registration on a new flow, services back.
+        old = self.status(B)["flow"]
+        out = self.sip_core("sipcore-deregister", "bob@mcx.test", "deactivated")
+        try:
+            s = self.wait("bob registered again on a new flow", lambda: (s := self.status(B))["phase"] == "ready"
+                          and s["flow"] != old and s.get("reg_subscribed") and s, timeout=90)
+        except Failed:
+            s = self.status(B)
+        self.check("bob registered again on a new flow after 'deactivated'", s["phase"] == "ready" and s["flow"] != old,
+                   old=old, new=s["flow"], core=out)
+        self.check("bob's services are authorised and affiliated again", s["mcptt"]["authorised"]
+                   and s["mcptt"]["affiliations"].get(GROUP) == "affiliated")
+        self.cmd(A, "private", MCPTT[B], "auto")
+        self.check("alice's call reaches bob after his new registration", bool(self.established(B)))
+        self.hangup(A)
+        self.idle_everywhere([A, B])
+
     SCENARIOS = {"S1": s1_startup, "S2": s2_private_automatic, "S3": s3_private_manual, "S4": s4_group, "S5": s5_adhoc, "S6": s6_sds,
                  "S7": s7_refresh_and_recovery, "S8": s8_lifecycle, "S9": s9_impaired, "S10": s10_latency,
                  "S11": s11_product, "S12": s12_private_no_floor, "S13": s13_location,
@@ -885,7 +952,8 @@ class Lab:
                  "S15": s15_server_address,
                  "S16": s16_emergency_calls,
                  "S17": s17_functional_aliases,
-                 "S18": s18_floor_queue}
+                 "S18": s18_floor_queue,
+                 "S19": s19_reg_event}
 
 
 def main() -> None:

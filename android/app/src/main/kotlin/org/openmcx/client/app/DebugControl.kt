@@ -500,6 +500,7 @@ class DebugControl(private val context: Context) {
             .put("logged_off", s.loggedOff).put("log_off", JSONObject(s.logOff)).put("deregistered", s.deregistered ?: JSONObject.NULL)
             .put("offline_since", s.offlineSince ?: JSONObject.NULL).put("next_retry_at", s.nextRetryAt ?: JSONObject.NULL)
             .put("signed_out", s.signedOut ?: JSONObject.NULL)
+            .put("network_deregistered", s.networkDeregistered ?: JSONObject.NULL).put("reg_subscribed", s.regSubscribed)
             .put("flow", client.ua.flow?.connection?.let { "${it.localHost}:${it.localPort}" })
             .put("network", network)
             .put("pid", android.os.Process.myPid())
