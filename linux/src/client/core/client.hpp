@@ -28,6 +28,7 @@
 #include "mcx/mcdata.hpp"
 #include "mcx/media.hpp"
 #include "mcx/msrp.hpp"
+#include "mcx/protocol.hpp"
 #include "mcx/mbms.hpp"
 #include "mcx/multicast.hpp"
 #include "mcx/protected_call.hpp"
@@ -224,6 +225,8 @@ class Client {
   bool answer_private_key(const MediaDescription &media);
 
   std::string gms_identity() const { return cfg_.at("security").at("gms_uri"); }
+  // TS 24.229 clause 5.1.1.3: the default public user identity, the configured SIP identity.
+  std::string sip_identity() const { return cfg_.at("sip").at("identity"); }
   // TS 24.481 clause 6.3.13.2.1 step b: "the configured public service identity for performing subscription proxy
   // function of the GMS" (TS 24.483 clause 8.2.9 GMSURI, the <GMS-URI> of TS 24.484 clause 7.2.2.1 item 4):
   // gms.subscription_psi. Not configured: the subscription is refused here (throws), never sent to another PSI.
@@ -722,11 +725,23 @@ class Client {
   // the return to service. logged_off_: after "log-off", until "log-on"; nothing authorises a service meanwhile.
   bool logged_off_ = false;
   void log_off_command();
-  void end_service_subscriptions();
+  void end_service_subscriptions(bool send = true);
+  void drop_service_state();
   void finish_log_off();
   void log_on_command();
   // RFC 3261 section 10.2 and TS 24.379 clause 7.2.2: SIP registration, then the service authorisation.
   void register_and_authorize();
+  void registration_answered(const SipResponse &response);
+  // TS 24.229 clauses 5.1.1.3, 5.1.1.5A and 5.1.1.7: the reg event subscription (core/reg_event.cpp).
+  void reg_subscribe();
+  void reg_subscription_granted(const SipResponse &response, std::uint64_t generation);
+  void reg_schedule_refresh(std::uint64_t expires);
+  void reg_refresh();
+  SipResponse reg_notify(const SipMessage &message);
+  void reg_event_document(const RegInfo &info);
+  void reg_cancel();
+  void network_deregistration(const std::string &reason);
+  void reregister();
 
   // TS 33.180 clause 5.1.3.1 step A, in parallel with the registration, and the limited service state of clause
   // 5.1.1 while it has not succeeded.
@@ -1377,6 +1392,17 @@ private:
   Json mcvideo_last_call_;
   // Conference subscriptions of ended calls: their final NOTIFY is still answered 200.
   std::set<std::string> mcvideo_retired_subscriptions_;
+  // RFC 6665 section 4.1.2.3: the subscriptions the log-off ended, until their final NOTIFY.
+  std::set<std::string> ending_subscriptions_;
+  // The reg event subscription's dialog, its document version (RFC 3680 section 5.2), the generation of the
+  // subscription and the tokens of its refresh and of a reregistration asked by the network.
+  std::string reg_subscription_;
+  std::optional<std::uint32_t> reg_version_;
+  std::uint64_t reg_generation_ = 0, reg_refresh_token_ = 0, reg_reregister_token_ = 0, reg_valid_until_ = 0;
+  // The initial subscription's duration and whether a NOTIFY gave the expiry since the last SUBSCRIBE (TS 24.229
+  // clause 5.1.1.3); the duration of the previous registration (clause 5.1.1.4.1), from its 200 (OK).
+  std::uint64_t reg_duration_s_ = 0, registration_duration_s_ = 0;
+  bool reg_notify_expiry_ = false;
   // Emergency alerts (TS 24.281 clause 11.2): this user's, and those received by origin.
   bool mcvideo_alerting_ = false;
   Json mcvideo_alerts_ = Json::object(), mcvideo_alert_result_;

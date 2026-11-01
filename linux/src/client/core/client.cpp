@@ -11,6 +11,8 @@
 
 #include "client.hpp"
 
+#include <charconv>
+
 #include <unistd.h>
 
 namespace mcx {
@@ -537,16 +539,35 @@ void Client::sign_in_failed(const std::string &reason) {
 // services), at start-up and at log-on, then the service authorisation (TS 24.379 clause 7.2.2) once the user is
 // signed in (TS 33.180 clause 5.1.3.2.1: the registration does not wait for the access token).
 void Client::register_and_authorize() {
-  sip_.register_account(register_expires(), [this](const SipResponse &response) {
-    if (response.status_code < 200) return;
-    if (response.status_code != 200) {
-      failure("SIP registration: " + std::to_string(response.status_code));
-      return;
-    }
-    registered_ = true;
-    event("sip_registered", {{"signed_in", signed_in_}});
-    if (signed_in_) schedule([this] { start_authorization(); });
-  });
+  sip_.register_account(register_expires(), [this](const SipResponse &response) { registration_answered(response); });
+}
+
+//------------------------------------------------------------------------------
+// The outcome of a REGISTER (also of the engine's refreshes): registered, then authorised once signed in; the reg
+// event subscription of TS 24.229 clause 5.1.1.3 when there is none (core/reg_event.cpp).
+void Client::registration_answered(const SipResponse &response) {
+  if (response.status_code < 200) return;
+  if (response.status_code != 200) {
+    failure("SIP registration: " + std::to_string(response.status_code));
+    return;
+  }
+  registered_ = true;
+  // TS 24.229 clause 5.1.1.4.1: the duration of this registration, for the reregistration time of a shortened one
+  // (core/reg_event.cpp): the expires parameter of the Contact or the Expires header field of the 200 (OK).
+  {
+    std::uint64_t granted = 0;
+    // The Contact may list other bindings of the identity: the expires after this client's own address.
+    const auto contact = std::string(get_header(response.headers, "Contact"));
+    const auto own = contact.find(client_rules::contact_address(sip_.contact_target()));
+    const auto at = own != std::string::npos ? contact.find(";expires=", own) : std::string::npos;
+    const auto value = at != std::string::npos ? std::string_view(contact).substr(at + 9)
+                                               : std::string_view(get_header(response.headers, "Expires"));
+    (void)std::from_chars(value.data(), value.data() + value.size(), granted);
+    if (granted) registration_duration_s_ = granted;
+  }
+  event("sip_registered", {{"signed_in", signed_in_}});
+  if (signed_in_) schedule([this] { start_authorization(); });
+  if (reg_subscription_.empty()) schedule([this] { reg_subscribe(); });
 }
 
 //------------------------------------------------------------------------------

@@ -64,11 +64,20 @@ void Client::log_off_command() {
 // authorisations: the affiliation status (TS 24.379 clause 9.2.1.3, TS 24.281 clause 8.2.1.3, TS 24.282 clause
 // 8.2.4), the group keys (TS 33.180 clause 5.7), the configuration (TS 24.484) and the functional alias status
 // (TS 24.379 clause 9A.2.1.3, TS 24.282 clause 22.2.1.3).
-void Client::end_service_subscriptions() {
-  const auto end = [this](std::string &dialog, const char *event_name, const std::string &icsi) {
+void Client::end_service_subscriptions(bool send) {
+  const auto end = [this, send](std::string &dialog, const char *event_name, const std::string &icsi) {
     if (dialog.empty()) return;
+    // Without send (TS 24.229 clause 5.1.1.7, a deregistration by the network): the dialogs are released locally; the
+    // servers end them with the third-party de-REGISTER (TS 24.229 clause 5.4.1.7), whose final NOTIFY is answered
+    // 200 as after an unsubscription (RFC 6665 section 4.1.2.3).
+    if (!send) {
+      ending_subscriptions_.insert(dialog);
+      return dialog.clear();
+    }
     sip_.request_in_dialog(dialog, "SUBSCRIBE", "", "",
                            {{"Event", event_name}, {"Expires", "0"}, {"P-Preferred-Service", icsi}});
+    // RFC 6665 section 4.1.2.3: "a successful unsubscription will also trigger a final NOTIFY request".
+    ending_subscriptions_.insert(dialog);
     dialog.clear();
   };
   end(subscription_, "presence", mcptt_icsi);
@@ -100,6 +109,26 @@ void Client::end_service_subscriptions() {
 // log-on. No MC service is left, so the client de-registers (TS 24.229 clause 5.1.1.6; TS 24.379 clause 7.2.1 NOTE
 // 1 re-registers without the MCPTT feature tags only when other services remain).
 void Client::finish_log_off() {
+  drop_service_state();
+  status_["logged_off"] = true;
+  // TS 24.229 clause 5.1.1.6.1: with the de-registration the reg event subscription is considered cancelled.
+  reg_cancel();
+  if (registered_) {
+    registered_ = false;
+    sip_.unregister_account([this](const SipResponse &response) {
+      if (response.status_code < 200) return;
+      status_["deregistered"] = response.status_code;
+      event("sip_deregistered", {{"status", response.status_code}});
+    });
+  }
+  event("logged_off", {{"services", status_["log_off"]}});
+}
+
+//------------------------------------------------------------------------------
+// Helper: the service state that ends with the log-off or a deregistration by the network ("rejected", TS 24.229
+// clause 5.1.1.7): the entity tags (the next authorisation is an initial publication, RFC 3903 section 4.1) and the
+// dynamic keys (TS 33.180 clause 9).
+void Client::drop_service_state() {
   auth_etag_.clear();
   affiliation_etag_.clear();
   mcvideo_auth_etag_.clear();
@@ -123,16 +152,6 @@ void Client::finish_log_off() {
   mcdata_pcks_.clear();
   status_.erase("csk_id");
   status_.erase("mcvideo_csk_id");
-  status_["logged_off"] = true;
-  if (registered_) {
-    registered_ = false;
-    sip_.unregister_account([this](const SipResponse &response) {
-      if (response.status_code < 200) return;
-      status_["deregistered"] = response.status_code;
-      event("sip_deregistered", {{"status", response.status_code}});
-    });
-  }
-  event("logged_off", {{"services", status_["log_off"]}});
 }
 
 //------------------------------------------------------------------------------
@@ -144,6 +163,9 @@ void Client::log_on_command() {
   status_["logged_off"] = false;
   status_.erase("log_off");
   status_.erase("deregistered");
+  status_.erase("network_deregistered");
+  // The final NOTIFYs of the subscriptions ended before are no longer awaited (RFC 6665 section 4.1.2.3).
+  ending_subscriptions_.clear();
   if (mcdata_keys_ && mcdata_needs_csk()) {
     auto [csk, upload] = mcdata_keys_->make_csk(mcdata_service());
     mcdata_csk_ = csk;

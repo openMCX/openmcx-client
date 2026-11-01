@@ -7,10 +7,11 @@
 // Warning header field, when a refused refresh token is dropped, the scope of the authentication request, the percent-decoding of an XCAP selector, the
 // escaped text of a control command, the groups of an MCPTT user profile, and the retry delay of a refused initial service authorisation, the
 // implicit floor request word of a call command, the SDP answer parameters kept, the GMK of a call's group, the end of an MCData PCK context and
-// the floor control streams of a call that go on under a new CSK.
+// the floor control streams of a call that go on under a new CSK, and the reg event timing, version and contact rules.
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 24.380 V19.2.0 (Rel-19),
-// TS 33.180 V19.4.0 (Rel-19), TS 24.484 V19.6.0 (Rel-19), RFC 3261, RFC 3903, RFC 3986, RFC 6749.
+// TS 33.180 V19.4.0 (Rel-19), TS 24.484 V19.6.0 (Rel-19), TS 24.229 V19.7.0 (Rel-19), RFC 3261, RFC 3680, RFC 3903,
+// RFC 3986, RFC 6749.
 
 #pragma once
 
@@ -413,6 +414,37 @@ inline std::set<std::uint32_t> call_floor_ssrcs(std::uint32_t local, std::option
   if (remote) ssrcs.insert(*remote);
   ssrcs.erase(0);
   return ssrcs;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.229 clause 5.1.1.3: the reg event subscription is refreshed "either 600 seconds before the expiration time if
+// the initial subscription was for greater than 1200 seconds, or when half of the time has expired if the initial
+// subscription was for 1200 seconds or less"; clause 5.1.1.4.1 times a reregistration the same way from the duration
+// of "the previous registration" (also when a shortened registration's expiration time is adjusted, clause 5.1.1.5A
+// item 1). The delay from now, seconds: the expiration time is remaining seconds away, the subscription (or
+// registration) was for duration seconds; 0 when the time has already come.
+inline std::uint64_t refresh_delay_s(std::uint64_t duration, std::uint64_t remaining) {
+  const std::uint64_t before = duration > 1200 ? 600 : duration / 2;
+  return remaining > before ? remaining - before : 0;
+}
+
+//------------------------------------------------------------------------------
+// RFC 3680 section 5.2: "If the value in the document is less than the local version, the document is discarded
+// without processing"; one equal to it is the same document again. Whether a received reginfo document is processed:
+// the first one of a subscription always.
+inline bool reginfo_version_new(std::optional<std::uint32_t> local, std::uint32_t received) {
+  return !local || received > *local;
+}
+
+//------------------------------------------------------------------------------
+// The user, host and port of a SIP URI ("user@host:port", without scheme, parameters or angle brackets), for matching
+// the <uri> of a reginfo <contact> with this client's own contact address (TS 24.229 clause 5.1.1.5A: "set to the
+// Contact address that the UE registered"), whose parameters may be written differently.
+inline std::string contact_address(std::string_view uri) {
+  auto value = std::string(uri);
+  if (const auto open = value.find('<'); open != std::string::npos) value = value.substr(open + 1);
+  if (const auto colon = value.find(':'); colon != std::string::npos) value = value.substr(colon + 1);
+  return value.substr(0, value.find_first_of(";>?"));
 }
 
 } // namespace mcx::client_rules

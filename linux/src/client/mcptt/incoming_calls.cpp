@@ -326,6 +326,20 @@ SipResponse Client::private_priority_info(const SipMessage &message) {
 // configuration, the group key (TS 24.481 clause 6.3.13.2.1, TS 33.180 clause 5.7), the conference event package
 // (TS 24.379 clause 10.1.3.2), MCData and MCVideo subscriptions and the affiliation status (clause 9.2.1.3).
 SipResponse Client::incoming_clear_notify(const SipMessage &message) {
+  // RFC 6665 section 4.1.2.3: a subscription the log-off ended gets "a final NOTIFY request", with or without state
+  // ("subscribers need to be prepared to receive final NOTIFY requests both with and without state"): accepted until
+  // the one that terminates it.
+  if (!message.dialog_id.empty() && ending_subscriptions_.contains(message.dialog_id)) {
+    if (get_header(message.headers, "Subscription-State").starts_with("terminated"))
+      ending_subscriptions_.erase(message.dialog_id);
+    SipResponse ok;
+    ok.status_code = 200;
+    return ok;
+  }
+  // TS 24.229 clause 5.1.1.3: this client's own reg event subscription.
+  if (get_header(message.headers, "Event") == "reg" && !message.dialog_id.empty() &&
+      message.dialog_id == reg_subscription_)
+    return reg_notify(message);
   if (get_header(message.headers, "Event") == "xcap-diff")
     if (auto handled = group_document_notify(message)) return *handled;
   if (get_header(message.headers, "Event") == "xcap-diff" && !config_subscription_.empty() &&
@@ -381,8 +395,8 @@ SipResponse Client::group_key_notify(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
   auto found = key_subscriptions_.find(message.dialog_id);
-  // RFC 6665 section 4.1.3: a NOTIFY that matches no subscription (e.g. the final NOTIFY after the subscriber ended
-  // it): "MUST return a 481 (Subscription does not exist) response".
+  // RFC 6665 section 4.1.3: a NOTIFY that matches no subscription: "MUST return a 481 (Subscription does not exist)
+  // response" (the final NOTIFY of a subscription the subscriber ended is accepted, section 4.1.2.3).
   if (found == key_subscriptions_.end()) {
     event("group_key_notify_rejected", {{"reason", "no subscription"}, {"from_uri", message.from_uri}});
     response.status_code = 481;
