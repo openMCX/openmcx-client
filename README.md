@@ -27,7 +27,9 @@ too ([building](docs/DEVELOPER_GUIDE.md#81-build)).
 puts the app on two phones against the system from the Docker Hub images, and
 [Tutorial 2](https://github.com/openMCX/openmcx-server/blob/main/tutorials/end-to-end/02-dispatcher-with-android/README.md) adds the
 dispatcher position ([all tutorials](https://github.com/openMCX/openmcx-server/blob/main/tutorials/README.md)). The
-ready-built app is [`android/apk/openmcx-client-v1.apk`](android/apk).
+ready-built app is [`android/apk/openmcx-client-v1.apk`](android/apk), release 1.0.0, which needs Android 13 or later (on
+Android 11 and 12 its activation fails); [`openmcx-client-develop.apk`](android/apk), the `main` branch with the `develop`
+images, runs on Android 11 and later.
 
 It is not an interoperability-certified implementation: see the limits in each client's documentation.
 
