@@ -72,6 +72,22 @@ The xcap-diff subscriptions (RFC 5875) ask for durations the specifications leav
 section 4.5, RFC 6665 section 3.1.1): `subscriptions.group_documents_expires_s` (600 s by default),
 `subscriptions.configuration_documents_expires_s` and `subscriptions.group_keys_expires_s` (3600 s each).
 
+### Transport and integrity keys (TrK, InK)
+
+The TrK and InK pre-provisioned for KMS traffic (TS 33.180 clauses 5.3.2 and 5.3.3) are configured per MC service
+user URI: `"security": {"transport_keys": {"<user URI>": {"trk": {"file": "<path>", "id": <32-bit identifier>},
+"ink": {"file": "<path>", "id": <32-bit identifier>}}}}`, either key optional. Each file holds the key in hexadecimal
+(TrK 256 bits, InK 128 or 256 bits) and must be a regular file (or a link to one) readable by its owner only. The
+client checks them at start and the status file's `transport_keys` shows which are configured and lists entries that
+name no identity of the client (`unmatched`). It reads them again for each KMS exchange and does not keep them in
+memory (clause 5.11.1). With an InK or TrK, the client signs its KMS requests (TS 33.180 annex D.2.2), verifies signed
+KMS responses and unwraps a key set wrapped under the TrK (annexes D.3.1 and D.3.3.2); an unsigned response is still
+accepted over TLS. Not sent: the Signature-ID and TrK-ID elements, whose text form the specification does not give;
+the key-wrap padding and the reference to the schema's Id attribute follow the ETSI test suite for TS 37.579, as no
+3GPP text gives them (Known limitations of the server repository). `"security": {"kms_id": "<KMS URI>"}` gives the
+KMS URI the KMS's documents carry (TS 33.180 clause 3.1), when it differs from the address the KMS is contacted at
+(`kms_uri`); by default the two are the same.
+
 ### IMS AKA (3GPP access)
 
 On 3GPP access (TS 33.180 clause 6.2.1) the client authenticates to the SIP core with IMS AKA instead of digest over

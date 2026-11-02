@@ -335,6 +335,21 @@ Client::Client(Json cfg, bool disable_tls)
   // TS 24.482 annex A.2.1.2: with a home HTTP proxy, the requests of http_ (CMS, GMS, content server, message store,
   // location) go through it; the IdMS's and the KMS's stay direct.
   http_.use_proxy(http_proxy(cfg_));
+  // TS 33.180 clause 5.3.2: each MC service user's pre-provisioned TrK and InK, checked at start; the status names which
+  // are configured and the entries of no identity of this client (a mistyped URI). Clause 5.11.1 ("stored in a
+  // protected state ... while not actively in use"): the keys are not kept in memory; the key management client reads
+  // them for each KMS exchange.
+  Json transport_status = Json::object();
+  std::vector<std::string> identities{user()};
+  if (cfg_.contains("mcdata")) identities.push_back(mcdata_user());
+  if (cfg_.contains("mcvideo")) identities.push_back(mcvideo_user());
+  const auto security = cfg_.value("security", Json::object());
+  for (const auto &identity : identities) {
+    const auto loaded = load_transport_keys(security, identity);
+    transport_status[identity] = {{"trk", loaded.trk.has_value()}, {"ink", loaded.ink.has_value()}};
+  }
+  const auto unmatched = unmatched_transport_keys(security, identities);
+  if (!unmatched.empty()) event("transport_keys_unmatched", {{"users", unmatched}});
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
   local_.protected_media = protected_media();
   if (cfg_.at("mcptt").contains("multicast"))
@@ -350,7 +365,9 @@ Client::Client(Json cfg, bool disable_tls)
              {"sent_packets", 0},
              {"received_packets", 0},
              {"floor_denials", 0},
-             {"floor_queue_info_received", 0}};
+             {"floor_queue_info_received", 0},
+             {"transport_keys",
+              {{"users", transport_status}, {"unmatched", unmatched}, {"protected_kms_exchange", "signed, TrK-wrapped keys"}}}};
   mbms_configure();
   if (mbms_enabled_)
     status_.update({{"multicast_joined", ""}, {"multicast_listening", false}, {"multicast_received_packets", 0}});

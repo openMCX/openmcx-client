@@ -19,6 +19,7 @@
 #include "activation.hpp"
 #include "client_rules.hpp"
 #include "handoff.hpp"
+#include "transport_key_config.hpp"
 #include "mcx/floor.hpp"
 #include "mcx/http.hpp"
 #include "mcx/ipconn.hpp"

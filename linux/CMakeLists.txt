@@ -30,6 +30,7 @@ add_executable(mcx-client
     src/client/core/seal_location.cpp
     src/client/core/sip_dispatch.cpp
     src/client/core/tokens.cpp
+    src/client/core/transport_key_config.cpp
     src/client/core/xml_protection.cpp
     # mcptt
     src/client/mcptt/adhoc.cpp
@@ -103,3 +104,10 @@ target_include_directories(test_xml_gate PRIVATE src/client/core)
 target_compile_options(test_xml_gate PRIVATE -Wall -Wextra -Wpedantic)
 target_link_libraries(test_xml_gate PRIVATE mcx_core)
 add_test(NAME xml_gate COMMAND test_xml_gate)
+
+# The pre-provisioned TrK and InK of each MC service user (src/client/core/transport_key_config.hpp).
+add_executable(test_transport_key_config tests/test_transport_key_config.cpp src/client/core/transport_key_config.cpp)
+target_include_directories(test_transport_key_config PRIVATE src/client/core)
+target_compile_options(test_transport_key_config PRIVATE -Wall -Wextra -Wpedantic)
+target_link_libraries(test_transport_key_config PRIVATE mcx_core)
+add_test(NAME transport_key_config COMMAND test_transport_key_config)
