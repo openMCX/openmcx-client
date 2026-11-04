@@ -96,6 +96,35 @@ int main() {
   check(!refusal({{"transport_keys", {{mcptt, {{"trk", {{"file", trk}}}}}}}}, mcptt).empty(),
         "key without its identifier refused");
 
+  // security.kms_via_proxy: direct by default; through the proxy only with a proxy and a TrK for every identity.
+  const std::string proxy = "https://proxy.mcx.test:8443";
+  check(mcx::kms_proxy(security, proxy, {mcptt, mcdata}).empty(), "KMS direct by default");
+  auto via = security;
+  via["kms_via_proxy"] = true;
+  check(mcx::kms_proxy(via, proxy, {mcptt, mcdata}) == proxy, "KMS through the proxy with TrKs for every identity");
+  bool refused = false;
+  try {
+    (void)mcx::kms_proxy(via, "", {mcptt});
+  } catch (const std::exception &) {
+    refused = true;
+  }
+  check(refused, "KMS through the proxy refused without a proxy");
+  refused = false;
+  try {
+    (void)mcx::kms_proxy(via, proxy, {mcptt, mcvideo});
+  } catch (const std::exception &) {
+    refused = true;
+  }
+  check(refused, "KMS through the proxy refused without a TrK for an identity (TS 33.180 clause 5.3.2)");
+  via["kms_via_proxy"] = "yes";
+  refused = false;
+  try {
+    (void)mcx::kms_proxy(via, proxy, {mcptt});
+  } catch (const std::exception &) {
+    refused = true;
+  }
+  check(refused, "kms_via_proxy must be a boolean");
+
   std::filesystem::remove_all(dir);
   if (failures == 0) std::printf("transport key configuration: ok\n");
   return failures == 0 ? 0 : 1;

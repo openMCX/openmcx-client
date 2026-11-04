@@ -25,4 +25,12 @@ transport::TransportKeys load_transport_keys(const nlohmann::json &security, con
 // The URIs of security.transport_keys that are none of the given MC service user identities (never used).
 std::vector<std::string> unmatched_transport_keys(const nlohmann::json &security,
                                                   const std::vector<std::string> &identities);
+
+// security.kms_via_proxy (false by default): the home HTTP proxy the KMS requests go through, empty for direct. TS
+// 24.482 annex A.2.1.2 and TS 33.180 clause 5.3.2 leave open which applies (spec conflict, Known limitations); the
+// option follows the ETSI test system for TS 37.579 (the test suite's reading, a labelled exception). Through the
+// proxy, clause 5.3.2 says "for public safety users the TrK shall be used": refused (throws) without a proxy or without
+// a TrK for each identity.
+std::string kms_proxy(const nlohmann::json &security, const std::string &proxy,
+                      const std::vector<std::string> &identities);
 } // namespace mcx

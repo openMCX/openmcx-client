@@ -10,7 +10,7 @@ import org.openmcx.client.body.descendants
 import org.openmcx.client.body.text
 import org.openmcx.client.http.HttpClient
 import org.w3c.dom.Element
-import java.net.URLEncoder
+import org.openmcx.client.security.KeyClient
 import kotlinx.serialization.json.*
 import org.openmcx.client.mcdata.GroupFdPolicy
 
@@ -181,7 +181,7 @@ object ServiceConfig {
 class DocumentClient(private val http: HttpClient, private val cms: String, private val gms: String) {
     private val etags = mutableMapOf<String, Pair<String, String>>() // url -> (etag, body)
 
-    private fun enc(s: String) = URLEncoder.encode(s, "UTF-8")
+    private fun enc(s: String) = KeyClient.xcapSegment(s)
 
     private suspend fun fetch(url: String, token: String): String {
         val headers = mutableMapOf("Authorization" to "Bearer $token")

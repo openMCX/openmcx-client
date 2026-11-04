@@ -339,7 +339,7 @@ void Client::select_group(const std::string &cmd) {
   const auto authorising = regroup ? regroups_.at(selected).value("preconfigured", selected) : selected;
   auto document =
       http_.request("GET",
-                    groups_xcap() + "/global/byGroupID/" + url_encode(authorising),
+                    groups_xcap() + "/global/byGroupID/" + xcap_segment(authorising),
                     {}, {{"Authorization", bearer()}});
   if (document.status != 200) throw std::runtime_error("group authorization retrieval failed");
   cfg_["mcptt"]["group_id"] = selected;

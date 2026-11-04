@@ -88,6 +88,19 @@ the key-wrap padding and the reference to the schema's Id attribute follow the E
 KMS URI the KMS's documents carry (TS 33.180 clause 3.1), when it differs from the address the KMS is contacted at
 (`kms_uri`); by default the two are the same.
 
+Four options follow the ETSI test system for TS 37.579 where the 3GPP texts leave the detail open (Known limitations
+of the server repository); each is that test system's reading, not a 3GPP rule:
+- the UID form: the client finds at key provisioning whether the KMS's keys are for the UID's 32 octets or its base64
+  text, and uses that form for ECCSI and SAKKE (status file: `key_management.uid_form`, `raw` or `text`);
+- `"security": {"kms_via_proxy": true}` (off by default): the KMS requests through the home HTTP proxy (`http.proxy`),
+  with a TrK required for each MC service user (TS 33.180 clause 5.3.2); refused at start otherwise;
+- `"cms": {"subscription_psi": "<SIP URI>"}`: the target of the configuration management SUBSCRIBE (TS 24.484 clause
+  6.3.13.2.2 step b) 2)); by default the MCPTT server's PSI.
+- `"sip": {"access_network_info": "<value>"}` (off by default): the P-Access-Network-Info header field value (RFC
+  7315 section 5.4) the client inserts in every request but CANCEL and ACK and every response but those to CANCEL,
+  the initial REGISTER included; TS 24.229 defines when it is available per access technology, and not for plain IP
+  or a VPN.
+
 ### IMS AKA (3GPP access)
 
 On 3GPP access (TS 33.180 clause 6.2.1) the client authenticates to the SIP core with IMS AKA instead of digest over

@@ -87,7 +87,7 @@ class KeyingInteropTest {
         val key = Mikey.open(kms, bob, "sip:gms@mcx.test", message, now, profile)
         assertEquals(v.getLong("gmk_id"), SrtpKeys.gukId(key.key, key.csbId, bob.uri))
         assertTrue(runCatching { KmsDocuments.parseGktpXcapDiff(diff, "sip:other@mcx.test", root) }.isFailure)
-        assertEquals("org.3gpp.MCPTT-GKTP/global/byGroupID/sip%3Aoperations%40mcx.test/~~/group/list-service/mgktp:GKTPs?xmlns(mgktp=urn:3gpp:ns:mcpttGKTP:1.0)",
+        assertEquals("org.3gpp.MCPTT-GKTP/global/byGroupID/sip:operations@mcx.test/~~/group/list-service/mgktp:GKTPs?xmlns(mgktp=urn:3gpp:ns:mcpttGKTP:1.0)",
             KmsDocuments.gktpSelector(group))
     }
 

@@ -104,7 +104,7 @@ object KmsDocuments {
 
     /** The XCAP selector of [group]'s GKTPs (TS 24.481, TS 33.180 5.7), as a GKTP subscription names it. */
     fun gktpSelector(group: String): String =
-        "org.3gpp.MCPTT-GKTP/global/byGroupID/" + KeyClient.urlEncode(group) + "/~~/group/list-service/mgktp:GKTPs?xmlns(mgktp=urn:3gpp:ns:mcpttGKTP:1.0)"
+        "org.3gpp.MCPTT-GKTP/global/byGroupID/" + KeyClient.xcapSegment(group) + "/~~/group/list-service/mgktp:GKTPs?xmlns(mgktp=urn:3gpp:ns:mcpttGKTP:1.0)"
 
     /** The resource list of a GKTP subscription for [group]. */
     fun gktpResourceList(group: String): String = Xml.DECLARATION +
@@ -261,6 +261,13 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
                 else append('%').append("0123456789ABCDEF"[c shr 4]).append("0123456789ABCDEF"[c and 15])
             }
         }
+
+        /**
+         * RFC 4825 section 6.2: a path segment of an XCAP document selector (an XUI, a group ID): as [urlEncode], ':' and
+         * '@' kept (permitted in a path segment, RFC 3986 section 3.3), as in TS 24.481 clause 7.2.10.2 and its annex A.
+         */
+        fun xcapSegment(text: String): String =
+            text.split(':').joinToString(":") { part -> part.split('@').joinToString("@") { urlEncode(it) } }
 
         fun decode(encoded: String): ByteArray = try { java.util.Base64.getDecoder().decode(encoded) } catch (e: IllegalArgumentException) { throw KeyError("invalid MIKEY base64") }
     }

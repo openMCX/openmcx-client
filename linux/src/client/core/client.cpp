@@ -350,6 +350,10 @@ Client::Client(Json cfg, bool disable_tls)
   }
   const auto unmatched = unmatched_transport_keys(security, identities);
   if (!unmatched.empty()) event("transport_keys_unmatched", {{"users", unmatched}});
+  // security.kms_via_proxy (kms_http_ in client.hpp, kms_proxy in transport_key_config.hpp): refused at start without
+  // a home HTTP proxy or a TrK for each MC service user.
+  if (const auto kms_through = kms_proxy(security, http_proxy(cfg_), identities); !kms_through.empty())
+    kms_http_.use_proxy(kms_through);
   local_.queueing = cfg_.at("mcptt").value("floor_queue", false);
   local_.protected_media = protected_media();
   if (cfg_.at("mcptt").contains("multicast"))
@@ -378,7 +382,7 @@ Client::Client(Json cfg, bool disable_tls)
 // profile index in use.
 void Client::read_mcvideo_profile() {
   const auto index = profile_index_;
-  const auto path = "/org.3gpp.mcvideo.user-profile/users/" + url_encode(mcvideo_user()) +
+  const auto path = "/org.3gpp.mcvideo.user-profile/users/" + xcap_segment(mcvideo_user()) +
                     "/mcvideo-user-profile-" + std::to_string(index) + ".xml";
   auto response = http_.request("GET", cms_xcap_root() + path, {},
                                 {{"Authorization", bearer()}});
@@ -400,7 +404,7 @@ void Client::read_mcvideo_profile() {
 // ruleset holds the MCData rights (clause 10.3.2.1 item 11 b) that TS 24.282 has the client check.
 void Client::read_mcdata_profile() {
   const auto index = profile_index_;
-  const auto path = "/org.3gpp.mcdata.user-profile/users/" + url_encode(mcdata_user()) +
+  const auto path = "/org.3gpp.mcdata.user-profile/users/" + xcap_segment(mcdata_user()) +
                     "/mcdata-user-profile-" + std::to_string(index) + ".xml";
   auto response = http_.request("GET", cms_xcap_root() + path, {},
                                 {{"Authorization", bearer()}});
@@ -479,6 +483,11 @@ void Client::sign_in() {
 // document subscriptions (TS 37.579-1 tables 5.3.2.6.1-1 and 5.3.2.7.1-1), not before the service authorisation.
 void Client::sign_in_documents() {
   try {
+    // TS 33.180 clause 5.3.3: the identity keys of the MCPTT ID right after the access token, before any document is
+    // read (test view: TS 37.579-1 table 5.3.2.3.1-1 steps 11-14 follow steps 9-10, and TS 37.579-2 table 5.1.3.2-1
+    // lists them before steps 17-19). The KMS requests do not depend on the protection the service configuration
+    // documents decide; only the CSKs do, and they wait for those documents (provision_for_protection).
+    provision_identity_keys();
     if (documents_on_notify())
       profile_index_ = configured_profile_index();
     else
@@ -517,7 +526,7 @@ void Client::provision_for_protection() {
   if (protected_media() || protected_floor() || xml_protection() || integrity_protection() ||
       (mcvideo_enabled() && (mcvideo_xml_protection() || mcvideo_integrity_protection())) || mcdata_needs_csk())
     provision_keys();
-  else
+  else if (!keys_)
     provision_identity_keys();
 }
 
@@ -671,7 +680,7 @@ void Client::load_user_documents() {
   // A user may belong to no group (an account activated without one): then there
   // is no group document to read and nothing to affiliate to.
   if (!group().empty())
-    retrieve(gms_xcap_root(), "/org.openmobilealliance.groups/global/byGroupID/" + url_encode(group()));
+    retrieve(gms_xcap_root(), "/org.openmobilealliance.groups/global/byGroupID/" + xcap_segment(group()));
 }
 
 //------------------------------------------------------------------------------
@@ -692,15 +701,22 @@ void Client::group_from_profile() {
 // the CSKs this client uploads at service authorisation.
 void Client::provision_keys() {
   const auto key_warning = [](std::string_view text) { event("key_warning", {{"reason", text}}); };
-  keys_ = std::make_unique<KeyClient>(kms_http_, cfg_.at("security"), user());
+  // The identity keys of the MCPTT ID provisioned at sign-in (provision_identity_keys) serve again: no second KMS
+  // exchange; without them (no KMS reached then), they are provisioned now and a failure ends this attempt.
+  if (!keys_) {
+    keys_ = std::make_unique<KeyClient>(kms_http_, cfg_.at("security"), user());
+    keys_->set_uid_form_detection(true); // TS 33.180 F.2.1.1: raw UID first (key_client.hpp)
+    keys_->provision(access_token());
+    status_["key_management"] = {{"kms_uri", cfg_.at("security").at("kms_uri")},
+                                 {"home_kms_uri", cfg_.at("security").value("home_kms_uri", "")},
+                                 {"own_kms", keys_->kms_uri_of(user())},
+                                 {"uid_form", keys_->uid_form()}};
+  }
   keys_->set_warning_handler(key_warning);
-  keys_->provision(access_token());
-  status_["key_management"] = {{"kms_uri", cfg_.at("security").at("kms_uri")},
-                               {"home_kms_uri", cfg_.at("security").value("home_kms_uri", "")},
-                               {"own_kms", keys_->kms_uri_of(user())}};
   // TS 24.282 clause 6.6: the MCData client signs and receives PCKs as its MCData ID.
   if (mcdata_protected() || mcdata_needs_csk() || mcdata_authenticates()) {
     mcdata_keys_ = std::make_unique<KeyClient>(kms_http_, cfg_.at("security"), mcdata_user(), user());
+    mcdata_keys_->set_uid_form_detection(true); // TS 33.180 F.2.1.1: raw UID first (key_client.hpp)
     mcdata_keys_->set_warning_handler(key_warning);
     mcdata_keys_->provision(access_token());
   }
@@ -713,6 +729,7 @@ void Client::provision_keys() {
   // uploads its own CSK for transmission control at MCVideo service authorisation.
   if (mcvideo_enabled()) {
     mcvideo_keys_ = std::make_unique<KeyClient>(kms_http_, cfg_.at("security"), mcvideo_user(), user());
+    mcvideo_keys_->set_uid_form_detection(true); // TS 33.180 F.2.1.1: raw UID first (key_client.hpp)
     mcvideo_keys_->set_warning_handler(key_warning);
     mcvideo_keys_->provision(access_token());
     auto [video_csk, video_upload] = mcvideo_keys_->make_csk(mcvideo_service_uri());
@@ -737,10 +754,12 @@ void Client::provision_identity_keys() {
   if (security.value("kms_uri", std::string{}).empty()) return;
   try {
     keys_ = std::make_unique<KeyClient>(kms_http_, security, user());
+    keys_->set_uid_form_detection(true); // TS 33.180 F.2.1.1: raw UID first (key_client.hpp)
     keys_->provision(access_token());
     status_["key_management"] = {{"kms_uri", security.at("kms_uri")},
                                  {"home_kms_uri", security.value("home_kms_uri", "")},
-                                 {"own_kms", keys_->kms_uri_of(user())}};
+                                 {"own_kms", keys_->kms_uri_of(user())},
+                                 {"uid_form", keys_->uid_form()}};
   } catch (const std::exception &error) {
     keys_.reset();
     event("key_management_unavailable", {{"reason", error.what()}});

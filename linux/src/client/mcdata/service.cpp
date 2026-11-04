@@ -259,7 +259,7 @@ const EnhancedStatusValues &Client::mcdata_group_status_values(const std::string
     if (const auto found = mcdata_enhanced_values_.find(group); found != mcdata_enhanced_values_.end())
       return found->second;
   auto document = http_.request("GET",
-                                groups_xcap() + "/global/byGroupID/" + url_encode(group),
+                                groups_xcap() + "/global/byGroupID/" + xcap_segment(group),
                                 {}, {{"Authorization", bearer()}});
   if (document.status != 200)
     throw std::runtime_error("group document retrieval failed: " + std::to_string(document.status));

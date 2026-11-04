@@ -90,6 +90,22 @@ inline SipConfig client_sip_config(const Json &cfg, bool disable_tls) {
   }
   // TS 24.281 clause 7.2.1AA: a client that also uses MCVideo registers its tag and ICSI.
   if (cfg.contains("mcvideo")) config.other_services.push_back(&mcvideo_service);
+  // TS 24.229 clauses 5.1.1.2.1 c), 5.1.3.1 and 5.1.4.1: the RFC 3840 media feature tags of the streaming media types
+  // the client supports, "audio" (section 10.1: MCPTT speech) and, with MCVideo, "video" (section 10.5), as the base
+  // tags appear in a Contact (section 9: no "+", no "sip.", no value for TRUE). Not "application" or "control" for the
+  // floor control and transmission control streams, nor a tag for MCData's MSRP (m=message): whether those are
+  // streaming media types is not settled by the text (Known limitations "Media feature tags of RFC 3840").
+  config.media_feature_tags = cfg.contains("mcvideo") ? ";audio;video" : ";audio";
+  // sip.access_network_info (off by default), for a test system: the P-Access-Network-Info header field value the
+  // client inserts (SipConfig::access_network_info). TS 24.229 clause 5.1.2A.1.1 asks for it "if available to the UE
+  // (as defined in the access technology specific annexes)", which no annex defines for plain IP or a VPN; the ETSI
+  // test suite for TS 37.579 expects it in every request, the initial REGISTER included: its reading, not a 3GPP rule
+  // (Known limitations "P-Access-Network-Info").
+  if (const auto sip = cfg.value("sip", Json::object()); sip.contains("access_network_info")) {
+    if (!sip.at("access_network_info").is_string() || sip.at("access_network_info").get<std::string>().empty())
+      throw std::runtime_error("sip.access_network_info must be a non-empty string");
+    config.access_network_info = sip.at("access_network_info").get<std::string>();
+  }
 
   // sip.auth "aka" (TS 33.203): the ISIM keeps its sequence numbers (TS 33.102 annex C.2) next to the status file
   // unless sip.isim.sqn_file names another file.
@@ -113,9 +129,13 @@ class Client {
   // example) with a certificate of a public CA (HttpTrust::configured_and_system); the other common services the
   // configured CA only.
   HttpClient idms_http_;
-  // KMS (key management client): direct, also with a home HTTP proxy. TS 24.482 annex A.2.1.2 sends every request but
-  // the IdMS's through the proxy, TS 33.180 clause 5.3.2 lets a KMS be used without it, and no configuration item
-  // tells the UE which applies: a spec conflict, so today's direct connection stays (Known limitations).
+  // KMS (key management client): direct, also with a home HTTP proxy, unless security.kms_via_proxy. TS 24.482 annex
+  // A.2.1.2 sends every request but the IdMS's through the proxy, TS 33.180 clause 5.3.2 lets a KMS be used without
+  // it, and no configuration item tells the UE which applies (spec conflict, Known limitations). security.kms_via_proxy
+  // (false by default) sends the KMS requests through the proxy, as the ETSI test system for TS 37.579 expects (the
+  // test suite's reading; maintainer decision 2026-11-03, a labelled exception to rule 7), with each MC service user's
+  // TrK required: clause 5.3.2, "If the KMS does connect to and employ the use of the HTTP proxy, then for public
+  // safety users the TrK shall be used as defined in clause 9.3.3".
   HttpClient kms_http_;
   Control control_;
   SipEngine sip_;
@@ -226,6 +246,19 @@ class Client {
   bool answer_private_key(const MediaDescription &media);
 
   std::string gms_identity() const { return cfg_.at("security").at("gms_uri"); }
+  // TS 24.484 clause 6.3.13.2.2 step b) 2): the configuration SUBSCRIBE goes to "the configured public service identity
+  // for performing subscription proxy function of the CMS", for which no configuration item is defined (spec gap,
+  // Known limitations "CMS subscription proxy PSI"): cms.subscription_psi, by default the MCPTT server's PSI (the
+  // form used so far). The option follows the ETSI test system for TS 37.579, which names such a PSI (the test
+  // suite's reading; maintainer decision 2026-11-03, a labelled exception to rule 7).
+  std::string cms_subscription_psi() const {
+    const auto cms = cfg_.value("cms", Json::object());
+    if (!cms.contains("subscription_psi")) return service();
+    const auto psi = cms.at("subscription_psi").get<std::string>();
+    if (!psi.starts_with("sip:") || psi.find_first_of("\r\n<> ") != std::string::npos)
+      throw std::runtime_error("cms.subscription_psi must be a SIP URI");
+    return psi;
+  }
   // TS 24.229 clause 5.1.1.3: the default public user identity, the configured SIP identity.
   std::string sip_identity() const { return cfg_.at("sip").at("identity"); }
   // TS 24.481 clause 6.3.13.2.1 step b: "the configured public service identity for performing subscription proxy
@@ -236,13 +269,6 @@ class Client {
     if (!gms.contains("subscription_psi"))
       throw std::runtime_error("gms.subscription_psi (the GMS-URI) is not configured");
     return gms.at("subscription_psi").get<std::string>();
-  }
-  // RFC 6665 section 4.1.3: the NOTIFYs of a group document or group key subscription come from its notifier, the
-  // GMS subscription proxy PSI it was sent to (the From of the dialog), asserted by the SIP core.
-  bool from_gms_proxy(const SipMessage &message, bool check_from) const {
-    if (!cfg_.value("gms", Json::object()).contains("subscription_psi")) return false;
-    const auto psi = gms_subscription_psi();
-    return asserted_identity(message) == psi && (!check_from || message.from_uri == psi);
   }
 
   std::string xcap_root() const;
@@ -881,7 +907,7 @@ class Client {
 
   // TS 24.484 clause 8.3.1A: the user's MCPTT user profile document, mcptt-user-profile-<index>.xml.
   std::string profile_document_path() const {
-    return "org.3gpp.mcptt.user-profile/users/" + url_encode(user()) + "/mcptt-user-profile-" +
+    return "org.3gpp.mcptt.user-profile/users/" + xcap_segment(user()) + "/mcptt-user-profile-" +
            std::to_string(profile_index_) + ".xml";
   }
 

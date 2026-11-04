@@ -71,7 +71,7 @@ void Client::profile_command(const std::string &cmd) {
   if (verb != "profile-revoke" || id.empty() || action.empty() || index < 1 || index > 255)
     throw std::runtime_error("profile-revoke <MCPTT ID> <action> [<profile index>]");
   const auto url = cms_xcap_root() + "/org.3gpp.mcptt.user-profile/users/" +
-                   url_encode(id) + "/mcptt-user-profile-" + std::to_string(index) + ".xml";
+                   xcap_segment(id) + "/mcptt-user-profile-" + std::to_string(index) + ".xml";
   const auto current = http_.request("GET", url, {}, {{"Authorization", bearer()}});
   if (current.status != 200) {
     status_["xcap_last"] = {{"method", "GET"},
@@ -162,7 +162,7 @@ std::string Client::group_documents_subscribe(const std::vector<std::string> &ar
   auto parts = info_parts(info);
   std::vector<std::string> entries;
   for (const auto &group_id : args)
-    entries.push_back("org.openmobilealliance.groups/global/byGroupID/" + url_encode(group_id));
+    entries.push_back("org.openmobilealliance.groups/global/byGroupID/" + xcap_segment(group_id));
   parts.push_back({resource_lists_mime, xcap_resource_list(entries)});
   const auto boundary = "mcx-" + random_id();
   // A refused SUBSCRIBE (403 when no group of the list may be followed, clause 6.3.13.3.2.2) creates no subscription
@@ -205,7 +205,7 @@ void Client::subscribe_own_group_documents() {
 void Client::group_documents_resubscribe(const std::vector<std::string> &args) {
   std::vector<std::string> entries;
   for (const auto &group_id : args)
-    entries.push_back("org.openmobilealliance.groups/global/byGroupID/" + url_encode(group_id));
+    entries.push_back("org.openmobilealliance.groups/global/byGroupID/" + xcap_segment(group_id));
   // A subscription whose dialog is gone is dropped; the others are still re-subscribed.
   std::vector<std::string> failed;
   for (const auto &entry : group_doc_subscriptions_) {
@@ -263,10 +263,10 @@ void Client::group_management_command(const std::string &cmd) {
   in >> verb;
   std::vector<std::string> args;
   for (std::string word; in >> word;) args.push_back(word);
-  const auto own_tree = groups_xcap() + "/users/" + url_encode(user()) + "/";
+  const auto own_tree = groups_xcap() + "/users/" + xcap_segment(user()) + "/";
   if (verb == "group-create") { // TS 24.481 clause 6.3.2.2.2
     if (args.size() < 2) throw std::runtime_error("group-create <document> <group ID> <member>...");
-    xcap_request("PUT", own_tree + url_encode(args[0]), "application/vnd.oma.poc.groups+xml",
+    xcap_request("PUT", own_tree + xcap_segment(args[0]), "application/vnd.oma.poc.groups+xml",
                  group_document_xml(args[1], {args.begin() + 2, args.end()}));
   } else if (verb == "temporary-create") { // TS 24.481 clause 6.3.14.2
     // temporary-create <document> <temporary group ID> <group>,<group>... [chat] [protected]
@@ -275,18 +275,18 @@ void Client::group_management_command(const std::string &cmd) {
           "temporary-create <document> <temporary group ID> <group>,<group>... [chat] [protected]");
     const bool chat = std::find(args.begin() + 3, args.end(), "chat") != args.end();
     const bool protect = std::find(args.begin() + 3, args.end(), "protected") != args.end();
-    xcap_request("POST", own_tree + url_encode(args[0]), "application/vnd.3gpp.GMOP+xml",
+    xcap_request("POST", own_tree + xcap_segment(args[0]), "application/vnd.3gpp.GMOP+xml",
                  temporary_group_request_xml(args[1], args[2], chat, protect));
   } else if (verb == "temporary-delete") { // TS 24.481 clause 6.3.15.2
     if (args.size() != 1) throw std::runtime_error("temporary-delete <document>");
-    xcap_request("DELETE", own_tree + url_encode(args[0]));
+    xcap_request("DELETE", own_tree + xcap_segment(args[0]));
   } else if (verb == "group-delete") { // TS 24.481 clause 6.3.5.2.2
     if (args.size() != 1) throw std::runtime_error("group-delete <document>");
-    xcap_request("DELETE", own_tree + url_encode(args[0]));
+    xcap_request("DELETE", own_tree + xcap_segment(args[0]));
   } else if (verb == "group-member") { // TS 24.481 clauses 6.3.6.2.2 and 6.3.7.2.2
     if (args.size() != 3 || (args[0] != "add" && args[0] != "remove"))
       throw std::runtime_error("group-member add|remove <group ID> <member>");
-    const auto url = groups_xcap() + "/global/byGroupID/" + url_encode(args[1]) + "/~~/" +
+    const auto url = groups_xcap() + "/global/byGroupID/" + xcap_segment(args[1]) + "/~~/" +
                      url_encode("group/list-service/list/entry[@uri=\"" + args[2] + "\"]");
     if (args[0] == "add")
       xcap_request("PUT", url, "application/xcap-el+xml",
@@ -328,7 +328,7 @@ void Client::subscribe_configuration() {
   parts.push_back({resource_lists_mime, xcap_resource_list(documents)});
   const auto boundary = "mcx-" + random_id();
   config_subscription_ = sip_.subscribe(
-      service(), "xcap-diff", configuration_documents_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
+      cms_subscription_psi(), "xcap-diff", configuration_documents_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
       [this](const SipResponse &response) {
         if (response.status_code < 200) return;
         status_["configuration"]["subscription_status"] = response.status_code;
@@ -417,7 +417,7 @@ void Client::configuration_subscription_tick() {
 std::string Client::ue_configuration_document_path() const {
   const auto &mcptt = cfg_.at("mcptt");
   const auto ue = mcptt.contains("ue_instance_id") ? mcptt.at("ue_instance_id").get<std::string>() : client_id();
-  return "org.3gpp.mcptt.ue-config/users/" + url_encode(user()) + "/" + url_encode(ue);
+  return "org.3gpp.mcptt.ue-config/users/" + xcap_segment(user()) + "/" + xcap_segment(ue);
 }
 
 //------------------------------------------------------------------------------
@@ -497,10 +497,10 @@ std::optional<SipResponse> Client::group_document_notify(const SipMessage &messa
   if (found == group_doc_subscriptions_.end()) return std::nullopt;
   SipResponse response;
   response.status_code = 200;
-  if (!from_gms_proxy(message, false)) {
-    response.status_code = 403;
-    return response;
-  }
+  // TS 24.481 clause 6.3.13.2.1 / TS 24.484 clause 6.3.13.2.2: the NOTIFY is handled "according to IETF RFC 5875";
+  // it is accepted by its subscription's dialog (RFC 6665 section 4.1.3) over the SA or TLS session the UE requires
+  // (TS 24.229 clause 5.1.2A.2). No P-Asserted-Identity is checked: no text asks the notifier for one (TS 24.229
+  // table A.63 item 17B: n/a for an AS acting as terminating UA) and nothing in the network inserts one.
   const auto body = message.parts.empty() ? message.body : message.parts.front().body;
   const auto attribute = [&](const std::string &element, const char *name) {
     const auto at = element.find(std::string(name) + "=\"");
@@ -523,13 +523,13 @@ std::optional<SipResponse> Client::group_document_notify(const SipMessage &messa
     if (!entry["removed"].get<bool>()) {
       schedule([this, group] {
         // TS 24.481 clause 6.3.3.2.2: retrieve the changed group document.
-        const auto response = http_.request("GET", groups_xcap() + "/global/byGroupID/" + url_encode(group), {},
+        const auto response = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(group), {},
                                             {{"Authorization", bearer()}});
         auto &document = group_documents_[group];
         document["fetch_status"] = response.status;
         if (response.status == 200)
           event("document_retrieved",
-                {{"resource", "/org.openmobilealliance.groups/global/byGroupID/" + url_encode(group)},
+                {{"resource", "/org.openmobilealliance.groups/global/byGroupID/" + xcap_segment(group)},
                  {"bytes", response.body.size()}});
         Json members = Json::array();
         for (std::size_t at = response.body.find("<entry"); at != std::string::npos;

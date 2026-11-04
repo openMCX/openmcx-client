@@ -352,7 +352,7 @@ void Client::private_service_command(const std::string &cmd) {
     // TS 24.379 clause 10.1.5.2.1 step 1A: no remotely initiated call on a preconfigured-use-only group. A
     // group document is served to members only; otherwise the server decides (167).
     auto document = http_.request("GET",
-                                  groups_xcap() + "/global/byGroupID/" + url_encode(second),
+                                  groups_xcap() + "/global/byGroupID/" + xcap_segment(second),
                                   {}, {{"Authorization", bearer()}});
     if (document.status == 200 && group_preconfigured_use_only(document.body))
       throw std::runtime_error("calls are not allowed on the preconfigured group");

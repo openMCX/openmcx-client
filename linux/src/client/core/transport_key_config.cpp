@@ -28,4 +28,19 @@ std::vector<std::string> unmatched_transport_keys(const nlohmann::json &security
     if (std::find(identities.begin(), identities.end(), entry.key()) == identities.end()) out.push_back(entry.key());
   return out;
 }
+
+//------------------------------------------------------------------------------
+// security.kms_via_proxy: see transport_key_config.hpp.
+std::string kms_proxy(const nlohmann::json &security, const std::string &proxy,
+                      const std::vector<std::string> &identities) {
+  if (!security.is_object() || !security.contains("kms_via_proxy")) return {};
+  if (!security.at("kms_via_proxy").is_boolean()) throw std::runtime_error("security.kms_via_proxy must be a boolean");
+  if (!security.at("kms_via_proxy").get<bool>()) return {};
+  if (proxy.empty()) throw std::runtime_error("security.kms_via_proxy needs a home HTTP proxy (http.proxy)");
+  for (const auto &identity : identities)
+    if (!load_transport_keys(security, identity).trk)
+      throw std::runtime_error("security.kms_via_proxy needs a TrK for " + identity +
+                               " (TS 33.180 clause 5.3.2: through the HTTP proxy the TrK shall be used)");
+  return proxy;
+}
 } // namespace mcx

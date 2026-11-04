@@ -345,11 +345,15 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
   if (get_header(message.headers, "Event") == "xcap-diff" && !config_subscription_.empty() &&
       message.dialog_id == config_subscription_) {
     SipResponse response;
-    response.status_code = asserted_identity(message) == service() ? 200 : 403;
-    if (response.status_code == 200) schedule([this] { configuration_notified(); });
+    response.status_code = 200;
+    // TS 24.481 clause 6.3.13.2.1 / TS 24.484 clause 6.3.13.2.2: the NOTIFY is handled "according to IETF RFC 5875";
+    // it is accepted by its subscription's dialog (RFC 6665 section 4.1.3) over the SA or TLS session the UE requires
+    // (TS 24.229 clause 5.1.2A.2). No P-Asserted-Identity is checked: no text asks the notifier for one (TS 24.229
+    // table A.63 item 17B: n/a for an AS acting as terminating UA) and nothing in the network inserts one.
+    schedule([this] { configuration_notified(); });
     // RFC 6665 section 4.1.3: on Subscription-State "terminated" the subscriber "MUST consider the subscription
     // terminated"; its documents are read as any NOTIFY's.
-    if (response.status_code == 200 && get_header(message.headers, "Subscription-State").starts_with("terminated"))
+    if (get_header(message.headers, "Subscription-State").starts_with("terminated"))
       configuration_subscription_ended(std::string(get_header(message.headers, "Subscription-State")));
     return response;
   }
@@ -402,10 +406,10 @@ SipResponse Client::group_key_notify(const SipMessage &message) {
     response.status_code = 481;
     return response;
   }
-  if (!from_gms_proxy(message, true)) {
-    response.status_code = 403;
-    return response;
-  }
+  // TS 24.481 clause 6.3.13.2.1 / TS 24.484 clause 6.3.13.2.2: the NOTIFY is handled "according to IETF RFC 5875";
+  // it is accepted by its subscription's dialog (RFC 6665 section 4.1.3) over the SA or TLS session the UE requires
+  // (TS 24.229 clause 5.1.2A.2). No P-Asserted-Identity is checked: no text asks the notifier for one (TS 24.229
+  // table A.63 item 17B: n/a for an AS acting as terminating UA) and nothing in the network inserts one.
   if (get_header(message.headers, "Subscription-State").starts_with("terminated")) {
     if (message.dialog_id == key_subscription_) {
       protection_.clear_group();
