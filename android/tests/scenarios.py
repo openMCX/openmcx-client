@@ -50,6 +50,7 @@ class Lab:
         self.results: list[dict] = []
         self.scenario = ""
         self.skipped: list[str] = []
+        self.skipped_parts: list[str] = []  # parts of a scenario skipped for a missing client, the rest still run
 
     def cmd(self, client: str, *args: str, ok: bool = True, timeout: float = 60):
         r = self.devices[client].control(*args, timeout=timeout)
@@ -286,11 +287,25 @@ class Lab:
     # Lab-side controls (root adb shell on the redroid clients).
 
     def leave_clean(self) -> None:
-        """Hang up what a scenario that stopped half-way left, for the next scenario."""
+        """Hang up what a scenario that stopped half-way left, and give up its functional aliases, for the next
+        scenario (an alias held on the server outlives the run: a later activation of it is then refused)."""
         for c in self.devices:
             try:
                 if self.call(c):
                     self.cmd(c, "hangup", ok=False)
+            except Exception:
+                pass
+        self.release_aliases(list(self.devices))
+
+    def release_aliases(self, clients) -> None:
+        """Stop presenting and deactivate every functional alias these clients hold (S17 starts from none)."""
+        for c in clients:
+            try:
+                held = self.status(c).get("functional_aliases", {}).get("active") or []
+                if held:
+                    self.cmd(c, "fa", "use", "none", ok=False)
+                for alias in held:
+                    self.cmd(c, "fa", "deactivate", alias, ok=False)
             except Exception:
                 pass
 
@@ -845,6 +860,10 @@ class Lab:
         duty_officer, incident_commander = alias(A, "duty-officer"), alias(A, "incident-commander")
         if not self.check("alice may use duty-officer and incident-commander", bool(duty_officer and incident_commander), available=fa(A)["available"]):
             return
+        # Start from no alias held: one left active on the server by an earlier run would make alice's activation of
+        # duty-officer refused (one user at a time).
+        self.release_aliases([A, B])
+        self.wait("alice and bob hold no alias", lambda: not fa(A)["active"] and not fa(B)["active"])
         # Each PUBLISH lists every alias wanted active (9A.2.1.2 step 6 a; the server replaces the set, 9A.2.2.2.3
         # steps 12 to 14): a second activation keeps the first, a deactivation lists the alias that stays.
         self.cmd(A, "fa", "activate", duty_officer)
@@ -865,21 +884,26 @@ class Lab:
         self.wait("alice is told she no longer holds duty-officer", lambda: duty_officer not in fa(A)["active"])
         self.check("bob takes duty-officer over; alice keeps incident-commander", incident_commander in fa(A)["active"])
         # A private call to the alias reaches whoever holds it: bob.
-        third = next(c for c in self.devices if c not in (A, B))
-        self.cmd(third, "private-fa", duty_officer, "auto", timeout=30)
-        bob = self.established(B)
-        self.check("a call to duty-officer reaches bob", bob["peer"] == MCPTT[third], peer=bob["peer"])
-        self.check("bob sees the call was to duty-officer", bob.get("called_alias") == duty_officer, called=bob.get("called_alias"))
-        self.talk_and_verify(third, [B])
-        self.hangup(third)
-        self.idle_everywhere([third, B])
-        # Alice presents incident-commander on her calls.
-        self.cmd(A, "fa", "use", incident_commander)
-        self.cmd(A, "private", MCPTT[third], "auto", timeout=30)
-        other = self.established(third)
-        self.check(f"{third} sees alice's call from incident-commander", other.get("calling_alias") == incident_commander, calling=other.get("calling_alias"))
-        self.hangup(A)
-        self.idle_everywhere([A, third])
+        third = next((c for c in self.devices if c not in (A, B)), None)
+        if third is None:
+            # A two-phone lab: the calls need a third client to call the alias and to be called by alice.
+            print(f"  [SKIP] {self.scenario}: the calls to and from an alias need a third client (create the lab without --phones-only)")
+            self.skipped_parts.append(f"{self.scenario} calls")
+        else:
+            self.cmd(third, "private-fa", duty_officer, "auto", timeout=30)
+            bob = self.established(B)
+            self.check("a call to duty-officer reaches bob", bob["peer"] == MCPTT[third], peer=bob["peer"])
+            self.check("bob sees the call was to duty-officer", bob.get("called_alias") == duty_officer, called=bob.get("called_alias"))
+            self.talk_and_verify(third, [B])
+            self.hangup(third)
+            self.idle_everywhere([third, B])
+            # Alice presents incident-commander on her calls.
+            self.cmd(A, "fa", "use", incident_commander)
+            self.cmd(A, "private", MCPTT[third], "auto", timeout=30)
+            other = self.established(third)
+            self.check(f"{third} sees alice's call from incident-commander", other.get("calling_alias") == incident_commander, calling=other.get("calling_alias"))
+            self.hangup(A)
+            self.idle_everywhere([A, third])
         self.cmd(A, "fa", "use", "none")
         self.cmd(A, "fa", "deactivate", incident_commander)
         self.cmd(B, "fa", "deactivate", duty_officer)
@@ -977,7 +1001,9 @@ def main() -> None:
             fn(lab)
         except KeyError as e:
             if not (e.args and e.args[0] in (A, B, C) and e.args[0] not in lab.devices):
-                raise
+                lab.check(f"{key} completed", False, error=f"KeyError: {e}")
+                lab.leave_clean()
+                continue
             # A phones-only lab has no third client: create the lab without --phones-only, so that redroid
             # client-c joins the phones (the C++ reference client does not take the debug control commands).
             print(f"  [SKIP] {key} needs {e.args[0]}, which this lab does not have (create it without --phones-only)")
@@ -987,8 +1013,13 @@ def main() -> None:
         except Failed as e:
             lab.check(f"{key} completed", False, error=str(e))
             lab.leave_clean()
+        except Exception as e:
+            # A scenario that crashes fails, and what it left is cleaned up; the run goes on to the next scenario.
+            lab.check(f"{key} completed", False, error=f"{type(e).__name__}: {e}")
+            lab.leave_clean()
     passed = sum(r["ok"] for r in lab.results)
-    print(f"\n{passed}/{len(lab.results)} checks passed" + (f"; skipped {' '.join(lab.skipped)} (no client-c)" if lab.skipped else ""))
+    print(f"\n{passed}/{len(lab.results)} checks passed" + (f"; skipped {' '.join(lab.skipped)} (no client-c)" if lab.skipped else "")
+          + (f"; partly skipped: {', '.join(lab.skipped_parts)}" if lab.skipped_parts else ""))
     out = Path(__file__).resolve().parents[1] / "lab" / "run" / lab.name / "android-scenarios.json"
     out.write_text(json.dumps(lab.results, indent=2) + "\n")
     sys.exit(0 if passed == len(lab.results) else 1)
