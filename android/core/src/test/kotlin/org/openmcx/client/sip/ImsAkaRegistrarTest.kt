@@ -271,5 +271,9 @@ class ImsAkaRegistrarTest {
         assertTrue(platform.opened[0].portUc != platform.opened[1].portUc)
         assertEquals(platform.opened[0].portUs, platform.opened[1].portUs)
         assertTrue(ua.flow!!.connection === platform.clients[1])
+        assertEquals(platform.opened[1].portUc, registrar.portUc)
+        assertEquals(2, registrar.setsUsed)
+        // TS 33.203 clause 7.4: the old set closes once its transactions have ended (polled every 500 ms).
+        withTimeout(10_000) { while (registrar.oldSetsClosed < 1) kotlinx.coroutines.delay(100) }
     }
 }

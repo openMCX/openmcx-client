@@ -123,6 +123,11 @@ class ImsAkaRegistrar(
     /** The algorithm pair of the set in use. */
     @Volatile var selected: SecMechanism? = null; private set
     val registered: Boolean get() = current != null
+    /** The set in use's protected client port, port_uc (TS 33.203 clause 7.1). */
+    val portUc: Int? get() = current?.set?.params?.portUc
+    /** The sets that came into use with a 200 (OK), and the old ones closed after their transactions (clause 7.4). */
+    @Volatile var setsUsed = 0; private set
+    @Volatile var oldSetsClosed = 0; private set
 
     init {
         // TS 24.229 clause 5.1.2A.1.1 b): every request but REGISTER names the protected server port in Via; REGISTER
@@ -317,6 +322,7 @@ class ImsAkaRegistrar(
         serviceRoutes = response.headers.values("Service-Route")
         if (now !== old) {
             current = now
+            setsUsed++
             ua.flow = now.flow
             ua.contactHost = hostport(now.set.params.local, now.set.params.portUs)
             unprotected?.let { it.close(); unprotected = null }
@@ -347,6 +353,7 @@ class ImsAkaRegistrar(
         scope.launch {
             while (ua.pendingOn(old.flow) > 0 || synchronized(old.incoming) { old.incoming.any { ua.pendingOn(it) > 0 } }) delay(500)
             closeSet(old)
+            oldSetsClosed++
             event("IMS AKA: old security association set closed (port_uc ${old.set.params.portUc})")
         }
     }

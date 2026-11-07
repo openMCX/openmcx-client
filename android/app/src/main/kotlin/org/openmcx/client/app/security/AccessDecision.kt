@@ -105,13 +105,15 @@ object AccessDecision {
         return rows
     }
 
-    /** The same for the debug status. */
+    /** The same for the debug status: the decision, and with IMS AKA its registration ("ims_aka"). */
     fun json(aka: ImsAkaRegistrar?): Any {
         val state = _current.value ?: return JSONObject.NULL
-        return JSONObject().put("method", state.method).put("reason", state.reason).put("card", state.card ?: JSONObject.NULL)
-            .put("registered", aka?.registered ?: false)
+        val out = JSONObject().put("method", state.method).put("reason", state.reason).put("card", state.card ?: JSONObject.NULL)
+        if (state.method != "IMS AKA") return out
+        return out.put("ims_aka", JSONObject().put("registered", aka?.registered ?: false)
             .put("alg", aka?.selected?.alg ?: JSONObject.NULL).put("ealg", aka?.selected?.ealg ?: JSONObject.NULL)
+            .put("port_uc", aka?.portUc ?: JSONObject.NULL).put("sets_used", aka?.setsUsed ?: 0).put("old_sets_closed", aka?.oldSetsClosed ?: 0)
             .put("associated_uris", org.json.JSONArray(aka?.associatedUris ?: emptyList<String>()))
-            .put("last_authentication", aka?.lastAuthentication?.let { JSONObject().put("at", it.first).put("outcome", it.second) } ?: JSONObject.NULL)
+            .put("last_authentication", aka?.lastAuthentication?.let { JSONObject().put("at", it.first).put("outcome", it.second) } ?: JSONObject.NULL))
     }
 }
