@@ -55,6 +55,8 @@ interface ImsAkaPlatform {
      * the set's transforms; connections the P-CSCF opens to port_us (from port_pc) go to [onIncoming].
      */
     suspend fun open(reservation: SaReservation, params: SaSetParams, onIncoming: (Connection) -> Unit): SaSet
+    /** The registration is over: what outlives a set (the listening socket of port_us) goes. */
+    fun release() {}
 }
 
 /** The identities and the P-CSCF of the IMS AKA registration. */
@@ -321,6 +323,7 @@ class ImsAkaRegistrar(
         if (current === active) {
             current = null
             closeSet(active)
+            platform.release()
             closed.complete(cause ?: IllegalStateException("security association set closed"))
         }
     }
@@ -364,6 +367,7 @@ class ImsAkaRegistrar(
         val status = runCatching { ua.send(request, authenticate = false, over = active.flow).status }.getOrNull()
         current = null
         closeSet(active)
+        platform.release()
         closed.complete(null)
         return status
     }
@@ -371,6 +375,7 @@ class ImsAkaRegistrar(
     fun close() {
         current?.let { current = null; closeSet(it) }
         unprotected?.close()
+        platform.release()
         if (!closed.isCompleted) closed.complete(null)
     }
 }

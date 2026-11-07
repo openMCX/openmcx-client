@@ -1,0 +1,209 @@
+//
+// OpenMCX Licence Information : AGPL-3.0-or-later
+//
+
+package org.openmcx.client.app.security
+
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.IpSecAlgorithm
+import android.net.IpSecManager
+import android.net.IpSecTransform
+import android.net.Network
+import android.system.Os
+import android.system.OsConstants
+import android.telephony.SubscriptionManager
+import android.telephony.TelephonyManager
+import android.util.Base64
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import org.openmcx.client.security.AkaOutcome
+import org.openmcx.client.security.CardAka
+import org.openmcx.client.security.EspKeys
+import org.openmcx.client.sip.Connection
+import org.openmcx.client.sip.ImsAkaPlatform
+import org.openmcx.client.sip.SaReservation
+import org.openmcx.client.sip.SaSet
+import org.openmcx.client.sip.SaSetParams
+import java.io.FileDescriptor
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.InputStream
+import java.io.OutputStream
+import java.net.Inet4Address
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.net.Socket
+import kotlin.concurrent.thread
+
+/**
+ * The card of IMS AKA: the ISIM of the subscription whose card gives this app carrier privileges (its ARA-M rule
+ * names the app's signing certificate). TS 31.103 clause 7.1.2, AUTHENTICATE in the IMS AKA security context, through
+ * TelephonyManager.getIccAuthentication; the app never sees K or OPc.
+ */
+class IsimCard(private val context: Context) : CardAka {
+    /** The card's TelephonyManager, or null without a subscription that gives carrier privileges. */
+    fun telephony(): TelephonyManager? {
+        val subs = context.getSystemService(SubscriptionManager::class.java).activeSubscriptionInfoList.orEmpty()
+        val tm = context.getSystemService(TelephonyManager::class.java)
+        return subs.map { tm.createForSubscriptionId(it.subscriptionId) }.firstOrNull { it.hasCarrierPrivileges() }
+    }
+
+    override suspend fun authenticate(rand: ByteArray, autn: ByteArray): AkaOutcome = withContext(Dispatchers.IO) {
+        val tm = telephony() ?: throw IllegalStateException("no card with carrier privileges")
+        // TS 31.102 clause 7.1.2.1: L RAND, RAND, L AUTN, AUTN.
+        val data = byteArrayOf(rand.size.toByte()) + rand + byteArrayOf(autn.size.toByte()) + autn
+        val answer = tm.getIccAuthentication(TelephonyManager.APPTYPE_ISIM, TelephonyManager.AUTHTYPE_EAP_AKA,
+            Base64.encodeToString(data, Base64.NO_WRAP))
+        // The card's refusal of the network (MAC failure, status word 9862) reaches the app only as a missing answer.
+        val r = answer?.let { Base64.decode(it, Base64.DEFAULT) } ?: return@withContext AkaOutcome.MacFailure
+        fun field(at: Int): Pair<ByteArray, Int> = r.copyOfRange(at + 1, at + 1 + (r[at].toInt() and 0xff)) to at + 1 + (r[at].toInt() and 0xff)
+        when (r.firstOrNull()?.toInt()?.and(0xff)) {
+            // Successful 3G context: DB, L RES, RES, L CK, CK, L IK, IK.
+            0xDB -> { val (res, a) = field(1); val (ck, b) = field(a); val (ik, _) = field(b); AkaOutcome.Success(res, ck, ik) }
+            // Synchronisation failure: DC, L AUTS, AUTS.
+            0xDC -> AkaOutcome.SyncFailure(field(1).first)
+            else -> AkaOutcome.MacFailure
+        }
+    }
+}
+
+/** A TCP connection on a socket the platform opened (a java.net.Socket or a raw descriptor). */
+private class SocketConnection(
+    override val input: InputStream, override val output: OutputStream,
+    override val localHost: String, override val localPort: Int, private val onClose: () -> Unit,
+) : Connection {
+    override val transport = "TCP"
+    override fun close() = onClose()
+}
+
+/**
+ * ImsAkaPlatform on Android: the default network's address, the ISIM ([IsimCard]) and the four transport-mode SAs of
+ * TS 33.203 clause 7.1 through IpSecManager, applied per socket: the client socket from port_uc carries the
+ * port_uc -> port_ps (spi_ps) and port_ps -> port_uc (spi_uc) SAs, the listening socket of port_us the port_pc ->
+ * port_us (spi_us) and port_us -> port_pc (spi_pc) ones, which each connection it accepts keeps. The ESP keys are
+ * those of TS 33.203 annex I ([EspKeys]); AES-GMAC is not among IpSecManager's algorithms (SecAgree.SUPPORTED).
+ */
+class AndroidImsAkaPlatform(private val context: Context, override val card: CardAka = IsimCard(context)) : ImsAkaPlatform {
+    private val ipsec = context.getSystemService(IpSecManager::class.java)
+    private val connectivity = context.getSystemService(ConnectivityManager::class.java)
+    @Volatile private var listener: FileDescriptor? = null
+
+    private fun network(): Network = connectivity.activeNetwork ?: throw IllegalStateException("no network")
+
+    override fun localAddress(): InetAddress {
+        val addresses = connectivity.getLinkProperties(network())?.linkAddresses.orEmpty().map { it.address }
+        return addresses.firstOrNull { it is Inet4Address && !it.isLoopbackAddress }
+            ?: addresses.firstOrNull { !it.isLinkLocalAddress && !it.isLoopbackAddress }
+            ?: throw IllegalStateException("no address on the network")
+    }
+
+    private inner class Reservation(local: InetAddress) : SaReservation {
+        // The UE's inbound SPIs (TS 33.203 clause 7.1: spi_uc, spi_us, chosen by the UE).
+        val uc: IpSecManager.SecurityParameterIndex = ipsec.allocateSecurityParameterIndex(local)
+        val us: IpSecManager.SecurityParameterIndex = ipsec.allocateSecurityParameterIndex(local)
+        // The client socket, bound now so that port_uc is known for the Security-Client.
+        val socket = Socket().also { network().bindSocket(it); it.reuseAddress = true; it.bind(InetSocketAddress(local, 0)) }
+        override val spiUc = uc.spi.toLong() and 0xffffffffL
+        override val spiUs = us.spi.toLong() and 0xffffffffL
+        override val portUc = socket.localPort
+        @Volatile var used = false
+        override fun close() {
+            if (!used) runCatching { socket.close() }
+            runCatching { uc.close() }; runCatching { us.close() }
+        }
+    }
+
+    override fun reserve(local: InetAddress): SaReservation = Reservation(local)
+
+    override suspend fun connectUnprotected(local: InetAddress, pcscf: InetAddress, port: Int): Connection = withContext(Dispatchers.IO) {
+        val socket = Socket()
+        network().bindSocket(socket)
+        socket.bind(InetSocketAddress(local, 0))
+        socket.connect(InetSocketAddress(pcscf, port), 10_000)
+        SocketConnection(socket.getInputStream(), socket.getOutputStream(), local.hostAddress!!, socket.localPort) { socket.close() }
+    }
+
+    private fun transform(source: InetAddress, spi: IpSecManager.SecurityParameterIndex, p: SaSetParams, toUe: Boolean, fromServer: Boolean): IpSecTransform {
+        val b = IpSecTransform.Builder(context)
+        val keys = p.keys
+        when (p.ealg.lowercase()) {
+            "aes-gcm", "aes-gcm-us" -> b.setAuthenticatedEncryption(IpSecAlgorithm(IpSecAlgorithm.AUTH_CRYPT_AES_GCM,
+                keys.encryption + EspKeys.saSalt(keys.salt, p.ealg, toUe, fromServer), 128))
+            else -> {
+                when (p.alg.lowercase()) {
+                    "hmac-sha2-256-128" -> b.setAuthentication(IpSecAlgorithm(IpSecAlgorithm.AUTH_HMAC_SHA256, keys.integrity, 128))
+                    "hmac-sha-1-96" -> b.setAuthentication(IpSecAlgorithm(IpSecAlgorithm.AUTH_HMAC_SHA1, keys.integrity, 96))
+                    else -> throw IllegalArgumentException("integrity algorithm ${p.alg}")
+                }
+                if (p.ealg.equals("aes-cbc", true)) b.setEncryption(IpSecAlgorithm(IpSecAlgorithm.CRYPT_AES_CBC, keys.encryption))
+            }
+        }
+        return b.buildTransportModeTransform(source, spi)
+    }
+
+    override suspend fun open(reservation: SaReservation, params: SaSetParams, onIncoming: (Connection) -> Unit): SaSet = withContext(Dispatchers.IO) {
+        val r = reservation as Reservation
+        val p = params
+        // Outbound SPIs: the P-CSCF's (spi_ps, spi_pc), reserved for its address.
+        val ps = ipsec.allocateSecurityParameterIndex(p.pcscf, p.spiPs.toInt())
+        val pc = ipsec.allocateSecurityParameterIndex(p.pcscf, p.spiPc.toInt())
+        val ueToPs = transform(p.local, ps, p, toUe = false, fromServer = false)
+        val psToUe = transform(p.pcscf, r.uc, p, toUe = true, fromServer = true)
+        val pcToUs = transform(p.pcscf, r.us, p, toUe = true, fromServer = false)
+        val usToPc = transform(p.local, pc, p, toUe = false, fromServer = true)
+        val transforms = listOf(ueToPs, psToUe, pcToUs, usToPc)
+        try {
+            // port_us: one listening socket for the registration's life; each new set gives it its transforms.
+            val fd = listener ?: Os.socket(if (p.local is Inet4Address) OsConstants.AF_INET else OsConstants.AF_INET6, OsConstants.SOCK_STREAM, 0).also { fd ->
+                network().bindSocket(fd)
+                Os.setsockoptInt(fd, OsConstants.SOL_SOCKET, OsConstants.SO_REUSEADDR, 1)
+                Os.bind(fd, p.local, p.portUs)
+                Os.listen(fd, 8)
+                listener = fd
+                thread(name = "ims-aka-port-us", isDaemon = true) { accept(fd, p, onIncoming) }
+            }
+            ipsec.applyTransportModeTransform(fd, IpSecManager.DIRECTION_IN, pcToUs)
+            ipsec.applyTransportModeTransform(fd, IpSecManager.DIRECTION_OUT, usToPc)
+            val socket = r.socket
+            ipsec.applyTransportModeTransform(socket, IpSecManager.DIRECTION_OUT, ueToPs)
+            ipsec.applyTransportModeTransform(socket, IpSecManager.DIRECTION_IN, psToUe)
+            socket.connect(InetSocketAddress(p.pcscf, p.portPs), 10_000)
+            r.used = true
+            val client = SocketConnection(socket.getInputStream(), socket.getOutputStream(), p.local.hostAddress!!, socket.localPort) {
+                runCatching { ipsec.removeTransportModeTransforms(socket) }; socket.close()
+            }
+            object : SaSet {
+                override val params = p
+                override val client = client
+                override fun close() {
+                    client.close()
+                    transforms.forEach { runCatching { it.close() } }
+                    runCatching { ps.close() }; runCatching { pc.close() }
+                }
+            }
+        } catch (e: Exception) {
+            transforms.forEach { runCatching { it.close() } }
+            runCatching { ps.close() }; runCatching { pc.close() }
+            throw e
+        }
+    }
+
+    /** The P-CSCF's connections to port_us (TS 33.203 clause 7.1, from port_pc), each a connection of its own. */
+    private fun accept(fd: FileDescriptor, p: SaSetParams, onIncoming: (Connection) -> Unit) {
+        while (listener === fd) {
+            val accepted = try { Os.accept(fd, null) } catch (e: Exception) { return }
+            onIncoming(SocketConnection(FileInputStream(accepted), FileOutputStream(accepted), p.local.hostAddress!!, p.portUs) {
+                runCatching { ipsec.removeTransportModeTransforms(accepted) }; runCatching { Os.close(accepted) }
+            })
+        }
+    }
+
+    override fun release() {
+        val fd = listener ?: return
+        listener = null
+        runCatching { ipsec.removeTransportModeTransforms(fd) }
+        runCatching { Os.shutdown(fd, OsConstants.SHUT_RDWR) }
+        runCatching { Os.close(fd) }
+    }
+}
