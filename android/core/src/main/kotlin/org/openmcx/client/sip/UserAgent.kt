@@ -142,7 +142,7 @@ class UserAgent(
      *  agreement's, RFC 3329 section 2.3.1); CANCEL and the transaction layer's ACK of a non-2xx do not pass here. */
     var outboundHeaders: (SipRequest) -> Unit = {}
 
-    private class ClientTx(val request: SipRequest, val provisional: suspend (SipResponse) -> Unit) {
+    private class ClientTx(val request: SipRequest, val provisional: suspend (SipResponse) -> Unit, val flow: SipFlow? = null) {
         val final = CompletableDeferred<SipResponse>()
     }
 
@@ -156,22 +156,24 @@ class UserAgent(
      * Requests reach us over the flow, never by this name; the SIP core aliases the
      * Contact to the flow only when the Contact differs from the flow's source address.
      */
-    private val invalidSentBy: String = "${hex(5)}.invalid"
+    val sentBy: String = "${hex(5)}.invalid"
 
     /**
-     * The sent-by of Via and the host of Contact instead of the random name: with IMS AKA the UE's address and its
-     * protected server port (TS 24.229 clause 5.1.2A.1.1 b), "the protected server port and the respective contact
-     * address"); null: the random `.invalid` name.
+     * The sent-by of a request's Via instead of [sentBy]: with IMS AKA the UE's address and protected server port for
+     * every request but REGISTER (TS 24.229 clause 5.1.2A.1.1 b)), and for REGISTER over TCP the connection's own
+     * (clauses 5.1.1.2.2 c) and 5.1.1.4.2 c): the protected server port in Via only for UDP); null: [sentBy].
      */
-    @Volatile var sentByOverride: String? = null
-    val sentBy: String get() = sentByOverride ?: invalidSentBy
+    var viaSentBy: (SipRequest) -> String? = { null }
 
-    /** Our Contact URI, with `ob` (RFC 5626 §5.4); with [sentByOverride] the address the UE is reached at. */
+    /** The host and port of our Contact instead of [sentBy]: with IMS AKA the UE's address and protected server port
+     *  (TS 24.229 clause 5.1.1.4.2 b)); null: [sentBy]. */
+    @Volatile var contactHost: String? = null
+
+    /** Our Contact URI, with `ob` (RFC 5626 §5.4). */
     fun contactUri(): String {
         val c = flow?.connection ?: throw IllegalStateException("no flow")
         val user = SipUri.parse(identity.publicUserId).user
-        return if (sentByOverride != null) "sip:$user@$sentBy;transport=${c.transport.lowercase()}"
-        else "sip:$user@$sentBy;transport=${c.transport.lowercase()};ob"
+        return "sip:$user@${contactHost ?: sentBy};transport=${c.transport.lowercase()};ob"
     }
 
     /** A new out-of-dialog request, routed through the outbound proxy. */
@@ -206,9 +208,9 @@ class UserAgent(
      * returned as it is (an IMS AKA REGISTER, whose answer goes over new security associations).
      */
     suspend fun send(request: SipRequest, dialog: Dialog? = null, authenticate: Boolean = true,
-                     provisional: suspend (SipResponse) -> Unit = {}): SipResponse {
+                     over: SipFlow? = null, provisional: suspend (SipResponse) -> Unit = {}): SipResponse {
         if (authenticate) applyCredentials(request)
-        var response = transact(request, provisional)
+        var response = transact(request, provisional, over)
         if (authenticate && (response.status == 401 || response.status == 407)) {
             val header = if (response.status == 401) "WWW-Authenticate" else "Proxy-Authenticate"
             val challenge = response.headers.all(header).map(DigestChallenge::parse).firstOrNull() ?: return response
@@ -225,6 +227,10 @@ class UserAgent(
         return response
     }
 
+    /** The client and server transactions still running on [flow] (an IMS AKA set ends once it has none). */
+    fun pendingOn(flow: SipFlow): Int =
+        clients.values.count { it.flow === flow } + servers.values.count { !it.finalSent && it.via === flow }
+
     /** The request last sent for a Call-ID after authentication, so its CSeq can be followed. */
     val lastSent = ConcurrentHashMap<String, SipRequest>()
 
@@ -236,16 +242,17 @@ class UserAgent(
         }
     }
 
-    private suspend fun transact(request: SipRequest, provisional: suspend (SipResponse) -> Unit): SipResponse {
+    /** [over]: the flow to send on instead of the UA's (an IMS AKA REGISTER over a new set, TS 24.229 clause 5.1.1.5.1). */
+    private suspend fun transact(request: SipRequest, provisional: suspend (SipResponse) -> Unit, over: SipFlow? = null): SipResponse {
         outboundGate(request)
         outboundHeaders(request)
-        val flow = flow ?: throw IllegalStateException("no flow")
+        val flow = over ?: flow ?: throw IllegalStateException("no flow")
         val branch = newBranch()
         val c = flow.connection
         request.headers.remove("Via")
-        request.headers.prepend("Via", "SIP/2.0/${c.transport} $sentBy;branch=$branch;rport")
+        request.headers.prepend("Via", "SIP/2.0/${c.transport} ${viaSentBy(request) ?: sentBy};branch=$branch;rport")
         if (request.method == "ACK") { flow.send(request); return SipResponse(200, "OK") }
-        val tx = ClientTx(request, provisional)
+        val tx = ClientTx(request, provisional, flow)
         val key = "$branch|${request.cseq.method}"
         clients[key] = tx
         try {
@@ -268,7 +275,7 @@ class UserAgent(
             .add("Call-ID", invite.callId).add("CSeq", "${invite.cseq.number} CANCEL")
         val cancel = SipRequest("CANCEL", invite.uri, headers)
         val key = "${invite.topVia.branch}|CANCEL"
-        val tx = ClientTx(cancel) {}
+        val tx = ClientTx(cancel, {})
         clients[key] = tx
         try {
             flow.send(cancel)
@@ -283,7 +290,7 @@ class UserAgent(
     suspend fun ack(dialog: Dialog, invite: SipRequest, body: ByteArray = ByteArray(0), contentType: String? = null) {
         val ack = inDialog(dialog, "ACK", cseq = (lastSent[invite.callId] ?: invite).cseq.number)
         if (contentType != null) ack.headers.add("Content-Type", contentType)
-        transact(SipRequest("ACK", ack.uri, ack.headers, body)) {}
+        transact(SipRequest("ACK", ack.uri, ack.headers, body), {})
     }
 
     internal suspend fun sendResponse(tx: ServerTransaction, response: SipResponse) {
