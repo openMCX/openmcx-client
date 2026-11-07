@@ -25,7 +25,13 @@ data class UaIdentity(
 )
 
 /** An incoming request and the means to answer it once (RFC 3261 §17.2, reliable transport). */
-class ServerTransaction internal constructor(private val ua: UserAgent, val request: SipRequest) {
+class ServerTransaction internal constructor(
+    private val ua: UserAgent,
+    val request: SipRequest,
+    /** The flow the request arrived on, where its responses go (TS 33.203 clause 7.1: a request the P-CSCF sends
+     *  from port_pc to the UE's port_us is answered there); null: the UA's outbound flow. */
+    internal val via: SipFlow? = null,
+) {
     @Volatile var finalSent = false
         private set
     /** Completes when a CANCEL arrives for this INVITE. */
@@ -132,6 +138,9 @@ class UserAgent(
     var onAck: suspend (SipRequest) -> Unit = {}
     /** Checked before every request goes out (each transaction and ACK); throws when the request may not be sent. */
     var outboundGate: (SipRequest) -> Unit = {}
+    /** Adds header fields to every request of a transaction and every ACK before its Via is set (e.g. the security
+     *  agreement's, RFC 3329 section 2.3.1); CANCEL and the transaction layer's ACK of a non-2xx do not pass here. */
+    var outboundHeaders: (SipRequest) -> Unit = {}
 
     private class ClientTx(val request: SipRequest, val provisional: suspend (SipResponse) -> Unit) {
         val final = CompletableDeferred<SipResponse>()
@@ -147,13 +156,22 @@ class UserAgent(
      * Requests reach us over the flow, never by this name; the SIP core aliases the
      * Contact to the flow only when the Contact differs from the flow's source address.
      */
-    val sentBy: String = "${hex(5)}.invalid"
+    private val invalidSentBy: String = "${hex(5)}.invalid"
 
-    /** Our Contact URI, with `ob` (RFC 5626 §5.4). */
+    /**
+     * The sent-by of Via and the host of Contact instead of the random name: with IMS AKA the UE's address and its
+     * protected server port (TS 24.229 clause 5.1.2A.1.1 b), "the protected server port and the respective contact
+     * address"); null: the random `.invalid` name.
+     */
+    @Volatile var sentByOverride: String? = null
+    val sentBy: String get() = sentByOverride ?: invalidSentBy
+
+    /** Our Contact URI, with `ob` (RFC 5626 §5.4); with [sentByOverride] the address the UE is reached at. */
     fun contactUri(): String {
         val c = flow?.connection ?: throw IllegalStateException("no flow")
         val user = SipUri.parse(identity.publicUserId).user
-        return "sip:$user@$sentBy;transport=${c.transport.lowercase()};ob"
+        return if (sentByOverride != null) "sip:$user@$sentBy;transport=${c.transport.lowercase()}"
+        else "sip:$user@$sentBy;transport=${c.transport.lowercase()};ob"
     }
 
     /** A new out-of-dialog request, routed through the outbound proxy. */
@@ -184,12 +202,14 @@ class UserAgent(
 
     /**
      * Send [request] in a client transaction and return its final response. A 401 or 407
-     * is answered once with credentials (RFC 3261 §22.2), in a new transaction.
+     * is answered once with credentials (RFC 3261 §22.2), in a new transaction; with [authenticate] false it is
+     * returned as it is (an IMS AKA REGISTER, whose answer goes over new security associations).
      */
-    suspend fun send(request: SipRequest, dialog: Dialog? = null, provisional: suspend (SipResponse) -> Unit = {}): SipResponse {
-        applyCredentials(request)
+    suspend fun send(request: SipRequest, dialog: Dialog? = null, authenticate: Boolean = true,
+                     provisional: suspend (SipResponse) -> Unit = {}): SipResponse {
+        if (authenticate) applyCredentials(request)
         var response = transact(request, provisional)
-        if (response.status == 401 || response.status == 407) {
+        if (authenticate && (response.status == 401 || response.status == 407)) {
             val header = if (response.status == 401) "WWW-Authenticate" else "Proxy-Authenticate"
             val challenge = response.headers.all(header).map(DigestChallenge::parse).firstOrNull() ?: return response
             challenges[header] = challenge
@@ -218,6 +238,7 @@ class UserAgent(
 
     private suspend fun transact(request: SipRequest, provisional: suspend (SipResponse) -> Unit): SipResponse {
         outboundGate(request)
+        outboundHeaders(request)
         val flow = flow ?: throw IllegalStateException("no flow")
         val branch = newBranch()
         val c = flow.connection
@@ -266,12 +287,12 @@ class UserAgent(
     }
 
     internal suspend fun sendResponse(tx: ServerTransaction, response: SipResponse) {
-        (flow ?: throw IllegalStateException("no flow")).send(response)
+        (tx.via ?: flow ?: throw IllegalStateException("no flow")).send(response)
         if (response.isFinal) servers.remove("${tx.request.topVia.branch}|${tx.request.method}")
     }
 
-    /** Dispatch a message received on the flow. */
-    suspend fun receive(message: SipMessage) {
+    /** Dispatch a message received on the flow, or on [from], a flow the UE accepted (IMS AKA port_us). */
+    suspend fun receive(message: SipMessage, from: SipFlow? = null) {
         when (message) {
             is SipResponse -> {
                 val key = "${message.topVia.branch}|${message.cseq.method}"
@@ -282,7 +303,7 @@ class UserAgent(
                     tx.final.complete(message)
                 } else scope.launch { tx.provisional(message) }
             }
-            is SipRequest -> receiveRequest(message)
+            is SipRequest -> receiveRequest(message, from)
         }
     }
 
@@ -295,13 +316,13 @@ class UserAgent(
         flow?.send(SipRequest("ACK", invite.uri, headers))
     }
 
-    private suspend fun receiveRequest(request: SipRequest) {
+    private suspend fun receiveRequest(request: SipRequest, from: SipFlow?) {
         val branch = request.topVia.branch ?: ""
         when (request.method) {
             "ACK" -> { scope.launch { onAck(request) }; return }
             "CANCEL" -> {
                 val invite = servers["$branch|INVITE"]
-                val tx = ServerTransaction(this, request)
+                val tx = ServerTransaction(this, request, from)
                 if (invite == null) { tx.respond(481); return }
                 tx.respond(200)
                 if (!invite.finalSent) {
@@ -313,7 +334,7 @@ class UserAgent(
         }
         val key = "$branch|${request.method}"
         if (servers.containsKey(key)) return // a retransmission; the transport is reliable, so drop it
-        val tx = ServerTransaction(this, request)
+        val tx = ServerTransaction(this, request, from)
         servers[key] = tx
         scope.launch {
             try {
