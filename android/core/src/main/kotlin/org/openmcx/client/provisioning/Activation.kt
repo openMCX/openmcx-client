@@ -118,6 +118,8 @@ object Activation {
                 put("proxy_port", corePort)
                 put("transport", if (tls) "TLS" else "TCP")
                 put("register_expires", 3600)
+                // The system's IMS AKA offer: the P-CSCF a UE with a usable card registers through.
+                sip.opt("ims_aka_pcscf")?.let { put("ims_aka_pcscf", it) }
             }
             putJsonObject("tls") { put("ca", "ca.crt"); put("cert", "client.crt"); put("key", "client.key") }
             putJsonObject("idms") {

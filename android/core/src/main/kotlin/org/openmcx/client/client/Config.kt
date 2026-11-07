@@ -53,6 +53,8 @@ data class ClientConfig(
     data class Sip(
         val publicUserId: String, val privateUserId: String, val password: String,
         val proxy: String, val proxyPort: Int, val transport: String, val registerExpires: Int,
+        /** The P-CSCF of the system's IMS AKA offer ("host:port", preconfigured, TS 24.229 §9.2.1); null: not offered. */
+        val imsAkaPcscf: String? = null,
     )
 
     data class Idms(
@@ -143,7 +145,8 @@ data class ClientConfig(
                 domain = root.str("domain"),
                 clientId = root.str("client_id"),
                 sip = Sip(sip.str("public_user_id"), sip.str("private_user_id"), sip.str("password"), sip.str("proxy"),
-                    sip.int("proxy_port"), sip.str("transport").uppercase(), sip.int("register_expires", 3600)),
+                    sip.int("proxy_port"), sip.str("transport").uppercase(), sip.int("register_expires", 3600),
+                    sip.optStr("ims_aka_pcscf")),
                 idms = Idms(idms.str("issuer"), idms.str("client_id"), idms.str("redirect_uri"), idms.optStr("username"), idms.optStr("password"),
                     idms.count("token_renewal_lead_s", DEFAULT_TOKEN_RENEWAL_LEAD_S),
                     idms.count("token_refresh_before_s", DEFAULT_TOKEN_REFRESH_BEFORE_S),

@@ -42,11 +42,54 @@ import kotlin.concurrent.thread
  * TelephonyManager.getIccAuthentication; the app never sees K or OPc.
  */
 class IsimCard(private val context: Context) : CardAka {
-    /** The card's TelephonyManager, or null without a subscription that gives carrier privileges. */
-    fun telephony(): TelephonyManager? {
+    /** The card's TelephonyManager and its SIM slot (0-based), or null without a subscription that gives carrier
+     *  privileges. */
+    fun privileged(): Pair<TelephonyManager, Int>? {
         val subs = context.getSystemService(SubscriptionManager::class.java).activeSubscriptionInfoList.orEmpty()
         val tm = context.getSystemService(TelephonyManager::class.java)
-        return subs.map { tm.createForSubscriptionId(it.subscriptionId) }.firstOrNull { it.hasCarrierPrivileges() }
+        return subs.map { tm.createForSubscriptionId(it.subscriptionId) to it.simSlotIndex }.firstOrNull { it.first.hasCarrierPrivileges() }
+    }
+
+    fun telephony(): TelephonyManager? = privileged()?.first
+
+    /** The ISIM's identities (TS 31.103 clauses 4.2.2 to 4.2.4). */
+    data class Identities(val impi: String, val impu: String, val domain: String)
+
+    /**
+     * EF_IMPI, EF_IMPU (its first record) and EF_DOMAIN of the ISIM, read over a logical channel (which only an app with
+     * carrier privileges may open); null when the ISIM cannot be opened or a file is empty.
+     */
+    fun identities(tm: TelephonyManager): Identities? {
+        val channel = tm.iccOpenLogicalChannel(ISIM_AID, 0x04)
+        if (channel.status != android.telephony.IccOpenLogicalChannelResponse.STATUS_NO_ERROR) return null
+        try {
+            fun read(fid: String, record: Boolean): String? {
+                // SELECT by file identifier without response data (P2 0x0C), then READ RECORD 1 or READ BINARY.
+                val select = tm.iccTransmitApduLogicalChannel(channel.channel, 0x00, 0xA4, 0x00, 0x0C, 0x02, fid)
+                if (select?.endsWith("9000") != true) return null
+                val data = if (record) tm.iccTransmitApduLogicalChannel(channel.channel, 0x00, 0xB2, 0x01, 0x04, 0x00, "")
+                           else tm.iccTransmitApduLogicalChannel(channel.channel, 0x00, 0xB0, 0x00, 0x00, 0x00, "")
+                return data?.let { tlv80(it) }?.takeIf { it.isNotEmpty() }
+            }
+            return Identities(read("6F02", false) ?: return null, read("6F04", true) ?: return null, read("6F03", false) ?: return null)
+        } finally {
+            tm.iccCloseLogicalChannel(channel.channel)
+        }
+    }
+
+    private companion object {
+        /** The ISIM's application identifier (ETSI TS 101 220 annex E: RID A000000087, application 1004). */
+        const val ISIM_AID = "A0000000871004FFFFFFFF8907090000"
+
+        /** The text of a TS 31.103 clause 4.2.2 to 4.2.4 TLV (tag 0x80, one length octet) before the status word. */
+        fun tlv80(response: String): String? {
+            if (response.length < 8 || !response.endsWith("9000")) return null
+            val hex = response.dropLast(4)
+            val bytes = ByteArray(hex.length / 2) { hex.substring(2 * it, 2 * it + 2).toInt(16).toByte() }
+            if (bytes[0] != 0x80.toByte()) return null
+            val n = bytes[1].toInt() and 0xff
+            return if (n + 2 <= bytes.size) String(bytes, 2, n, Charsets.UTF_8) else null
+        }
     }
 
     override suspend fun authenticate(rand: ByteArray, autn: ByteArray): AkaOutcome = withContext(Dispatchers.IO) {

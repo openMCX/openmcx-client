@@ -115,6 +115,11 @@ class ImsAkaRegistrar(
     @Volatile var associatedUris: List<String> = emptyList(); private set
     /** TS 24.229 clause 5.1.1.2.1: the Service-Route of the last 200 (OK). */
     @Volatile var serviceRoutes: List<String> = emptyList(); private set
+    /** The last authentication: when (seconds since the epoch) and its outcome ("ok", "card resynchronised",
+     *  "network not accepted by the card"). */
+    @Volatile var lastAuthentication: Pair<Long, String>? = null; private set
+    private fun authenticated(outcome: String) { lastAuthentication = System.currentTimeMillis() / 1000 to outcome }
+
     /** The algorithm pair of the set in use. */
     @Volatile var selected: SecMechanism? = null; private set
     val registered: Boolean get() = current != null
@@ -191,7 +196,10 @@ class ImsAkaRegistrar(
             if (response.status != 401) {
                 reservation.close()
                 // After the answer to a challenge the card deemed invalid, the network's refusal ends the attempt.
-                if (lastInvalid == AkaOutcome.MacFailure) fail("network not accepted by the card (${response.status} ${response.reason})", active)
+                if (lastInvalid == AkaOutcome.MacFailure) {
+                    authenticated("network not accepted by the card")
+                    fail("network not accepted by the card (${response.status} ${response.reason})", active)
+                }
                 fail("REGISTER: ${response.status} ${response.reason}", active)
             }
             // TS 24.229 clause 5.1.1.5.1: the AKA challenge; the topmost one with an algorithm of IMS AKA.
@@ -226,6 +234,7 @@ class ImsAkaRegistrar(
                     event("IMS AKA: security associations ${selected!!.alg}/${selected!!.ealg}, port_uc ${params.portUc} port_us ${params.portUs} " +
                         "port_pc ${params.portPc} port_ps ${params.portPs}")
                     authorization = auth
+                    authenticated(if (invalid > 0) "card resynchronised" else "ok")
                     return accept(answer, expires, active, fresh, protectedRequest)
                 }
                 is AkaOutcome.SyncFailure, AkaOutcome.MacFailure -> {

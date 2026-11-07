@@ -170,7 +170,9 @@ object Engine {
             SocketConnector(config.sip.transport, ssl, endpoints = endpoints),
             log, browser = customTabBrowser(context.applicationContext), knownAliases = known,
             idmsHttp = SocketHttpClient(provisioning.idmsSslContext(), endpoints),
-            kmsHttp = SocketHttpClient(ssl, endpoints))
+            kmsHttp = SocketHttpClient(ssl, endpoints),
+            // How to reach the SIP core, decided at each initial registration: IMS AKA with the card, SIP digest, or none.
+            access = { org.openmcx.client.app.security.AccessDecision.decide(context.applicationContext, config) { log.add(it) } })
         client = c
         scope.launch { c.aliases.collect { settings.edit().putString(aliasKey, it.available.joinToString("\n")).apply() } }
         val store = HistoryStore(context).also { history = it }
