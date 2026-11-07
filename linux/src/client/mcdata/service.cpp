@@ -10,6 +10,8 @@
 
 #include "client.hpp"
 
+#include <algorithm>
+
 namespace mcx {
 
 //------------------------------------------------------------------------------
@@ -224,8 +226,15 @@ void Client::mcdata_affiliate(bool affiliate) {
   // published.
   Affiliation affiliation{mcdata_user(), client_id(), random_id(), {}, {}, true};
   if (!mcdata_group().empty()) affiliation.groups.push_back(mcdata_group());
+  // Further groups of the configuration (mcdata.groups), such as an interworking group an IWF owns (TS 29.582
+  // clause 8.3.3): the user is affiliated to them too (TS 24.282 clause 8.2.2 step 2, one <affiliation> each).
+  const auto listed = [&affiliation](const std::string &group) {
+    return std::find(affiliation.groups.begin(), affiliation.groups.end(), group) != affiliation.groups.end();
+  };
+  for (const auto &group : cfg_.at("mcdata").value("groups", std::vector<std::string>{}))
+    if (!group.empty() && !listed(group)) affiliation.groups.push_back(group);
   for (const auto &group : mcdata_groups_)
-    if (!group.empty() && group != mcdata_group()) affiliation.groups.push_back(group);
+    if (!group.empty() && !listed(group)) affiliation.groups.push_back(group);
   if (affiliate && affiliation.groups.empty()) return;
   mcdata_sent_pid_ = affiliation.publication_id;
   std::vector<SipHeader> headers{{"Expires", affiliate ? "4294967295" : "0"}};
