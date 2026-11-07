@@ -4,6 +4,9 @@
 
 package org.openmcx.client.client
 
+import org.openmcx.client.sip.ImsAkaConfig
+import org.openmcx.client.sip.ImsAkaPlatform
+import org.openmcx.client.sip.ImsAkaRegistrar
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -140,6 +143,17 @@ data class ClientStatus(
 )
 
 /**
+ * How the client reaches the SIP core at its next initial registration, decided then (TS 33.180 clause 6.2.1): SIP
+ * digest over the configured connection, IMS AKA through the P-CSCF with the card, or no registration (e.g. mobile
+ * data without a usable card, where SIP digest "shall not apply", TS 33.203 clauses N.1 and O.1.1), with the reason.
+ */
+sealed interface SipAccess {
+    data object Digest : SipAccess
+    class ImsAka(val platform: ImsAkaPlatform, val config: ImsAkaConfig) : SipAccess
+    class Refused(val reason: String) : SipAccess
+}
+
+/**
  * The MC UE's signalling engine: identity, documents, one outbound flow and its
  * registration, service authorisation and affiliation for MCPTT and MCData, and every
  * refresh that keeps them (docs/android/wire/phase1-startup.md).
@@ -163,6 +177,8 @@ class McxClient(
      * it, and nothing configured tells the UE which applies: a spec conflict, today's direct connection stays.
      */
     private val kmsHttp: HttpClient = http,
+    /** The SIP core access of each initial registration ([SipAccess]); SIP digest unless the app decides otherwise. */
+    private val access: suspend () -> SipAccess = { SipAccess.Digest },
 ) {
     val scope = CoroutineScope(parent.coroutineContext + SupervisorJob())
     private val _status = MutableStateFlow(ClientStatus())
@@ -223,6 +239,9 @@ class McxClient(
 
     val handlers = mutableListOf<ServiceHandler>()
     private var registration: SipRequest? = null
+    /** The IMS AKA registration of this life of the client, when it registered with IMS AKA. */
+    @Volatile var imsAka: ImsAkaRegistrar? = null
+        private set
     /** The duration granted to the last registration, seconds (TS 24.229 §5.1.1.4.1 "the previous registration was for"). */
     @Volatile private var registrationDurationS = 0L
 
@@ -310,6 +329,7 @@ class McxClient(
                     _status.update { it.copy(lastError = e.message, registered = false, offlineSince = it.offlineSince ?: now,
                         nextRetryAt = now + backoff / 1000) }
                     ua.flow?.close(e)
+                    imsAka?.close()
                     // Back off, unless told to reconnect now (a new network, or the user's Retry now).
                     if (!reconnectNow.isCompleted) withTimeoutOrNull(backoff) { reconnectNow.await() }
                     backoff = nextBackoff(backoff)
@@ -321,6 +341,7 @@ class McxClient(
 
     fun stop() {
         ua.flow?.close()
+        imsAka?.close()
         scope.cancel()
     }
 
@@ -442,7 +463,7 @@ class McxClient(
     /** Run a refresh now instead of at its timer: `register`, `subscription` or `token`. */
     suspend fun refreshNow(what: String) {
         when (what) {
-            "register" -> register(config.sip.registerExpires)
+            "register" -> register(registerExpires())
             "subscription" -> refreshSubscription(McService.MCPTT)
             "token" -> renewToken()
             else -> throw IllegalArgumentException("refresh register|subscription|token")
@@ -492,18 +513,37 @@ class McxClient(
      */
     private suspend fun run() {
         setPhase("connecting")
-        val connection = connector.connect(config.sip.proxy, config.sip.proxyPort)
-        val flow = SipFlow(scope, connection, ::receive, { dir, m -> trace(dir, m) }, keepaliveMs = keepaliveMs)
-        ua.flow = flow
-        flow.start()
-        event("flow ${connection.localHost}:${connection.localPort} → ${config.sip.proxy}:${config.sip.proxyPort} ${connection.transport}")
         endingSubscriptions.clear()
-        register(config.sip.registerExpires)
+        val lifeline: CompletableDeferred<Throwable?>
+        when (val chosen = access()) {
+            is SipAccess.Refused -> {
+                event("no SIP registration: ${chosen.reason}")
+                throw IllegalStateException(chosen.reason)
+            }
+            is SipAccess.ImsAka -> {
+                val registrar = ImsAkaRegistrar(scope, ua, chosen.config, chosen.platform, ::contactParams,
+                    { dir, m -> trace(dir, m) }, ::event, keepaliveMs)
+                imsAka = registrar
+                lifeline = registrar.closed
+                // TS 24.229 §5.1.1.2.1: the UE asks for 600 000 seconds.
+                register(IMS_AKA_REGISTER_EXPIRES)
+            }
+            SipAccess.Digest -> {
+                imsAka = null
+                val connection = connector.connect(config.sip.proxy, config.sip.proxyPort)
+                val flow = SipFlow(scope, connection, ::receive, { dir, m -> trace(dir, m) }, keepaliveMs = keepaliveMs)
+                ua.flow = flow
+                flow.start()
+                event("flow ${connection.localHost}:${connection.localPort} → ${config.sip.proxy}:${config.sip.proxyPort} ${connection.transport}")
+                lifeline = flow.closed
+                register(config.sip.registerExpires)
+            }
+        }
         _status.update { it.copy(registered = true, networkDeregistered = null) }
         // TS 24.229 §5.1.1.3: subscribe "upon receipt of a 2xx response to the initial registration" (and on a new
         // flow, whose registration binds a new flow, the subscription of the old one being gone); not awaited.
         scope.launch { regSubscribe() }
-        authenticateUser(flow)
+        authenticateUser(lifeline)
         config.mcptt?.let { bringUp(McService.MCPTT, it.groups.ifEmpty { profile?.groups ?: emptyList() }) }
         config.mcdata?.let { bringUp(McService.MCDATA, it.groups) }
         config.mcvideo?.let { bringUp(McService.MCVIDEO, it.groups) }
@@ -511,7 +551,7 @@ class McxClient(
         _status.update { it.copy(lastError = null, offlineSince = null, nextRetryAt = null) }
         housekeeping?.cancel()
         housekeeping = scope.launch { housekeeping() }
-        val cause = flow.closed.await()
+        val cause = lifeline.await()
         housekeeping?.cancel()
         _status.update { it.copy(registered = false) }
         setPhase("flow-lost")
@@ -531,7 +571,7 @@ class McxClient(
      * Retry now; the registration is kept and refreshed meanwhile. A lost flow, a log-off or IdMS's sign-out ends the
      * attempts ([start] takes over).
      */
-    private suspend fun authenticateUser(flow: SipFlow) {
+    private suspend fun authenticateUser(lifeline: CompletableDeferred<Throwable?>) {
         var backoff = config.recovery.firstRetryMs
         while (true) {
             val refresher = scope.launch { keepRegistered() }
@@ -545,12 +585,12 @@ class McxClient(
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (loggedOff || signedOut || flow.closed.isCompleted) throw e
+                if (loggedOff || signedOut || lifeline.isCompleted) throw e
                 event("limited service: sign-in failed: ${e.message}")
                 _status.update { it.copy(limitedService = true, lastError = e.message, nextRetryAt = clock() + backoff / 1000) }
                 setPhase("limited-service")
-                withTimeoutOrNull(backoff) { select<Unit> { reconnectNow.onAwait {}; flow.closed.onAwait {} } }
-                if (flow.closed.isCompleted) throw IllegalStateException("flow closed in the limited service state", e)
+                withTimeoutOrNull(backoff) { select<Unit> { reconnectNow.onAwait {}; lifeline.onAwait {} } }
+                if (lifeline.isCompleted) throw IllegalStateException("flow closed in the limited service state", e)
                 backoff = nextBackoff(backoff)
                 if (reconnectNow.isCompleted) reconnectNow = CompletableDeferred()
                 _status.update { it.copy(nextRetryAt = null) }
@@ -569,7 +609,7 @@ class McxClient(
             delay(5_000)
             if (clock() < nextRegisterAt) continue
             try {
-                register(config.sip.registerExpires)
+                register(registerExpires())
             } catch (e: kotlinx.coroutines.CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -669,8 +709,14 @@ class McxClient(
 
     // Registration (TS 24.379 §7.2.1, TS 24.282 §7.2.1, RFC 5626).
 
-    private fun registerContact(): String =
-        "<${ua.contactUri()}>;+sip.instance=\"<${config.clientId}>\";reg-id=1;+g.3gpp.mcptt;+g.3gpp.mcdata.sds;" +
+    private fun registerContact(): String = "<${ua.contactUri()}>" + contactParams()
+
+    /** The expiry a REGISTER asks for: TS 24.229 §5.1.1.2.1's 600 000 s with IMS AKA, else the configured one. */
+    private fun registerExpires(): Int = if (imsAka != null) IMS_AKA_REGISTER_EXPIRES else config.sip.registerExpires
+
+    /** The Contact's header field parameters: +sip.instance, reg-id and the MC feature tags. */
+    private fun contactParams(): String =
+        ";+sip.instance=\"<${config.clientId}>\";reg-id=1;+g.3gpp.mcptt;+g.3gpp.mcdata.sds;" +
             (if (config.mcdata != null) "+g.3gpp.mcdata.fd;" else "") +
             (if (config.mcvideo != null) "+g.3gpp.mcvideo;" else "") +
             "+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCPTT)},${Icsi.encoded(Icsi.MCDATA)},${Icsi.encoded(Icsi.MCDATA_SDS)}" +
@@ -679,6 +725,13 @@ class McxClient(
 
     private suspend fun register(expires: Int): Int {
         setPhase("registering")
+        imsAka?.let { aka ->
+            val granted = aka.register(expires)
+            registrationDurationS = granted.toLong()
+            nextRegisterAt = clock() + RegEventRules.refreshDelayS(granted.toLong(), granted.toLong())
+            event("registered with IMS AKA for $granted s, P-Associated-URI ${aka.associatedUris.joinToString(", ")}")
+            return granted
+        }
         val previous = registration
         val request = if (previous == null) ua.newRequest("REGISTER", "sip:${config.domain}", NameAddr(config.sip.publicUserId))
         else ua.newRequest("REGISTER", "sip:${config.domain}", NameAddr(config.sip.publicUserId), from = previous.from,
@@ -703,6 +756,7 @@ class McxClient(
 
     /** RFC 3261 §10.2.2: remove this registration (its Contact, Expires 0); the final status. */
     private suspend fun deregister(): Int? {
+        imsAka?.let { return it.deregister() }
         val previous = registration ?: return null
         val request = ua.newRequest("REGISTER", "sip:${config.domain}", NameAddr(config.sip.publicUserId), from = previous.from,
             callId = previous.callId, cseq = (ua.lastSent[previous.callId] ?: previous).cseq.number + 1)
@@ -1253,7 +1307,7 @@ class McxClient(
                 setPhase("ready")
             }
             if (now >= nextRegisterAt) {
-                register(config.sip.registerExpires)
+                register(registerExpires())
                 setPhase("ready")
             }
             if (now >= nextSubscription) {
@@ -1354,3 +1408,6 @@ class EventLog(private val capacity: Int = 500) {
 
     fun trace(direction: String, message: SipMessage) { tracer?.invoke(direction, message) }
 }
+
+/** TS 24.229 §5.1.1.2.1: "the value of 600 000 seconds as the value desired for the duration of the registration". */
+private const val IMS_AKA_REGISTER_EXPIRES = 600_000
