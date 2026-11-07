@@ -126,9 +126,11 @@ class ImsAkaRegistrar(
 
     init {
         // TS 24.229 clause 5.1.2A.1.1 b): every request but REGISTER names the protected server port in Via; REGISTER
-        // over TCP its connection's own address (clauses 5.1.1.2.2 c), 5.1.1.4.2 c): the port only for UDP).
-        ua.viaSentBy = { request ->
-            if (request.method == "REGISTER") null else current?.let { "${hostport(it.set.params.local, it.set.params.portUs)}" }
+        // over TCP its connection's own address and port (clauses 5.1.1.2.2 c), 5.1.1.4.2 c): the protected server port
+        // only for UDP), by which the P-CSCF finds the UE's contact and security associations.
+        ua.viaSentBy = { request, flow ->
+            if (request.method == "REGISTER") flow.connection.let { c -> hostport(InetAddress.getByName(c.localHost), c.localPort) }
+            else current?.let { hostport(it.set.params.local, it.set.params.portUs) }
         }
         ua.outboundHeaders = { request -> current?.let { secAgree(request, it) } }
     }

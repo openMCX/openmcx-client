@@ -163,7 +163,7 @@ class UserAgent(
      * every request but REGISTER (TS 24.229 clause 5.1.2A.1.1 b)), and for REGISTER over TCP the connection's own
      * (clauses 5.1.1.2.2 c) and 5.1.1.4.2 c): the protected server port in Via only for UDP); null: [sentBy].
      */
-    var viaSentBy: (SipRequest) -> String? = { null }
+    var viaSentBy: (SipRequest, SipFlow) -> String? = { _, _ -> null }
 
     /** The host and port of our Contact instead of [sentBy]: with IMS AKA the UE's address and protected server port
      *  (TS 24.229 clause 5.1.1.4.2 b)); null: [sentBy]. */
@@ -250,7 +250,7 @@ class UserAgent(
         val branch = newBranch()
         val c = flow.connection
         request.headers.remove("Via")
-        request.headers.prepend("Via", "SIP/2.0/${c.transport} ${viaSentBy(request) ?: sentBy};branch=$branch;rport")
+        request.headers.prepend("Via", "SIP/2.0/${c.transport} ${viaSentBy(request, flow) ?: sentBy};branch=$branch;rport")
         if (request.method == "ACK") { flow.send(request); return SipResponse(200, "OK") }
         val tx = ClientTx(request, provisional, flow)
         val key = "$branch|${request.cseq.method}"

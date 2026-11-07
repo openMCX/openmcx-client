@@ -174,6 +174,8 @@ class ImsAkaRegistrarTest {
             first.headers["Authorization"]!!.contains("nonce=\"\", response=\"\""))
         assertTrue(first.headers["Security-Client"]!!.startsWith("ipsec-3gpp;q=0.9;alg=null;ealg=aes-gcm-us;prot=esp;mod=trans"))
         assertNull(first.headers["Security-Verify"])
+        // Via: the UE's address and the connection's port, never a name the P-CSCF cannot map to the UE.
+        assertTrue(first.headers.values("Via").first().contains("10.0.0.5:${platform.unprotected!!.localPort};"))
         // The set: the P-CSCF's first pair the UE supports (AES-GMAC skipped), its SPIs and ports, the annex I keys.
         val set = platform.opened.single()
         assertEquals("null" to "aes-gcm-us", set.alg to set.ealg)
@@ -186,6 +188,8 @@ class ImsAkaRegistrarTest {
         assertEquals(first.cseq.number + 1, second.cseq.number)
         assertEquals(securityServer, second.headers["Security-Verify"])
         assertTrue(second.headers["Contact"]!!.contains("@10.0.0.5:5064;"))
+        // The protected REGISTER over TCP: the address and port_uc in Via (TS 24.229 clause 5.1.1.2.2 c)).
+        assertTrue(second.headers.values("Via").first().contains("10.0.0.5:${set.portUc};"))
         assertEquals(listOf("<sip:alice@mcx.test>"), registrar.associatedUris)
         // A later request: over the set, Via with the protected server port, sec-agree, the preloaded Route.
         val message = ua.newRequest("MESSAGE", "sip:mcptt@mcx.test", NameAddr("sip:mcptt@mcx.test"))
