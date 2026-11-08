@@ -19,7 +19,10 @@ class SdpNegotiationError(message: String) : Exception(message)
 data class LocalMedia(val address: String, val audioPort: Int, val floorPort: Int, val floorSsrc: Long,
                       val floorControl: Boolean = true, val audioSsrc: Long = 0,
                       /** We support queued floor requests (`mc_queueing`, TS 24.380 §14.2.2). */
-                      val queueing: Boolean = false)
+                      val queueing: Boolean = false,
+                      /** SRTP media (RTP/SAVP, TS 33.180 7.4/7.5, RFC 3711) and, for a private call, the PCK's
+                       *  MIKEY-SAKKE I_MESSAGE in a=key-mgmt (RFC 4567; TS 24.379 §6.2.1 step 4 b)). */
+                      val protected: Boolean = false, val keyMgmt: String? = null)
 
 /** What the other side (the MCPTT server) negotiated. */
 data class RemoteMedia(
@@ -37,6 +40,9 @@ data class RemoteMedia(
     val modeSet: List<Int> = emptyList(),
     /** The peer's `mc_queueing` (TS 24.380 §14.2.2): queued floor requests. */
     val queueing: Boolean = false,
+    /** RTP/SAVP audio, and the base64 MIKEY message of `a=key-mgmt:mikey` (RFC 4567), if any. */
+    val protected: Boolean = false,
+    val keyMgmt: String? = null,
 )
 
 /**
@@ -49,12 +55,25 @@ object McpttSdp {
     const val PAYLOAD_TYPE = 96
     private val random = SecureRandom()
 
-    fun newFloorSsrc(): Long = (random.nextInt().toLong() and 0xffffffffL).let { if (it == 0L) 1L else it }
+    // RFC 7714 §8.4: "each originating endpoint MUST maintain a history of outbound SSRC identifiers that it has
+    // issued within the lifetime of the current master key, and when a new SSRC requests an SSRC identifier it MUST
+    // NOT be given an identifier that has been previously issued". The CSK protects floor control in every call of its
+    // lifetime and a GMK every group call; the history spans the process, so it covers each key's lifetime.
+    private val issued = HashSet<Long>()
+
+    /** A random non-zero SSRC (RFC 3550 §8.1) never issued before by this client (RFC 7714 §8.4). */
+    @Synchronized
+    fun newFloorSsrc(): Long {
+        while (true) {
+            val ssrc = (random.nextInt().toLong() and 0xffffffffL).let { if (it == 0L) 1L else it }
+            if (issued.add(ssrc)) return ssrc
+        }
+    }
 
     private fun sessionId() = (random.nextInt() and 0x7fffffff).toLong()
 
     private fun audio(local: LocalMedia, pt: Int, octetAligned: Boolean) = MediaDescription(
-        "audio", local.audioPort, "RTP/AVP", listOf(pt.toString()), info = "speech",
+        "audio", local.audioPort, if (local.protected) "RTP/SAVP" else "RTP/AVP", listOf(pt.toString()), info = "speech",
         attributes = listOf(
             "rtpmap" to "$pt AMR-WB/16000/1",
             // TS 26.179 §4.1.3: mode-change-capability 2, max-red 0, ptime 20 and maxptime 240 offered, no mode-set.
@@ -76,6 +95,7 @@ object McpttSdp {
         origin = "- ${sessionId()} 1 IN IP4 ${local.address}",
         connection = "IN IP4 ${local.address}",
         media = listOfNotNull(audio(local, PAYLOAD_TYPE, false), if (local.floorControl) floor(local, null, local.queueing) else null),
+        attributes = listOfNotNull(local.keyMgmt?.let { "key-mgmt" to "mikey $it" }),
     ).encode()
 
     /** Answer [offer]: its payload type and octet alignment, its floor priority echoed, queueing when both support it (§14.2.2). */
@@ -100,7 +120,10 @@ object McpttSdp {
         val address = session.address(audio) ?: throw SdpNegotiationError("no connection address")
         val modeSet = try { AmrWb.modeSet(fmtp["mode-set"]) } catch (e: IllegalArgumentException) { throw SdpNegotiationError(e.message ?: "mode-set") }
         return RemoteMedia(address, audio.port, floor?.port ?: 0, pt, fmtp["octet-align"] == "1", ssrc, floorParams["mc_priority"]?.toIntOrNull(),
-            floorControl = floor != null, modeSet = modeSet, queueing = floor != null && "mc_queueing" in floorParams)
+            floorControl = floor != null, modeSet = modeSet, queueing = floor != null && "mc_queueing" in floorParams,
+            protected = audio.proto == "RTP/SAVP",
+            keyMgmt = (session.attributes.firstOrNull { it.first == "key-mgmt" }?.second ?: audio.attribute("key-mgmt"))
+                ?.trim()?.takeIf { it.startsWith("mikey ") }?.removePrefix("mikey ")?.trim())
     }
 
     private fun params(text: String): Map<String, String?> = text.split(';').map { it.trim() }.filter { it.isNotEmpty() }

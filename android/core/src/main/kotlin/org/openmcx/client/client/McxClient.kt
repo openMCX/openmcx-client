@@ -204,30 +204,52 @@ class McxClient(
         clock = clock, endpoints = config.idms.endpoints)
 
     /**
-     * MCVideo's key management client (TS 24.281 4.7, TS 33.180 5.3): it keys as the MCVideo ID, and
-     * its CSK, uploaded at MCVideo service authorisation, protects transmission control (9.4).
+     * The key management client of each service that uses one (TS 33.180 5.3; TS 24.281 4.7 for MCVideo): it keys as
+     * the service's MC service ID; its CSK, uploaded with the service authorisation (TS 24.379 clause 7.2.2 step 3,
+     * TS 24.281 clause 7.2.5), protects floor or transmission control (TS 33.180 clause 9.4).
      */
-    @Volatile var videoKeys: KeyClient? = null
-        private set
-    @Volatile var videoCsk: KeyMessage? = null
-        private set
-    private var videoCskUpload: String? = null
+    private val keyClients = java.util.concurrent.ConcurrentHashMap<McService, KeyClient>()
+    private val csks = java.util.concurrent.ConcurrentHashMap<McService, KeyMessage>()
+    private val cskUploads = java.util.concurrent.ConcurrentHashMap<McService, String>()
 
-    private suspend fun provisionVideoKeys(token: String) {
-        val security = config.security ?: return
-        val mcvideo = config.mcvideo ?: return
-        val account = config.mcptt?.userId ?: mcvideo.userId
-        val keys = videoKeys ?: KeyClient(kmsHttp, security.kmsUri, mcvideo.userId, account,
-            WireProfile(security.messageType, security.algorithm, security.keyParametersIei,
-                security.encryptedPayloadIei),
-            security.mikeyClockSkewS) { event(it) }.also { videoKeys = it }
-        keys.provision(token)
-        if (videoCsk == null) {
-            val (csk, upload) = keys.makeCsk(mcvideo.psi)
-            videoCsk = csk; videoCskUpload = upload
-            event("MCVideo keys: KMS ${security.kmsUri}, CSK %08x".format(csk.csbId))
+    fun keysOf(service: McService): KeyClient? = keyClients[service]
+    fun cskOf(service: McService): KeyMessage? = csks[service]
+    val videoKeys: KeyClient? get() = keyClients[McService.MCVIDEO]
+    val videoCsk: KeyMessage? get() = csks[McService.MCVIDEO]
+
+    /**
+     * Whether [service] has key management: MCVideo whenever the configuration names a KMS (as before); MCPTT when it
+     * also protects media or floor control (TS 24.379 clause 7.2.2 step 3: the CSK with the service authorisation, as
+     * the Linux client; this client has no XML signalling protection, the clause's other condition).
+     */
+    private fun keyed(service: McService): Boolean {
+        val security = config.security ?: return false
+        return when (service) {
+            McService.MCVIDEO -> config.mcvideo != null
+            McService.MCPTT -> config.mcptt != null && (security.protectMedia || security.protectFloor)
+            McService.MCDATA -> false
         }
     }
+
+    private suspend fun provisionKeys(service: McService, token: String) {
+        val security = config.security ?: return
+        val userId = ownId(service)
+        val account = config.mcptt?.userId ?: userId
+        val keys = keyClients[service] ?: KeyClient(kmsHttp, security.kmsUri, userId, account,
+            WireProfile(security.messageType, security.algorithm, security.keyParametersIei,
+                security.encryptedPayloadIei),
+            security.mikeyClockSkewS) { event(it) }.also { keyClients[service] = it }
+        keys.provision(token)
+        if (csks[service] == null) {
+            val (csk, upload) = keys.makeCsk(psi(service))
+            csks[service] = csk; cskUploads[service] = upload
+            event("${service.name} keys: KMS ${security.kmsUri}, CSK %08x".format(csk.csbId))
+        }
+    }
+
+    /** The CSKs go (TS 33.180 9.2.1: a new one with the next service authorisation). */
+    private fun dropCsks() { csks.clear(); cskUploads.clear() }
+
     private val documents = DocumentClient(http, config.cms, config.gms)
 
     @Volatile var tokens: Tokens? = null
@@ -448,7 +470,7 @@ class McxClient(
             event("${service.name} MC log-off (PUBLISH Expires 0): $status")
         }
         affiliationEtags.clear()
-        videoCsk = null; videoCskUpload = null
+        dropCsks()
         // The SIP de-REGISTER ends likewise with its final response or at Timer F (RFC 3261 §17.1.2.2).
         val deregistered = runCatching { deregister() }.getOrNull()
         event("SIP de-REGISTER (REGISTER Expires 0): $deregistered")
@@ -1051,7 +1073,7 @@ class McxClient(
         subscriptions.clear()
         dropDocumentSubscriptions()
         authEtags.clear(); affiliationEtags.clear()
-        videoCsk = null; videoCskUpload = null
+        dropCsks()
         for (service in McService.entries) updateService(service) { ServiceState() }
     }
 
@@ -1111,12 +1133,12 @@ class McxClient(
         val answerMode = when (service) {
             McService.MCPTT -> config.mcptt!!.answerMode; McService.MCVIDEO -> config.mcvideo!!.answerMode; McService.MCDATA -> null
         }
-        if (service == McService.MCVIDEO && config.security != null) provisionVideoKeys(token)
+        if (keyed(service)) provisionKeys(service, token)
         // TS 24.281 7.2.5: the MCVideo CSK goes to the MCVideo server with the authorisation, in application/mikey.
         // TS 33.180 9.2.1.2 and 9.2.1.3: it is uploaded at the initial connection and stays in use for the session, so a
         // later authorisation (a renewed access token) carries none; the server keeps it with the publication.
         val parts = { listOfNotNull(infoPart(service, token = token), Part(PocSettings.CONTENT_TYPE, PocSettings.encode(config.clientId, answerMode).toByteArray()),
-            videoCskUpload?.takeIf { service == McService.MCVIDEO }?.let { Part("application/mikey", it.toByteArray()) }) }
+            cskUploads[service]?.let { Part("application/mikey", it.toByteArray()) }) }
         var request = serviceRequest(service, "PUBLISH", "poc-settings", parts()).also { it.headers.add("Expires", "4294967295") }
         authEtags[service]?.let { request.headers.add("SIP-If-Match", it) }
         var response = ua.send(request)
@@ -1124,7 +1146,7 @@ class McxClient(
             // The server lost our publication (a restart): authorise afresh, then everything after it again. Its CSK
             // went with it, and an I_MESSAGE is accepted once only (RFC 3830 replay protection): upload a new CSK.
             authEtags.remove(service); affiliationEtags.remove(service)
-            if (service == McService.MCVIDEO && config.security != null) { videoCsk = null; provisionVideoKeys(token) }
+            if (keyed(service)) { csks.remove(service); cskUploads.remove(service); provisionKeys(service, token) }
             request = serviceRequest(service, "PUBLISH", "poc-settings", parts()).also { it.headers.add("Expires", "4294967295") }
             response = ua.send(request)
         }
@@ -1132,11 +1154,11 @@ class McxClient(
         // warning 164, MCVideo 166, MCData 228) means the user is authorised on another client: the retry succeeds
         // once that one logs off or its authorisation ends. A refused request may still have spent its CSK upload (the
         // server opens it first): the retry uploads a new CSK.
-        if (!response.isSuccess && service == McService.MCVIDEO && videoCskUpload != null) videoCsk = null
+        if (!response.isSuccess && cskUploads[service] != null) csks.remove(service)
         if (!response.isSuccess) throw IllegalStateException("${service.name} service authorisation: ${response.status} ${response.reason}" +
             (response.headers["Warning"]?.let { " ($it)" } ?: ""))
         response.headers["SIP-ETag"]?.let { authEtags[service] = it }
-        if (service == McService.MCVIDEO) videoCskUpload = null // the server has the CSK
+        cskUploads.remove(service) // the server has the CSK
         updateService(service) { it.copy(authorised = true, refused = null) }
         event("${service.name} authorised")
         return true

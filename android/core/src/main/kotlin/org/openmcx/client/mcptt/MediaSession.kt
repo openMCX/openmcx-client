@@ -105,6 +105,11 @@ class MediaSession(
     private var timestamp = SecureRandom().nextInt().toLong() and 0xffffffffL
     private var receivingSsrc: Long? = null
     @Volatile private var playingBurst: TalkBurst? = null
+    /**
+     * The call's protection (TS 33.180 7.4, 7.5, 9.4): SRTP for speech under the PCK or GMK, SRTCP for floor control
+     * under the CSK. A packet it refuses to protect is not sent, one it cannot authenticate is dropped; never clear.
+     */
+    @Volatile var protection: org.openmcx.client.mcvideo.CallProtection? = null
 
     val bursts: MutableList<TalkBurst> = CopyOnWriteArrayList()
     /** When the user last pressed PTT, for the access time (TS 22.179 KPI 1). */
@@ -135,7 +140,8 @@ class MediaSession(
 
     private suspend fun sendFloor(message: FloorMessage) {
         val r = remote ?: return
-        val data = message.encode()
+        val clear = message.encode()
+        val data = protection?.let { it.protectControl(clear) ?: return onEvent("floor → $message not sent: no usable floor key") } ?: clear
         onEvent("floor → ${message}")
         kotlinx.coroutines.withContext(Dispatchers.IO) {
             ports.floor.send(DatagramPacket(data, data.size, InetSocketAddress(r.address, r.floorPort)))
@@ -147,7 +153,10 @@ class MediaSession(
         while (scope.isActive) {
             val packet = DatagramPacket(buffer, buffer.size)
             try { ports.floor.receive(packet) } catch (e: Exception) { return }
-            val message = try { FloorMessage.decode(buffer.copyOf(packet.length)) } catch (e: FloorCodecError) {
+            val raw = buffer.copyOf(packet.length)
+            val clear = protection?.let { it.unprotectControl(raw) ?: run { onEvent("floor: packet failed authentication, dropped"); null } } ?: raw
+            if (clear == null) continue
+            val message = try { FloorMessage.decode(clear) } catch (e: FloorCodecError) {
                 onEvent("floor: bad packet: ${e.message}"); continue
             }
             onEvent("floor ← $message")
@@ -161,7 +170,8 @@ class MediaSession(
         while (scope.isActive) {
             val packet = DatagramPacket(buffer, buffer.size)
             try { ports.audio.receive(packet) } catch (e: Exception) { return }
-            val rtp = RtpPacket.parse(buffer, packet.length) ?: continue
+            val received = protection?.let { it.unprotectRtp(buffer.copyOf(packet.length)) ?: continue }
+            val rtp = (if (received != null) RtpPacket.parse(received, received.size) else RtpPacket.parse(buffer, packet.length)) ?: continue
             if (!duplex) {
                 val expected = floor.currentMediaSsrc
                 if (floor.state.value == FloorState.HAS_PERMISSION) continue // our own floor: ignore stray media
@@ -262,8 +272,9 @@ class MediaSession(
                 val frame = encoder.encode(pcm)
                 if (frame.ft == AmrWb.FT_NO_DATA) continue
                 val payload = AmrWb.pack(listOf(frame), r.octetAligned)
-                val packet = RtpPacket(r.payloadType, sequence, timestamp, ssrc, payload, marker = first).encode()
-                ports.audio.send(DatagramPacket(packet, packet.size, target))
+                val clear = RtpPacket(r.payloadType, sequence, timestamp, ssrc, payload, marker = first).encode()
+                val packet = protection.let { if (it == null) clear else it.protectRtp(clear) }
+                if (packet != null) ports.audio.send(DatagramPacket(packet, packet.size, target))
                 if (first) burst.startedAt = System.currentTimeMillis()
                 burst.payloadHashes += hash(payload)
                 sequence = (sequence + 1) and 0xffff

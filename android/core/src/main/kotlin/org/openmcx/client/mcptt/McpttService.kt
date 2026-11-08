@@ -6,6 +6,16 @@ package org.openmcx.client.mcptt
 
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
+import org.openmcx.client.mcvideo.CallProtection
+import org.openmcx.client.mcvideo.GroupKeySubscriptions
+import org.openmcx.client.security.GroupKeys
+import org.openmcx.client.security.KeyMessage
+import org.openmcx.client.security.KmsDocuments
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -72,6 +82,8 @@ class Call internal constructor(
     @Volatile var callingAlias: String? = null
     @Volatile var calledAlias: String? = null
     val floorEvents: MutableList<String> = CopyOnWriteArrayList()
+    /** A protected incoming call's keys, opened before it is answered: its PCK (private) or GMK (group). */
+    internal var keys: Pair<org.openmcx.client.security.KeyMessage?, org.openmcx.client.security.KeyMessage?> = null to null
 }
 
 /** Tells the UI and the service about call events. */
@@ -107,7 +119,126 @@ class McpttService(
 
     init {
         ua.onAck = { ack -> onAck(ack) }
+        // TS 33.180 5.7, TS 24.481 §6.3.13.2.1: with protected media, once authorised, subscribe to each group's GMK
+        // (the <GKTPs> of its MCS GKTP document) at the GMS-URI; each subscription is refreshed in its dialog before it
+        // expires (RFC 6665 §4.1.2.2).
+        if (client.config.security?.protectMedia == true) scope.launch {
+            client.status.map { it.mcptt.authorised }.distinctUntilChanged().collect { authorised ->
+                keyRefresh?.cancel()
+                if (!authorised) { keyRefresh = null; return@collect }
+                // A round of SUBSCRIBEs is not cut short, so each accepted subscription has its dialog to end it with.
+                keyRefresh = scope.launch { withContext(NonCancellable) { subscribeGroupKeys() }; refreshGroupKeys() }
+            }
+        }
     }
+
+    /** Each group's GMKs (TS 33.180 5.7), their CSB-IDs the GMK-IDs; from the GKTP subscriptions. */
+    private val groupKeys = GroupKeys()
+    val groupKeyIds: Map<String, Long> get() = groupKeys.ids
+    private val keySubscriptions = GroupKeySubscriptions()
+    private var keyRefresh: Job? = null
+
+    private suspend fun subscribeGroupKeys() {
+        val token = client.tokens?.accessToken ?: return
+        val gms = config.gmsSubscriptionPsi ?: run { event("group key subscription: no GMS-URI configured"); return }
+        for (group in config.groups.distinct()) subscribeGroupKey(gms, group, token)
+    }
+
+    /**
+     * TS 24.481 §6.3.13.2.1: the initial SIP SUBSCRIBE for [group]'s <GKTPs>: b) the Request-URI the GMS-URI, the
+     * MCPTT ICSI in P-Preferred-Service (c)) and in the Contact (f)), an mcptt-info body with the access token, and the
+     * resource list; Event xcap-diff (RFC 5875), as the Linux client.
+     */
+    private suspend fun subscribeGroupKey(gms: String, group: String, token: String) {
+        val request = ua.newRequest("SUBSCRIBE", gms, NameAddr(gms))
+        request.headers.add("Contact", client.contactFor(McService.MCPTT)).add("P-Preferred-Service", Icsi.MCPTT)
+            .add("Event", GroupKeySubscriptions.EVENT).add("Accept", GroupKeySubscriptions.ACCEPT)
+            .add("Expires", GroupKeySubscriptions.EXPIRES_SECONDS.toString())
+        val (contentType, body) = Multipart.encode(listOf(
+            Part(McpttInfo.CONTENT_TYPE, McpttInfo(accessToken = token, requestUri = group, clientId = client.config.clientId).encode().toByteArray()),
+            Part(ResourceLists.CONTENT_TYPE, KmsDocuments.gktpResourceList(group).toByteArray())))
+        request.headers.add("Content-Type", contentType)
+        val subscribe = SipRequest(request.method, request.uri, request.headers, body)
+        keySubscriptions.sent(subscribe.callId, group)
+        val response = runCatching { ua.send(subscribe) }.getOrNull()
+        val expires = response?.headers?.get("Expires")?.let { ", $it s" } ?: ""
+        event("group key subscription for $group: ${response?.status}$expires")
+        if (response == null || !response.isSuccess) { keySubscriptions.ended(subscribe.callId); return }
+        runCatching { Dialog.fromResponse(ua.lastSent[subscribe.callId] ?: subscribe, response) }.getOrNull()
+            ?.let { keySubscriptions.accepted(it, GroupKeySubscriptions.granted(response)) }
+    }
+
+    private suspend fun refreshGroupKeys() {
+        while (true) {
+            val next = keySubscriptions.nextRefresh() ?: return
+            delay((next - System.currentTimeMillis()).coerceAtLeast(0))
+            for ((dialog, group) in keySubscriptions.due())
+                withContext(NonCancellable) { refreshGroupKey(dialog, group) }
+        }
+    }
+
+    /**
+     * TS 24.481 §6.3.13.2.1: the re-SUBSCRIBE in [dialog], the MCPTT ICSI in the Contact. A refused or failed refresh
+     * ends that subscription (RFC 6665 §4.1.2.2); a new initial SUBSCRIBE takes its place.
+     */
+    private suspend fun refreshGroupKey(dialog: Dialog, group: String) {
+        val request = GroupKeySubscriptions.refresh(ua, dialog, group)
+        request.headers.add("Contact", client.contactFor(McService.MCPTT)).add("P-Preferred-Service", Icsi.MCPTT)
+        val response = runCatching { ua.send(request, dialog) }.getOrNull()
+        event("group key subscription for $group refreshed: ${response?.status}")
+        if (response != null && response.isSuccess) {
+            keySubscriptions.accepted(dialog, GroupKeySubscriptions.granted(response))
+            return
+        }
+        keySubscriptions.ended(dialog.callId)
+        val gms = config.gmsSubscriptionPsi ?: return
+        client.tokens?.accessToken?.let { subscribeGroupKey(gms, group, it) }
+    }
+
+    /**
+     * End every GKTP subscription in its dialog (RFC 6665 §4.1.2.3, Expires 0): before the SIP de-REGISTER the UE
+     * releases all dialogs that use the contact address (TS 24.229 §5.1.1.6.1). The renewal stops first; the final
+     * NOTIFYs are still answered 200 (the dialogs stay known until then).
+     */
+    private suspend fun endGroupKeySubscriptions() {
+        keyRefresh?.cancelAndJoin()
+        keyRefresh = null
+        for (dialog in keySubscriptions.takeDialogs()) {
+            val group = keySubscriptions.group(dialog.callId)
+            val request = GroupKeySubscriptions.unsubscribe(ua, dialog)
+            request.headers.add("P-Preferred-Service", Icsi.MCPTT)
+            val response = runCatching { ua.send(request, dialog) }.getOrNull()
+            event("group key subscription for $group ended: ${response?.status}")
+        }
+    }
+
+    /** A GKTP NOTIFY (xcap-diff): open the group's GMK, authenticated as from the GMS (TS 33.180 5.7). */
+    private suspend fun keyNotify(group: String, tx: ServerTransaction) {
+        val request = tx.request
+        if (request.headers["Subscription-State"]?.startsWith("terminated") == true) {
+            tx.respond(200); keySubscriptions.ended(request.callId); return
+        }
+        val security = client.config.security
+        val keys = client.keysOf(McService.MCPTT)
+        val gms = security?.gmsUri; val root = security?.xcapRoot
+        if (keys == null || gms == null || root == null || request.contentType?.startsWith(GroupKeySubscriptions.ACCEPT) != true) { tx.respond(400); return }
+        tx.respond(200)
+        try {
+            val key = keys.openGroupMessage(gms, group, KmsDocuments.parseGktpXcapDiff(String(request.body), group, root))
+            groupKeys.add(group, key)
+            event("group key for $group: GMK %08x".format(key.csbId) + (if (groupKeys.active(group)?.csbId != key.csbId) ", not active yet" else ""))
+        } catch (e: Exception) {
+            event("group key for $group refused: ${e.message}")
+        }
+    }
+
+    /** The group's active GMK, waiting a little for it (sent by the GMS after start-up, TS 33.180 5.7). */
+    private suspend fun awaitGroupKey(group: String): KeyMessage =
+        groupKeys.active(group) ?: withTimeoutOrNull(GROUP_KEY_WAIT_MS) {
+            event("waiting for the group key for $group")
+            while (groupKeys.active(group) == null) delay(100)
+            groupKeys.active(group)
+        } ?: throw CallError("no group key for $group yet")
 
     private fun event(text: String) = client.event("mcptt: $text")
     private fun changed(call: Call) { _calls.value = _calls.value.toList(); listener?.changed(call) }
@@ -119,6 +250,29 @@ class McpttService(
             .add("Accept-Contact", "*;+g.3gpp.mcptt;require;explicit")
             .add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCPTT)}\";require;explicit")
             .add("P-Preferred-Service", Icsi.MCPTT)
+    }
+
+    private val protectedMedia get() = client.config.security?.protectMedia == true
+    private val protectedFloor get() = client.config.security?.protectFloor == true
+
+    /**
+     * The call's packet keys (MCPTT CS-IDs, TS 33.180 annex E): floor control under the CSK (9.4), a private call's
+     * speech under its [pck] (7.4), a group call's under its [gmk] (7.3).
+     */
+    private fun protection(pck: KeyMessage?, localInitiator: Boolean, gmk: KeyMessage?, call: Call): CallProtection? {
+        val csk = client.cskOf(McService.MCPTT).takeIf { protectedFloor }
+        if (protectedFloor && csk == null) throw CallError("no MCPTT CSK for protected floor control")
+        return when {
+            pck != null -> CallProtection.privateCall(csk, pck, localInitiator, mcvideo = false)
+            // The sender of received group speech: the floor's talker, else any member of the group (its group
+            // document): speech can arrive before the Floor Taken that names the talker.
+            gmk != null -> CallProtection.Group(csk, gmk, config.userId, mcvideo = false) {
+                listOfNotNull(runCatching { call.media?.floor?.talker }.getOrNull()) +
+                    (call.groupId?.let { client.groupDocuments[it]?.members } ?: emptyList())
+            }
+            csk != null -> CallProtection(csk, null, null, mcvideo = false)
+            else -> null
+        }
     }
 
     private fun bindMedia(): Pair<MediaPorts, LocalMedia> {
@@ -188,12 +342,28 @@ class McpttService(
                                   calledAlias: String? = null): Call {
         if (active != null) throw CallError("already in a call")
         val resource = resourcePriority(priority)
+        // TS 33.180 7.4 (TS 24.379 §11.1.1.2.1.1): a protected private call's media under a new PCK for the called
+        // MCPTT ID, offered in a=key-mgmt; 7.3: a protected group call's media under the group's GMK. A call to a
+        // functional alias has no MCPTT ID to key the PCK for yet; an ad hoc group call has no GMK (as MCVideo).
+        val pck = if (protectedMedia && type == CallType.PRIVATE && !toAlias) {
+            val keys = client.keysOf(McService.MCPTT) ?: throw CallError("no MCPTT keys for a protected call")
+            keys.makePck(peer ?: throw CallError("no one to call"))
+        } else null
+        val gmk = if (protectedMedia && type == CallType.PREARRANGED) awaitGroupKey(group ?: throw CallError("no group")) else null
         val call = Call(ids.incrementAndGet(), type, true, peer, group).also { it.floorControl = floorControl; it.priority = priority }
+        val protection = protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
         _calls.value = _calls.value + call
         val (ports, bound) = bindMedia()
         // §11.1.2.2 steps 12-13: no media-floor control section; the speech SSRC is announced instead.
-        val local = if (floorControl) bound else bound.copy(floorControl = false, audioSsrc = McpttSdp.newFloorSsrc())
+        val floored = if (floorControl) bound else bound.copy(floorControl = false, audioSsrc = McpttSdp.newFloorSsrc())
+        val local = when {
+            pck != null -> floored.copy(protected = true, keyMgmt = pck.second)
+            gmk != null -> floored.copy(protected = true)
+            else -> floored
+        }
         val media = newMedia(call, ports, local)
+        media.protection = protection
+        pck?.let { event("call ${call.id}: PCK %08x for $peer".format(it.first.csbId)) }
         call.media = media
         try {
             val request = ua.newRequest("INVITE", config.psi, NameAddr(config.psi))
@@ -251,6 +421,7 @@ class McpttService(
             }
             val remote = McpttSdp.remote(sdp.text)
             if (remote.floorControl != floorControl) throw CallError("floor control not negotiated as offered")
+            if (remote.protected != local.protected) throw CallError("media protection not negotiated as offered")
             media.start(remote, priority = null)
             call.state = "established"
             call.sessionExpires = response.headers["Session-Expires"]?.substringBefore(';')?.trim()?.toIntOrNull() ?: 0
@@ -269,6 +440,11 @@ class McpttService(
 
     override suspend fun handle(tx: ServerTransaction): Boolean {
         val request = tx.request
+        if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == GroupKeySubscriptions.EVENT) {
+            val group = keySubscriptions.group(request.callId) ?: return false
+            keyNotify(group, tx)
+            return true
+        }
         val call = _calls.value.firstOrNull { it.dialog?.callId == request.callId || it.invite?.callId == request.callId }
         when (request.method) {
             "INVITE" -> if (call == null) incoming(tx) else reinvite(call, tx)
@@ -306,6 +482,26 @@ class McpttService(
             it.callingAlias = info.functionalAlias
             it.calledAlias = info.calledFunctionalAlias
         }
+        // TS 33.180 7.4 with TS 24.379 §11.1.1.2.1.2: a protected private call's offer carries the caller's PCK, which
+        // must authenticate as from the calling MCPTT ID, else 488 with warning 136; a protected group call needs the
+        // group's GMK (7.3).
+        var pck: KeyMessage? = null
+        var gmk: KeyMessage? = null
+        if (remote.protected) {
+            val group = call.groupId
+            if (type == CallType.PREARRANGED && group != null) {
+                gmk = runCatching { awaitGroupKey(group) }.getOrNull()
+                if (gmk == null) { tx.respond(488); event("protected call on $group without its group key"); return }
+            } else if (type == CallType.PRIVATE) try {
+                val keys = client.keysOf(McService.MCPTT) ?: throw CallError("no MCPTT keys")
+                pck = keys.acceptPck(info.callingUserId ?: throw CallError("no caller"), remote.keyMgmt ?: throw CallError("protected call without a PCK"))
+            } catch (e: Exception) {
+                event("call from ${info.callingUserId}: PCK refused: ${e.message}")
+                tx.respond(488, extra = listOf("Warning" to "399 ${ua.sentBy} \"136 authentication of the MIKEY-SAKE I_MESSAGE failed\""))
+                return
+            } else { tx.respond(488); event("protected ${type.sessionType} call: no key for it"); return }
+        }
+        call.keys = pck to gmk
         notePriority(call, info, quiet = true)
         call.incoming = tx
         call.invite = request
@@ -347,8 +543,12 @@ class McpttService(
     private suspend fun accept(call: Call, tx: ServerTransaction, remote: RemoteMedia) {
         val (ports, bound) = try { bindMedia() } catch (e: Exception) { tx.respond(480); release(call, "no media ports"); return }
         // §11.1.2.3: an offer without floor control is answered without it, announcing our speech SSRC.
-        val local = if (remote.floorControl) bound else bound.copy(floorControl = false, audioSsrc = McpttSdp.newFloorSsrc())
+        val floored = if (remote.floorControl) bound else bound.copy(floorControl = false, audioSsrc = McpttSdp.newFloorSsrc())
+        val local = floored.copy(protected = remote.protected)
+        val protection = try { protection(call.keys.first, localInitiator = false, gmk = call.keys.second, call = call) }
+            catch (e: CallError) { ports.close(); tx.respond(480); release(call, e.message ?: "no keys"); return }
         val media = newMedia(call, ports, local)
+        media.protection = protection
         call.media = media
         val offered = tx.request.headers["Session-Expires"]?.substringBefore(';')?.trim()?.toIntOrNull() ?: 90
         call.sessionExpires = offered
@@ -552,9 +752,12 @@ class McpttService(
     /** The user logs off: every call is left (BYE, or CANCEL while calling), as by hang-up. */
     override suspend fun logOff() {
         _calls.value.forEach { call -> runCatching { hangup(call) }.onFailure { release(call, "logged off") } }
+        endGroupKeySubscriptions()
     }
 
     companion object {
+        /** How long a protected group call waits for the group's GMK before giving up (as MCVideo). */
+        const val GROUP_KEY_WAIT_MS = 10_000L
         const val ALLOW = "INVITE, ACK, CANCEL, BYE, UPDATE, INFO, MESSAGE, NOTIFY, OPTIONS"
     }
 }

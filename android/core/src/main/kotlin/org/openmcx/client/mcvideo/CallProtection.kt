@@ -30,8 +30,10 @@ open class CallProtection(
     private val receivedMedia: SecurityMaterial?,
     private val mediaKey: KeyMessage? = null,
     private val clock: () -> Long = unixNow,
+    /** MCVideo (TS 33.180 CS-IDs 2/3, 5, 8) or MCPTT (CS-IDs 0/1, 4, 6), the service whose keys these are. */
+    protected val mcvideo: Boolean = true,
 ) {
-    private val floor: SecurityMaterial? = csk?.let { SrtpKeys.floorControl(it, mcvideo = true) }
+    private val floor: SecurityMaterial? = csk?.let { SrtpKeys.floorControl(it, mcvideo = mcvideo) }
     private val floors = HashMap<Long, SecureStream>()
     private val sent = HashMap<Long, SecureStream>()
     private val received = HashMap<Long, SecureStream>()
@@ -99,10 +101,11 @@ open class CallProtection(
         private val gmk: KeyMessage,
         own: String,
         clock: () -> Long = unixNow,
+        mcvideo: Boolean = true,
         private val senders: () -> Collection<String>,
     ) :
-        CallProtection(csk, null, null, gmk, clock) {
-        private val sentMaterial = SrtpKeys.groupCall(gmk, gmk.csbId, SrtpKeys.gukId(gmk.key, gmk.csbId, own), mcvideo = true)
+        CallProtection(csk, null, null, gmk, clock, mcvideo) {
+        private val sentMaterial = SrtpKeys.groupCall(gmk, gmk.csbId, SrtpKeys.gukId(gmk.key, gmk.csbId, own), mcvideo = mcvideo)
         private val sent = HashMap<Long, SecureStream>()
         private val received = HashMap<Long, SecureStream>()
         private val gukOf = HashMap<String, Long>()
@@ -124,7 +127,7 @@ open class CallProtection(
             val guk = u32(packet, mki + 4)
             val known = synchronized(gukOf) { senders().any { s -> gukOf.getOrPut(s) { SrtpKeys.gukId(gmk.key, gmk.csbId, s) } == guk } }
             if (!known) { failures++; return null }
-            val material = synchronized(materials) { materials.getOrPut(guk) { SrtpKeys.groupCall(gmk, gmk.csbId, guk, mcvideo = true) } }
+            val material = synchronized(materials) { materials.getOrPut(guk) { SrtpKeys.groupCall(gmk, gmk.csbId, guk, mcvideo = mcvideo) } }
             val ssrc = u32(packet, 8)
             // One context per sender and SSRC.
             return use(received, ssrc xor (guk shl 32), { SecureStream(material, ssrc) }) { it.unprotectRtp(packet) }
@@ -147,13 +150,15 @@ open class CallProtection(
         }
 
         /** A private (one-to-one) call under [pck], whose initiator we are or not. */
-        fun privateCall(csk: KeyMessage?, pck: KeyMessage, localInitiator: Boolean, clock: () -> Long = unixNow) =
+        fun privateCall(csk: KeyMessage?, pck: KeyMessage, localInitiator: Boolean, mcvideo: Boolean = true,
+                        clock: () -> Long = unixNow) =
             CallProtection(
                 csk,
-                SrtpKeys.privateCall(pck, fromInitiator = localInitiator, mcvideo = true),
-                SrtpKeys.privateCall(pck, fromInitiator = !localInitiator, mcvideo = true),
+                SrtpKeys.privateCall(pck, fromInitiator = localInitiator, mcvideo = mcvideo),
+                SrtpKeys.privateCall(pck, fromInitiator = !localInitiator, mcvideo = mcvideo),
                 pck,
                 clock,
+                mcvideo,
             )
     }
 }

@@ -123,4 +123,22 @@ class CallProtectionTest {
         assertArrayEquals(rtp, receiver.unprotectRtp(wire))
         assertNull(receiver.unprotectRtp(wire)) // replay
     }
+
+    /** MCPTT keys (CS-IDs 0/1, 4, 6) pair up, and never open MCVideo's (2/3, 5, 8) under the same key. */
+    @Test fun mcpttKeysAreTheirOwn() {
+        val caller = CallProtection.privateCall(csk, pck, localInitiator = true, mcvideo = false)
+        val called = CallProtection.privateCall(csk, pck, localInitiator = false, mcvideo = false)
+        val sent = caller.protectRtp(rtp)!!
+        assertArrayEquals(rtp, called.unprotectRtp(sent))
+        assertNull(CallProtection.privateCall(csk, pck, localInitiator = false).unprotectRtp(sent))
+        val rtcp = byteArrayOf(0x80.toByte(), 0xcc.toByte(), 0, 4, 0x12, 0x34, 0x56, 0x78, 'M'.code.toByte(), 'C'.code.toByte(), 'P'.code.toByte(), 'T'.code.toByte(), 1, 2, 3, 4, 5, 6, 7, 8)
+        val floor = CallProtection(csk, null, null, mcvideo = false).protectControl(rtcp)!!
+        assertArrayEquals(rtcp, CallProtection(csk, null, null, mcvideo = false).unprotectControl(floor))
+        assertNull(CallProtection(csk, null, null).unprotectControl(floor))
+        val gmk = KeyMessage(ByteArray(16) { (64 + it).toByte() }, ByteArray(16) { (80 + it).toByte() }, 0x30000001, 0)
+        val alice = "sip:alice@mcx.test"
+        val sender = CallProtection.Group(null, gmk, alice, mcvideo = false) { emptyList() }
+        val receiver = CallProtection.Group(null, gmk, "sip:bob@mcx.test", mcvideo = false) { listOf(alice) }
+        assertArrayEquals(rtp, receiver.unprotectRtp(sender.protectRtp(rtp)!!))
+    }
 }

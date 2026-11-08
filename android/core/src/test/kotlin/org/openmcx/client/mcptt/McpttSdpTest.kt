@@ -69,4 +69,25 @@ class McpttSdpTest {
         assertFalse("not answered when not offered", McpttSdp.answer(McpttSdp.remote(McpttSdp.offer(local)), local.copy(queueing = true)).contains("mc_queueing"))
         assertFalse(McpttSdp.offer(local).contains("mc_queueing"))
     }
+
+    /** TS 33.180 7.4 / RFC 4567: a protected private call's offer is RTP/SAVP with the PCK in a=key-mgmt. */
+    @Test fun protectedOfferCarriesTheKey() {
+        val sdp = McpttSdp.offer(local.copy(protected = true, keyMgmt = "AQID"))
+        assertTrue(sdp.contains("m=audio 20000 RTP/SAVP 96"))
+        assertTrue(sdp.contains("a=key-mgmt:mikey AQID"))
+        val remote = McpttSdp.remote(sdp)
+        assertTrue(remote.protected)
+        assertEquals("AQID", remote.keyMgmt)
+        // An answer is RTP/SAVP without a key (the PCK comes from the caller).
+        val answer = McpttSdp.answer(remote, local.copy(protected = true))
+        assertTrue(answer.contains("RTP/SAVP") && !answer.contains("key-mgmt"))
+        // Clear media stays RTP/AVP without key-mgmt.
+        assertFalse(McpttSdp.remote(McpttSdp.offer(local)).protected)
+    }
+
+    /** RFC 7714 §8.4: no SSRC is given out twice. */
+    @Test fun ssrcsAreNotReissued() {
+        val seen = HashSet<Long>()
+        repeat(2000) { assertTrue(seen.add(McpttSdp.newFloorSsrc())) }
+    }
 }

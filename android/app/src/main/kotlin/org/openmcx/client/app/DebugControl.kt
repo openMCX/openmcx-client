@@ -231,6 +231,10 @@ class DebugControl(private val context: Context) {
             JSONObject().put("group", a.group).put("latitude", a.location?.latitude).put("longitude", a.location?.longitude)
         })
         "video-tamper-pck" -> { mcvideo().tamperNextPck = true; "next PCK tampered" }
+        "keys" -> JSONObject().put("kms", Engine.client?.keysOf(org.openmcx.client.body.McService.MCPTT)?.kms?.kmsUri)
+            .put("csk_id", Engine.client?.cskOf(org.openmcx.client.body.McService.MCPTT)?.csbId)
+            .put("identity", Engine.client?.keysOf(org.openmcx.client.body.McService.MCPTT)?.identity)
+            .put("group_keys", JSONObject(mcptt().groupKeyIds))
         "video-keys" -> JSONObject().put("kms", Engine.client?.videoKeys?.kms?.kmsUri).put("csk_id", Engine.client?.videoCsk?.csbId)
             .put("identity", Engine.client?.videoKeys?.identity).put("group_keys", JSONObject(mcvideo().groupKeyIds))
         "video-push" -> videoJson(mcvideo().push(Engine.mcvideoId(args[0])))
@@ -493,6 +497,7 @@ class DebugControl(private val context: Context) {
         val s = client.status.value
         fun service(state: org.openmcx.client.client.ServiceState) =
             JSONObject().put("authorised", state.authorised).put("affiliations", JSONObject(state.affiliations))
+                .put("refused", state.refused ?: JSONObject.NULL)
         return JSONObject().put("phase", s.phase).put("registered", s.registered)
             .put("user", client.config.sip.publicUserId)
             .put("mcptt", service(s.mcptt)).put("mcdata", service(s.mcdata)).put("mcvideo", service(s.mcvideo))
