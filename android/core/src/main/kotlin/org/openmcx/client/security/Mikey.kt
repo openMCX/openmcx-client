@@ -18,7 +18,19 @@ class KeyError(message: String) : Exception(message)
 private fun check(ok: Boolean, what: String) { if (!ok) throw KeyError(what) }
 
 /** A KMS's public parameters (TS 33.180 D.3.2): its URI, key period and offset (seconds), KPAK and Z. */
-data class KmsPublic(val kmsUri: String, val period: Long, val offset: Long, val kpak: EcPoint, val z: EcPoint) {
+/**
+ * The form of the UID that enters ECCSI (RFC 6507 "ID") and SAKKE (RFC 6508 "a"/"b"). TS 33.180 annex F.2.1.1 says
+ * "The full 256-bit output shall be used as the identifier within MIKEY-SAKKE (referred to as 'ID' in IETF RFC 6507 [9]
+ * and 'a' or 'b' within IETF RFC 6508 [10]. The resulting UID shall be base64 encoded." without saying which of the two
+ * enters them (spec defect, reported; Known limitations "MIKEY-SAKKE UID form"). TEXT, the base64 text, is OpenMCX's
+ * form; RAW, the 32 octets, is the reading of the ETSI test suite for TS 37.579, used only under a KMS whose keys are
+ * for it (found at key provisioning, as the Linux client does).
+ */
+enum class UidForm { TEXT, RAW }
+
+/** A KMS certificate's public part; [uidForm], the UID form its keys are for (found at key provisioning). */
+data class KmsPublic(val kmsUri: String, val period: Long, val offset: Long, val kpak: EcPoint, val z: EcPoint,
+                     val uidForm: UidForm = UidForm.TEXT) {
     fun periodNumber(ntpSeconds: Long): Long {
         check(period > 0 && offset < period && ntpSeconds >= offset, "invalid KMS key period")
         return (ntpSeconds - offset) / period
@@ -26,7 +38,9 @@ data class KmsPublic(val kmsUri: String, val period: Long, val offset: Long, val
 }
 
 /** A user's key material for one period: the ECCSI (SSK, PVT) pair and the SAKKE RSK. Never sent to anyone. */
-class IdentityKeys(val uri: String, val periodNumber: Long, val ssk: BigInteger, val pvt: EcPoint, val rsk: EcPoint)
+class IdentityKeys(val uri: String, val periodNumber: Long, val ssk: BigInteger, val pvt: EcPoint, val rsk: EcPoint,
+                   /** The UID form these keys validated for (KmsDocuments.parseKeyProv). */
+                   val uidForm: UidForm = UidForm.TEXT)
 
 /** Key properties (TS 33.180 E.6.11): type 0 GMK, 1 PCK, 2 CSK; status bit 0 not revoked; Unix times. */
 data class KeyProperties(val type: Int, val status: Long = 1, val activation: Long = 0, val expiry: Long = 0,
@@ -63,14 +77,21 @@ object Mikey {
     private fun ByteArrayOutputStream.bytes(b: ByteArray) = write(b, 0, b.size)
 
     /** TS 33.180 F.2.1: the UID of [uri] for the key period that [ntpSeconds] falls in, as its base64 text. */
-    fun uid(uri: String, kms: KmsPublic, ntpSeconds: Long): String {
+    fun uid(uri: String, kms: KmsPublic, ntpSeconds: Long): String = Base64.getEncoder().encodeToString(uidDigest(uri, kms, ntpSeconds))
+
+    /** The identifier of [uri] that enters ECCSI and SAKKE under [kms]: the UID in the form of that KMS's keys ([UidForm]). */
+    fun identifier(uri: String, kms: KmsPublic, ntpSeconds: Long): ByteArray =
+        if (kms.uidForm == UidForm.RAW) uidDigest(uri, kms, ntpSeconds) else uid(uri, kms, ntpSeconds).toByteArray()
+
+    /** TS 33.180 F.2.1.1: the 256-bit SHA-256 output (KDF input of TS 33.220 annex B.2). */
+    fun uidDigest(uri: String, kms: KmsPublic, ntpSeconds: Long): ByteArray {
         val out = ByteArrayOutputStream()
         fun string(text: String) { val b = text.toByteArray(); check(b.isNotEmpty() && b.size <= 65535, "invalid identity"); out.bytes(b); out.int(b.size.toLong(), 2) }
         fun minimal(value: Long) { var width = 1; var rest = value ushr 8; while (rest != 0L) { width++; rest = rest ushr 8 }; out.int(value, width); out.int(width.toLong(), 2) }
         out.write(0)
         string("MIKEY-SAKKE-UID"); string(uri); string(kms.kmsUri)
         minimal(kms.period); minimal(kms.offset); minimal(kms.periodNumber(ntpSeconds))
-        return Base64.getEncoder().encodeToString(Eccsi.sha256(out.toByteArray()))
+        return Eccsi.sha256(out.toByteArray())
     }
 
     private fun idPayload(out: ByteArrayOutputStream, next: Int, role: Int, identity: String) {
@@ -84,7 +105,7 @@ object Mikey {
                profile: WireProfile? = null, recipientKms: KmsPublic = kms): ByteArray {
         check(key.ntpSeconds >= 0 && key.random.size in 16..255, "invalid MIKEY timestamp or RAND")
         check(sender.periodNumber == kms.periodNumber(key.ntpSeconds), "identity key period mismatch")
-        val encapsulated = Sakke(recipientKms.z).encapsulate(uid(recipient, recipientKms, key.ntpSeconds).toByteArray(), key.key)
+        val encapsulated = Sakke(recipientKms.z).encapsulate(identifier(recipient, recipientKms, key.ntpSeconds), key.key)
         val out = ByteArrayOutputStream()
         out.bytes(byteArrayOf(1, 26, 5, 1)); out.int(key.csbId, 4); out.write(0); out.write(1)
         // RFC 5905 section 6: the 32-bit seconds field holds the era offset; the receiver infers the era (ntpFromWire).
@@ -101,7 +122,7 @@ object Mikey {
         }
         out.int(0x2081, 2) // RFC 6507 signature: r32 ‖ s32 ‖ PVT65
         val signed = out.toByteArray()
-        val id = uid(sender.uri, kms, key.ntpSeconds).toByteArray()
+        val id = identifier(sender.uri, kms, key.ntpSeconds)
         return signed + Eccsi(kms.kpak).sign(id, sender.ssk, sender.pvt, signed)
     }
 
@@ -217,9 +238,9 @@ object Mikey {
         val signedLength = r.position
         val signature = r.take(129)
         check(r.position == message.size, "trailing MIKEY data")
-        val signerId = uid(sender, signingKms, ntp).toByteArray()
+        val signerId = identifier(sender, signingKms, ntp)
         check(Eccsi(signingKms.kpak).verify(signerId, message.copyOfRange(0, signedLength), signature), "MIKEY signature invalid")
-        val key = Sakke(kms.z).decapsulate(uid(recipient.uri, kms, ntp).toByteArray(), recipient.rsk, ciphertext)
+        val key = Sakke(kms.z).decapsulate(identifier(recipient.uri, kms, ntp), recipient.rsk, ciphertext)
             ?: throw KeyError("SAKKE decapsulation failed")
         if (rand.size < 16)
             warn("MIKEY RAND of ${rand.size} octets from $sender accepted (RFC 3830 6.11: SHOULD be at least 16)")

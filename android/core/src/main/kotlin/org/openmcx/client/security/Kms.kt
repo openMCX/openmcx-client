@@ -72,16 +72,53 @@ object KmsDocuments {
         } catch (e: IllegalArgumentException) { throw KeyError("invalid KMS public key") }
     }
 
-    private fun keyField(set: Element, name: String): ByteArray {
+    /**
+     * TS 33.180 table D.3.3.2-1: the value of a key element: the unencrypted KeyContentType of the KMS interface
+     * namespace, or with a TrK the EncKeyContentType (clause 9.3.4.2, annex D.3.3.2): one xenc:EncryptedKey with
+     * kw-aes256, its KeyName the base64 TrK-ID, unwrapped under the TrK's confidentiality key (annex F.1.4 FC 0x51, P0
+     * the user) with the test suite's padding ([TransportKeys.unwrapKeyMaterial]).
+     */
+    private fun keyField(set: Element, name: String, trk: Xpk?, user: String): ByteArray {
         val e = set.one(name)
         val type = e.getAttributeNS("http://www.w3.org/2001/XMLSchema-instance", "type")
         val prefix = type.substringBefore(':', "")
-        if (type.substringAfter(':') != "KeyContentType" || e.lookupNamespaceURI(prefix.ifEmpty { null }) != NS) throw KeyError("unsupported encrypted or invalid key content")
-        return unhex(e.text())
+        if (e.lookupNamespaceURI(prefix.ifEmpty { null }) != NS) throw KeyError("unsupported or invalid key content")
+        when (type.substringAfter(':')) {
+            "KeyContentType" -> return unhex(e.text())
+            "EncKeyContentType" -> {}
+            else -> throw KeyError("unsupported or invalid key content")
+        }
+        trk ?: throw KeyError("encrypted key material requires the TrK")
+        val encrypted = e.only("EncryptedKey", XENC)
+        if (encrypted.only("EncryptionMethod", XENC).getAttribute("Algorithm") != KW_AES256) throw KeyError("unsupported key encryption algorithm")
+        if (encrypted.only("KeyInfo", DSIG).only("KeyName", DSIG).text().trim() != trk.keyName) throw KeyError("key encrypted under another TrK")
+        val wrapped = try {
+            java.util.Base64.getMimeDecoder().decode(encrypted.only("CipherData", XENC).only("CipherValue", XENC).text().trim())
+        } catch (x: IllegalArgumentException) { throw KeyError("invalid CipherValue") }
+        val kek = TransportKeys.protectionKey(trk, user, TransportKeys.CONFIDENTIALITY)
+        return try { TransportKeys.unwrapKeyMaterial(kek, wrapped) } finally { java.util.Arrays.fill(kek, 0) }
     }
 
-    /** The key set for [user] under [kms], validated (§5.1.2 of RFC 6507, §6.1.2 of RFC 6508). */
-    fun parseKeyProv(xml: String, kms: KmsPublic, user: String, request: String, nowNtp: Long): IdentityKeys {
+    private const val XENC = "http://www.w3.org/2001/04/xmlenc#"
+    private const val DSIG = "http://www.w3.org/2000/09/xmldsig#"
+    private const val KW_AES256 = "http://www.w3.org/2001/04/xmlenc#kw-aes256"
+
+    /** The one child element [name] of the namespace [ns]. */
+    private fun Element.only(name: String, ns: String): Element {
+        val found = (0 until childNodes.length).map { childNodes.item(it) }.filterIsInstance<Element>()
+            .filter { it.localName == name && it.namespaceURI == ns }
+        if (found.size != 1) throw KeyError(if (found.isEmpty()) "missing $name" else "duplicate $name")
+        return found[0]
+    }
+
+    /**
+     * The key set for [user] under [kms], validated (§5.1.2 of RFC 6507, §6.1.2 of RFC 6508); its key elements in clear,
+     * or wrapped under the [trk] when one is given. With [detectUidForm] the key set is validated for the UID's 32 octets
+     * first, then for its base64 text, and the form it is valid for is returned (IdentityKeys.uidForm); without, for the
+     * text only.
+     */
+    fun parseKeyProv(xml: String, kms: KmsPublic, user: String, request: String, nowNtp: Long,
+                     trk: Xpk? = null, detectUidForm: Boolean = false): IdentityKeys {
         val set = envelope(xml, user, kms.kmsUri, request, nowNtp).one("KmsKeyProv").one("KmsKeySet")
         val uid = Mikey.uid(user, kms, nowNtp)
         if (set.getAttribute("Version") != "1.1.0" || set.field("KmsUri") != kms.kmsUri || set.field("UserUri") != user ||
@@ -90,12 +127,19 @@ object KmsDocuments {
         // Table D.3.3.2-1: the SSK is an "OCTET STRING encoding of an integer as described in section 6 of [31]"
         // (RFC 6090 6.2, any length k): leading zero octets are allowed; the key validation checks its value.
         val keys = try {
-            val ssk = BigInteger(1, keyField(set, "UserSigningKeySSK"))
+            val ssk = BigInteger(1, keyField(set, "UserSigningKeySSK", trk, user))
             if (ssk.bitLength() > 256) throw KeyError("invalid SSK size")
             IdentityKeys(user, set.field("KeyPeriodNo").toLong(), ssk,
-                Eccsi.P256.decode(keyField(set, "UserPubTokenPVT")), Sakke.E.decode(keyField(set, "UserDecryptKey")))
+                Eccsi.P256.decode(keyField(set, "UserPubTokenPVT", trk, user)), Sakke.E.decode(keyField(set, "UserDecryptKey", trk, user)))
         } catch (e: IllegalArgumentException) { throw KeyError("invalid key material") }
         if (keys.periodNumber != kms.periodNumber(nowNtp)) throw KeyError("identity key period mismatch")
+        // TS 33.180 annex F.2.1.1 does not say which UID form enters ECCSI and SAKKE (spec defect, reported, see
+        // UidForm): with detection the 32 octets first (the ETSI test suite's reading, as the Linux client), then the
+        // base64 text (OpenMCX's form). The RFC 6507 5.1.2 and RFC 6508 6.1.2 checks are made in either case; a key set
+        // valid in neither form is refused.
+        fun valid(id: ByteArray) = Eccsi(kms.kpak).validate(id, keys.ssk, keys.pvt) && Sakke(kms.z).validate(id, keys.rsk)
+        if (detectUidForm && valid(Mikey.uidDigest(user, kms, nowNtp)))
+            return IdentityKeys(keys.uri, keys.periodNumber, keys.ssk, keys.pvt, keys.rsk, UidForm.RAW)
         val id = uid.toByteArray()
         if (!Eccsi(kms.kpak).validate(id, keys.ssk, keys.pvt)) throw KeyError("invalid ECCSI identity key")
         if (!Sakke(kms.z).validate(id, keys.rsk)) throw KeyError("invalid SAKKE identity key")
@@ -176,8 +220,10 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
 
     private suspend fun refresh() {
         val public = KmsDocuments.parseInit(fetch("init"), account, kmsUri, url("init"), Mikey.nowNtp())
-        keys = KmsDocuments.parseKeyProv(fetch("keyprov"), public, identity, url("keyprov"), Mikey.nowNtp())
-        kms = public
+        // The UID form of this KMS's keys decides the identifier of every ECCSI and SAKKE operation under it (UidForm).
+        val provisioned = KmsDocuments.parseKeyProv(fetch("keyprov"), public, identity, url("keyprov"), Mikey.nowNtp(), detectUidForm = true)
+        keys = provisioned
+        kms = public.copy(uidForm = provisioned.uidForm)
     }
 
     /** The keys for now, fetched again when the key period has turned. */
