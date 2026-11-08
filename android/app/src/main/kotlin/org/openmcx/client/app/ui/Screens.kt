@@ -659,8 +659,6 @@ private fun VideoScreen(state: UiState, actions: UiActions) {
 @Composable
 private fun FunctionalAliases(state: UiState, actions: UiActions) {
     Section("Functional aliases")
-    Text("A functional alias is a role others can call, such as a dispatcher. Activate one to receive its calls; " +
-        "present it so your calls show it.", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
     // A call presents at most one alias (TS 24.379 §9A): say which.
     val presented = state.aliases.filter { it.inUse }.joinToString { CallDisplay.role(it.id) }
     Text(if (presented.isEmpty()) "Your calls present no role." else "Your calls present: $presented",
