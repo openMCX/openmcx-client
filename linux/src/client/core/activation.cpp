@@ -211,6 +211,20 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
   // is the GMS subscription proxy PSI of the group document and group key subscriptions.
   if (boot.contains("ue_initial_configuration"))
     cfg["gms"]["subscription_psi"] = parse_initial_gms_uri(boot.at("ue_initial_configuration").get<std::string>());
+  // TS 24.484 clause 7.2.2.1 item 3 f) (TS 24.483 clause 8.2.44): the <kms> of the UE initial configuration is the KMS
+  // the key management client uses; the GMS identity that signs the GMKs is the GMS XCAP root's groups AUID (TS 24.481
+  // clause 6.3.13), unless the configuration names it. An empty <kms> names none (the configuration's stays).
+  if (boot.contains("ue_initial_configuration")) {
+    const auto kms = parse_initial_kms(boot.at("ue_initial_configuration").get<std::string>());
+    if (!kms.empty()) {
+      cfg["security"]["kms_uri"] = kms;
+      if (!cfg["security"].contains("gms_uri") && cfg.contains("endpoints") && cfg["endpoints"].contains("gms")) {
+        auto root = cfg["endpoints"]["gms"].get<std::string>();
+        while (!root.empty() && root.back() == '/') root.pop_back();
+        cfg["security"]["gms_uri"] = root + "/org.openmobilealliance.groups";
+      }
+    }
+  }
   // TS 24.484 clause 7.2.2.1 item 3 c), g) (TS 24.482 annex A.2.1.2): the home HTTP proxy and its TLS tunnel
   // authentication; an empty <http-proxy> names none (direct requests). Mutual authentication is refused at activation.
   if (boot.contains("ue_initial_configuration")) {

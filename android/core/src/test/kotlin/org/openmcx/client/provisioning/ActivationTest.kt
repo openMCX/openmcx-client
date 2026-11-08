@@ -100,4 +100,22 @@ class ActivationTest {
             Activation.initialHttpProxy(initial("", "<mutual-authentication>false</mutual-authentication>"))
         }
     }
+
+    /** TS 24.484 §7.2.2.1: the KMS of the UE initial configuration's <App-Server-Info>, else the package's endpoint. */
+    @Test fun kmsFromTheInitialConfiguration() {
+        fun with(extra: String) = Json.parseToJsonElement(pkg.toString().removeSuffix("}") + extra + "}").jsonObject
+        val initial = ",\"ue_initial_configuration\":" + Json.encodeToString(kotlinx.serialization.json.JsonPrimitive(
+            initial("<http-proxy/>", "<mutual-authentication>false</mutual-authentication>")))
+        val security = ClientConfig.parse(Activation.bundle(with(initial), "p", "erin", "s").toString()).security!!
+        assertEquals("https://kms", security.kmsUri)
+        assertEquals("https://http-proxy:8443/gms/org.openmobilealliance.groups", security.gmsUri)
+        assertFalse(security.protectMedia || security.protectFloor || security.kmsViaProxy)
+        // Without an initial configuration: the package's kms endpoint; without either, no KMS settings.
+        val endpoints = Json.parseToJsonElement(pkg.toString().replace("\"gms\":\"https://http-proxy:8443/gms\"",
+            "\"gms\":\"https://http-proxy:8443/gms\",\"kms\":\"https://kms:8443\"")).jsonObject
+        assertEquals("https://kms:8443", ClientConfig.parse(Activation.bundle(endpoints, "p", "erin", "s").toString()).security!!.kmsUri)
+        assertEquals(null, ClientConfig.parse(Activation.bundle(pkg, "p", "erin", "s").toString()).security)
+        assertEquals(null, Activation.initialKms(initial("<http-proxy/>", "<mutual-authentication>0</mutual-authentication>")
+            .replace("<kms>https://kms</kms>", "<kms/>")))
+    }
 }

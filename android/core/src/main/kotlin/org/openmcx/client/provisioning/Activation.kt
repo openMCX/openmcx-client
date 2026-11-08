@@ -153,6 +153,18 @@ object Activation {
                     putJsonArray("chat_groups") {}; put("answer_mode", "automatic")
                 }
             }
+            // TS 24.484 §7.2.2.1 (TS 24.483 §8.2.41B, <App-Server-Info>): the <kms> of the UE initial configuration, the
+            // KMS the key management client uses (else the package's own endpoint); the GMS identity that signs the
+            // GMKs is its XCAP root's groups AUID (TS 24.481 §6.3.13). Media and transmission control protection stay the
+            // device's own settings, as for the Linux client.
+            (pkg.opt("ue_initial_configuration")?.let(::initialKms) ?: endpoints.opt("kms"))?.let { kms ->
+                putJsonObject("security") {
+                    put("kms_uri", kms)
+                    put("gms_uri", endpoints.str("gms").trimEnd('/') + "/org.openmobilealliance.groups")
+                    // The client's Key Parameters wire profile defaults (ClientConfig.Security), as for any profile without one.
+                    putJsonObject("key_parameter_profile") {}
+                }
+            }
             pkg["address_map"]?.jsonObject?.let { put("endpoints", it) }
             // TS 24.484 §7.2.2.1 item 3 c), g) (TS 24.482 annex A.2.1.2): the home HTTP proxy of the UE initial
             // configuration, with one-way TLS tunnel authentication; an empty <http-proxy> names none.
@@ -184,6 +196,15 @@ object Activation {
     }
 
     /** TS 24.484 §7.2.2.1 item 4: <on-network>/<GMS-URI>, null when absent or empty. */
+    /** The <kms> of the UE initial configuration's App-Server-Info (TS 24.484 §7.2.2.1); null when absent or empty. */
+    internal fun initialKms(xml: String): String? {
+        val root = Xml.parse(xml)
+        require(root.localName == "mcptt-UE-initial-configuration" && root.namespaceURI == INITIAL_NS) {
+            "wrong UE initial configuration root"
+        }
+        return root.child("on-network")?.child("App-Server-Info")?.child("kms")?.textContent?.trim()?.ifEmpty { null }
+    }
+
     internal fun initialGmsUri(xml: String): String? {
         val root = Xml.parse(xml)
         require(root.localName == "mcptt-UE-initial-configuration" && root.namespaceURI == INITIAL_NS) {
