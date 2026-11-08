@@ -136,6 +136,9 @@ object Activation {
                 // TS 24.484 §7.2.2.1: the profile index of <Default-user-profile>, 1 when the package has none.
                 put("profile_index", mcptt.opt("profile_index")?.toIntOrNull() ?: 1)
                 put("answer_mode", "automatic"); put("session_expires", 1800); put("manual_answer_timeout", 20)
+                // TS 24.484 §7.2.2.1 item 4 (TS 24.483 §8.2.9): the <GMS-URI> of the UE initial configuration is the GMS
+                // subscription proxy PSI of the group document subscriptions (TS 24.481 §6.3.13.2.1 b)).
+                pkg.opt("ue_initial_configuration")?.let(::initialGmsUri)?.let { put("gms_subscription_psi", it) }
             }
             putJsonObject("media") { putJsonArray("port_range") { add(JsonPrimitive(20000)); add(JsonPrimitive(20400)) }; put("amr_wb_mode", 2) }
             pkg["mcdata"]?.jsonObject?.let { d ->
@@ -178,6 +181,15 @@ object Activation {
         }
         val proxy = server.child("http-proxy") ?: throw IllegalArgumentException("the UE initial configuration has no http-proxy")
         return proxy.textContent.trim().ifEmpty { null }
+    }
+
+    /** TS 24.484 §7.2.2.1 item 4: <on-network>/<GMS-URI>, null when absent or empty. */
+    internal fun initialGmsUri(xml: String): String? {
+        val root = Xml.parse(xml)
+        require(root.localName == "mcptt-UE-initial-configuration" && root.namespaceURI == INITIAL_NS) {
+            "wrong UE initial configuration root"
+        }
+        return root.child("on-network")?.child("GMS-URI")?.textContent?.trim()?.ifEmpty { null }
     }
 
     private const val INITIAL_NS = "urn:3gpp:mcptt:mcpttUEinitConfig:1.0"

@@ -205,6 +205,10 @@ class DocumentClient(private val http: HttpClient, private val cms: String, priv
     suspend fun serviceResourcePriorities(service: String, token: String): Map<String, String> =
         ServiceConfig.resourcePriorities(serviceConfiguration(service, token))
 
+    /** TS 24.484 §8.2.1: the MCPTT UE configuration document of the user [mcpttId] on the UE [ueId] (read as text). */
+    suspend fun ueConfiguration(mcpttId: String, ueId: String, token: String): String =
+        fetch("$cms/org.3gpp.mcptt.ue-config/users/${enc(mcpttId)}/${enc(ueId)}", token)
+
     suspend fun group(groupId: String, token: String): GroupDocument =
         GroupDocument.parse(fetch("$gms/org.openmobilealliance.groups/global/byGroupID/${enc(groupId)}", token))
 }

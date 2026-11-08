@@ -111,7 +111,14 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
                   "answer_mode": "automatic", "session_expires": 1800, "manual_answer_timeout": 20,
                   # The functional aliases this user may activate (TS 24.379 clause 9A), from the site's definitions.
                   "functional_aliases": [fa["id"] for fa in site.get("functional_aliases", [])
-                                         if mcptt["user_id"] in fa.get("users", [])]},
+                                         if mcptt["user_id"] in fa.get("users", [])],
+                  # TS 24.481 clause 6.3.13.2.1 b) and TS 24.484 clause 6.3.13.2.2 b) 2): the subscription proxy PSIs
+                  # of the reference client; with --documents-on-notify the MCPTT documents are read on their NOTIFYs.
+                  **({"gms_subscription_psi": ref["gms"]["subscription_psi"]} if isinstance(ref.get("gms"), dict)
+                     and ref["gms"].get("subscription_psi") else {}),
+                  **({"cms_subscription_psi": ref["cms"]["subscription_psi"]} if isinstance(ref.get("cms"), dict)
+                     and ref["cms"].get("subscription_psi") else {}),
+                  "documents_on_notify": bool(ref["mcptt"].get("documents_on_notify", False))},
         "media": {"port_range": [20000, 20400], "amr_wb_mode": 2},
     }
     if mcdata:
@@ -270,6 +277,8 @@ def create(args) -> None:
     if args.http_proxy_mode == "forward":
         # The clients send their HTTP through the home HTTP proxy in absolute-form (TS 24.482 annex A.2.1.2).
         command += ["--http-proxy-mode", "forward", "--log-level", "debug"]
+    if getattr(args, "documents_on_notify", False):
+        command.append("--documents-on-notify")
     if args.mcvideo:
         command.append("--mcvideo")
     if args.location:
@@ -811,6 +820,8 @@ def main() -> None:
     c.add_argument("--openmcx", default=str(ROOT.parents[1] / "openmcx-server"), help="the openmcx-server checkout (default: ../openmcx-server)")
     c.add_argument("--name", default="a1")
     c.add_argument("--debug-sip", action="store_true", help="clear SIP over TCP for capture-based checks")
+    c.add_argument("--documents-on-notify", action="store_true",
+                   help="the clients read their MCPTT documents on the subscriptions' NOTIFYs (test 5.1 steps 18, 19)")
     c.add_argument("--http-proxy-mode", choices=("path", "forward"), default="path",
                    help="forward: the clients name each server by its URI and send their HTTP requests (but the "
                    "IdMS's and the KMS's) through the home HTTP proxy (TS 24.482 annex A.2.1.2)")

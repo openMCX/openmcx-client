@@ -88,6 +88,32 @@ data class ClientConfig(
          * in the user profile document, so the provisioning names them; the status notifications add any others.
          */
         val functionalAliases: List<String> = emptyList(),
+        /**
+         * TS 24.484 §6.3.13.2.2: subscribe to the UE configuration, user profile and service configuration documents
+         * through the CMS subscription proxy function (`subscribe_configuration`, on by default).
+         */
+        val subscribeConfiguration: Boolean = true,
+        /** TS 24.481 §6.3.13.2.1: subscribe to the group documents of [groups] (`subscribe_group_documents`, on by default). */
+        val subscribeGroupDocuments: Boolean = true,
+        /**
+         * Read the configuration documents only once their NOTIFY says where they are, and authorise the service after
+         * that (`documents_on_notify`, off by default: the documents are read at sign-in). As TS 37.579-1 table
+         * 5.3.2.6.1-1 expects of a client that subscribes to them.
+         */
+        val documentsOnNotify: Boolean = false,
+        /**
+         * TS 24.484 §6.3.13.2.2 b) 2): "the configured public service identity for performing subscription proxy function
+         * of the CMS" (`cms_subscription_psi`). No configuration item of TS 24.484 §7 names it (a spec gap, reported):
+         * by default the MCPTT server's PSI, as the ETSI test system for TS 37.579 expects.
+         */
+        val cmsSubscriptionPsi: String? = null,
+        /**
+         * TS 24.481 §6.3.13.2.1 b): the GMS subscription proxy PSI, the <GMS-URI> of the UE initial configuration
+         * (TS 24.484 §7.2.2.1 item 4) (`gms_subscription_psi`); without it no group document subscription is made.
+         */
+        val gmsSubscriptionPsi: String? = null,
+        /** The UE ID of the UE configuration document (TS 24.484 §8.2.1) (`ue_id`, by default the client ID). */
+        val ueId: String? = null,
     )
 
     data class Mcdata(
@@ -157,7 +183,10 @@ data class ClientConfig(
                 mcptt = (root["mcptt"] as? JsonObject)?.let {
                     Mcptt(it.str("user_id"), it.str("psi"), it.strings("groups"), it.optStr("answer_mode") ?: "automatic",
                         it.int("session_expires", 1800), it.int("manual_answer_timeout", 20),
-                        it.int("profile_index", 1).takeIf { index -> index in 1..255 } ?: 1, it.strings("functional_aliases"))
+                        it.int("profile_index", 1).takeIf { index -> index in 1..255 } ?: 1, it.strings("functional_aliases"),
+                        it.bool("subscribe_configuration", true), it.bool("subscribe_group_documents", true),
+                        it.bool("documents_on_notify", false), it.optStr("cms_subscription_psi")?.also(::sipUri),
+                        it.optStr("gms_subscription_psi")?.also(::sipUri), it.optStr("ue_id"))
                 },
                 mcdata = (root["mcdata"] as? JsonObject)?.let {
                     Mcdata(it.str("user_id"), it.str("psi"), it.strings("groups"), it.int("max_payload_size_sds_cplane_bytes", 1000),
@@ -196,6 +225,12 @@ data class ClientConfig(
 
         private fun JsonObject.obj(key: String) = this[key] as? JsonObject ?: throw ConfigError("missing object $key")
         private fun JsonObject.optStr(key: String) = (this[key] as? JsonPrimitive)?.content
+
+        /** A subscription proxy PSI goes into a Request-URI as it is: a SIP URI, nothing that would break the header. */
+        private fun sipUri(uri: String) {
+            if (!uri.startsWith("sip:") || uri.any { it == '\r' || it == '\n' || it == '<' || it == '>' || it == ' ' })
+                throw ConfigError("not a SIP URI: $uri")
+        }
         private fun JsonObject.str(key: String) = optStr(key) ?: throw ConfigError("missing $key")
         private fun JsonObject.int(key: String, default: Int? = null) =
             (this[key] as? JsonPrimitive)?.intOrNull ?: default ?: throw ConfigError("missing $key")
