@@ -330,6 +330,9 @@ class McxClient(
                         nextRetryAt = now + backoff / 1000) }
                     ua.flow?.close(e)
                     imsAka?.close()
+                    // TS 24.229 §5.1.1.3: the next initial registration subscribes anew; the subscription of this one
+                    // goes with its flow (a start-up that failed after the registration left it in place).
+                    regCancel()
                     // Back off, unless told to reconnect now (a new network, or the user's Retry now).
                     if (!reconnectNow.isCompleted) withTimeoutOrNull(backoff) { reconnectNow.await() }
                     backoff = nextBackoff(backoff)
@@ -618,6 +621,7 @@ class McxClient(
             } catch (e: Exception) {
                 event("registration refresh failed: ${e.message}")
                 ua.flow?.close(e)
+                imsAka?.close()
                 return
             }
         }
@@ -1310,7 +1314,19 @@ class McxClient(
                 setPhase("ready")
             }
             if (now >= nextRegisterAt) {
-                register(registerExpires())
+                // A failed reregistration ends the flow, so that [start] makes an initial registration (TS 24.229
+                // §5.1.1.4.1: the UE can reregister "via an initial registration" at any time; it shall after a 403,
+                // 408, 500 or 504). Uncaught, it would end this loop and leave the client "ready" without a registration.
+                try {
+                    register(registerExpires())
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    event("registration refresh failed: ${e.message}")
+                    ua.flow?.close(e)
+                    imsAka?.close()
+                    return
+                }
                 setPhase("ready")
             }
             if (now >= nextSubscription) {

@@ -231,7 +231,10 @@ class ImsAkaRegistrar(
                     val params = SaSetParams(local, cfg.pcscf, reservation.portUc, cfg.portUs, mechanism.portC!!, mechanism.portS!!,
                         reservation.spiUc, reservation.spiUs, mechanism.spiC!!, mechanism.spiS!!,
                         mechanism.alg, mechanism.ealg ?: "null", keys)
-                    val fresh = openSet(reservation, params, serverValue)
+                    // A set that cannot be set up locally (e.g. the platform refuses the P-CSCF's SPIs) fails the
+                    // attempt; its reservation goes, the set in use (if any) stays until the caller decides.
+                    val fresh = try { openSet(reservation, params, serverValue) }
+                                catch (e: Exception) { reservation.close(); fail("security associations not set up: ${e.message}", active) }
                     // Clause 5.1.1.5.1 / 5.1.1.4.2: the REGISTER over the new set, with Security-Verify.
                     val protectedRequest = registerRequest(expires, contact(hostport(local, cfg.portUs)), auth, offer, fresh)
                     val answer = try { ua.send(protectedRequest, authenticate = false, over = fresh.flow) }

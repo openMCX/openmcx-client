@@ -56,7 +56,7 @@ class RegEventClientTest {
      * presence: as asked, and for Expires 0 the final NOTIFY after the 200), anything else 200. It records the client's
      * requests and its answers to the core's NOTIFYs, and sends NOTIFYs on a recorded subscription.
      */
-    private class Core : Connection {
+    private class Core(val refusePublish: Boolean = false) : Connection {
         val requests = CopyOnWriteArrayList<SipRequest>()
         val answers = LinkedBlockingQueue<SipResponse>()
         private val toClient = LinkedBlockingQueue<ByteArray>()
@@ -107,6 +107,7 @@ class RegEventClientTest {
                 "PUBLISH" -> headers.add("SIP-ETag", "e${requests.size}").add("Expires", request.headers["Expires"] ?: "0")
                 "SUBSCRIBE" -> headers.add("Expires", if (event == "reg") "3761" else request.headers["Expires"]!!)
             }
+            if (refusePublish && request.method == "PUBLISH") { toClient.put(SipResponse(500, "Server Internal Error", headers).encode()); return }
             toClient.put(SipResponse(200, "OK", headers).encode())
             if (request.method == "SUBSCRIBE" && event == "presence" && request.headers["Expires"] == "0")
                 notify(request, "presence", "terminated;reason=timeout", null, null)
@@ -258,6 +259,26 @@ class RegEventClientTest {
         val core = cores[0]
         assertTrue(core.requests.any { it.method == "SUBSCRIBE" && it.headers["Event"] == "presence" && it.headers["Expires"] == "0" })
         assertEquals(200, core.answer().status)
+        client.stop()
+    }
+
+    /**
+     * §5.1.1.3: a start-up that fails after the registration (the MC service refused) starts over with an initial
+     * registration on a new flow, and that registration has its own reg event subscription.
+     */
+    @Test
+    fun aFailedStartUpSubscribesAgainAfterTheNextRegistration() = runBlocking {
+        val cores = CopyOnWriteArrayList<Core>()
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        val client = McxClient(scope, config(), noHttp, connector = { _, _ -> Core(refusePublish = cores.isEmpty()).also { cores += it } })
+        client.tokens = tokens()
+        client.serviceProtection = mapOf("mcptt" to (false to false))
+        client.start()
+        waitFor("first flow subscribed") { cores.isNotEmpty() && cores[0].requests.any { it.method == "SUBSCRIBE" && it.headers["Event"] == "reg" } }
+        waitFor("a new flow after the failed start-up", 30) { cores.size >= 2 }
+        waitFor("ready on the new flow", 30) { client.status.value.phase == "ready" }
+        waitFor("reg subscription on the new flow") { cores[1].requests.any { it.method == "SUBSCRIBE" && it.headers["Event"] == "reg" } }
+        assertTrue(client.status.value.regSubscribed)
         client.stop()
     }
 }

@@ -188,15 +188,18 @@ class AndroidImsAkaPlatform(private val context: Context, override val card: Car
     override suspend fun open(reservation: SaReservation, params: SaSetParams, onIncoming: (Connection) -> Unit): SaSet = withContext(Dispatchers.IO) {
         val r = reservation as Reservation
         val p = params
-        // Outbound SPIs: the P-CSCF's (spi_ps, spi_pc), reserved for its address.
-        val ps = ipsec.allocateSecurityParameterIndex(p.pcscf, p.spiPs.toInt())
-        val pc = ipsec.allocateSecurityParameterIndex(p.pcscf, p.spiPc.toInt())
-        val ueToPs = transform(p.local, ps, p, toUe = false, fromServer = false)
-        val psToUe = transform(p.pcscf, r.uc, p, toUe = true, fromServer = true)
-        val pcToUs = transform(p.pcscf, r.us, p, toUe = true, fromServer = false)
-        val usToPc = transform(p.local, pc, p, toUe = false, fromServer = true)
-        val transforms = listOf(ueToPs, psToUe, pcToUs, usToPc)
+        // Outbound SPIs: the P-CSCF's (spi_ps, spi_pc), reserved for its address. Each allocation is closed again if a
+        // later step fails: an SPI or transform left open holds the SPI until it is collected, and the P-CSCF reuses
+        // its SPIs for later sets.
+        val spis = mutableListOf<IpSecManager.SecurityParameterIndex>()
+        val transforms = mutableListOf<IpSecTransform>()
         try {
+            val ps = ipsec.allocateSecurityParameterIndex(p.pcscf, p.spiPs.toInt()).also { spis += it }
+            val pc = ipsec.allocateSecurityParameterIndex(p.pcscf, p.spiPc.toInt()).also { spis += it }
+            val ueToPs = transform(p.local, ps, p, toUe = false, fromServer = false).also { transforms += it }
+            val psToUe = transform(p.pcscf, r.uc, p, toUe = true, fromServer = true).also { transforms += it }
+            val pcToUs = transform(p.pcscf, r.us, p, toUe = true, fromServer = false).also { transforms += it }
+            val usToPc = transform(p.local, pc, p, toUe = false, fromServer = true).also { transforms += it }
             // port_us: one listening socket for the registration's life; each new set gives it its transforms.
             val fd = listener ?: Os.socket(if (p.local is Inet4Address) OsConstants.AF_INET else OsConstants.AF_INET6, OsConstants.SOCK_STREAM, 0).also { fd ->
                 network().bindSocket(fd)
@@ -222,12 +225,12 @@ class AndroidImsAkaPlatform(private val context: Context, override val card: Car
                 override fun close() {
                     client.close()
                     transforms.forEach { runCatching { it.close() } }
-                    runCatching { ps.close() }; runCatching { pc.close() }
+                    spis.forEach { runCatching { it.close() } }
                 }
             }
         } catch (e: Exception) {
             transforms.forEach { runCatching { it.close() } }
-            runCatching { ps.close() }; runCatching { pc.close() }
+            spis.forEach { runCatching { it.close() } }
             throw e
         }
     }

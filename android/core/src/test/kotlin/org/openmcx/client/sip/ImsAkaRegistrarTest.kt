@@ -121,6 +121,9 @@ class ImsAkaRegistrarTest {
         var nextPort = 40000
         var nextSpi = 1000L
         var onIncoming: ((Connection) -> Unit)? = null
+        val reservationsClosed = CopyOnWriteArrayList<Long>()
+        /** The platform refusing the next set (Android: the P-CSCF's SPI unavailable). */
+        var refuseOpen = false
         var protectedAnswer: (SipRequest) -> SipResponse? = { request ->
             when (request.method) {
                 "REGISTER" -> if (responseValid(request) || request.headers["Expires"] == "0")
@@ -141,11 +144,12 @@ class ImsAkaRegistrarTest {
             override val spiUc = nextSpi++
             override val spiUs = nextSpi++
             override val portUc = nextPort++
-            override fun close() {}
+            override fun close() { reservationsClosed += spiUc }
         }
         override suspend fun connectUnprotected(local: InetAddress, pcscf: InetAddress, port: Int): Connection =
             Peer(nextPort++) { unprotectedAnswer(it) }.also { unprotected = it }
         override suspend fun open(reservation: SaReservation, params: SaSetParams, onIncoming: (Connection) -> Unit): SaSet {
+            if (refuseOpen) throw IllegalStateException("Requested SPI is unavailable (spi: ${params.spiPc})")
             opened += params
             this.onIncoming = onIncoming
             val client = Peer(params.portUc) { protectedAnswer(it) }.also { clients += it }
@@ -275,5 +279,31 @@ class ImsAkaRegistrarTest {
         assertEquals(2, registrar.setsUsed)
         // TS 33.203 clause 7.4: the old set closes once its transactions have ended (polled every 500 ms).
         withTimeout(10_000) { while (registrar.oldSetsClosed < 1) kotlinx.coroutines.delay(100) }
+    }
+
+    /**
+     * A new set the platform cannot set up (Android refused the P-CSCF's SPI): the reregistration fails with the
+     * reason, its reservation is closed, the set in use stays in use (the client then registers anew).
+     */
+    @Test fun aSetThatCannotBeSetUpFailsTheReregistrationAndKeepsTheSetInUse() = runBlocking {
+        val platform = Platform(mutableListOf())
+        platform.protectedAnswer = { request ->
+            if (request.method == "REGISTER" && platform.clients.size == 1 && platform.clients[0].requests.size > 1) challenge(request)
+            else if (request.method == "REGISTER")
+                reply(request, 200, "OK", "Contact" to (request.headers["Contact"]!! + ";expires=600000"), "P-Associated-URI" to "<sip:alice@mcx.test>")
+            else reply(request, 200, "OK")
+        }
+        val (ua, registrar) = registrar(platform)
+        withTimeout(10_000) { registrar.register(600000) }
+        val firstSet = platform.clients.single()
+        val closedBefore = platform.reservationsClosed.size
+        platform.refuseOpen = true
+        val failure = runCatching { withTimeout(10_000) { registrar.register(600000) } }.exceptionOrNull()
+        assertTrue(failure is ImsAkaFailure)
+        assertTrue(failure!!.message!!.contains("security associations not set up"))
+        assertEquals(closedBefore + 1, platform.reservationsClosed.size)
+        assertTrue(ua.flow!!.connection === firstSet)
+        assertEquals(1, registrar.setsUsed)
+        assertTrue(registrar.registered)
     }
 }
