@@ -131,6 +131,11 @@ class AndroidImsAkaPlatform(private val context: Context, override val card: Car
     private val ipsec = context.getSystemService(IpSecManager::class.java)
     private val connectivity = context.getSystemService(ConnectivityManager::class.java)
     @Volatile private var listener: FileDescriptor? = null
+    // The set in use: a connection accepted on port_us carries the listener's transforms of that moment, those of the
+    // newest set, and belongs to it (not to the set that opened the listener).
+    @Volatile private var current: Pair<SaSetParams, (Connection) -> Unit>? = null
+    // Every accepted connection still open, closed at the latest with the listener.
+    private val accepted = java.util.Collections.newSetFromMap(java.util.concurrent.ConcurrentHashMap<FileDescriptor, Boolean>())
 
     private fun network(): Network = connectivity.activeNetwork ?: throw IllegalStateException("no network")
 
@@ -207,17 +212,18 @@ class AndroidImsAkaPlatform(private val context: Context, override val card: Car
                 Os.bind(fd, p.local, p.portUs)
                 Os.listen(fd, 8)
                 listener = fd
-                thread(name = "ims-aka-port-us", isDaemon = true) { accept(fd, p, onIncoming) }
+                thread(name = "ims-aka-port-us", isDaemon = true) { accept(fd) }
             }
             ipsec.applyTransportModeTransform(fd, IpSecManager.DIRECTION_IN, pcToUs)
             ipsec.applyTransportModeTransform(fd, IpSecManager.DIRECTION_OUT, usToPc)
+            current = p to onIncoming
             val socket = r.socket
             ipsec.applyTransportModeTransform(socket, IpSecManager.DIRECTION_OUT, ueToPs)
             ipsec.applyTransportModeTransform(socket, IpSecManager.DIRECTION_IN, psToUe)
             socket.connect(InetSocketAddress(p.pcscf, p.portPs), 10_000)
             r.used = true
             val client = SocketConnection(socket.getInputStream(), socket.getOutputStream(), p.local.hostAddress!!, socket.localPort) {
-                runCatching { ipsec.removeTransportModeTransforms(socket) }; socket.close()
+                runCatching { ipsec.removeTransportModeTransforms(socket) }; runCatching { socket.close() }
             }
             object : SaSet {
                 override val params = p
@@ -235,19 +241,37 @@ class AndroidImsAkaPlatform(private val context: Context, override val card: Car
         }
     }
 
-    /** The P-CSCF's connections to port_us (TS 33.203 clause 7.1, from port_pc), each a connection of its own. */
-    private fun accept(fd: FileDescriptor, p: SaSetParams, onIncoming: (Connection) -> Unit) {
+    /**
+     * The P-CSCF's connections to port_us (TS 33.203 clause 7.1, from port_pc), each a connection of its own, handed
+     * to the set in use when it arrives.
+     */
+    private fun accept(fd: FileDescriptor) {
         while (listener === fd) {
-            val accepted = try { Os.accept(fd, null) } catch (e: Exception) { return }
-            onIncoming(SocketConnection(FileInputStream(accepted), FileOutputStream(accepted), p.local.hostAddress!!, p.portUs) {
-                runCatching { ipsec.removeTransportModeTransforms(accepted) }; runCatching { Os.close(accepted) }
-            })
+            val socket = try { Os.accept(fd, null) } catch (e: Exception) { return }
+            val set = current
+            if (set == null) { abort(socket); continue }
+            val (p, onIncoming) = set
+            accepted += socket
+            onIncoming(SocketConnection(FileInputStream(socket), FileOutputStream(socket), p.local.hostAddress!!, p.portUs) { abort(socket) })
         }
+    }
+
+    /**
+     * Its transforms removed, then closed. A socket that still names a set's SAs once they are gone makes the kernel
+     * hold the SPI of its outbound SA as long as it sends (TCP retransmissions, also after the process ended), and the
+     * P-CSCF gives that SPI to a later set; so no accepted connection may outlive its set (seen on Android 16).
+     */
+    private fun abort(socket: FileDescriptor) {
+        if (!accepted.remove(socket) && !socket.valid()) return
+        runCatching { ipsec.removeTransportModeTransforms(socket) }
+        runCatching { Os.close(socket) }
     }
 
     override fun release() {
         val fd = listener ?: return
         listener = null
+        current = null
+        accepted.toList().forEach { abort(it) }
         runCatching { ipsec.removeTransportModeTransforms(fd) }
         runCatching { Os.shutdown(fd, OsConstants.SHUT_RDWR) }
         runCatching { Os.close(fd) }
