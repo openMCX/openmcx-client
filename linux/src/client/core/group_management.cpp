@@ -539,6 +539,13 @@ std::optional<SipResponse> Client::group_document_notify(const SipMessage &messa
             members.push_back(response.body.substr(uri + 5, response.body.find('"', uri + 5) - uri - 5));
         }
         document["members"] = members;
+        // TS 24.481 clause 7.2.4.2: the text of <protect-floor-control-signalling> (whichever prefix or namespace
+        // declaration), false when absent.
+        std::string value;
+        if (const auto name = response.body.find("protect-floor-control-signalling"); name != std::string::npos)
+          if (const auto open = response.body.find('>', name); open != std::string::npos)
+            value = response.body.substr(open + 1, response.body.find('<', open) - open - 1);
+        document["protect_floor"] = value == "true" || value == "1";
       });
     }
   }

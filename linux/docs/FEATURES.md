@@ -40,6 +40,8 @@ has it: the lab scenarios run each server feature through this client.
   group calls with participants or criteria, and their modification
 - Private calls: automatic, manual and forced commencement, with and without floor control; first-to-answer
 - Ambient listening (locally and remotely initiated); remotely initiated private and group calls
+- Floor control protection per call: a group call's from its group document's `<protect-floor-control-signalling>`
+  (TS 24.481 clause 7.2.4.2), a private call's with its media, unless `security.protect_floor` sets it for all
 - Emergency and imminent-peril calls (group and private), emergency alerts and their cancellation by an authorised
   user, ad hoc group emergency alerts
 - Call-back, call transfer and call forwarding

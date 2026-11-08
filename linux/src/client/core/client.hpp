@@ -152,7 +152,17 @@ class Client {
   // ---- Protected calls and private call keys (core/protected_call.cpp) ----
   bool protected_media() const { return cfg_.value("security", Json::object()).value("protect_media", false); }
 
-  bool protected_floor() const { return cfg_.value("security", Json::object()).value("protect_floor", false); }
+  // Whether floor control is protected in the call (TS 33.180 clause 9.4.2): security.protect_floor when the
+  // configuration sets it, for every call; otherwise, for a group call, the group document's
+  // <protect-floor-control-signalling> (TS 24.481 clause 7.2.4.2, as the server applies it per group), and for a
+  // private call the same as its media (the server protects a private call's floor control with its media).
+  bool protected_floor() const {
+    const auto security = cfg_.value("security", Json::object());
+    if (security.contains("protect_floor")) return security.at("protect_floor").get<bool>();
+    if (private_media()) return protected_media();
+    const auto found = group_documents_.find(active_group());
+    return found != group_documents_.end() && found->is_object() && found->value("protect_floor", false);
+  }
 
   // mcptt.documents_on_notify: the MCPTT documents are read on the subscription NOTIFYs only (sign_in_documents).
   bool documents_on_notify() const {
