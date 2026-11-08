@@ -57,6 +57,7 @@ add_executable(mcx-client
     src/client/mcvideo/multicast.cpp
     # mcdata
     src/client/mcdata/alert.cpp
+    src/client/mcdata/security_data.cpp
     src/client/mcdata/dispatch.cpp
     src/client/mcdata/file_distribution.cpp
     src/client/mcdata/ipconn.cpp

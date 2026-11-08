@@ -25,6 +25,11 @@ SipResponse Client::mcdata_incoming(const SipMessage &message) {
   }
   const auto parts = message.parts.empty() ? parse_body_parts(message.content_type, message.body) : message.parts;
   if (auto handled = mcdata_group_state_received(parts)) return *handled;
+  // TS 29.582 clause 17.3.2: Interworking Security Data, with the MCData ICSI and its interworking-data body.
+  if (service == mcdata::icsi && std::any_of(parts.begin(), parts.end(), [](const BodyPart &part) {
+        return part.content_type == mcdata::interworking_data_mime;
+      }))
+    return mcdata_security_data_received(parts);
   if (service == mcdata::icsi) {
     response.status_code = 403;
     return response;
@@ -541,6 +546,7 @@ void Client::mcdata_command(const std::string &cmd) {
   }
   if (verb == "sds-reply") return mcdata_sds_reply_command(words);
   if (verb == "mcdata-alert") return mcdata_alert_command(words);
+  if (verb == "mcdata-intersd") return mcdata_security_data_command(words);
   if (verb == "mcdata-fa") return mcdata_fa_command(words);
   mcdata_sds_command(verb, words);
 }
@@ -1005,6 +1011,8 @@ void Client::mcdata_status() {
   status_["mcdata_alerts_received"] = mcdata_alerts_received_;
   status_["mcdata_alert_last_result"] = mcdata_alert_last_result_;
   status_["mcdata_alert_receipts"] = mcdata_alert_receipts_;
+  status_["mcdata_security_data_received"] = mcdata_security_data_received_;
+  status_["mcdata_security_data_last_result"] = mcdata_security_data_last_result_;
 }
 
 } // namespace mcx

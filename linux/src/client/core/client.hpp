@@ -2048,6 +2048,10 @@ private:
 
   void mcdata_alert_incoming(const mcdata::Info &info, const std::vector<BodyPart> &parts);
 
+  // ---- Interworking Security Data, mcdata/security_data.cpp (TS 29.582 clauses 17.3.1, 17.3.2) ----
+  Json mcdata_security_data_received_ = Json::array(), mcdata_security_data_last_result_ = nullptr;
+  SipResponse mcdata_security_data_received(const std::vector<BodyPart> &parts);
+
   // TS 24.282 clause 22.2.1.2: functional alias status change. The published list is the full set
   // of aliases wanted active; an empty set is Expires 0. Its base is mcdata_aliases_standing_, those the last NOTIFY
   // lists "activated" or "activating" (one listed "deactivating" is given up: listing it again activates it, clause
@@ -2147,6 +2151,8 @@ private:
   void mcdata_sds_reply_command(std::istringstream &words);
   // "mcdata-alert": emergency alert or its cancellation (TS 24.282 clause 16.2.1.1).
   void mcdata_alert_command(std::istringstream &words);
+  // "mcdata-intersd": an Interworking Security Data message (TS 29.582 clause 17.3.1).
+  void mcdata_security_data_command(std::istringstream &words);
   // "mcdata-fa": functional alias status change or use (TS 24.282 clause 22.2.1.2).
   void mcdata_fa_command(std::istringstream &words);
   // "sds", "sds-group", "sds-adhoc", "sds-fa": standalone SDS (TS 24.282 clause 9.2.1.1).

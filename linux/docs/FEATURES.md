@@ -58,6 +58,8 @@ has it: the lab scenarios run each server feature through this client.
 - IP connectivity, enhanced status, communication release
 - Functional aliases (status subscription, outcome by NOTIFY, take-over once offered), message store (storage control and notification channels), location
 - End-to-end protected payloads and signalling
+- Interworking Security Data with an LMR interworking function (TS 29.582 clause 17): `mcdata-intersd` sends the
+  opaque payload, received ones are in the status (`mcdata_security_data_received`)
 
 ### MCVideo (TS 24.281, TS 24.581)
 
