@@ -87,6 +87,16 @@ def compose_bin(openmcx: Path) -> list[str]:
     return [str(local)] if local.exists() else ["docker", "compose"]
 
 
+def transport_keys(ref: dict, generated: Path) -> dict:
+    """The reference client's TrK and InK (security.transport_keys: key files with the hexadecimal key, 32-bit ids) as
+    the provisioning file's "transport_keys" member: {user: {"trk"|"ink": {"key": hex, "id": n}}}."""
+    out = {}
+    for user, kinds in ((ref.get("security") or {}).get("transport_keys") or {}).items():
+        out[user] = {kind: {"key": (generated / "transport-keys" / Path(entry["file"]).name).read_text().strip(),
+                            "id": entry["id"]} for kind, entry in kinds.items()}
+    return out
+
+
 def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None = None) -> dict:
     """The Android client's provisioning bundle from the reference client's provisioned configuration."""
     sip, mcptt, mcdata, oauth = ref["sip"], ref["mcptt"], ref.get("mcdata"), ref["oauth"]
@@ -142,7 +152,7 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
     security = ref.get("security")
     if security:
         # TS 33.180: the KMS, the Key Parameters wire profile, and what is protected (the fixture's --protected).
-        bundle["security"] = {k: security[k] for k in ("kms_uri", "gms_uri", "key_parameter_profile", "protect_media", "protect_floor") if k in security}
+        bundle["security"] = {k: security[k] for k in ("kms_uri", "kms_id", "gms_uri", "key_parameter_profile", "protect_media", "protect_floor") if k in security}
     return bundle
 
 
@@ -303,6 +313,15 @@ def create(args) -> None:
         # End-to-end protection (TS 33.180): media, transmission control and key management, with the
         # interoperability profile's Key Parameters IEI.
         command += ["--protected", "--key-parameters-iei", "0x79"]
+    if args.transport_keys:
+        if not args.protected:
+            sys.exit("--transport-keys needs --protected")
+        # TS 33.180 clause 5.3.2: the generator's TrK and InK (client-a both, client-b a TrK), shared with the KMS.
+        command.append("--transport-keys")
+        for role in args.transport_key_role or []:
+            command += ["--transport-key-role", role]
+    if args.kms_via_proxy and not (args.transport_keys and args.http_proxy_mode == "forward"):
+        sys.exit("--kms-via-proxy needs --transport-keys and --http-proxy-mode forward")
     if args.reference_client:
         if not args.client_image:
             sys.exit("--reference-client needs --client-image (the mcx-client image, built with openmcx-client/linux/tools/build-image)")
@@ -352,6 +371,8 @@ def create(args) -> None:
         bundle = lab / "provisioning" / role
         bundle.mkdir(parents=True)
         config = provisioning(ref, site, role, args.debug_sip, fd if role in phones else None)
+        if args.kms_via_proxy and "security" in config:
+            config["security"]["kms_via_proxy"] = True
         if role in phones:
             sip_port = 5060 if args.debug_sip else 5061
             config["endpoints"] = {f"sip-core:{sip_port}": f"{hostip}:{args.sip_port if not args.debug_sip else 5060}",
@@ -360,6 +381,11 @@ def create(args) -> None:
             if args.protected:
                 config["endpoints"]["kms:8443"] = f"{hostip}:{args.kms_port}"
         (bundle / "bundle.json").write_text(json.dumps(config, indent=2) + "\n")
+        transport = transport_keys(ref, generated)
+        if transport:
+            # The app moves them into the Android Keystore at its next start and deletes the file (Provisioning.kt).
+            (bundle / "transport-keys.json").write_text(json.dumps(transport) + "\n")
+            os.chmod(bundle / "transport-keys.json", 0o600)
         for source, target in (("ca.crt", "ca.crt"), (f"{role}.crt", "client.crt"), (f"{role}.key", "client.key")):
             shutil.copyfile(generated / "tls" / source, bundle / target)
         # The trusted CAs are the provisioned ones only: an external IdMS (Keycloak, for example) is trusted through its CA,
@@ -376,7 +402,8 @@ def create(args) -> None:
             prov = phone / f"{role}.mcxprov"
             prov.write_text(json.dumps({"format": "mcx-provisioning/1", "bundle": config,
                                         "ca": (bundle / "ca.crt").read_text(), "cert": (bundle / "client.crt").read_text(),
-                                        "key": (bundle / "client.key").read_text()}, indent=2) + "\n")
+                                        "key": (bundle / "client.key").read_text(),
+                                        **({"transport_keys": transport} if transport else {})}, indent=2) + "\n")
             os.chmod(prov, 0o600)
             continue
         if args.phones_only or role in (args.reference_client or []):
@@ -465,7 +492,7 @@ def create(args) -> None:
     for seed, name in enumerate(("alpha", "bravo", "charlie")):
         speech_wav(speech / f"{name}.wav", seed)
     meta_doc = {"openmcx": str(openmcx), "project": f"mcxandroid-{args.name}", "debug_sip": args.debug_sip,
-                "server_image": args.server_image, "mcvideo": args.mcvideo, "protected": args.protected, "location": args.location,
+                "server_image": args.server_image, "mcvideo": args.mcvideo, "protected": args.protected, "transport_keys": args.transport_keys, "location": args.location,
                 "priority": args.priority, "floor_queue": args.floor_queue,
                 "reference_clients": args.reference_client or [], "client_image": args.client_image,
                 "admin": args.admin, "admin_image": args.admin_image, "keycloak": args.keycloak,
@@ -853,6 +880,14 @@ def main() -> None:
                    help="emergency and imminent peril, and the MCPTT emergency alert (the group priority policy)")
     c.add_argument("--protected", action="store_true",
                    help="end-to-end protection (TS 33.180): the KMS, protected media and transmission control")
+    c.add_argument("--transport-keys", action="store_true",
+                   help="with --protected: pre-provisioned TrK and InK (TS 33.180 5.3.2) for client-a (both) and client-b "
+                        "(TrK), written into their provisioning; signed KMS exchanges and TrK-wrapped keys")
+    c.add_argument("--transport-key-role", action="append", metavar="ROLE=trk[+ink]",
+                   help="with --transport-keys: the roles that get keys instead of the generator's default (repeat)")
+    c.add_argument("--kms-via-proxy", action="store_true",
+                   help="with --transport-keys and --http-proxy-mode forward: the clients reach the KMS through the home "
+                        "HTTP proxy (security.kms_via_proxy, the test system's reading); each client needs a TrK")
     c.add_argument("--kms-port", type=int, default=PHONE_KMS_PORT, help="host port published for the KMS (--protected)")
     c.add_argument("--admin", action="store_true", help="MCX Admin manages the accounts; phones activate from its codes")
     c.add_argument("--admin-image", help="the MCX Admin image (--admin)")

@@ -352,7 +352,9 @@ fun String.short(): String = removePrefix("sip:").substringBefore('@').removeSuf
 /** A snapshot of the engine for the screens. */
 fun snapshot(batteryExempt: Boolean = true): UiState {
     val network = (org.openmcx.client.app.NetworkStatus.current.value?.rows() ?: emptyList()) +
-        org.openmcx.client.app.security.AccessDecision.rows(Engine.client?.imsAka, Engine.client?.sipConnectionSecurity)
+        org.openmcx.client.app.security.AccessDecision.rows(Engine.client?.imsAka, Engine.client?.sipConnectionSecurity) +
+        // Whether pre-provisioned keys for the key management server are in the Keystore: their presence only.
+        listOfNotNull(Engine.client?.config?.security?.let { "Transport keys" to if (Engine.transportKeySummary.isEmpty()) "none" else "present" })
     val client = Engine.client ?: return UiState(events = Engine.log.last(30).reversed(), batteryExempt = batteryExempt, network = network)
     val status = client.status.value
     val mcptt = Engine.mcptt

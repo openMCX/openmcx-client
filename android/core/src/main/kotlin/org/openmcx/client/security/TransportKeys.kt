@@ -13,22 +13,46 @@ import javax.crypto.spec.SecretKeySpec
 /**
  * A pre-provisioned transport key (TrK, 256 bits) or integrity key (InK, 128 or 256 bits) with its 32-bit identifier
  * (TS 33.180 clause 5.3.3: "The TrK and InK are initially distributed via an out-of-band mechanism along with their
- * 32-bit identifiers"; clause 9.3.3: the key is the XPK and its identifier the XPK-ID). [clear] wipes the key
- * (clause 5.11.1: it does not outlive its use in memory).
+ * 32-bit identifiers"; clause 9.3.3: the key is the XPK and its identifier the XPK-ID). Only its HMAC-SHA-256 is used
+ * (the annex F.1.4 derivation), so the key may stay in a key store that never gives it out (the app's Android Keystore).
  */
-class Xpk(key: ByteArray, val id: Long) {
+interface XpkKey {
+    val id: Long
+    /** The key length in octets: 16 or 32. */
+    val size: Int
+    /** HMAC-SHA-256 keyed by the XPK. */
+    fun hmac(data: ByteArray): ByteArray
+
+    /** TS 33.180 clause 9.3.5: the KeyName of a key under this XPK, the base64 of its 4-octet XPK-ID. */
+    val keyName: String get() = Base64.getEncoder().encodeToString(byteArrayOf(
+        (id ushr 24).toByte(), (id ushr 16).toByte(), (id ushr 8).toByte(), id.toByte()))
+}
+
+/** An XPK held in memory; [clear] wipes it (clause 5.11.1: it does not outlive its use in memory). */
+class Xpk(key: ByteArray, override val id: Long) : XpkKey {
     private val bytes = key.copyOf()
     init {
         require(bytes.size == 16 || bytes.size == 32) { "the XPK must be 128 or 256 bits" }
         require(id in 0..0xffffffffL) { "the XPK-ID is 32 bits" }
     }
     val key: ByteArray get() = bytes.copyOf()
-    val size: Int get() = bytes.size
+    override val size: Int get() = bytes.size
     fun clear() = Arrays.fill(bytes, 0)
+    override fun hmac(data: ByteArray): ByteArray {
+        val k = bytes.copyOf()
+        return try { Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(k, "HmacSHA256")) }.doFinal(data) }
+        finally { Arrays.fill(k, 0) }
+    }
+}
 
-    /** TS 33.180 clause 9.3.5: the KeyName of a key under this XPK, the base64 of its 4-octet XPK-ID. */
-    val keyName: String get() = Base64.getEncoder().encodeToString(byteArrayOf(
-        (id ushr 24).toByte(), (id ushr 16).toByte(), (id ushr 8).toByte(), id.toByte()))
+/**
+ * One MC service user's pre-provisioned keys (TS 33.180 clause 5.3.2): the TrK, the InK, either or both. KMS messages
+ * are signed under the InK, else the TrK (annexes D.2.2 and D.3.1: "the InK, or if not present, the TrK"); key
+ * material is wrapped under the TrK only (clause 9.3.4.2).
+ */
+class UserTransportKeys(val trk: XpkKey?, val ink: XpkKey?) {
+    val integrity: XpkKey? get() = ink ?: trk
+    val confidentiality: XpkKey? get() = trk
 }
 
 /**
@@ -49,17 +73,14 @@ object TransportKeys {
      * output of the KDF". L0 and L1 are the actual lengths (TS 33.220 annex B.2.0): F.1.4's "(i.e. 0x00 0x17)" for both
      * is a spec defect (reported).
      */
-    fun protectionKey(xpk: Xpk, user: String, fc: Int): ByteArray {
+    fun protectionKey(xpk: XpkKey, user: String, fc: Int): ByteArray {
         require(fc == CONFIDENTIALITY || fc == INTEGRITY) { "unknown FC for an XPK-derived key" }
         val p0 = user.toByteArray(Charsets.UTF_8)
         require(p0.isNotEmpty() && p0.size <= 65535) { "the derivation needs the MC service user ID" }
         val id = xpk.id
         val input = byteArrayOf(fc.toByte()) + p0 + byteArrayOf((p0.size ushr 8).toByte(), p0.size.toByte(),
             (id ushr 24).toByte(), (id ushr 16).toByte(), (id ushr 8).toByte(), id.toByte(), 0, 4)
-        val key = xpk.key
-        val out = try {
-            Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(key, "HmacSHA256")) }.doFinal(input)
-        } finally { Arrays.fill(key, 0) }
+        val out = xpk.hmac(input)
         val result = out.copyOfRange(out.size - xpk.size, out.size)
         Arrays.fill(out, 0)
         return result

@@ -9,6 +9,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.openmcx.client.app.security.ClientCredentials
+import org.openmcx.client.app.security.TransportKeyStore
+import org.openmcx.client.security.TransportKeyEntries
+import org.openmcx.client.security.UserTransportKeys
+import kotlinx.serialization.json.JsonObject
 import org.openmcx.client.security.Pem
 import org.openmcx.client.client.ClientConfig
 import org.openmcx.client.client.ServerAddress
@@ -22,6 +26,7 @@ import javax.net.ssl.SSLContext
 class Provisioning(context: Context) {
     companion object {
         const val FORMAT = "mcx-provisioning/1"
+        private const val PENDING_TRANSPORT_KEYS = "transport-keys.json"
 
         fun validHost(host: String) = ServerAddress.valid(host)
         fun hostOf(config: ClientConfig) = ServerAddress.of(config)
@@ -53,7 +58,9 @@ class Provisioning(context: Context) {
     /**
      * Install a provisioning file: one JSON document with the bundle and its PEM material
      * (`{"format": "mcx-provisioning/1", "bundle": {…}, "ca": "…", "cert": "…", "key": "…"}`), as
-     * `lab/androidlab.py` writes it for a phone. The key moves into the Keystore on the next start.
+     * `lab/androidlab.py` writes it for a phone. The key moves into the Keystore on the next start. An optional
+     * `"transport_keys"` member carries the users' pre-provisioned TrK and InK ([TransportKeyEntries]); they move into
+     * the Keystore on the next start too ([transportKeys]), and a profile without them removes any earlier ones.
      */
     fun import(text: String): ClientConfig {
         val root = Json.parseToJsonElement(text).jsonObject
@@ -62,8 +69,14 @@ class Provisioning(context: Context) {
         val config = ClientConfig.parse(bundle.toString())
         val pem = { name: String -> root[name]?.jsonPrimitive?.content ?: throw IllegalArgumentException("no $name") }
         Pem.certificates(pem("ca")); Pem.certificates(pem("cert")); Pem.privateKey(pem("key"))
+        val transport = root["transport_keys"]?.let {
+            (it as? JsonObject ?: throw IllegalArgumentException("transport_keys must be an object"))
+                .also { keys -> TransportKeyEntries.parse(keys).forEach { e -> e.clear() } }
+        }
         dir.deleteRecursively()
+        TransportKeyStore.clearKeystore()
         dir.mkdirs()
+        transport?.let { File(dir, PENDING_TRANSPORT_KEYS).writeText(it.toString()) }
         File(dir, "bundle.json").writeText(bundle.toString())
         File(dir, "ca.crt").writeText(pem("ca"))
         File(dir, "client.crt").writeText(pem("cert"))
@@ -77,6 +90,8 @@ class Provisioning(context: Context) {
      */
     fun installActivation(result: org.openmcx.client.provisioning.Activation.Result) {
         dir.deleteRecursively()
+        // MCX Admin holds no keys: an activation carries no TrK or InK, and earlier ones go.
+        TransportKeyStore.clearKeystore()
         dir.mkdirs()
         File(dir, "bundle.json").writeText(result.bundle.toString())
         File(dir, "ca.crt").writeText(result.caPem)
@@ -92,6 +107,27 @@ class Provisioning(context: Context) {
         }
         return ClientCredentials.sslContext(File(dir, "ca.crt").readText())
     }
+
+    private val transportStore get() = TransportKeyStore(File(dir, "transport-keys.meta.json"))
+
+    /**
+     * The users' TrK and InK (TS 33.180 clause 5.3.2), importing newly provisioned ones into the Keystore first (the
+     * file of [import], or `transport-keys.json` that `lab/androidlab.py` puts into the bundle); the file is deleted
+     * after the import.
+     */
+    fun transportKeys(): (String) -> UserTransportKeys? {
+        val pending = File(dir, PENDING_TRANSPORT_KEYS)
+        if (pending.exists()) {
+            val text = pending.readText()
+            pending.delete()
+            transportStore.import(TransportKeyEntries.parse(Json.parseToJsonElement(text).jsonObject))
+        }
+        val store = transportStore
+        return { user -> store.keysOf(user) }
+    }
+
+    /** Which users have which transport keys ("trk", "ink"), never the keys. */
+    fun transportKeySummary(): Map<String, List<String>> = transportStore.summary()
 
     /** The TLS context for IdMS: the provisioned CA and the system's (Pem.sslContextWithSystem). */
     fun idmsSslContext(): SSLContext = Pem.sslContextWithSystem(Pem.certificates(File(dir, "ca.crt").readText()))

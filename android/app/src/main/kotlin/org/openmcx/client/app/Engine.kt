@@ -67,6 +67,8 @@ object Engine {
         log.add("error: ${e.javaClass.simpleName}: ${e.message}")
     })
 
+    /** Which MC service users have a TrK or InK in the Keystore ("trk", "ink"): shown, never the keys. */
+    @Volatile var transportKeySummary: Map<String, List<String>> = emptyMap()
     @Volatile var client: McxClient? = null
         private set
     @Volatile var mcptt: McpttService? = null
@@ -164,15 +166,19 @@ object Engine {
         val aliasKey = KNOWN_ALIASES + config.sip.publicUserId
         val known = settings.getString(aliasKey, null)?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
         // TS 24.482 annex A.2.1.2: with a home HTTP proxy, the CMS, GMS and MCData requests go through it; the IdMS's
-        // and the KMS's stay direct.
+        // stays direct, and the KMS's too unless security.kms_via_proxy.
         config.httpProxy?.let { log.add("HTTP proxy: $it") }
         val c = McxClient(scope, config, SocketHttpClient(ssl, endpoints, proxy = config.httpProxy),
             SocketConnector(config.sip.transport, ssl, endpoints = endpoints),
             log, browser = customTabBrowser(context.applicationContext), knownAliases = known,
             idmsHttp = SocketHttpClient(provisioning.idmsSslContext(), endpoints),
-            kmsHttp = SocketHttpClient(ssl, endpoints),
+            // security.kms_via_proxy: through the home HTTP proxy (the test system's reading); direct otherwise.
+            kmsHttp = SocketHttpClient(ssl, endpoints, proxy = config.httpProxy.takeIf { config.security?.kmsViaProxy == true }),
             // How to reach the SIP core, decided at each initial registration: IMS AKA with the card, SIP digest, or none.
-            access = { org.openmcx.client.app.security.AccessDecision.decide(context.applicationContext, config) { log.add(it) } })
+            access = { org.openmcx.client.app.security.AccessDecision.decide(context.applicationContext, config) { log.add(it) } },
+            transportKeys = provisioning.transportKeys())
+        transportKeySummary = provisioning.transportKeySummary()
+        if (transportKeySummary.isNotEmpty()) log.add("transport keys: " + transportKeySummary.entries.joinToString { "${it.key} ${it.value.sorted()}" })
         client = c
         scope.launch { c.aliases.collect { settings.edit().putString(aliasKey, it.available.joinToString("\n")).apply() } }
         val store = HistoryStore(context).also { history = it }

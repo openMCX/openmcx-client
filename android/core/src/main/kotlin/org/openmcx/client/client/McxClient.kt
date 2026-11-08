@@ -36,6 +36,7 @@ import org.openmcx.client.documents.UserProfile
 import org.openmcx.client.http.HttpClient
 import org.openmcx.client.idms.IdmsClient
 import org.openmcx.client.idms.IdmsRefused
+import org.openmcx.client.security.UserTransportKeys
 import org.openmcx.client.security.KeyClient
 import org.openmcx.client.security.KeyMessage
 import org.openmcx.client.security.WireProfile
@@ -182,11 +183,17 @@ class McxClient(
     /**
      * HTTP to the KMS: direct, also with a home HTTP proxy ([http] by default). TS 24.482 annex A.2.1.2
      * sends every request but the IdMS's through the proxy, TS 33.180 §5.3.2 lets a KMS be used without
-     * it, and nothing configured tells the UE which applies: a spec conflict, today's direct connection stays.
+     * it, and nothing configured tells the UE which applies: a spec conflict, direct by default (through the proxy
+     * with security.kms_via_proxy, the test system's reading: [ClientConfig.Security.kmsViaProxy]).
      */
     private val kmsHttp: HttpClient = http,
     /** The SIP core access of each initial registration ([SipAccess]); SIP digest unless the app decides otherwise. */
     private val access: suspend () -> SipAccess = { SipAccess.Digest },
+    /**
+     * TS 33.180 clause 5.3.2: the pre-provisioned TrK and InK of an MC service user ID (null without), looked up for
+     * each KMS exchange; the app's are held in the Android Keystore.
+     */
+    private val transportKeys: (String) -> UserTransportKeys? = { null },
 ) {
     val scope = CoroutineScope(parent.coroutineContext + SupervisorJob())
     private val _status = MutableStateFlow(ClientStatus())
@@ -238,12 +245,14 @@ class McxClient(
         val keys = keyClients[service] ?: KeyClient(kmsHttp, security.kmsUri, userId, account,
             WireProfile(security.messageType, security.algorithm, security.keyParametersIei,
                 security.encryptedPayloadIei),
-            security.mikeyClockSkewS) { event(it) }.also { keyClients[service] = it }
+            security.mikeyClockSkewS, { event(it) }, security.kmsId, { transportKeys(userId) }, security.kmsViaProxy)
+            .also { keyClients[service] = it }
         keys.provision(token)
         if (csks[service] == null) {
             val (csk, upload) = keys.makeCsk(psi(service))
             csks[service] = csk; cskUploads[service] = upload
-            event("${service.name} keys: KMS ${security.kmsUri}, CSK %08x".format(csk.csbId))
+            event("${service.name} keys: KMS ${security.kmsUri}, CSK %08x".format(csk.csbId) +
+                if (keys.signedExchange) ", signed KMS exchange" else "")
         }
     }
 
@@ -1113,6 +1122,20 @@ class McxClient(
      * read, so that whether it does is not known) is not started: its service authorisation would go out unprotected.
      * Null when the service may start.
      */
+    /**
+     * TS 33.180 clause 5.3.2: through the home HTTP proxy "the TrK shall be used" (`kms_via_proxy`): a keyed service whose
+     * MC service user ID has no TrK cannot get its keys, so it is not started (the others are), with the reason.
+     */
+    private fun transportKeyRefusal(service: McService): String? {
+        val security = config.security ?: return null
+        if (!security.kmsViaProxy || !keyed(service) || transportKeys(ownId(service))?.trk != null) return null
+        return "${service.name} not started: its key management server is reached through the HTTP proxy, which needs a " +
+            "transport key this app does not hold for ${ownId(service)}"
+    }
+
+    /** Why [service] is not started (protection the app lacks, or no TrK for a KMS through the proxy); null if it may. */
+    private fun notStarted(service: McService): String? = protectionRefusal(service) ?: transportKeyRefusal(service)
+
     private fun protectionRefusal(service: McService): String? {
         val protection = serviceProtection[service.name.lowercase()]
             ?: return "${service.name} not started: its service configuration could not be read"
@@ -1123,7 +1146,7 @@ class McxClient(
 
     /** The service authorisation; false (and the reason in the service's state) when the service is not started. */
     private suspend fun authorise(service: McService): Boolean {
-        protectionRefusal(service)?.let { reason ->
+        notStarted(service)?.let { reason ->
             updateService(service) { it.copy(authorised = false, refused = reason) }
             event(reason)
             return false
@@ -1580,19 +1603,19 @@ class McxClient(
 
     init {
         ua.onRequest = { tx -> dispatch(tx) }
-        // A service that is not started (protectionRefusal) sends nothing: no operation of it goes out unprotected.
+        // A service that is not started (notStarted) sends nothing: no operation of it goes out unprotected.
         // Its requests inside a dialog need no check, as neither side can create one (outgoing: here; incoming:
         // dispatch).
         ua.outboundGate = { request ->
             if (!configurationPending(request))
-                mcServiceOf(request)?.let { service -> protectionRefusal(service)?.let { throw IllegalStateException(it) } }
+                mcServiceOf(request)?.let { service -> notStarted(service)?.let { throw IllegalStateException(it) } }
         }
     }
 
     private suspend fun dispatch(tx: ServerTransaction) {
         val request = tx.request
         // A request of a service that is not started gets the answer of a service this client does not run.
-        if (!configurationPending(request) && mcServiceOf(request)?.let { protectionRefusal(it) } != null) { notHandled(tx); return }
+        if (!configurationPending(request) && mcServiceOf(request)?.let { notStarted(it) } != null) { notHandled(tx); return }
         if (request.method == "NOTIFY" && eventPackage(request) == RegEventRules.EVENT) { regNotify(tx); return }
         // RFC 6665 §4.1.2.3: a subscription this client ended lasts until its final NOTIFY, which is answered 200.
         if (request.method == "NOTIFY" && request.callId in endingSubscriptions) {

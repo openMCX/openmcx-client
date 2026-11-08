@@ -235,6 +235,8 @@ class DebugControl(private val context: Context) {
             .put("csk_id", Engine.client?.cskOf(org.openmcx.client.body.McService.MCPTT)?.csbId)
             .put("identity", Engine.client?.keysOf(org.openmcx.client.body.McService.MCPTT)?.identity)
             .put("group_keys", JSONObject(mcptt().groupKeyIds))
+            .put("signed_kms_exchange", Engine.client?.keysOf(org.openmcx.client.body.McService.MCPTT)?.signedExchange)
+            .put("transport_keys", JSONObject(Engine.transportKeySummary.mapValues { JSONArray(it.value.sorted()) }))
         "video-keys" -> JSONObject().put("kms", Engine.client?.videoKeys?.kms?.kmsUri).put("csk_id", Engine.client?.videoCsk?.csbId)
             .put("identity", Engine.client?.videoKeys?.identity).put("group_keys", JSONObject(mcvideo().groupKeyIds))
         "video-push" -> videoJson(mcvideo().push(Engine.mcvideoId(args[0])))

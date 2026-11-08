@@ -150,6 +150,21 @@ data class ClientConfig(
          * pending maintainer choice (no spec value).
          */
         val mikeyClockSkewS: Long = Mikey.DEFAULT_CLOCK_SKEW_S,
+        /**
+         * TS 33.180 clause 3.1 ("KMS URI: A unique identifier for a security domain") and annexes D.2.2/D.3.1: the KMS URI
+         * the KMS's documents carry (KmsUri), apart from the HTTPS address [kmsUri] it is contacted at (TS 24.484 clause
+         * 7.2.2.7 <kms>); `kms_id`, by default that address, as the Linux client.
+         */
+        val kmsId: String? = null,
+        /**
+         * `kms_via_proxy` (false by default): the KMS requests go through the home HTTP proxy. TS 24.482 annex A.2.1.2
+         * sends every request but the IdMS's through the proxy, TS 33.180 clause 5.3.2 lets a KMS be used without it,
+         * and no configuration item tells the UE which applies (spec conflict, Known limitations): direct by default; the
+         * option follows the ETSI test system for TS 37.579 (the test suite's reading, a labelled exception, as the Linux
+         * client). Through the proxy, clause 5.3.2: "for public safety users the TrK shall be used": it needs a home
+         * HTTP proxy, and the key management client refuses an exchange without a TrK.
+         */
+        val kmsViaProxy: Boolean = false,
     ) {
         val xcapRoot: String? get() = gmsUri?.takeIf { it.endsWith("org.openmobilealliance.groups") }?.removeSuffix("org.openmobilealliance.groups")
     }
@@ -207,7 +222,13 @@ data class ClientConfig(
                         (it["mikey_clock_skew_s"] as? JsonPrimitive)?.let { skew ->
                             skew.longOrNull?.takeIf { value -> !skew.isString && value in 0..0xffffffffL }
                                 ?: throw ConfigError("mikey_clock_skew_s must be a number of seconds")
-                        } ?: Mikey.DEFAULT_CLOCK_SKEW_S)
+                        } ?: Mikey.DEFAULT_CLOCK_SKEW_S,
+                        it.optStr("kms_id")?.also { id ->
+                            if (id.isEmpty() || id.any { c -> c in "\r\n<>&\"" }) throw ConfigError("kms_id must be a KMS URI")
+                        },
+                        (it["kms_via_proxy"] as? JsonPrimitive)?.let { v ->
+                            v.booleanOrNull?.takeIf { !v.isString } ?: throw ConfigError("security.kms_via_proxy must be a boolean")
+                        } ?: false)
                 },
                 endpoints = (root["endpoints"] as? JsonObject)?.mapValues { it.value.jsonPrimitive.content } ?: emptyMap(),
                 httpProxy = (root["http"] as? JsonObject)?.let { http ->
@@ -220,7 +241,10 @@ data class ClientConfig(
                     val first = it.count("first_retry_ms", DEFAULT_FIRST_RETRY_MS, 1)
                     Recovery(first, it.count("last_retry_ms", maxOf(first, DEFAULT_LAST_RETRY_MS), first))
                 } ?: Recovery(),
-            )
+            ).also { c ->
+                if (c.security?.kmsViaProxy == true && c.httpProxy == null)
+                    throw ConfigError("security.kms_via_proxy needs a home HTTP proxy (http.proxy)")
+            }
         }
 
         private fun JsonObject.obj(key: String) = this[key] as? JsonObject ?: throw ConfigError("missing object $key")

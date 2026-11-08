@@ -134,6 +134,17 @@ system's CAs and those the user installed, so an IdMS with a certificate of a pr
 the phone (Settings, Encryption & credentials, CA certificate) as well as in `ca.crt`. **Settings** shows the IdMS and,
 once signed in, "Signed in at" its host with the access token's expiry.
 
+Pre-provisioned transport keys for the KMS (the TrK and InK of TS 33.180 clause 5.3.2, distributed out of band with
+their 32-bit identifiers) come in the `.mcxprov` file's optional `transport_keys` member, per MC service user:
+`{"<MC service user ID>": {"trk": {"key": "<hex, 256 bits>", "id": <32-bit id>}, "ink": {"key": "<hex, 128 or 256
+bits>", "id": <id>}}}` (`androidlab.py --transport-keys` writes them into the bundle as `transport-keys.json`). On the
+next start they move into the Android Keystore as HMAC keys that cannot be read back, and the file is deleted; a new
+provisioning file or an MCX Admin activation removes earlier ones. With them the KMS requests are signed (the InK,
+else the TrK), signed KMS responses are verified and key sets wrapped under the TrK are unwrapped; Settings shows only
+whether transport keys are present. `security.kms_via_proxy` (off by default) sends the KMS requests through the home
+HTTP proxy, as the ETSI test system for TS 37.579 expects, and then needs a TrK; `security.kms_id` names the KMS URI
+its documents carry when it differs from the address.
+
 Speech uses the microphone through `AudioRecord` (`VOICE_COMMUNICATION`) and plays through `AudioTrack` (voice
 communication usage). Calls are registered with Android telecom as a self-managed account. PTT comes from:
 

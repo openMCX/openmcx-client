@@ -72,7 +72,7 @@ class UidFormTest {
     }
 
     private fun parse(xml: String, detect: Boolean, trk: Xpk? = null) =
-        KmsDocuments.parseKeyProv(xml, kms, user, s("alice_keyprov_request"), now, trk, detect)
+        KmsDocuments.parseKeyProv(xml, kms, user, s("alice_keyprov_request"), now, trk?.let { UserTransportKeys(it, null) }, detect)
 
     private val rawId get() = Mikey.uidDigest(user, kms, now)
     private val textId get() = Mikey.uid(user, kms, now).toByteArray()
