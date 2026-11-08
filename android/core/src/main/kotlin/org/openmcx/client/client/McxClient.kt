@@ -460,6 +460,9 @@ class McxClient(
     /** One keepalive on the current flow now; false (and a reconnect under way) when it is dead. */
     suspend fun probeFlow(): Boolean = ua.flow?.probe() ?: false
 
+    /** The protection of the SIP flow's own connection (e.g. "TLS 1.3"), null without one or for plain TCP. */
+    val sipConnectionSecurity: String? get() = ua.flow?.connection?.security
+
     /** Run a refresh now instead of at its timer: `register`, `subscription` or `token`. */
     suspend fun refreshNow(what: String) {
         when (what) {

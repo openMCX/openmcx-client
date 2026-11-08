@@ -35,7 +35,7 @@ object AccessDecision {
     const val PROTECTED_SERVER_PORT = 5064
 
     /** The last decision: the method, why, and the card used. */
-    data class State(val method: String, val reason: String, val card: String?)
+    data class State(val method: String, val reason: String?, val card: String?)
 
     private val _current = MutableStateFlow<State?>(null)
     val current: StateFlow<State?> = _current
@@ -58,10 +58,11 @@ object AccessDecision {
         val offered = config.sip.imsAkaPcscf
         val identities = privileged?.let { runCatching { card.identities(it.first) }.getOrNull() }
         val cardText = privileged?.let { "slot ${it.second + 1}, ISIM" }
+        // One line each in Settings.
         val why: String? = when {
             privileged == null -> "no card with carrier privileges"
-            identities == null -> "the card's ISIM has no identities"
-            offered == null -> "the network does not offer IMS AKA"
+            identities == null -> "no identities on the card's ISIM"
+            offered == null -> "network does not offer IMS AKA"
             else -> null
         }
         val decided: Pair<SipAccess, State> = if (why == null) {
@@ -71,36 +72,52 @@ object AccessDecision {
                 ?: java.net.InetAddress.getByName(host)
             val aka = ImsAkaConfig(identities!!.impi, identities.impu, identities.domain, pcscf, port, PROTECTED_SERVER_PORT)
             SipAccess.ImsAka(AndroidImsAkaPlatform(context, card), aka) to
-                State("IMS AKA", "card ready, the network offers IMS AKA", cardText)
+                State("IMS AKA", "card and network ready", cardText)
         } else if (onMobileData(context)) {
-            SipAccess.Refused("mobile data needs the card: $why") to State("not registered", "mobile data needs the card: $why", cardText)
+            SipAccess.Refused("mobile data needs the card: $why") to State("not registered", "mobile data needs the card", cardText)
         } else {
-            SipAccess.Digest to State("SIP digest", "Wi-Fi: $why, SIP digest", cardText)
+            SipAccess.Digest to State("SIP digest", why, cardText)
         }
         _current.value = decided.second
-        log("SIP core access: ${decided.second.method} (${decided.second.reason})")
+        log("SIP core access: ${decided.second.method} (${decided.second.reason}${if (why != null) "; $why" else ""})")
         decided.first
     }
 
     private val time = DateTimeFormatter.ofPattern("HH:mm").withZone(ZoneId.systemDefault())
 
-    /** The Settings rows of the decision and the IMS AKA registration (no spec references in the UI). */
-    fun rows(aka: ImsAkaRegistrar?): List<Pair<String, String>> {
+    /**
+     * The security associations' algorithms by name (TS 33.203 annexes H and I: 128-bit keys; with AES-GCM, an AEAD
+     * algorithm, "alg" is "null" and AES-GCM gives both encryption and integrity).
+     */
+    fun espName(alg: String?, ealg: String?): String {
+        val integrity = when (alg) {
+            "hmac-sha2-256-128" -> "HMAC-SHA-256"; "hmac-sha-1-96" -> "HMAC-SHA-1"
+            "aes-gmac", "aes-gmac-us" -> "AES-128-GMAC"; else -> null
+        }
+        return "IPsec ESP, " + when (ealg) {
+            "aes-gcm", "aes-gcm-us" -> "AES-128-GCM"
+            "aes-cbc" -> "AES-128-CBC" + (integrity?.let { " + $it" } ?: "")
+            else -> (integrity ?: "no integrity") + ", no encryption"
+        }
+    }
+
+    /** The Settings rows of the decision and the registration, one line each (no spec references in the UI). */
+    fun rows(aka: ImsAkaRegistrar?, connectionSecurity: String?): List<Pair<String, String>> {
         val state = _current.value ?: return emptyList()
         val rows = mutableListOf(
             "Card used" to (state.card ?: "none"),
             "Registration" to when (state.method) {
-                "IMS AKA" -> "IMS AKA with the card, IPsec"
-                "SIP digest" -> "SIP digest over TLS"
+                "IMS AKA" -> "IMS AKA with the card"
+                "SIP digest" -> "SIP digest"
                 else -> "not registered"
             },
-            "Reason" to state.reason,
         )
+        state.reason?.let { rows += "Reason" to it }
         if (state.method == "IMS AKA") {
             rows += "Last authentication" to (aka?.lastAuthentication?.let { (at, outcome) -> "$outcome, ${time.format(Instant.ofEpochSecond(at))}" } ?: "none yet")
-            rows += "Protection" to (aka?.selected?.let { "IPsec, ${it.alg} / ${it.ealg}" } ?: "none yet")
+            rows += "Protection" to (aka?.selected?.let { espName(it.alg, it.ealg) } ?: "none yet")
         } else if (state.method == "SIP digest") {
-            rows += "Protection" to "TLS"
+            rows += "Protection" to (connectionSecurity ?: "TLS")
         }
         return rows
     }
@@ -108,7 +125,7 @@ object AccessDecision {
     /** The same for the debug status: the decision, and with IMS AKA its registration ("ims_aka"). */
     fun json(aka: ImsAkaRegistrar?): Any {
         val state = _current.value ?: return JSONObject.NULL
-        val out = JSONObject().put("method", state.method).put("reason", state.reason).put("card", state.card ?: JSONObject.NULL)
+        val out = JSONObject().put("method", state.method).put("reason", state.reason ?: JSONObject.NULL).put("card", state.card ?: JSONObject.NULL)
         if (state.method != "IMS AKA") return out
         return out.put("ims_aka", JSONObject().put("registered", aka?.registered ?: false)
             .put("alg", aka?.selected?.alg ?: JSONObject.NULL).put("ealg", aka?.selected?.ealg ?: JSONObject.NULL)

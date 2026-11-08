@@ -352,7 +352,7 @@ fun String.short(): String = removePrefix("sip:").substringBefore('@').removeSuf
 /** A snapshot of the engine for the screens. */
 fun snapshot(batteryExempt: Boolean = true): UiState {
     val network = (org.openmcx.client.app.NetworkStatus.current.value?.rows() ?: emptyList()) +
-        org.openmcx.client.app.security.AccessDecision.rows(Engine.client?.imsAka)
+        org.openmcx.client.app.security.AccessDecision.rows(Engine.client?.imsAka, Engine.client?.sipConnectionSecurity)
     val client = Engine.client ?: return UiState(events = Engine.log.last(30).reversed(), batteryExempt = batteryExempt, network = network)
     val status = client.status.value
     val mcptt = Engine.mcptt

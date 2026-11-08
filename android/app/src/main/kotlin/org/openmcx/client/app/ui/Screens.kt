@@ -391,7 +391,8 @@ private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit
                 }
                 state.endpoints.forEach { (name, target) -> Text("$name → $target", style = MaterialTheme.typography.bodySmall) }
             }
-            // Network and SIM under the profile: what the phone offers for IMS AKA; the app registers with SIP digest.
+            // Network and SIM under the profile: the network, the SIM, and how the app registers (IMS AKA with the card or
+            // SIP digest) with its protection.
             Row(Modifier.fillMaxWidth().clickable { networkInfo = !networkInfo }.testTag(Tags.NETWORK_INFO), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { Section("Network and SIM") }
                 Text(if (networkInfo) "▾" else "▸", color = Mcx.Muted, modifier = Modifier.padding(top = 12.dp))

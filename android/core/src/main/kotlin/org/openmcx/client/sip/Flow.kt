@@ -33,7 +33,12 @@ interface Connection : Closeable {
     val localHost: String
     val localPort: Int
     val transport: String
+    /** The protection the connection itself gives, for display: e.g. "TLS 1.3"; null for plain TCP. */
+    val security: String? get() = null
 }
+
+/** The TLS version for display: "TLSv1.3" -> "TLS 1.3". */
+fun tlsVersion(protocol: String): String = protocol.replace(Regex("^TLSv"), "TLS ")
 
 /** Opens connections to the SIP core. */
 fun interface Connector {
@@ -71,6 +76,7 @@ class SocketConnector(
             override val localHost: String = plain.localAddress.hostAddress
             override val localPort: Int = plain.localPort
             override val transport: String = this@SocketConnector.transport.uppercase()
+            override val security: String? = (socket as? SSLSocket)?.session?.protocol?.let(::tlsVersion)
             override fun close() = socket.close()
         }
     }

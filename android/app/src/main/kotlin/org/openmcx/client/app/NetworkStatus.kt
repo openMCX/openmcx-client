@@ -23,6 +23,8 @@ object NetworkStatus {
     data class Snapshot(
         /** wifi, cellular, ethernet, vpn, other or none: the default network's transport. */
         val transport: String,
+        /** The Wi-Fi generation of the link (e.g. "Wi-Fi 6", from WifiInfo.getWifiStandard), null when not known. */
+        val wifiGeneration: String? = null,
         val validated: Boolean,
         /** A network with the MCX capability (NET_CAPABILITY_MCX) is up, used or not. */
         val mcxNetwork: Boolean,
@@ -44,7 +46,7 @@ object NetworkStatus {
 
         /** Label and value rows for Settings. */
         fun rows(): List<Pair<String, String>> = listOf(
-            "Network" to (when (transport) { "wifi" -> "Wi-Fi"; "vpn" -> "VPN"; "none" -> "none"; else -> transport.replaceFirstChar { it.titlecase() } } +
+            "Network" to (when (transport) { "wifi" -> wifiGeneration ?: "Wi-Fi"; "vpn" -> "VPN"; "none" -> "none"; else -> transport.replaceFirstChar { it.titlecase() } } +
                 if (validated || transport == "none") "" else " (not validated)"),
             "MCX network" to if (mcxNetwork) "up" else "none",
             "SIM" to sims.joinToString("\n"),
@@ -85,6 +87,14 @@ object NetworkStatus {
             else -> "other"
         }
         val validated = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) == true
+        // The link's 802.11 generation (Wi-Fi Alliance names); the standard is readable without location permission.
+        val wifiGeneration = (caps?.transportInfo as? android.net.wifi.WifiInfo)?.wifiStandard?.let {
+            when (it) {
+                android.net.wifi.ScanResult.WIFI_STANDARD_11N -> "Wi-Fi 4"; android.net.wifi.ScanResult.WIFI_STANDARD_11AC -> "Wi-Fi 5"
+                android.net.wifi.ScanResult.WIFI_STANDARD_11AX -> "Wi-Fi 6"; android.net.wifi.ScanResult.WIFI_STANDARD_11BE -> "Wi-Fi 7"
+                else -> null
+            }
+        }
         val mcx = mcxNetworks > 0 || caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_MCX) == true
         val telephony = context.getSystemService(TelephonyManager::class.java)
         // Per slot, without READ_PHONE_STATE: the card state of each slot and, for the default one, the SIM's PLMN.
@@ -111,7 +121,7 @@ object NetworkStatus {
         val mobileNetwork = telephony?.networkOperator?.takeIf { it.length >= 5 }?.let { plmn(it) }
         val privileges = inserted && runCatching { telephony!!.hasCarrierPrivileges() }.getOrDefault(false)
         val isim = if (privileges) isimPresent(telephony!!) else null
-        return Snapshot(transport, validated, mcx, sims, mobileNetwork, privileges, isim)
+        return Snapshot(transport, wifiGeneration, validated, mcx, sims, mobileNetwork, privileges, isim)
     }
 
     private fun plmn(numeric: String) = "${numeric.take(3)}-${numeric.drop(3)}"
