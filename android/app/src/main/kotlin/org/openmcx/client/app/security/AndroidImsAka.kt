@@ -12,6 +12,7 @@ import android.net.IpSecTransform
 import android.net.Network
 import android.system.Os
 import android.system.OsConstants
+import android.system.StructTimeval
 import android.telephony.SubscriptionManager
 import android.telephony.TelephonyManager
 import android.util.Base64
@@ -248,6 +249,11 @@ class AndroidImsAkaPlatform(private val context: Context, override val card: Car
     private fun accept(fd: FileDescriptor) {
         while (listener === fd) {
             val socket = try { Os.accept(fd, null) } catch (e: Exception) { return }
+            // Linger 0: a close (also by the process's end) ends the connection at once with an RST and leaves no
+            // socket behind. A FIN_WAIT socket left on port_us would take the P-CSCF's next connection from the same
+            // port_pc (a later set may get it) for itself: its SYN gets an ACK, not a SYN-ACK, and the connection
+            // never comes up.
+            runCatching { lingerZero(socket) }
             val set = current
             if (set == null) { abort(socket); continue }
             val (p, onIncoming) = set
@@ -257,9 +263,20 @@ class AndroidImsAkaPlatform(private val context: Context, override val card: Car
     }
 
     /**
-     * Its transforms removed, then closed. A socket that still names a set's SAs once they are gone makes the kernel
-     * hold the SPI of its outbound SA as long as it sends (TCP retransmissions, also after the process ended), and the
-     * P-CSCF gives that SPI to a later set; so no accepted connection may outlive its set (seen on Android 16).
+     * SO_LINGER on, 0 s. The SDK has no public call for it (Os.setsockoptLinger is hidden). Os.setsockoptTimeval passes
+     * a struct timeval, which on Android's little-endian ABIs begins with the bytes of struct linger { int l_onoff;
+     * int l_linger; }: tv_sec 1, tv_usec 0 gives l_onoff 1, l_linger 0 (both 32-bit and 64-bit; the kernel reads the
+     * first sizeof(struct linger) octets).
+     */
+    private fun lingerZero(socket: FileDescriptor) =
+        Os.setsockoptTimeval(socket, OsConstants.SOL_SOCKET, OsConstants.SO_LINGER, StructTimeval.fromMillis(1000))
+
+    /**
+     * Its transforms removed, then closed. A socket that still names a set's SAs makes the kernel hold the SPI of its
+     * outbound SA when it sends (seen on Android 16, also for the single RST of a linger-0 close), and the P-CSCF gives
+     * that SPI to a later set; so no accepted connection may outlive its set, and none closes with its transforms on.
+     * With linger 0 (set at accept) the close sends an RST, in clear (the P-CSCF drops it on its protected port and
+     * closes its side when it deletes the set), and leaves no FIN_WAIT socket on port_us.
      */
     private fun abort(socket: FileDescriptor) {
         if (!accepted.remove(socket) && !socket.valid()) return
