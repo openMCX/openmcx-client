@@ -34,9 +34,11 @@ import javax.xml.parsers.DocumentBuilderFactory
  * - Transforms: the enveloped signature transform (REQUIRED, clause 6.6.4), then at most one canonicalization.
  * The signature must cover the whole KmsRequest or KmsResponse (TS 33.180 annexes D.1, D.2.2 and D.3.1): one of its
  * References must identify that element or an ancestor of it, and every Reference must validate.
- * One case the shared core accepts is refused here: Canonical XML 1.1 of an element whose omitted ancestors carry an
- * xml:base that must be joined with another xml:base (clause 2.4 of Canonical XML 1.1); libxml2 joins them with its own
- * URI resolver and serializer, which this code does not reproduce.
+ * The xml:base fix-up of Canonical XML 1.1 (clause 2.4) follows the Recommendation's text, as the shared core does
+ * (libxml2's own fix-up, which it does not use, differs in edge cases: a trailing "..", the fragment of a joined value,
+ * the dot segments of an absolute value, an empty xml:base when no fix-up is made). Example 3.8 of the Recommendation
+ * is read as corrected by W3C erratum E11-01 (2008): only the contiguously omitted ancestors are joined. (The node-sets
+ * here, a subtree less a subtree, have no rendered element between omitted ones, the case of that example.)
  * Specifications: TS 33.180 V19.5.0 (Rel-19) clauses 9.3.3 and 9.3.5, annexes D.1, D.2.2, D.3.1 and D.3.5.1; W3C XML
  * Signature Syntax and Processing (Second Edition, 2008) clauses 3.2, 4.3.3 and 6; W3C Canonical XML 1.0 and 1.1; W3C
  * Exclusive XML Canonicalization 1.0; W3C xml:id.
@@ -234,7 +236,7 @@ object KmsSignature {
      *   InclusiveNamespaces PrefixList, which are treated as in Canonical XML.
      * - Canonical XML 1.0 clause 2.4: an element whose parent is omitted inherits the xml: attributes of its
      *   ancestors; Canonical XML 1.1 clause 2.4: only xml:lang and xml:space are inherited, xml:id is not, xml:base is
-     *   fixed up (an empty xml:base is not rendered, as libxml2 does).
+     *   fixed up (an empty fixed-up value is not rendered).
      * - Characters and attribute values escaped as Canonical XML 1.0 clause 2.3 (namespace URIs written as libxml2
      *   writes them); comments and PIs before or after the document element on their own line.
      * Every element of the document must have an absolute namespace URI (Canonical XML 1.0 clause 2.1: "relative
@@ -490,9 +492,7 @@ object KmsSignature {
                     }
                     (lang ?: hiddenParentAttr(element.parentNode, "lang"))?.let { list += item(it) }
                     (space ?: hiddenParentAttr(element.parentNode, "space"))?.let { list += item(it) }
-                    (base ?: hiddenParentAttr(element.parentNode, "base"))?.let { attr ->
-                        fixedBase(attr)?.let { list += Item(attr.name, attr.namespaceURI, "base", it) }
-                    }
+                    fixedBase(element, base)?.let { (attr, value) -> list += Item(attr.name, attr.namespaceURI, "base", value) }
                 }
             }
             for (a in list.sortedWith(attrOrder))
@@ -500,17 +500,29 @@ object KmsSignature {
         }
 
         /**
-         * Canonical XML 1.1 clause 2.4: the xml:base value joined with those of the omitted ancestors up to the first
-         * in the node-set; null when empty (not rendered). Joining two values is not reproduced (see the class comment).
+         * Canonical XML 1.1 clause 2.4, the xml:base of [element] (whose own is [own]): "only performed if at least one
+         * of E1 ... En" (its contiguously omitted ancestors) "had an xml:base attribute"; then X1 ... Xm, the values on
+         * E1 ... En+1, are "reduced in reverse document order to a single value by first combining Xm with Xm-1, then
+         * the result with Xm-2, and so on" with join-URI-References; an empty or null result "MUST NOT be rendered".
+         * Without a fix-up [own] is an ordinary attribute of the node-set. Returns the attribute naming the output
+         * attribute and its value, or null when none is rendered.
          */
-        private fun fixedBase(attr: Attr): String? {
-            var current: Node? = attr.ownerElement.parentNode
+        private fun fixedBase(element: Element, own: Attr?): Pair<Attr, String>? {
+            val values = ArrayList<String>() // Xm first (innermost)
+            own?.let { values += it.value }
+            var named = own
+            var omitted = false
+            var current: Node? = element.parentNode
             while (current != null && !visible(current)) {
-                if (current is Element && current.getAttributeNodeNS(XML_NAMESPACE, "base") != null)
-                    throw KeyError("unsupported xml:base fix-up of Canonical XML 1.1")
+                if (current is Element) current.getAttributeNodeNS(XML_NAMESPACE, "base")?.let {
+                    values += it.value; omitted = true; if (named == null) named = it
+                }
                 current = current.parentNode
             }
-            return attr.value.ifEmpty { null }
+            if (!omitted) return own?.let { it to it.value }
+            var value = values[0]
+            for (outer in values.drop(1)) value = XmlBase.join(outer, value)
+            return if (value.isEmpty()) null else named!! to value
         }
     }
 

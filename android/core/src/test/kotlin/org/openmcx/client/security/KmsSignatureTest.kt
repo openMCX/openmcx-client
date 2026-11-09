@@ -449,18 +449,30 @@ class KmsSignatureTest {
                 assertEquals("XML canonicalization failed", e.message)
             }
         }
-        // Deliberate difference from the shared core: Canonical XML 1.1 joining xml:base values of omitted ancestors
-        // (libxml2's URI resolver gives "http://h/a/b/" here) is refused, not reproduced.
-        try {
-            canonical("<r xmlns=\"urn:d\" xml:base=\"http://h/a/\"><m xml:base=\"b/\"><e xml:id=\"e\"/></m></r>", "e", null, false, c14n11)
-            fail("xml:base joined")
-        } catch (e: KeyError) {
-            assertTrue(e.message!!.contains("xml:base"))
-        }
-        // No join needed: the omitted ancestor's xml:base is inherited as it is; an empty one is not rendered.
+    }
+
+    /** Canonical XML 1.1 clause 2.4: the xml:base fix-up over the omitted ancestors of the apex. */
+    @Test fun xmlBaseFixUp() {
+        fun e(xml: String, id: String = "e") = canonical(xml, id, null, false, c14n11)
+        // Joined values (libxml2 gives the same).
+        assertEquals("<e xmlns=\"urn:d\" xml:base=\"http://h/a/b/\" xml:id=\"e\"></e>",
+            e("<r xmlns=\"urn:d\" xml:base=\"http://h/a/\"><m xml:base=\"b/\"><e xml:id=\"e\"/></m></r>"))
+        assertEquals("<d xmlns=\"urn:d\" xml:base=\"../x\" xml:id=\"d\"></d>",
+            e("<a xmlns=\"urn:d\" xml:base=\"foo/bar\"><b xml:base=\"..\"><c xml:base=\"..\"><d xml:base=\"x\" xml:id=\"d\"/></c></b></a>", "d"))
+        // A fixed-up value that is empty is not rendered.
+        assertEquals("<e xmlns=\"urn:d\" xml:id=\"e\"></e>", e("<r xmlns=\"urn:d\"><m xml:base=\"abc/\"><e xml:id=\"e\" xml:base=\"../\"/></m></r>"))
+        // The fragment of a joined value is dropped (libxml2 keeps "#x").
+        assertEquals("<e xmlns=\"urn:d\" xml:base=\"http://h/c\" xml:id=\"e\"></e>",
+            e("<r xmlns=\"urn:d\" xml:base=\"http://h/a?q\"><m xml:base=\"#f\"><e xml:id=\"e\" xml:base=\"../../c#x\"/></m></r>"))
+        // No fix-up: the omitted ancestor's single xml:base is taken as it is; an element's own xml:base, also empty,
+        // is an ordinary attribute of the node-set (libxml2 drops the empty one).
         assertEquals("<e xmlns=\"urn:d\" xml:base=\"http://h/a/\" xml:id=\"e\"></e>",
-            canonical("<r xmlns=\"urn:d\" xml:base=\"http://h/a/\"><e xml:id=\"e\"/></r>", "e", null, false, c14n11))
-        assertEquals("<r xmlns=\"urn:d\"><e xml:id=\"e\"></e></r>",
+            e("<r xmlns=\"urn:d\" xml:base=\"http://h/a/\"><e xml:id=\"e\"/></r>"))
+        assertEquals("<e xmlns=\"urn:d\" xml:base=\"a/../b\" xml:id=\"e\"></e>", e("<r xmlns=\"urn:d\"><e xml:id=\"e\" xml:base=\"a/../b\"/></r>"))
+        assertEquals("<r xmlns=\"urn:d\" xml:base=\"\"><e xml:id=\"e\"></e></r>",
             canonical("<r xmlns=\"urn:d\" xml:base=\"\"><e xml:id=\"e\"/></r>", null, null, false, c14n11))
+        // Canonical XML 1.0 has no fix-up: the nearest omitted ancestor's xml:base is inherited.
+        assertEquals("<e xmlns=\"urn:d\" xml:base=\"b/\" xml:id=\"e\"></e>",
+            canonical("<r xmlns=\"urn:d\" xml:base=\"http://h/a/\"><m xml:base=\"b/\"><e xml:id=\"e\"/></m></r>", "e", null, false, c14n10))
     }
 }
