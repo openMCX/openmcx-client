@@ -61,8 +61,7 @@ std::optional<SipResponse> Client::csk_key_download(const SipMessage &message) {
     // with their SRTCP indexes (mcptt_floor_streams, mcvideo_floor_streams, ProtectedCall::set_floor).
     if (name == "mcptt") {
       protection_.set_floor(csk, mcptt_floor_streams());
-      csk_ = csk;
-      status_["csk_id"] = csk.csb_id;
+      adopt_csk(csk, {}); // made by the server: no I_MESSAGE of this client (identity_hiding_csk)
     } else if (name == "mcvideo") {
       mcvideo_protection_.set_floor(csk, mcvideo_floor_streams());
       mcvideo_csk_ = csk;

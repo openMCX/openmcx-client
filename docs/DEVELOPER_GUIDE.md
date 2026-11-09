@@ -628,6 +628,21 @@ Points to know:
   would protect is not sent (`require_protection_known`). With `mcptt.documents_on_notify` the configuration management
   subscription goes before the service authorisation (`start_authorization`), and the keys and the authorisation wait
   for the MCPTT service configuration document (`configuration_notified`).
+- ID token validation (`oauth.id_token_tls_validation`, off by default): TS 33.180 annex B.11.1 validates the ID
+  token "as per section 3.1.3.7" of OpenID Connect Core 1.0, whose step 6 lets a client that received it from the
+  token endpoint over TLS rely on the TLS server validation instead of the signature. On, the client does not read
+  the IdMS JWKS and checks every claim but not the signature (`id_token_keys`, `tls_validated_claims` in the server
+  repository's `src/security/http.cpp`); for a test system whose ID token signing key no PIXIT gives (TS 37.579-1
+  table 5.3.2.3.1-1 has no JWKS request). Off, the signature is verified against the JWKS.
+- Identity hiding (`mcptt.identity_hiding`, off by default): TS 24.484 clause 6.3.13.2.2 step d and TS 24.481 clause
+  6.3.13.2.1 step d apply "if identity hiding is required", and no configuration item says when. With the switch on,
+  the initial configuration management, group document and GKTP SUBSCRIBEs carry the CSK upload I_MESSAGE
+  (`identity_hiding_csk`, which makes the CSK first when the configuration subscription goes before the service
+  authorisation), and the requests of these subscriptions are encrypted and signed under the CSK whatever the service
+  configuration document says (`hide_identity`). TS 37.579-1 table 5.5.2.14-1 expects this unconditionally. Off, these
+  subscriptions are sent without XML protection (`document_subscription`). The environment variable
+  `MCX_CSK_KEYLOGFILE` (lab use, like `SSLKEYLOGFILE`) appends each CSK the client adopts (`adopt_csk`) to a file so
+  that a capture of its protected signalling can be decrypted.
 - The group document and group key subscriptions go to `gms.subscription_psi`, the GMS-URI (TS 24.481 clause
   6.3.13.2.1 step b); activation takes it from the `<GMS-URI>` of the package's UE initial configuration. Without it
   they are refused locally, never sent to another PSI.

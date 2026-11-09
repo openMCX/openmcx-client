@@ -142,6 +142,9 @@ class Client {
   std::unique_ptr<KeyClient> keys_;
   ProtectedCall protection_;
   std::string csk_upload_, key_subscription_;
+  // The CSK upload I_MESSAGE of csk_ (TS 33.180 clause 5.4), kept after the service authorisation for the identity
+  // hiding SUBSCRIBEs (identity_hiding_csk); empty for a CSK the server made (TS 24.379 clause 7.3.7).
+  std::string csk_message_;
   std::map<std::string, std::string> key_subscriptions_;
   // When the GKTP subscription is refreshed in its dialog (Unix seconds; 0: none due), key_refresh_time.
   std::int64_t key_refresh_at_ = 0;
@@ -174,6 +177,15 @@ class Client {
   bool protected_media() const { return cfg_.value("security", Json::object()).value("protect_media", false); }
 
   bool protected_floor() const { return cfg_.value("security", Json::object()).value("protect_floor", false); }
+
+  // mcptt.identity_hiding: TS 24.484 clause 6.3.13.2.2 step d and TS 24.481 clause 6.3.13.2.1 step d ("if identity
+  // hiding is required"; no configuration item of TS 24.483 or TS 24.484 says when it is): the configuration
+  // management, group document and GKTP subscriptions carry the CSK and are confidentiality and integrity protected
+  // with it.
+  // Off by default.
+  bool identity_hiding() const {
+    return cfg_.value("mcptt", Json::object()).value("identity_hiding", false);
+  }
 
   // mcptt.documents_on_notify: the MCPTT documents are read on the subscription NOTIFYs only (sign_in_documents).
   bool documents_on_notify() const {
@@ -820,7 +832,10 @@ class Client {
 
   static void require_xml_key(const keying::KeyMessage *csk, const char *service);
 
-  bool unprotected_subscription(const SipTransmission &transmission, const std::vector<BodyPart> &parts) const;
+  bool document_subscription(const SipTransmission &transmission, const std::vector<BodyPart> &parts) const;
+  std::vector<BodyPart> hide_identity(std::vector<BodyPart> parts);
+  const std::string &identity_hiding_csk();
+  void adopt_csk(const keying::KeyMessage &csk, std::string upload);
 
   // TS 33.180 annex E.6.10: the CSK is not used as the XPK past its Expiry time (throws: nothing is protected or
   // opened with it).

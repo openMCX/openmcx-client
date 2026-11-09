@@ -149,9 +149,8 @@ void Client::authorize() {
   if (keys_ && (protected_media() || protected_floor() || xml_protection() || integrity_protection())) {
     auto [key, upload] = keys_->make_csk(service());
     protection_.set_floor(key);
-    csk_upload_ = std::move(upload);
-    status_["csk_id"] = key.csb_id;
-    csk_ = key;
+    csk_upload_ = upload;
+    adopt_csk(key, std::move(upload));
   }
   if (authorise_by_register()) {
     register_authorization([this](const SipResponse &response) {

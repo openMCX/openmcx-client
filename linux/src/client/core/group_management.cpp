@@ -154,6 +154,20 @@ std::string Client::temporary_group_request_xml(const std::string &group_id, con
 }
 
 //------------------------------------------------------------------------------
+// RFC 6665 section 7.2 and RFC 5875 section 4: the SUBSCRIBE of a configuration management or group document
+// subscription accepts the xcap-diff documents of its NOTIFYs (the package's default type, named as TS 37.579-1 table
+// 5.5.2.14-1 has it); each body part has a Content-ID (RFC 2045 section 7), the reference TS 24.379 clause 6.6.3.1
+// gives a signature, which TS 37.579-1 table 5.5.2.14-1 asks for whether or not the parts are signed.
+namespace {
+constexpr const char *xcap_diff_mime = "application/xcap-diff+xml";
+
+void label_subscription_parts(std::vector<BodyPart> &parts) {
+  for (auto &part : parts)
+    if (part.content_id.empty()) part.content_id = random_id().substr(0, 16) + "@mcx";
+}
+} // namespace
+
+//------------------------------------------------------------------------------
 // TS 24.481 clause 6.3.13.2.1: subscribe to the group documents of the groups (xcap-diff, RFC 5875); the dialog.
 std::string Client::group_documents_subscribe(const std::vector<std::string> &args) {
   McpttInfo info;
@@ -164,12 +178,16 @@ std::string Client::group_documents_subscribe(const std::vector<std::string> &ar
   for (const auto &group_id : args)
     entries.push_back("org.openmobilealliance.groups/global/byGroupID/" + xcap_segment(group_id));
   parts.push_back({resource_lists_mime, xcap_resource_list(entries)});
+  // TS 24.481 clause 6.3.13.2.1 step d 2): with identity hiding, the CSK (identity_hiding_csk).
+  if (identity_hiding()) parts.push_back({"application/mikey", identity_hiding_csk()});
+  label_subscription_parts(parts);
   const auto boundary = "mcx-" + random_id();
   // A refused SUBSCRIBE (403 when no group of the list may be followed, clause 6.3.13.3.2.2) creates no subscription
   // (RFC 6665 section 4.1.2.1), so it is not kept for a later re-SUBSCRIBE.
   auto created = std::make_shared<std::string>();
   const auto dialog = sip_.subscribe(
-      gms_subscription_psi(), "xcap-diff", group_documents_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
+      gms_subscription_psi(), "xcap-diff", group_documents_expires_s(),
+      {{"P-Preferred-Service", mcptt_icsi}, {"Accept", xcap_diff_mime}},
       [this, args, created](const SipResponse &response) {
         if (response.status_code < 200) return;
         status_["group_subscription_result"] = {{"groups", args}, {"status", response.status_code}};
@@ -326,9 +344,13 @@ void Client::subscribe_configuration() {
   const std::vector<std::string> documents{ue_configuration_document_path(), profile_document_path(),
                                            service_configuration_document_path};
   parts.push_back({resource_lists_mime, xcap_resource_list(documents)});
+  // TS 24.484 clause 6.3.13.2.2 step d 2): with identity hiding, the CSK (identity_hiding_csk).
+  if (identity_hiding()) parts.push_back({"application/mikey", identity_hiding_csk()});
+  label_subscription_parts(parts);
   const auto boundary = "mcx-" + random_id();
   config_subscription_ = sip_.subscribe(
-      cms_subscription_psi(), "xcap-diff", configuration_documents_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
+      cms_subscription_psi(), "xcap-diff", configuration_documents_expires_s(),
+      {{"P-Preferred-Service", mcptt_icsi}, {"Accept", xcap_diff_mime}},
       [this](const SipResponse &response) {
         if (response.status_code < 200) return;
         status_["configuration"]["subscription_status"] = response.status_code;

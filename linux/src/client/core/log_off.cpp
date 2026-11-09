@@ -143,6 +143,7 @@ void Client::drop_service_state() {
   mcvideo_protection_ = ProtectedCall(true);
   csk_.reset();
   csk_upload_.clear();
+  csk_message_.clear();
   mcvideo_csk_.reset();
   mcvideo_csk_upload_.clear();
   mcdata_csk_.reset();

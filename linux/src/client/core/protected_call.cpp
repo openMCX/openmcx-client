@@ -117,6 +117,8 @@ void Client::subscribe_keys() {
   info.request_uri = key_group;
   auto parts = info_parts(info);
   parts.push_back({"application/resource-lists+xml", keying::gktp_resource_list(key_group)});
+  // TS 24.481 clause 6.3.13.2.1 step d 2) (clause 7.7): with identity hiding, the CSK (identity_hiding_csk).
+  if (identity_hiding()) parts.push_back({"application/mikey", identity_hiding_csk()});
   const auto boundary = "mcx-" + random_id();
   key_subscription_ = sip_.subscribe(
       gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(), {},
@@ -225,6 +227,8 @@ void Client::update_key_subscriptions() {
     info.request_uri = key_group;
     auto parts = info_parts(info);
     parts.push_back({"application/resource-lists+xml", keying::gktp_resource_list(key_group)});
+    // TS 24.481 clause 6.3.13.2.1 step d 2) (clause 7.7): with identity hiding, the CSK (identity_hiding_csk).
+    if (identity_hiding()) parts.push_back({"application/mikey", identity_hiding_csk()});
     const auto boundary = "mcx-" + random_id();
     const auto dialog = sip_.subscribe(
         gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(), {},

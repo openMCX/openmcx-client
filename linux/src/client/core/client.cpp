@@ -740,9 +740,8 @@ void Client::provision_keys() {
   }
   auto [csk, upload] = keys_->make_csk(service());
   protection_.set_floor(csk);
-  csk_upload_ = std::move(upload);
-  csk_ = csk;
-  status_["csk_id"] = csk.csb_id;
+  csk_upload_ = upload;
+  adopt_csk(csk, std::move(upload));
 }
 
 //------------------------------------------------------------------------------

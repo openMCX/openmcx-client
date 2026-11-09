@@ -10,6 +10,10 @@
 #include "client.hpp"
 #include "xml_gate.hpp"
 
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+
 namespace mcx {
 
 //------------------------------------------------------------------------------
@@ -202,7 +206,13 @@ std::vector<BodyPart> Client::mcvideo_protect_outgoing(std::vector<BodyPart> par
 // body, its Contact naming every service of the UE. The MCData REGISTER body is encrypted by the MCData service
 // (mcdata_authorize) and signed here, and a REGISTER without service authorisation has no body to protect.
 std::vector<BodyPart> Client::protect_outgoing(const SipTransmission &transmission, std::vector<BodyPart> parts) {
-  if (unprotected_subscription(transmission, parts)) return parts;
+  // The configuration management, group document and GKTP subscriptions: unprotected, or with identity hiding
+  // under the CSK (document_subscription, hide_identity).
+  // Identity hiding is the MCPTT client's (TS 24.484 clause 6.3.13.2.2, TS 24.481 clause 6.3.13.2.1).
+  if (document_subscription(transmission, parts))
+    return identity_hiding() && !mcvideo_transmission(transmission) && !mcdata_transmission(transmission)
+               ? hide_identity(std::move(parts))
+               : parts;
   const auto carries = [&parts](const std::string &type) {
     return std::any_of(parts.begin(), parts.end(), [&type](const BodyPart &part) { return part.content_type == type; });
   };
@@ -224,7 +234,7 @@ std::vector<BodyPart> Client::protect_outgoing(const SipTransmission &transmissi
 
   // An XML body whose protection is not known is not sent, the first service authorisation included: an unread
   // service configuration document is not one without protection (the configuration management subscription that
-  // goes before it is unprotected_subscription()'s). TS 24.379 clause 7.2.1: until the server holds the CSK, only the
+  // goes before it is document_subscription()'s). TS 24.379 clause 7.2.1: until the server holds the CSK, only the
   // request uploading it is protected.
   require_protection_known("mcptt", parts);
   const bool uploads = carries("application/mikey");
@@ -256,13 +266,14 @@ std::vector<BodyPart> Client::protect_outgoing(const SipTransmission &transmissi
 //------------------------------------------------------------------------------
 // TS 24.484 clause 6.3.13.2.2 step d and TS 24.481 clause 6.3.13.2.1 step d (which the GKTP subscription of TS 24.481
 // clause 7.7 follows): the CMC and the GMC protect the mcptt-info and resource-lists bodies of their subscription
-// "if identity hiding is required", including the CSK in an application/mikey body; this client does not apply
-// identity hiding, so the requests of these subscriptions are sent without XML protection, before and after the
-// service authorisation alike (the service configuration document does not decide them). A message belongs to one of
-// them by its dialog (the configuration, group document and group key subscriptions held), or, for the initial
-// SUBSCRIBE whose dialog is not known yet, by the documents its resource list subscribes to
-// (xml_gate::subscription_procedure). The GMK of a GKTP document stays protected by its MIKEY-SAKKE I_MESSAGE.
-bool Client::unprotected_subscription(const SipTransmission &transmission, const std::vector<BodyPart> &parts) const {
+// "if identity hiding is required", including the CSK in an application/mikey body. Without identity hiding
+// (mcptt.identity_hiding, off by default) the requests of these subscriptions are sent without XML protection, before
+// and after the service authorisation alike: the service configuration document does not decide them; with it they
+// are protected under the CSK (hide_identity). A message belongs to one of them by its dialog (the configuration,
+// group document and group key subscriptions held), or, for the initial SUBSCRIBE whose dialog is not known yet, by
+// the documents its resource list subscribes to (xml_gate::subscription_procedure). The GMK of a GKTP document stays
+// protected by its MIKEY-SAKKE I_MESSAGE.
+bool Client::document_subscription(const SipTransmission &transmission, const std::vector<BodyPart> &parts) const {
   const auto &dialog = transmission.call_id;
   if (!dialog.empty() &&
       (dialog == config_subscription_ || dialog == key_subscription_ || dialog == mcvideo_key_subscription_ ||
@@ -272,6 +283,74 @@ bool Client::unprotected_subscription(const SipTransmission &transmission, const
     return true;
   return !transmission.response && transmission.method == "SUBSCRIBE" &&
          get_header(transmission.headers, "Event") == "xcap-diff" && xml_gate::subscription_procedure(parts);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.484 clause 6.3.13.2.2 step d 1) and TS 24.481 clause 6.3.13.2.1 step d 1), with identity hiding: "the
+// confidentiality protection procedures and integrity protection procedures defined in 3GPP TS 24.379 [9] for MCPTT
+// client on the application/vnd.3gpp.mcptt-info+xml MIME body and on the application/resource-lists+xml MIME body"
+// (also on the bodies of the subscription's later requests and responses): their sensitive elements and URIs
+// encrypted (TS 24.379 clause 6.6.2.3.3: the access token, the client ID, the entry URIs), then every XML body signed
+// (clause 6.6.3.3.3), under the CSK whatever the service configuration document says. Without a CSK in use nothing
+// is sent (throws), never in the clear.
+std::vector<BodyPart> Client::hide_identity(std::vector<BodyPart> parts) {
+  require_xml_key(csk_ ? &*csk_ : nullptr, "MCPTT");
+  const auto key = xml_key();
+  for (auto &part : parts)
+    if (mcptt_xml_part(part.content_type) && !xmlsec::is_protected(part.body)) {
+      part.body = xmlsec::encrypt(part.body, key, mcptt_xml_profile());
+      ++xml_encrypted_;
+    }
+  if (std::any_of(parts.begin(), parts.end(), [](const BodyPart &part) { return part.content_type == signed_mime; }))
+    return parts;
+  std::vector<xmlsec::SignedBody> bodies;
+  for (auto &part : parts)
+    if (signable_part(part.content_type)) {
+      if (part.content_id.empty()) part.content_id = random_id().substr(0, 16) + "@mcx";
+      bodies.push_back({part.content_id, part.body});
+    }
+  if (!bodies.empty()) {
+    parts.push_back({signed_mime, xmlsec::sign(bodies, key, "urn:3gpp:ns:mcpttSignedDoc:1.0")});
+    ++xml_signed_;
+  }
+  return parts;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.484 clause 6.3.13.2.2 step d 2) and TS 24.481 clause 6.3.13.2.1 step d 2): "an application/mikey MIME body
+// with the CSK as specified in 3GPP TS 24.379 [9]", the CSK upload I_MESSAGE of TS 33.180 clause 5.4 to the MCPTT
+// server. A configuration subscription before the service authorisation (mcptt.documents_on_notify) makes the CSK
+// first; the service authorisation may replace it later (authorize), and the subscriptions made after it carry the
+// new one. A CSK the server made (TS 24.379 clause 7.3.7) has no I_MESSAGE of this client: refused (throws).
+const std::string &Client::identity_hiding_csk() {
+  if (!csk_) {
+    if (!keys_) throw std::runtime_error("identity hiding: no key material for a CSK");
+    auto [key, upload] = keys_->make_csk(service());
+    protection_.set_floor(key);
+    adopt_csk(key, std::move(upload));
+  }
+  if (csk_message_.empty()) throw std::runtime_error("identity hiding: the CSK in use was not made by this client");
+  return csk_message_;
+}
+
+//------------------------------------------------------------------------------
+// The MCPTT CSK in use from now on, with its upload I_MESSAGE when this client made it. Lab use: with the environment
+// variable MCX_CSK_KEYLOGFILE set (as SSLKEYLOGFILE for TLS), the CSK is appended to that file, one line
+// "CSK <MCPTT ID> <CSK-ID> <hex key>", so that a capture of its protected signalling can be decrypted.
+void Client::adopt_csk(const keying::KeyMessage &csk, std::string upload) {
+  csk_ = csk;
+  csk_message_ = std::move(upload);
+  status_["csk_id"] = csk.csb_id;
+  if (const char *file = std::getenv("MCX_CSK_KEYLOGFILE"); file && *file) {
+    std::ofstream log(file, std::ios::app);
+    std::string hex;
+    for (const auto octet : csk.key) {
+      char digits[3];
+      std::snprintf(digits, sizeof digits, "%02x", octet);
+      hex += digits;
+    }
+    log << "CSK " << user() << ' ' << csk.csb_id << ' ' << hex << '\n';
+  }
 }
 
 //------------------------------------------------------------------------------
