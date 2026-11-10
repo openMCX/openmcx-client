@@ -305,7 +305,7 @@ void Client::resume_held() {
 // Command: private call services, requesting side: call-back (TS 24.379 clause 11.1.5.2.1, fulfilment clause
 // 11.1.5.2.3), remotely initiated group call (clause 10.1.5.2.1) and private call (clause 11.1.7.2.1), private call
 // transfer (clause 11.1.8.2.1, announced clause 11.1.8.2.3) and forwarding (clause 11.1.9.2.1):
-//   callback <id> [low|normal|high] | callback-cancel <id> | callback-fulfil <id>
+//   callback <id> [low|normal|high] | callback-cancel <id> | callback-fulfil <id> [no-floor]
 //   remote-call <remote id> <target id> [auto|manual|force-auto] [silent] [priority=<namespace.value>]
 //   remote-group-call <remote id> <group id> [silent] [priority=<namespace.value>]
 //   transfer <target id> [announced|complete|cancel] | forward <target id>
@@ -344,7 +344,10 @@ void Client::private_service_command(const std::string &cmd) {
     });
   } else if (verb == "callback-fulfil") {
     if (!pccb_target_.contains(first)) throw std::runtime_error("no call-back request from that user");
-    private_call(first + " manual"); // TS 24.379 clause 11.1.5.2.3: manual commencement
+    // TS 24.379 clause 11.1.5.2.3: manual commencement; "no-floor" for a call-back call without floor control
+    // (TS 24.379 clause 11.1.2.2; TS 37.579-2 6.2.13 step 9).
+    if (!second.empty() && second != "no-floor") throw std::runtime_error("usage: callback-fulfil <id> [no-floor]");
+    private_call(first + " manual" + (second == "no-floor" ? " no-floor" : ""));
   } else if (verb == "remote-group-call") {
     // TS 24.379 clause 10.1.5.2.1: ask a remote user to place a group call.
     require_profile({"allow-request-remote-init-group-call"});
