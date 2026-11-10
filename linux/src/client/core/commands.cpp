@@ -376,14 +376,13 @@ void Client::answer_command(const std::string &cmd) {
   if (!pending_answer_ || dialog_.empty()) throw std::runtime_error("no incoming call awaiting answer");
   auto response = *pending_answer_;
   pending_answer_.reset();
-  if (cmd == "reject" && (call_type_ == "private" || call_type_ == "adhoc")) {
-    // TS 24.379 clause 6.2.3.2.1: a declined private call invitation.
+  if (cmd == "reject") {
+    // TS 24.379 clause 6.2.3.2.1 (private call) and clause 6.2.3.2.2 (group call, manual commencement): "if the
+    // MCPTT user declines the MCPTT session invitation the MCPTT client shall send a SIP 480 (Temporarily
+    // Unavailable) response [...] with the warning text set to: "110 user declined the call invitation"" (clause 4.4).
     response = {};
     response.status_code = 480;
     response.headers = {{"Warning", "399 mcx \"110 user declined the call invitation\""}};
-  } else if (cmd == "reject") {
-    response.status_code = 486;
-    response.reason = "Busy Here";
   } else if (call_type_ == "private" && first_to_answer_ && protected_media() && response.local_media) {
     // TS 24.379 clause 11.1.1.2.1.2 step 5: the invitee encapsulates a PCK to the caller
     // in its SDP answer. The caller initiated the call (TS 33.180 annex E.1.3).
