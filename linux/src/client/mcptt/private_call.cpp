@@ -142,6 +142,9 @@ std::vector<BodyPart> Client::private_call_parts(const std::string &target, bool
   auto parts = info_parts(info);
   parts.push_back({resource_lists_mime, private_call_resource_list(target)});
   if (alert) parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
+  // TS 37.579-1 table 5.5.2.5.1-1: the Accept of the SDP and MCPTT-Info bodies in each initial INVITE (private and
+  // first-to-answer calls).
+  headers.push_back({"Accept", "application/sdp, " + std::string(mcptt_mime)});
   return parts;
 }
 
