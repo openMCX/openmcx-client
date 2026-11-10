@@ -610,6 +610,13 @@ std::optional<SipResponse> Client::group_document_notify(const SipMessage &messa
           }
         }
         document["members"] = members;
+        // TS 24.481 clause 7.2.4.2: <preconfigured-group-use-only> "true" in the <list-service> (MCPTT): no calls on
+        // the group (TS 24.379 clauses 10.1.1.2.1.1 and 10.1.2.2.1.1, group_call_command).
+        const auto flag = response.body.find("preconfigured-group-use-only");
+        const auto flag_end = flag == std::string::npos ? flag : response.body.find('>', flag);
+        document["preconfigured_group_use_only"] =
+            flag_end != std::string::npos && response.body[flag_end - 1] != '/' &&
+            response.body.compare(flag_end + 1, 4, "true") == 0;
       });
     }
   }

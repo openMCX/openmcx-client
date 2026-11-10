@@ -412,6 +412,18 @@ void Client::group_call_command(const std::string &cmd) {
       (!affiliated_ && !may_affiliate_implicitly && !force && !(cmd == "rejoin" && last_call_type_ == "adhoc")) ||
       !dialog_.empty())
     throw std::runtime_error("call requires affiliation and idle state");
+  // TS 24.379 clauses 10.1.1.2.1.1 and 10.1.2.2.1.1: with <preconfigured-group-use-only> "true" in the group document,
+  // the user is told that calls are not allowed on the group and no INVITE is sent (a regroup of it is still called).
+  if (cmd != "rejoin" && !force) {
+    const auto document = group_documents_.find(group());
+    if (document != group_documents_.end() && document->value("preconfigured_group_use_only", false) &&
+        !regroups_.contains(group())) {
+      status_["last_call_failure"] = {{"status", nullptr}, {"reason", "calls not allowed on the group"},
+                                      {"group", group()}};
+      event("call_not_allowed", {{"group", group()}, {"reason", "preconfigured-group-use-only"}});
+      throw std::runtime_error("calls are not allowed on group " + group() + " (preconfigured-group-use-only)");
+    }
+  }
   McpttInfo info;
 
   // TS 24.379 clause 10.1.2.2.1.1: initiating and joining a chat group call use the
