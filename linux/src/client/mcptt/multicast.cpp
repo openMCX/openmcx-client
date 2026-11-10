@@ -136,6 +136,7 @@ void Client::multicast_report(bool listening) {
   const auto psi = bearer == mbms_bearers_.end() ? service() : bearer->second.psi;
   sip_.request("MESSAGE", psi, "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
                {{"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(mcptt_icsi) + "\";require;explicit"},
+                {"P-Preferred-Identity", "<" + sip_identity() + ">"},   // TS 24.379 clause 14.3.3.2 item 1 c
                 {"P-Preferred-Service", mcptt_icsi}},
                [this, listening, session](const SipResponse &response) {
                  if (response.status_code < 200) return;

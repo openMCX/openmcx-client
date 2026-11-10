@@ -358,7 +358,10 @@ void Client::mbms_report(MbmsService service, const std::string &psi, bool liste
                                     mbms_status_part(service, mbs, status)};
   const auto boundary = "mcx-" + random_id();
   sip_.request("MESSAGE", psi, "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
+               // TS 24.379 clause 14.3.3.2 item 1 b to d: the ICSI Accept-Contact, the public user identity in
+               // P-Preferred-Identity ("should") and the ICSI in P-Preferred-Service.
                {{"Accept-Contact", std::string("*;+g.3gpp.icsi-ref=\"") + profile.icsi_encoded + "\";require;explicit"},
+                {"P-Preferred-Identity", "<" + sip_identity() + ">"},
                 {"P-Preferred-Service", profile.icsi}},
                [this, listening, tmgis](const SipResponse &response) {
                  if (response.status_code < 200) return;
