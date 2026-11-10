@@ -479,17 +479,21 @@ void Client::group_call_command(const std::string &cmd) {
 // TS 24.380 clause 14.2.3: "The MCPTT client should base floor priority on the configured value": the
 // mcptt.maximum_floor_priority (or mcptt.floor_priority) of the configuration, else the <user-priority> of this user's
 // <entry> in the selected group's document (TS 24.481 clause 7.2.4.2; TS 37.579-1 table 5.5.7.1-1 gives user A "3"),
-// for a regroup the document of its preconfigured group (TS 24.379 clause 16.1: the regroup takes its configuration);
-// nothing when neither is configured.
+// for a regroup the document of its preconfigured group (TS 24.379 clause 16.1: the regroup takes its configuration),
+// else that of the constituent group the call is placed from; nothing when neither is configured.
 std::optional<unsigned> Client::configured_floor_priority() const {
   const auto &mcptt = cfg_.at("mcptt");
   if (mcptt.contains("maximum_floor_priority")) return mcptt.at("maximum_floor_priority").get<unsigned>();
   if (mcptt.contains("floor_priority")) return mcptt.at("floor_priority").get<unsigned>();
   const auto regroup = regroups_.find(group());
   const auto configuring = regroup != regroups_.end() ? regroup->value("preconfigured", group()) : group();
-  const auto document = group_documents_.find(configuring);
-  if (document != group_documents_.end() && document->contains("user_priority"))
-    return document->at("user_priority").get<unsigned>();
+  // A temporary group formed by the GMS (TS 24.481 clause 6.3.3.2.1) has no document here (it is its own
+  // "preconfigured" group): the constituent group the call is placed from (its <associated-group-id>) gives it.
+  for (const auto &candidate : {configuring, calling_constituent_}) {
+    const auto document = group_documents_.find(candidate);
+    if (document != group_documents_.end() && document->contains("user_priority"))
+      return document->at("user_priority").get<unsigned>();
+  }
   return std::nullopt;
 }
 
