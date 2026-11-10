@@ -55,9 +55,12 @@ void Client::regroup_command(const std::string &action, const std::string &tgi, 
   regroup_result_ = {{"action", action}, {"regroup", tgi}, {"status", 0}, {"warning", ""}};
   status_["regroup_result"] = regroup_result_;
   sip_.request("MESSAGE", service(), "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary),
+               // TS 24.379 clause 16.2.1.1 item 5, clause 16.2.1.2 item 7 and clause 16.3.1.1: the ICSI in a
+               // P-Asserted-Service header field (TS 37.579-2 tables 6.5.1.3.3-2 and 6.5.3.3.3-2: P-Preferred-Service
+               // not present), where the client's other requests have P-Preferred-Service (TS 24.229).
                {{"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"},
                 {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(mcptt_icsi) + "\";require;explicit"},
-                {"P-Preferred-Service", mcptt_icsi}},
+                {"P-Asserted-Service", mcptt_icsi}},
                [this, action, tgi](const SipResponse &response) {
                  if (response.status_code < 200) return;
                  regroup_result_ = {{"action", action},

@@ -85,7 +85,7 @@ bool Client::xml_protection() const {
 // TS 24.379 clause 4.8: the MCPTT XML MIME bodies that carry sensitive application data to encrypt.
 bool Client::mcptt_xml_part(const std::string &type) {
   return type == mcptt_mime || type == resource_lists_mime || type == "application/pidf+xml" ||
-         type == mcptt_location_mime || type == "application/conference-info+xml";
+         type == mcptt_location_mime || type == "application/conference-info+xml" || type == regroup_mime;
 }
 
 //------------------------------------------------------------------------------
@@ -119,7 +119,13 @@ const xmlsec::Profile &Client::mcptt_xml_profile() {
                                         "latitude",
                                         "altitude",
                                         "horizontalaccuracy",
-                                        "verticalaccuracy"},
+                                        "verticalaccuracy",
+                                        // TS 24.379 annex F.7 (TS 37.579-1 table 5.5.3.16.2-1, NOTE 1 to 4): the
+                                        // group and user IDs of a regroup request.
+                                        "preconfig-group-id",
+                                        "mcptt-regroup-uri",
+                                        "groups-for-regroup",
+                                        "users-for-regroup"},
                                        // The PIDF's <tuple> "id", the MCPTT client ID (TS 24.379
                                        // clause 4.8: "an MCPTT ID, an MCPTT Group ID, and an MCPTT
                                        // client ID in an XML document published in SIP PUBLISH
