@@ -885,6 +885,7 @@ class Client {
   // (endpoints.cms) of the initial MC UE configuration, used as given.
   std::string gms_xcap_root() const;
   std::string cms_xcap_root() const;
+  std::string group_creation_xui() const;
 
   void xcap_request(const std::string &method, const std::string &url, const std::string &content_type = {},
                     const std::string &body = {});

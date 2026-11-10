@@ -43,11 +43,39 @@ void Client::xcap_request(const std::string &method, const std::string &url, con
 }
 
 //------------------------------------------------------------------------------
-// Helper: a group document (TS 24.481 clause 7.2) of the group with its members.
+// TS 24.481 clause 6.3.2.2.1 and clause 6.3.14.2 item a) 1): the XUI of the users tree a group is created in, "a group
+// creation XUI configuration parameter" (TS 24.483 clause 8.2.9A GroupCreationXUI, the <group-creation-XUI> of the UE
+// initial configuration, TS 24.484 clause 7.2.2.1 item 5): gms.group_creation_xui, which activation takes from the
+// package's UE initial configuration. TS 24.484 clause 7.2.2.7 item 6 also says the element "contains the group
+// management server XCAP Root URI information" (a contradiction with TS 24.483 and TS 24.481, which use it as an
+// XUI): such a value (an http or https URI) names no users tree, and neither does an unset one; the users tree is
+// then the MCPTT ID's own.
+std::string Client::group_creation_xui() const {
+  const auto xui = cfg_.value("gms", Json::object()).value("group_creation_xui", std::string{});
+  if (xui.empty() || xui.starts_with("http://") || xui.starts_with("https://")) return user();
+  return xui;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.481 clause 7.2.2: the <supported-services> of an MCPTT group document ("shall include"): one <service> with
+// the "enabler" attribute set to the MCPTT ICSI and a <group-media> element (OMA-TS-XDM_Group-V1_1_1), the MCPTT
+// speech media (clause 7.2.4.2 <mcptt-speech>). TS 37.579-1 tables 5.5.7.4-1 and 5.5.7.4-2.
+static std::string mcptt_supported_services() {
+  return "<oxe:supported-services xmlns:oxe=\"urn:oma:xml:xdm:extensions\"><oxe:service "
+         "enabler=\"urn:urn-7:3gpp-service.ims.icsi.mcptt\"><oxe:group-media><mcpttgi:mcptt-speech "
+         "xmlns:mcpttgi=\"urn:3gpp:ns:mcpttGroupInfo:1.0\"/></oxe:group-media></oxe:service></oxe:supported-services>";
+}
+
+//------------------------------------------------------------------------------
+// Helper: a group document (TS 24.481 clause 7.2) of the group with its members: its <display-name> (clause 7.2.2 b),
+// "may include"; TS 37.579-1 table 5.5.7.4-1 expects one, "any value"), the user part of the group ID; the member
+// list; the ruleset; and the <supported-services> (clause 7.2.2 e), "shall include").
 std::string Client::group_document_xml(const std::string &group, const std::vector<std::string> &members) {
+  auto name = group.substr(group.find(':') == std::string::npos ? 0 : group.find(':') + 1);
+  name = name.substr(0, name.find('@'));
   std::string out =
       "<?xml version=\"1.0\" encoding=\"UTF-8\"?><group xmlns=\"urn:oma:xml:poc:list-service\"><list-service uri=\"" +
-      xml_escape(group) + "\"><list>";
+      xml_escape(group) + "\"><display-name>" + xml_escape(name.empty() ? group : name) + "</display-name><list>";
   for (const auto &member : members) out += "<entry uri=\"" + xml_escape(member) + "\"/>";
   // TS 24.481 clause 7.2.12.1: the members may read the member list.
   return out +
@@ -55,7 +83,8 @@ std::string Client::group_document_xml(const std::string &group, const std::vect
          "id=\"members\"><cp:conditions>"
          "<is-list-member/></cp:conditions><cp:actions><on-network-allow-getting-member-list "
          "xmlns=\"urn:3gpp:ns:mcpttGroupInfo:1.0\">true</on-network-allow-getting-member-list></cp:actions></cp:rule>"
-         "</cp:ruleset></list-service></group>";
+         "</cp:ruleset>" +
+         mcptt_supported_services() + "</list-service></group>";
 }
 
 //------------------------------------------------------------------------------
@@ -143,7 +172,9 @@ std::string Client::temporary_group_request_xml(const std::string &group_id, con
       flag +
       "</mcpttgi:protect-floor-control-signalling>"
       "<mcpttgi:on-network-temporary><mcpttgi:constituent-MCPTT-group-IDs>" +
-      ids + "</mcpttgi:constituent-MCPTT-group-IDs></mcpttgi:on-network-temporary>";
+      ids + "</mcpttgi:constituent-MCPTT-group-IDs></mcpttgi:on-network-temporary>" +
+      // TS 24.481 clause 7.2.2 e): the temporary group's document is an MCPTT group document too.
+      mcptt_supported_services();
   // The group's type, in the project's configuration extension of the document.
   if (chat)
     group += "<configuration xmlns=\"urn:openmcx:ns:groupConfiguration:1.0\">{\"type\":\"chat\"}</configuration>";
@@ -281,10 +312,11 @@ void Client::group_management_command(const std::string &cmd) {
   in >> verb;
   std::vector<std::string> args;
   for (std::string word; in >> word;) args.push_back(word);
-  const auto own_tree = groups_xcap() + "/users/" + xcap_segment(user()) + "/";
+  // TS 24.481 clauses 6.3.2.2.1, 6.3.14.2 and 6.3.15.2: the users tree of the group creation XUI.
+  const auto creation_tree = groups_xcap() + "/users/" + xcap_segment(group_creation_xui()) + "/";
   if (verb == "group-create") { // TS 24.481 clause 6.3.2.2.2
     if (args.size() < 2) throw std::runtime_error("group-create <document> <group ID> <member>...");
-    xcap_request("PUT", own_tree + xcap_segment(args[0]), "application/vnd.oma.poc.groups+xml",
+    xcap_request("PUT", creation_tree + xcap_segment(args[0]), "application/vnd.oma.poc.groups+xml",
                  group_document_xml(args[1], {args.begin() + 2, args.end()}));
   } else if (verb == "temporary-create") { // TS 24.481 clause 6.3.14.2
     // temporary-create <document> <temporary group ID> <group>,<group>... [chat] [protected]
@@ -293,14 +325,14 @@ void Client::group_management_command(const std::string &cmd) {
           "temporary-create <document> <temporary group ID> <group>,<group>... [chat] [protected]");
     const bool chat = std::find(args.begin() + 3, args.end(), "chat") != args.end();
     const bool protect = std::find(args.begin() + 3, args.end(), "protected") != args.end();
-    xcap_request("POST", own_tree + xcap_segment(args[0]), "application/vnd.3gpp.GMOP+xml",
+    xcap_request("POST", creation_tree + xcap_segment(args[0]), "application/vnd.3gpp.GMOP+xml",
                  temporary_group_request_xml(args[1], args[2], chat, protect));
   } else if (verb == "temporary-delete") { // TS 24.481 clause 6.3.15.2
     if (args.size() != 1) throw std::runtime_error("temporary-delete <document>");
-    xcap_request("DELETE", own_tree + xcap_segment(args[0]));
+    xcap_request("DELETE", creation_tree + xcap_segment(args[0]));
   } else if (verb == "group-delete") { // TS 24.481 clause 6.3.5.2.2
     if (args.size() != 1) throw std::runtime_error("group-delete <document>");
-    xcap_request("DELETE", own_tree + xcap_segment(args[0]));
+    xcap_request("DELETE", creation_tree + xcap_segment(args[0]));
   } else if (verb == "group-member") { // TS 24.481 clauses 6.3.6.2.2 and 6.3.7.2.2
     if (args.size() != 3 || (args[0] != "add" && args[0] != "remove"))
       throw std::runtime_error("group-member add|remove <group ID> <member>");

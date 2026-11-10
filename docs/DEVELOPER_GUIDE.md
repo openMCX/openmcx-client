@@ -643,6 +643,12 @@ Points to know:
   subscriptions are sent without XML protection (`document_subscription`). The environment variable
   `MCX_CSK_KEYLOGFILE` (lab use, like `SSLKEYLOGFILE`) appends each CSK the client adopts (`adopt_csk`) to a file so
   that a capture of its protected signalling can be decrypted.
+- Groups are created, formed and torn down in the users tree of `gms.group_creation_xui` (TS 24.481 clauses
+  6.3.2.2.1 and 6.3.14.2: "a group creation XUI configuration parameter"), which activation takes from the
+  `<group-creation-XUI>` of the UE initial configuration. TS 24.484 clause 7.2.2.7 item 6 also calls that element the
+  GMS XCAP root URI; an http or https value, or none, gives the user's own MCPTT ID (`group_creation_xui`). The group
+  documents carry `<supported-services>` with the MCPTT `<service>` (TS 24.481 clause 7.2.2 e), "shall include") and
+  a `<display-name>`.
 - The group document and group key subscriptions go to `gms.subscription_psi`, the GMS-URI (TS 24.481 clause
   6.3.13.2.1 step b); activation takes it from the `<GMS-URI>` of the package's UE initial configuration. Without it
   they are refused locally, never sent to another PSI.

@@ -211,6 +211,12 @@ nlohmann::json activate(nlohmann::json cfg, const std::string &link, const std::
   // is the GMS subscription proxy PSI of the group document and group key subscriptions.
   if (boot.contains("ue_initial_configuration"))
     cfg["gms"]["subscription_psi"] = parse_initial_gms_uri(boot.at("ue_initial_configuration").get<std::string>());
+  // TS 24.484 clause 7.2.2.1 item 5 (TS 24.483 clause 8.2.9A): the <group-creation-XUI>, the users tree of group
+  // creation (Client::group_creation_xui).
+  if (boot.contains("ue_initial_configuration")) {
+    const auto xui = parse_initial_group_creation_xui(boot.at("ue_initial_configuration").get<std::string>());
+    if (!xui.empty()) cfg["gms"]["group_creation_xui"] = xui;
+  }
   // TS 24.484 clause 7.2.2.1 item 3 c), g) (TS 24.482 annex A.2.1.2): the home HTTP proxy and its TLS tunnel
   // authentication; an empty <http-proxy> names none (direct requests). Mutual authentication is refused at activation.
   if (boot.contains("ue_initial_configuration")) {
