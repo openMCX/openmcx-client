@@ -128,13 +128,6 @@ class Lab:
             s = self.wait(f"{c} ready", lambda c=c: (s := self.status(c))["phase"] == "ready" and s, timeout=60)
             self.check(f"{c} registered", s["registered"])
             for service in ("mcptt", "mcdata"):
-                if service == "mcdata" and self.protected:
-                    # The --protected fixture requires MCData signalling protection and XML confidentiality; the app has
-                    # neither (docs/LIMITATIONS.md of the server repository), so it does not start MCData and says why.
-                    refused = s[service].get("refused") or ""
-                    self.check(f"{c} mcdata not started, with the reason", not s[service]["authorised"]
-                               and "requires signalling protection" in refused, refused=refused)
-                    continue
                 self.check(f"{c} {service} authorised", s[service]["authorised"])
                 self.check(f"{c} {service} affiliated to {GROUP}", s[service]["affiliations"].get(GROUP) == "affiliated")
 

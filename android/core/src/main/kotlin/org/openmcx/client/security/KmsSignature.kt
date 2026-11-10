@@ -97,7 +97,7 @@ object KmsSignature {
     }
 
     /** Whether a DOCTYPE comes before the root element: after the XML declaration, white space, comments and PIs. */
-    private fun prologHasDoctype(xml: String): Boolean {
+    internal fun prologHasDoctype(xml: String): Boolean {
         var at = if (xml.startsWith("﻿")) 1 else 0
         while (at < xml.length) {
             when {
@@ -134,7 +134,7 @@ object KmsSignature {
      * The base64 octets of an element's text (RFC 4648 section 4), white space ignored, decoded as OpenSSL's
      * EVP_DecodeBlock does for the shared core ('=' read as zero bits, the padding octets then dropped).
      */
-    private fun unbase64(text: String): ByteArray {
+    internal fun unbase64(text: String): ByteArray {
         val clean = text.filter { it != ' ' && it != '\n' && it != '\r' && it != '\t' }
         need(clean.isNotEmpty() && clean.length % 4 == 0, "invalid base64")
         val out = ByteArray(clean.length / 4 * 3)

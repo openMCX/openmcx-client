@@ -17,6 +17,7 @@ import kotlinx.serialization.json.longOrNull
 import org.openmcx.client.idms.IdmsEndpoints
 import org.openmcx.client.mcdata.FdConfig
 import org.openmcx.client.security.Mikey
+import org.openmcx.client.security.WireProfile
 
 class ConfigError(message: String) : Exception(message)
 
@@ -122,6 +123,27 @@ data class ClientConfig(
         val fd: FdConfig = FdConfig(),
         /** The MCData functional aliases this user may activate (TS 24.282 §22.2.1), as [Mcptt.functionalAliases]. */
         val functionalAliases: List<String> = emptyList(),
+        /**
+         * TS 24.282 §6.6.3 with TS 33.180 §8.5: the DATA PAYLOADs of one-to-one SDS and files are protected end to end
+         * with a PCK, those of group SDS with the group's GMK (`protect_payload`, off by default, as the Linux client).
+         */
+        val protectPayload: Boolean = false,
+        /**
+         * TS 24.282 §6.6.3 with TS 33.180 §9.5: the MCData signalling with the MCData server is protected under the
+         * CSK uploaded at service authorisation (`protect_signalling`, off by default, as the Linux client).
+         */
+        val protectSignalling: Boolean = false,
+        /**
+         * TS 33.180 §8.5.5 with TS 24.282 §6.6.3.2: DATA PAYLOADs signed with this user's ECCSI key as its MCData ID
+         * (`authenticate_payload`, off by default, as the Linux client).
+         */
+        val authenticatePayload: Boolean = false,
+        /**
+         * TS 24.282 §9.2.2.2.1 step 2c uses "an existing unexpired context" with the peer, and no clause sets how long a
+         * PCK context lasts: the local lifetime `pck_lifetime_s` (seconds; the Linux client's option and default), or
+         * the PCK's own Expiry time when it is earlier (TS 33.180 annex E.6.10).
+         */
+        val pckLifetimeS: Long = DEFAULT_PCK_LIFETIME_S,
     )
 
     data class Media(val portRange: IntRange, val amrWbMode: Int)
@@ -142,6 +164,8 @@ data class ClientConfig(
      */
     data class Security(
         val kmsUri: String, val messageType: Int, val algorithm: Int, val keyParametersIei: Int, val encryptedPayloadIei: Int,
+        /** TS 33.180 table 8.5.4.2-2: the profile's code of DP_AES_256_GCM, if it names one ([WireProfile.algorithm256]). */
+        val algorithm256: Int?,
         val protectMedia: Boolean, val protectFloor: Boolean,
         /** The GMS's identity (`…/org.openmobilealliance.groups`), which signs the GMKs; its XCAP root precedes that. */
         val gmsUri: String? = null,
@@ -166,6 +190,8 @@ data class ClientConfig(
          */
         val kmsViaProxy: Boolean = false,
     ) {
+        /** The agreed wire profile of key parameters and Protected Payload messages (TS 33.180 annex E.6, clause 8.5.4). */
+        val wireProfile: WireProfile get() = WireProfile(messageType, algorithm, keyParametersIei, encryptedPayloadIei, algorithm256)
         val xcapRoot: String? get() = gmsUri?.takeIf { it.endsWith("org.openmobilealliance.groups") }?.removeSuffix("org.openmobilealliance.groups")
     }
 
@@ -174,6 +200,8 @@ data class ClientConfig(
         const val DEFAULT_TOKEN_REFRESH_BEFORE_S = 600L
         const val DEFAULT_FIRST_RETRY_MS = 2_000L
         const val DEFAULT_LAST_RETRY_MS = 60_000L
+        /** The Linux client's default of `mcdata.pck_lifetime_s` (no spec value: see [Mcdata.pckLifetimeS]). */
+        const val DEFAULT_PCK_LIFETIME_S = 3600L
 
         fun parse(text: String): ClientConfig {
             val root = Json.parseToJsonElement(text).jsonObject
@@ -205,7 +233,9 @@ data class ClientConfig(
                 },
                 mcdata = (root["mcdata"] as? JsonObject)?.let {
                     Mcdata(it.str("user_id"), it.str("psi"), it.strings("groups"), it.int("max_payload_size_sds_cplane_bytes", 1000),
-                        it.int("tdu1_seconds", 10), FdConfig.parse(it["fd"] as? JsonObject), it.strings("functional_aliases"))
+                        it.int("tdu1_seconds", 10), FdConfig.parse(it["fd"] as? JsonObject), it.strings("functional_aliases"),
+                        it.flag("protect_payload"), it.flag("protect_signalling"), it.flag("authenticate_payload"),
+                        it.count("pck_lifetime_s", DEFAULT_PCK_LIFETIME_S, 1))
                 },
                 media = Media(ports[0]..ports[1], media.int("amr_wb_mode", 2)),
                 mcvideo = (root["mcvideo"] as? JsonObject)?.let {
@@ -218,6 +248,10 @@ data class ClientConfig(
                     val profile = it.obj("key_parameter_profile")
                     Security(it.str("kms_uri"), profile.int("message_type", 10), profile.int("algorithm", 1),
                         profile.int("key_parameters_iei", 0x79), profile.int("encrypted_payload_iei", 0x78),
+                        (profile["algorithm_256"] as? JsonPrimitive)?.let { code ->
+                            code.intOrNull?.takeIf { value -> !code.isString && value in 0..255 }
+                                ?: throw ConfigError("key_parameter_profile.algorithm_256 must be an octet")
+                        },
                         it.bool("protect_media", false), it.bool("protect_floor", false), it.optStr("gms_uri"),
                         (it["mikey_clock_skew_s"] as? JsonPrimitive)?.let { skew ->
                             skew.longOrNull?.takeIf { value -> !skew.isString && value in 0..0xffffffffL }
@@ -264,6 +298,10 @@ data class ClientConfig(
                 value.longOrNull?.takeIf { !value.isString && it >= min } ?: throw ConfigError("$key must be a number of at least $min")
             } ?: default
         private fun JsonObject.bool(key: String, default: Boolean) = (this[key] as? JsonPrimitive)?.booleanOrNull ?: default
+        /** A boolean option, false when absent; anything but a boolean is refused (a protection option is not guessed). */
+        private fun JsonObject.flag(key: String): Boolean = (this[key] as? JsonPrimitive)?.let { v ->
+            v.booleanOrNull?.takeIf { !v.isString } ?: throw ConfigError("$key must be a boolean")
+        } ?: false
         private fun JsonObject.strings(key: String) = (this[key] as? JsonArray)?.map { it.jsonPrimitive.content } ?: emptyList()
     }
 }

@@ -135,6 +135,9 @@ class McpttService(
     /** Each group's GMKs (TS 33.180 5.7), their CSB-IDs the GMK-IDs; from the GKTP subscriptions. */
     private val groupKeys = GroupKeys()
     val groupKeyIds: Map<String, Long> get() = groupKeys.ids
+
+    // TS 33.180 clause 8.4: the GMK of a group also protects MCData payloads for its MC group IDs (as the Linux client).
+    init { client.mcpttGroupKeys = groupKeys }
     private val keySubscriptions = GroupKeySubscriptions()
     private var keyRefresh: Job? = null
 

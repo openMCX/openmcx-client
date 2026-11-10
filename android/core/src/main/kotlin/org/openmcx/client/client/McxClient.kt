@@ -39,7 +39,6 @@ import org.openmcx.client.idms.IdmsRefused
 import org.openmcx.client.security.UserTransportKeys
 import org.openmcx.client.security.KeyClient
 import org.openmcx.client.security.KeyMessage
-import org.openmcx.client.security.WireProfile
 import org.openmcx.client.idms.LoopbackRedirect
 import org.openmcx.client.idms.Tokens
 import org.openmcx.client.mcdata.McdataInfo
@@ -202,12 +201,14 @@ class McxClient(
     val ua = UserAgent(scope, UaIdentity(config.sip.publicUserId, config.sip.privateUserId, config.sip.password,
         config.domain, config.clientId))
     private val idms = IdmsClient(idmsHttp, config.idms.issuer, config.idms.clientId, config.idms.redirectUri,
-        // TS 33.180 5.3: a protected client also asks for its key management services (MCPTT and MCVideo here).
+        // TS 33.180 5.3 and table B.4.2.2-1: a client with key management also asks for the key management service of
+        // each configured service (as the Linux client): MCData keys as its MCData ID (TS 24.282 clause 6.6).
         scope = IdmsClient.scope(
             listOfNotNull("ptt".takeIf { config.mcptt != null }, "data".takeIf { config.mcdata != null },
                 "video".takeIf { config.mcvideo != null }),
             if (config.security == null) emptyList()
-            else listOfNotNull("ptt".takeIf { config.mcptt != null }, "video".takeIf { config.mcvideo != null })),
+            else listOfNotNull("ptt".takeIf { config.mcptt != null }, "data".takeIf { config.mcdata != null },
+                "video".takeIf { config.mcvideo != null })),
         clock = clock, endpoints = config.idms.endpoints)
 
     /**
@@ -226,16 +227,47 @@ class McxClient(
 
     /**
      * Whether [service] has key management: MCVideo whenever the configuration names a KMS (as before); MCPTT when it
-     * also protects media or floor control (TS 24.379 clause 7.2.2 step 3: the CSK with the service authorisation, as
-     * the Linux client; this client has no XML signalling protection, the clause's other condition).
+     * protects media or floor control or its service configuration asks for XML protection (TS 24.379 clause 7.2.2
+     * step 3: the CSK with the service authorisation "if either confidentiality protection is enabled ... or integrity
+     * protection is enabled", as the Linux client); MCData when it protects payloads, signalling or authenticates
+     * payloads, or its service configuration asks for XML protection (TS 24.282 clause 6.6: the MCData client signs and
+     * receives PCKs as its MCData ID).
      */
     private fun keyed(service: McService): Boolean {
         val security = config.security ?: return false
         return when (service) {
             McService.MCVIDEO -> config.mcvideo != null
-            McService.MCPTT -> config.mcptt != null && (security.protectMedia || security.protectFloor)
-            McService.MCDATA -> false
+            McService.MCPTT -> config.mcptt != null && (security.protectMedia || security.protectFloor || protection.required(service))
+            McService.MCDATA -> config.mcdata?.let { it.protectPayload || it.protectSignalling || it.authenticatePayload } == true ||
+                (config.mcdata != null && protection.required(service))
         }
+    }
+
+    /**
+     * Whether [service] uploads a CSK with its service authorisation: MCPTT and MCVideo whenever keyed (as the Linux
+     * client); MCData, TS 24.282 clause 7.2.2 step 3, "if either confidentiality protection is enabled as specified in
+     * clause 6.5.2.3.1 or integrity protection is enabled as specified in clause 6.5.3.3.1", and for signalling
+     * protection (clause 6.6), which uses it as well.
+     */
+    private fun uploadsCsk(service: McService): Boolean = when (service) {
+        McService.MCDATA -> config.mcdata?.protectSignalling == true || protection.required(service)
+        else -> true
+    }
+
+    /**
+     * Application signalling security (TS 33.180 clause 9.3): XML confidentiality and integrity under each service's
+     * CSK, and MCData signalling under the MCData CSK, on every message the user agent sends and receives.
+     */
+    val protection = SignallingProtection(config, { serviceProtection[it] }, { csks[it] },
+        { csks[it] != null && cskUploads[it] == null }, clock)
+
+    /** The GMKs of the MCPTT groups (the MCPTT service's, TS 33.180 clause 5.7), which also protect MCData payloads. */
+    @Volatile var mcpttGroupKeys: org.openmcx.client.security.GroupKeys? = null
+
+    /** MCData payload protection (TS 24.282 clause 6.6.3, TS 33.180 clause 8.5), when MCData is configured. */
+    val mcdataProtection: org.openmcx.client.mcdata.McdataProtection? = config.mcdata?.let {
+        org.openmcx.client.mcdata.McdataProtection(it, config.security?.wireProfile, { keyClients[McService.MCDATA] },
+            { mcpttGroupKeys }, clock)
     }
 
     private suspend fun provisionKeys(service: McService, token: String) {
@@ -243,13 +275,12 @@ class McxClient(
         val userId = ownId(service)
         val account = config.mcptt?.userId ?: userId
         val keys = keyClients[service] ?: KeyClient(kmsHttp, security.kmsUri, userId, account,
-            WireProfile(security.messageType, security.algorithm, security.keyParametersIei,
-                security.encryptedPayloadIei),
+            security.wireProfile,
             security.mikeyClockSkewS, { event(it) }, security.kmsId, { transportKeys(userId) },
             accountTransportKeys = { transportKeys(account) }, viaProxy = security.kmsViaProxy)
             .also { keyClients[service] = it }
         keys.provision(token)
-        if (csks[service] == null) {
+        if (csks[service] == null && uploadsCsk(service)) {
             val (csk, upload) = keys.makeCsk(psi(service))
             csks[service] = csk; cskUploads[service] = upload
             event("${service.name} keys: KMS ${security.kmsUri}, CSK %08x".format(csk.csbId) +
@@ -1118,12 +1149,6 @@ class McxClient(
     }
 
     /**
-     * TS 24.379 §6.6.2.3.1 and §6.6.3.3.1 (TS 24.281 the same, TS 24.282 §6.5.2.3.1 and §6.5.3.3.1): this client has no
-     * XML signalling protection, so a service whose service configuration document enables it (or that could not be
-     * read, so that whether it does is not known) is not started: its service authorisation would go out unprotected.
-     * Null when the service may start.
-     */
-    /**
      * TS 33.180 clause 5.3.2: through the home HTTP proxy "the TrK shall be used" (`kms_via_proxy`): a keyed service whose
      * MC service user ID has no TrK cannot get its keys, so it is not started (the others are), with the reason.
      */
@@ -1134,15 +1159,23 @@ class McxClient(
             "transport key this app does not hold for ${ownId(service)}"
     }
 
-    /** Why [service] is not started (protection the app lacks, or no TrK for a KMS through the proxy); null if it may. */
-    private fun notStarted(service: McService): String? = protectionRefusal(service) ?: transportKeyRefusal(service)
+    /**
+     * Why [service] is not started (its service configuration unknown, protection without key management, or no TrK
+     * for a KMS through the proxy); null if it may.
+     */
+    private fun notStarted(service: McService): String? = configurationRefusal(service) ?: transportKeyRefusal(service)
 
-    private fun protectionRefusal(service: McService): String? {
-        val protection = serviceProtection[service.name.lowercase()]
-            ?: return "${service.name} not started: its service configuration could not be read"
-        return if (protection.first || protection.second)
-            "${service.name} not started: the system requires signalling protection, which this app does not support"
-        else null
+    /**
+     * TS 24.379 §6.6.2.3.1 and §6.6.3.3.1 (TS 24.281 the same, TS 24.282 §6.5.2.3.1 and §6.5.3.3.1): the service
+     * configuration document decides the signalling protection; one that could not be read leaves it unknown, and no
+     * XML body of the service may go out then ([SignallingProtection]): the service is not started. One that asks for
+     * protection needs the service's CSK, so a client configured without a key management server does not start it.
+     */
+    private fun configurationRefusal(service: McService): String? {
+        serviceProtection[service.name.lowercase()] ?: return "${service.name} not started: its service configuration could not be read"
+        if (config.security == null && protection.required(service))
+            return "${service.name} not started: the system requires signalling protection, and no key management server is configured"
+        return null
     }
 
     /** The service authorisation; false (and the reason in the service's state) when the service is not started. */
@@ -1192,10 +1225,9 @@ class McxClient(
 
     /**
      * A request of the configuration subscription (its SUBSCRIBE, a NOTIFY or answer in its dialog) while the MCPTT
-     * service configuration is not known yet: it passes the protection gate ([protectionRefusal]), which would otherwise
-     * stop the subscription that brings that document. TS 24.484 §6.3.13.2.2 d) asks for identity hiding "if identity
-     * hiding is required", which the client learns from that document; once it is known and requires protection, the
-     * gate refuses as for any MCPTT request (as the Linux client, which sends this SUBSCRIBE before it knows).
+     * service configuration is not known yet: it passes the start gate ([configurationRefusal]), which would otherwise
+     * stop the subscription that brings that document. The subscription is sent without XML protection
+     * ([SignallingProtection]: identity hiding, TS 24.484 §6.3.13.2.2 d), is not applied, as the Linux client).
      */
     private fun configurationPending(request: SipRequest): Boolean =
         serviceProtection["mcptt"] == null && configSubscription?.request?.callId == request.callId
@@ -1210,8 +1242,8 @@ class McxClient(
      * The initial SUBSCRIBE to [uri] for [entries] (TS 24.484 §6.3.13.2.2, TS 24.481 §6.3.13.2.1, both "according
      * to ... IETF RFC 5875"): items b) 1) / a) the resource list, c) the mcptt-info body with the access token, e) the
      * MCPTT ICSI in P-Preferred-Service, f) the MCPTT ICSI in the Contact. Event xcap-diff, Expires of RFC 5875 §4.5.
-     * Identity hiding (item d)) needs XML protection, which this client does not have: a service whose service
-     * configuration asks for it is not started ([protectionRefusal]).
+     * Identity hiding (item d), "if identity hiding is required") is not applied: the subscription is sent without XML
+     * protection, as the Linux client ([SignallingProtection]).
      */
     private fun documentSubscription(uri: String, entries: List<String>, token: String): DocumentSubscription {
         val request = ua.newRequest("SUBSCRIBE", uri, NameAddr(uri))
@@ -1604,6 +1636,8 @@ class McxClient(
 
     init {
         ua.onRequest = { tx -> dispatch(tx) }
+        ua.outgoingBodies = protection::outgoing
+        ua.incomingBodies = protection::incoming
         // A service that is not started (notStarted) sends nothing: no operation of it goes out unprotected.
         // Its requests inside a dialog need no check, as neither side can create one (outgoing: here; incoming:
         // dispatch).

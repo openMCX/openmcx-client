@@ -96,6 +96,10 @@ sealed class SipMessage(val headers: Headers, val body: ByteArray) {
     val topVia: Via get() = Via.parse(headers.values("Via").firstOrNull() ?: throw SipParseError("no Via"))
     val contentType: String? get() = headers["Content-Type"]
 
+    /** Set on a received message whose protected bodies failed the incoming body filter ([UserAgent.incomingBodies]):
+     *  "139 ..." integrity check failed, "140 ..." not decryptable (TS 24.379 clauses 6.6.3.4.2 and 6.6.2.4.2). */
+    @Volatile var protectionError: String? = null
+
     abstract fun startLine(): String
 
     fun encode(): ByteArray {
@@ -153,6 +157,6 @@ fun reasonPhrase(status: Int): String = when (status) {
     415 -> "Unsupported Media Type"; 420 -> "Bad Extension"; 480 -> "Temporarily Unavailable"
     481 -> "Call/Transaction Does Not Exist"; 486 -> "Busy Here"; 487 -> "Request Terminated"
     488 -> "Not Acceptable Here"; 491 -> "Request Pending"; 500 -> "Server Internal Error"
-    503 -> "Service Unavailable"; 603 -> "Decline"
+    503 -> "Service Unavailable"; 603 -> "Decline"; 606 -> "Not Acceptable"
     else -> "Unknown"
 }

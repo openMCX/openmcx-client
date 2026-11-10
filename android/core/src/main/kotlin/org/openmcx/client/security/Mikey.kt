@@ -59,7 +59,13 @@ class KeyMessage(val key: ByteArray, val random: ByteArray, val csbId: Long, val
  * The outer values TS 33.180 E.6 leaves unassigned (the Key Parameters IEI, and the Protected Payload
  * message type, algorithm and IEI), agreed per deployment; the lab's are in its security configuration.
  */
-data class WireProfile(val messageType: Int, val algorithm: Int, val keyParametersIei: Int, val encryptedPayloadIei: Int)
+data class WireProfile(val messageType: Int, val algorithm: Int, val keyParametersIei: Int, val encryptedPayloadIei: Int,
+                       /**
+                        * TS 33.180 table 8.5.4.2-2: the agreed profile's code of DP_AES_256_GCM, if it names one
+                        * (`algorithm_256`; no default: TS 33.180 assigns no code). Accepted only for MCData signalling
+                        * under the CSK (annex F.1.5, last paragraph); never sent, as the Linux client.
+                        */
+                       val algorithm256: Int? = null)
 
 /** MIKEY-SAKKE (RFC 6509) I_MESSAGEs as TS 33.180 Annex E profiles them, byte for byte as OpenMCX writes them. */
 object Mikey {
@@ -292,11 +298,16 @@ object Mikey {
         return KeyProperties(type, status, activation, expiry, text, groups)
     }
 
-    /** Annex F.1.5: the DPCK, HMAC-SHA-256(DPPK, 0x53 ‖ DPPK-ID ‖ 0x0004), its last 16 octets. */
-    fun payloadKey(dppk: ByteArray, dppkId: Long): ByteArray {
+    /**
+     * Annex F.1.5: the DPCK, HMAC-SHA-256(DPPK, 0x53 ‖ DPPK-ID ‖ 0x0004): "Where the DPPK is 128-bits, the DPCK shall be
+     * 128-bits and hence the 128 least significant bits of the 256 bits of the KDF output shall be used"; with [full],
+     * for the CSK protecting MCData signalling with DP_AES_256_GCM, "the entire output of the KDF" (last paragraph).
+     */
+    fun payloadKey(dppk: ByteArray, dppkId: Long, full: Boolean = false): ByteArray {
         val mac = Mac.getInstance("HmacSHA256").apply { init(SecretKeySpec(dppk, "HmacSHA256")) }
         val input = ByteArrayOutputStream().apply { write(0x53); int(dppkId, 4); int(4, 2) }.toByteArray()
-        return mac.doFinal(input).copyOfRange(16, 32)
+        val output = mac.doFinal(input)
+        return if (full) output else output.copyOfRange(16, 32)
     }
 
     /** TS 33.180 8.5.4.1: a Protected Payload message, AES-128-GCM under the DPCK of [dppk]. */
@@ -317,22 +328,182 @@ object Mikey {
 
     class Payload(val type: Int, val unixSeconds: Long, val payloadId: Long, val sequence: Int, val dppkId: Long, val plain: ByteArray)
 
-    fun openPayload(data: ByteArray, dppk: ByteArray, profile: WireProfile): Payload {
+    /**
+     * TS 33.180 clauses 8.5.4.1 and 8.5.4.2: decrypts and authenticates a Protected Payload message under the DPCK of
+     * its DPPK-ID. [cskSignalling]: the message protects MCData signalling under the CSK (annex F.1.5, last paragraph),
+     * the only use in which DP_AES_256_GCM (the profile's [WireProfile.algorithm256]) is accepted; any other message
+     * names DP_AES_128_GCM. Both use the 16-octet IV field of table 8.5.4.1-1 (as the shared core).
+     */
+    fun openPayload(data: ByteArray, dppk: ByteArray, profile: WireProfile, cskSignalling: Boolean = false): Payload {
+        check(profile.algorithm == 1, "only DP_AES_128_GCM is supported as the profile's algorithm 1")
         val r = Reader(data)
         val type = r.number(1).toInt(); val time = r.number(5); val id = r.number(4); val seq = r.number(1).toInt()
-        check(r.number(1) == profile.algorithm.toLong(), "unsupported payload algorithm")
+        val algorithm = r.number(1)
+        var aes256 = false
+        if (algorithm != profile.algorithm.toLong()) {
+            val code = profile.algorithm256
+            check(cskSignalling && code != null && algorithm == code.toLong() && code != profile.algorithm, "unsupported payload algorithm")
+            aes256 = true
+        }
         val iv = r.take(16); val dppkId = r.number(4)
+        // Annex F.1.5 and annex G: DP_AES_256_GCM has a key only for the CSK (purpose tag 2).
+        if (aes256) check(dppkId ushr 28 == 2L, "DP_AES_256_GCM is for MCData signalling under the CSK only")
         val associated = data.copyOfRange(0, r.position)
         check(r.number(1) == profile.encryptedPayloadIei.toLong(), "unexpected protected payload IEI")
         val cipher = r.take(r.number(2).toInt())
         check(r.position == data.size && cipher.size >= 16, "invalid protected payload")
         val plain = try {
             Cipher.getInstance("AES/GCM/NoPadding").apply {
-                init(Cipher.DECRYPT_MODE, SecretKeySpec(payloadKey(dppk, dppkId), "AES"), GCMParameterSpec(128, iv))
+                init(Cipher.DECRYPT_MODE, SecretKeySpec(payloadKey(dppk, dppkId, aes256), "AES"), GCMParameterSpec(128, iv))
                 updateAAD(associated)
             }.doFinal(cipher)
         } catch (e: javax.crypto.AEADBadTagException) { throw KeyError("protected payload authentication failed") }
         return Payload(type, time, id, seq, dppkId, plain)
+    }
+
+    /** TS 33.180 clause 8.5.4.1: the DPPK-ID, readable before decryption so that the receiver can select the key. */
+    fun payloadKeyId(data: ByteArray): Long {
+        val r = Reader(data)
+        r.take(1 + 5 + 4 + 1 + 1 + 16)
+        return r.number(4)
+    }
+
+    /**
+     * TS 33.180 table 8.5.4.1-1 NOTE 2: data longer than one Protected Payload message holds (65535 octets) as a series
+     * of messages with one random Payload ID and consecutive Payload sequence numbers; at most 256 messages. The series
+     * starts with the length of the data (8 octets), so that a series missing its last messages is refused (the format
+     * has no last-message indication), as the shared core writes it.
+     */
+    fun sealSeries(plain: ByteArray, type: Int, dppk: ByteArray, dppkId: Long, profile: WireProfile, chunk: Int = 60000,
+                   unixSeconds: Long = System.currentTimeMillis() / 1000): ByteArray {
+        check(chunk in 9..(65535 - 16) && plain.size.toLong() + 8 <= chunk.toLong() * 256, "data too large for 256 protected payloads")
+        val id = random.nextInt().toLong() and 0xffffffffL
+        val framed = ByteArrayOutputStream().apply { int(plain.size.toLong(), 8); bytes(plain) }.toByteArray()
+        val out = ByteArrayOutputStream()
+        var offset = 0
+        var sequence = 0
+        do {
+            val length = minOf(chunk, framed.size - offset)
+            out.bytes(sealPayload(type, unixSeconds, id, sequence++, dppk, dppkId, framed.copyOfRange(offset, offset + length), profile))
+            offset += length
+        } while (offset < framed.size)
+        java.util.Arrays.fill(framed, 0)
+        return out.toByteArray()
+    }
+
+    /**
+     * TS 33.180 table 8.5.4.1-1 NOTE 2: opens a series sealed under one DPPK: every message must carry that DPPK-ID, the
+     * message type, one Payload ID and the next sequence number.
+     */
+    fun openSeries(data: ByteArray, type: Int, dppk: ByteArray, profile: WireProfile): ByteArray {
+        check(data.isNotEmpty(), "empty protected series")
+        val plain = ByteArrayOutputStream()
+        var offset = 0
+        var sequence = 0
+        val dppkId = payloadKeyId(data)
+        var payloadId: Long? = null
+        while (offset < data.size) {
+            check(data.size - offset >= 35, "truncated protected series")
+            val length = 35 + (((data[offset + 33].toInt() and 0xff) shl 8) or (data[offset + 34].toInt() and 0xff))
+            check(length <= data.size - offset, "truncated protected series")
+            val message = data.copyOfRange(offset, offset + length)
+            check(payloadKeyId(message) == dppkId, "protected series uses several keys")
+            val opened = openPayload(message, dppk, profile)
+            check(opened.type == type && opened.sequence == sequence++ && sequence <= 256 &&
+                (payloadId == null || payloadId == opened.payloadId), "protected series out of order")
+            payloadId = opened.payloadId
+            plain.bytes(opened.plain)
+            offset += length
+        }
+        val all = plain.toByteArray()
+        check(all.size >= 8, "protected series without its length")
+        var declared = 0L
+        for (index in 0 until 8) declared = (declared shl 8) or (all[index].toLong() and 0xff)
+        check(declared == (all.size - 8).toLong(), "protected series is incomplete")
+        return all.copyOfRange(8, all.size)
+    }
+
+    // Authenticated Payloads (TS 33.180 clause 8.5.5).
+
+    /**
+     * TS 33.180 clause 8.5.5: the local algorithm number and IEIs of the Authenticated Payload (TS 33.180 assigns none;
+     * the shared core's values).
+     */
+    const val ECCSI_ALGORITHM = 1
+    const val ORIGINAL_PAYLOAD_IEI = 0x71
+    const val SIGNING_DATA_IEI = 0x72
+    const val SIGNING_UID_IEI = 0x73
+    const val SIGNING_KMS_IEI = 0x74
+    const val SIGNATURE_IEI = 0x75
+
+    /** TS 33.180 clause 8.5.5: the original payload of an Authenticated Payload, its message type, signer UID and KMS. */
+    class AuthenticatedPayload(val messageType: Int, val original: ByteArray, val signerUid: String, val signerKms: String)
+
+    /**
+     * TS 33.180 clause 8.5.5 (tables 8.5.5-1 and 8.5.5-2): an Authenticated Payload - the original payload, the
+     * algorithm, the Signing Data (the signer's UID and KMS URI) and an ECCSI signature over everything before the
+     * signature value; the message type octet in front with bit 8 set (clause 8.5.1). The Signing UID is the UID's text
+     * form; the signature is under the identifier of the KMS's UID form ([identifier]), as the shared core.
+     */
+    fun authenticatePayload(kms: KmsPublic, signer: IdentityKeys, nowNtp: Long, type: Int, original: ByteArray): ByteArray {
+        check(original.size <= 65535, "oversized payload to authenticate")
+        check(signer.periodNumber == kms.periodNumber(nowNtp), "identity key period mismatch")
+        val signerUid = uid(signer.uri, kms, nowNtp).toByteArray()
+        val kmsUri = kms.kmsUri.toByteArray()
+        check(signerUid.size <= 255 && kmsUri.size <= 255, "signing data too long")
+        val out = ByteArrayOutputStream()
+        out.write((type or 0x80) and 0xff); out.write(ORIGINAL_PAYLOAD_IEI); out.int(original.size.toLong(), 2); out.bytes(original)
+        out.write(ECCSI_ALGORITHM)
+        val signing = ByteArrayOutputStream()
+        signing.write(SIGNING_UID_IEI); signing.write(signerUid.size); signing.bytes(signerUid)
+        signing.write(SIGNING_KMS_IEI); signing.write(kmsUri.size); signing.bytes(kmsUri)
+        out.write(SIGNING_DATA_IEI); out.int(signing.size().toLong(), 2); out.bytes(signing.toByteArray())
+        // TS 33.180 clause 8.5.5: the type and length of the Signature element are signed; its value is not.
+        out.write(SIGNATURE_IEI); out.int(129, 2)
+        val signed = out.toByteArray()
+        val signature = Eccsi(kms.kpak).sign(identifier(signer.uri, kms, nowNtp), signer.ssk, signer.pvt, signed)
+        check(signature.size == 129, "unexpected ECCSI signature length")
+        return signed + signature
+    }
+
+    /**
+     * TS 33.180 clause 8.5.5: verifies an Authenticated Payload from [sender]; the Signing KMS URI selects the KMS
+     * parameters ([kms] or [lookup]), the Signing UID must be the sender's UID for the current or the previous key
+     * period, and the signature must verify with it.
+     */
+    fun openAuthenticated(kms: KmsPublic, sender: String, message: ByteArray, nowNtp: Long,
+                          lookup: (String) -> KmsPublic? = { null }): AuthenticatedPayload {
+        val r = Reader(message)
+        val type = r.number(1).toInt()
+        check(type and 0x80 != 0, "payload is not authenticated")
+        check(r.number(1) == ORIGINAL_PAYLOAD_IEI.toLong(), "unexpected Original Payload IEI")
+        val original = r.take(r.number(2).toInt())
+        check(r.number(1) == ECCSI_ALGORITHM.toLong(), "unsupported payload signature algorithm")
+        check(r.number(1) == SIGNING_DATA_IEI.toLong(), "unexpected Signing Data IEI")
+        val signing = Reader(r.take(r.number(2).toInt()))
+        check(signing.number(1) == SIGNING_UID_IEI.toLong(), "unexpected Signing UID IEI")
+        val signerUid = String(signing.take(signing.number(1).toInt()))
+        check(signing.number(1) == SIGNING_KMS_IEI.toLong(), "unexpected Signing KMS IEI")
+        val signerKms = String(signing.take(signing.number(1).toInt()))
+        check(signing.position == signing.data.size, "trailing signing data")
+        val parameters = if (signerKms == kms.kmsUri) kms else lookup(signerKms) ?: throw KeyError("payload signed under another KMS")
+        check(r.number(1) == SIGNATURE_IEI.toLong() && r.number(2) == 129L, "unexpected Signature element")
+        val signedLength = r.position
+        val signature = r.take(129)
+        check(r.position == message.size, "trailing authenticated payload data")
+        // After verification the sender's URI must produce the Signing UID (TS 33.180 clause 8.5.5).
+        val time = listOf(nowNtp, if (nowNtp >= parameters.period) nowNtp - parameters.period else nowNtp)
+            .firstOrNull { uid(sender, parameters, it) == signerUid } ?: throw KeyError("Signing UID is not the sender's")
+        check(Eccsi(parameters.kpak).verify(identifier(sender, parameters, time), message.copyOfRange(0, signedLength), signature),
+            "payload signature invalid")
+        return AuthenticatedPayload(type, original, signerUid, signerKms)
+    }
+
+    /** TS 33.180 clause 5.2.2: the CSB-ID of an I_MESSAGE (the key identifier), read without authenticating it. */
+    fun csbIdOf(message: ByteArray): Long {
+        val r = Reader(message)
+        check(r.number(1) == 1L && r.number(1) == 26L && r.number(1) == 5L && (r.number(1) and 0x7f) == 1L, "unsupported MIKEY header")
+        return r.number(4)
     }
 
     private fun sealProperties(key: KeyMessage, p: KeyProperties, profile: WireProfile): ByteArray {

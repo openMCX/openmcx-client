@@ -237,6 +237,8 @@ class DebugControl(private val context: Context) {
             .put("group_keys", JSONObject(mcptt().groupKeyIds))
             .put("signed_kms_exchange", Engine.client?.keysOf(org.openmcx.client.body.McService.MCPTT)?.signedExchange)
             .put("transport_keys", JSONObject(Engine.transportKeySummary.mapValues { JSONArray(it.value.sorted()) }))
+            .put("xml_protection", xmlProtectionJson())
+            .put("mcdata_protection", mcdataProtectionJson())
         "video-keys" -> JSONObject().put("kms", Engine.client?.videoKeys?.kms?.kmsUri).put("csk_id", Engine.client?.videoCsk?.csbId)
             .put("identity", Engine.client?.videoKeys?.identity).put("group_keys", JSONObject(mcvideo().groupKeyIds))
         "video-push" -> videoJson(mcvideo().push(Engine.mcvideoId(args[0])))
@@ -271,6 +273,43 @@ class DebugControl(private val context: Context) {
         "fd-hash" -> fd().record(args[0])?.localPath?.let { FdService.sha256(java.io.File(it)) }
             ?: throw IllegalStateException("no local file for ${args[0]}")
         else -> throw IllegalArgumentException("unknown command: $cmd")
+    }
+
+    /**
+     * The signalling protection of each service (its service configuration: "confidentiality", "integrity", null before
+     * it is read), the CSK of each service, and what the protection did: XML bodies encrypted, decrypted, signed and
+     * verified, received messages refused, messages not sent, MCData signalling sealed and opened.
+     */
+    private fun xmlProtectionJson(): Any {
+        val client = Engine.client ?: return JSONObject.NULL
+        val p = client.protection
+        val services = JSONObject()
+        for (service in org.openmcx.client.body.McService.entries) {
+            val name = service.name.lowercase()
+            val configured = when (service) {
+                org.openmcx.client.body.McService.MCPTT -> client.config.mcptt != null
+                org.openmcx.client.body.McService.MCDATA -> client.config.mcdata != null
+                org.openmcx.client.body.McService.MCVIDEO -> client.config.mcvideo != null
+            }
+            if (!configured) continue
+            val document = client.serviceProtection[name]
+            services.put(name, JSONObject()
+                .put("confidentiality", document?.first ?: JSONObject.NULL).put("integrity", document?.second ?: JSONObject.NULL)
+                .put("csk_id", client.cskOf(service)?.csbId ?: JSONObject.NULL))
+        }
+        return JSONObject().put("services", services).put("encrypted", p.xmlEncrypted.get()).put("decrypted", p.xmlDecrypted.get())
+            .put("signed", p.xmlSigned.get()).put("verified", p.xmlVerified.get()).put("refused", p.xmlRefused.get())
+            .put("not_sent", p.notSent.get()).put("signalling_sealed", p.signallingSealed.get())
+            .put("signalling_opened", p.signallingOpened.get())
+            .put("signalling_protection", p.signallingKey() != null)
+    }
+
+    /** MCData payload protection: enabled, payload authentication, PCK contexts, payloads sealed/opened/signed/verified. */
+    private fun mcdataProtectionJson(): Any {
+        val p = Engine.client?.mcdataProtection ?: return JSONObject.NULL
+        return JSONObject().put("enabled", p.protectsPayload).put("authenticate_payload", p.authenticates)
+            .put("pck_contexts", p.pckContexts).put("sealed", p.sealed.get()).put("opened", p.opened.get())
+            .put("signed", p.signed.get()).put("verified", p.verified.get()).put("failures", p.failures.get())
     }
 
     /** Open a flow to the SIP core with the provisioned TLS identity and send one unauthenticated REGISTER. */
@@ -359,7 +398,7 @@ class DebugControl(private val context: Context) {
         }
         val sent = service.send(words.first(), words.drop(1).joinToString(" "), group, disposition, toAlias = toAlias)
         Engine.sent(sent)
-        return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status)
+        return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("dppk_id", sent.dppkId ?: JSONObject.NULL)
     }
 
     private fun mcvideo(): McvideoService = Engine.mcvideo ?: throw IllegalStateException("MCVideo not provisioned")
@@ -528,11 +567,12 @@ class DebugControl(private val context: Context) {
                     .put("sender", m.sender).put("group", m.group).put("text", m.text)
                     .put("sender_alias", m.senderAlias).put("called_alias", m.calledAlias)
                     .put("disposition", m.disposition?.name).put("displayed", m.displayed).put("notified", m.notified?.name)
+                    .put("protected", m.dppkId != null).put("dppk_id", m.dppkId ?: JSONObject.NULL).put("authenticated", m.authenticated)
             } ?: emptyList<JSONObject>()))
             .put("files", JSONArray(Engine.fd?.records?.value?.map(::fdJson) ?: emptyList<JSONObject>()))
             .put("outbox", JSONArray(Engine.mcdata?.outbox?.value?.map { m ->
                 JSONObject().put("message_id", m.messageId.toString()).put("target", m.target).put("group", m.group)
-                    .put("text", m.text).put("status", m.status)
+                    .put("text", m.text).put("status", m.status).put("dppk_id", m.dppkId ?: JSONObject.NULL)
                     .put("notifications", JSONObject(m.notifications.mapValues { it.value.name }))
             } ?: emptyList<JSONObject>()))
     }

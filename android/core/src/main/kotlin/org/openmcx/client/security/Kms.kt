@@ -281,7 +281,7 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
                  *  user; [transportKeys] are this identity's, for its key provisioning. */
                 private val accountTransportKeys: () -> UserTransportKeys? = transportKeys,
                 /** The KMS is reached through the home HTTP proxy (`kms_via_proxy`): a TrK is then required. */
-                private val viaProxy: Boolean = false) {
+                private val viaProxy: Boolean = false) : org.openmcx.client.mcdata.PayloadKeys {
     private val kmsUri = kmsUri.trimEnd('/')
     /** The KMS URI its documents carry (clause 3.1, `kms_id`), by default the address. */
     private val kmsId = kmsId ?: this.kmsUri
@@ -361,14 +361,14 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
     }
 
     /** A new PCK for [recipient] (TS 33.180 7.4), and its I_MESSAGE in base64 for a=key-mgmt. */
-    suspend fun makePck(recipient: String): Pair<KeyMessage, String> {
+    override suspend fun makePck(recipient: String): Pair<KeyMessage, String> {
         val (k, id) = current()
         val key = Mikey.newKey(1, Mikey.nowNtp())
         return key to java.util.Base64.getEncoder().encodeToString(Mikey.create(k, id, recipient, key))
     }
 
     /** Open a PCK offered by [expected] (its initiator, authenticated), refusing a replay; key parameters allowed. */
-    suspend fun acceptPck(expected: String, encoded: String): KeyMessage {
+    override suspend fun acceptPck(expected: String, encoded: String): KeyMessage {
         val message = decode(encoded)
         val (k, id) = current()
         val now = Mikey.nowNtp()
@@ -392,6 +392,22 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
             received[tag] = key.ntpSeconds + 2 * skew
         }
         return key
+    }
+
+    /**
+     * TS 33.180 clause 8.5.5: [original] (a payload whose first octet is its message type) signed as an Authenticated
+     * Payload of this identity, bit 8 of the message type set.
+     */
+    override suspend fun authenticate(original: ByteArray): ByteArray {
+        if (original.isEmpty()) throw KeyError("empty payload to authenticate")
+        val (k, id) = current()
+        return Mikey.authenticatePayload(k, id, Mikey.nowNtp(), original[0].toInt() and 0xff, original)
+    }
+
+    /** TS 33.180 clause 8.5.5: an Authenticated Payload verified as signed by [sender]. */
+    override suspend fun openAuthenticated(sender: String, message: ByteArray): Mikey.AuthenticatedPayload {
+        val (k, _) = current()
+        return Mikey.openAuthenticated(k, sender, message, Mikey.nowNtp())
     }
 
     /** Open the GMK of [group] from the GMS [gms] in a GKTP document (TS 33.180 5.7). */
@@ -431,6 +447,9 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
         fun xcapSegment(text: String): String =
             text.split(':').joinToString(":") { part -> part.split('@').joinToString("@") { urlEncode(it) } }
 
+        /** TS 33.180 clause 5.2.2: the CSB-ID (key ID) of an I_MESSAGE in base64, read without authenticating it. */
+        fun keyId(encoded: String): Long = Mikey.csbIdOf(decode(encoded))
+
         fun decode(encoded: String): ByteArray = try { java.util.Base64.getDecoder().decode(encoded) } catch (e: IllegalArgumentException) { throw KeyError("invalid MIKEY base64") }
     }
 }
@@ -457,6 +476,12 @@ class GroupKeys(private val clock: () -> Long = { Mikey.nowNtp() - Mikey.NTP_EPO
     /** Whether a GMK of [group] is held, active or not. */
     fun held(group: String): Boolean = keys[group].orEmpty().any { !expired(it, clock()) }
 
+    /**
+     * The GMK whose GMK-ID is [id], held for some group (TS 33.180 clause 8.5.2.1: the DPPK a received Protected
+     * Payload names); whether it may be used is for the caller ([KeyUse.requireActive]).
+     */
+    fun byId(id: Long): KeyMessage? = keys.values.asSequence().flatten().firstOrNull { it.csbId == id }
+
     /** Each group's GMK-ID in use. */
     val ids: Map<String, Long> get() = keys.keys.mapNotNull { g -> active(g)?.let { g to it.csbId } }.toMap()
 
@@ -464,4 +489,32 @@ class GroupKeys(private val clock: () -> Long = { Mikey.nowNtp() - Mikey.NTP_EPO
         key.properties?.activation?.takeIf { it != 0L } ?: (key.ntpSeconds - Mikey.NTP_EPOCH)
 
     private fun expired(key: KeyMessage, now: Long): Boolean = key.properties?.expiry?.let { it != 0L && now >= it } ?: false
+}
+
+/** TS 33.180 annex E.6: whether a key may be used now (the shared core's require_in_use and require_active). */
+object KeyUse {
+    /**
+     * TS 33.180 annex E.6.9 and E.6.10 ("the time in UTC at which the associated key shall no longer be used"; 0: never):
+     * throws once the key is revoked or expired; a key without key parameters passes.
+     */
+    fun requireInUse(key: KeyMessage, nowUnix: Long) {
+        val p = key.properties ?: return
+        if (p.status and 1L == 0L) throw KeyError("key revoked")
+        if (p.expiry != 0L && nowUnix >= p.expiry) throw KeyError("key expired")
+    }
+
+    /**
+     * TS 33.180 annex E.6: a key may be used only if its Status (E.6.9) is not revoked, between its Activation Time
+     * (E.6.4; 0 is the I_MESSAGE timestamp) and its Expiry Time (E.6.10; 0 never expires), and, for a GMK, for one of
+     * its MC Group IDs (E.6.3).
+     */
+    fun requireActive(key: KeyMessage, group: String, nowUnix: Long) {
+        val p = key.properties ?: throw KeyError("missing protected key properties")
+        if (p.status and 1L == 0L) throw KeyError("key revoked")
+        if (p.expiry != 0L && nowUnix >= p.expiry) throw KeyError("key inactive or expired")
+        if (p.type == 0) { if (group.isEmpty() || group !in p.groups) throw KeyError("key not authorized for group") }
+        else if (group.isNotEmpty()) throw KeyError("non-group key used for group media")
+        val activation = if (p.activation != 0L) p.activation else key.ntpSeconds - Mikey.NTP_EPOCH
+        if (nowUnix < activation) throw KeyError("key inactive or expired")
+    }
 }

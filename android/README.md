@@ -145,6 +145,20 @@ whether transport keys are present. `security.kms_via_proxy` (off by default) se
 HTTP proxy, as the ETSI test system for TS 37.579 expects, and then needs a TrK; `security.kms_id` names the KMS URI
 its documents carry when it differs from the address.
 
+Signalling protection follows each service's service configuration document, as the Linux client: XML confidentiality
+and integrity under the service's CSK (uploaded with the service authorisation) when its `<confidentiality-protection>`
+or `<integrity-protection>` is "true" or absent. A message whose required protection has no usable CSK, or whose
+service configuration has not been read, is not sent; received content that fails its signature check or cannot be
+decrypted is refused (403, warnings 139 and 140). The configuration management, group document and group key
+subscriptions are sent without XML protection (no identity hiding). MCData options in the provisioning, all off by
+default: `mcdata.protect_payload` (one-to-one SDS and files under a PCK, group SDS under the group's GMK, which needs
+the group key subscriptions of protected media), `mcdata.protect_signalling` (MCData signalling with the MCData server
+under the MCData CSK), `mcdata.authenticate_payload` (payloads signed with the user's ECCSI key) and
+`mcdata.pck_lifetime_s` (how long a PCK context with a peer is used, 3600 s by default, or until the PCK's expiry).
+`security.key_parameter_profile.algorithm_256` names the profile's code of DP_AES_256_GCM, accepted only for MCData
+signalling under the CSK. Settings shows "Signalling protection" and, with payload protection, "Message protection";
+the debug command `keys` reports `xml_protection` and `mcdata_protection` counters.
+
 Speech uses the microphone through `AudioRecord` (`VOICE_COMMUNICATION`) and plays through `AudioTrack` (voice
 communication usage). Calls are registered with Android telecom as a self-managed account. PTT comes from:
 

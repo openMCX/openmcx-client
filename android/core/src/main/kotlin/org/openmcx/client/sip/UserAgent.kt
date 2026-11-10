@@ -8,6 +8,8 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
+import org.openmcx.client.body.Multipart
+import org.openmcx.client.body.Part
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -114,6 +116,18 @@ class Dialog(
 
 class SipTimeout(message: String) : Exception(message)
 
+/** A message passing a body filter, with the request it answers when it is a response (TS 33.180 clause 9.3). */
+class SipTransmission(val message: SipMessage, val request: SipRequest?) {
+    val isResponse: Boolean get() = message is SipResponse
+    /** The request's method, or for a response the method of its CSeq. */
+    val method: String get() = (message as? SipRequest)?.method ?: message.cseq.method
+}
+
+/** Takes the body parts of a message and returns them protected (outgoing) or opened (incoming); throws when the
+ *  message may not be sent (outgoing) or its protection fails (incoming: the message starts "139 " for an integrity
+ *  failure, "140 " for content that cannot be decrypted; any other failure is refused without a warning). */
+typealias SipBodyFilter = (SipTransmission, List<Part>) -> List<Part>
+
 /**
  * The SIP user agent over one outbound flow: client and server transactions (reliable
  * transport, so no retransmission timers), request construction, digest authentication
@@ -141,6 +155,16 @@ class UserAgent(
     /** Adds header fields to every request of a transaction and every ACK before its Via is set (e.g. the security
      *  agreement's, RFC 3329 section 2.3.1); CANCEL and the transaction layer's ACK of a non-2xx do not pass here. */
     var outboundHeaders: (SipRequest) -> Unit = {}
+    /**
+     * TS 33.180 clause 9.3 (application signalling security): every message this UA sends passes its body parts
+     * through [outgoingBodies] just before it goes on the flow (after the transaction, Via and credentials are set, so
+     * a request sent again after a challenge is protected again from its clear body), and every message received
+     * passes through [incomingBodies] before anything else sees it. A failing incoming request is refused with 403 and
+     * Warning 139 or 140 (TS 24.379 clauses 6.6.3.4.2 and 6.6.2.4.2); a failing response is delivered with
+     * [SipMessage.protectionError] set.
+     */
+    @Volatile var outgoingBodies: SipBodyFilter? = null
+    @Volatile var incomingBodies: SipBodyFilter? = null
 
     private class ClientTx(val request: SipRequest, val provisional: suspend (SipResponse) -> Unit, val flow: SipFlow? = null) {
         val final = CompletableDeferred<SipResponse>()
@@ -251,12 +275,13 @@ class UserAgent(
         val c = flow.connection
         request.headers.remove("Via")
         request.headers.prepend("Via", "SIP/2.0/${c.transport} ${viaSentBy(request, flow) ?: sentBy};branch=$branch;rport")
-        if (request.method == "ACK") { flow.send(request); return SipResponse(200, "OK") }
+        if (request.method == "ACK") { flow.send(protect(request, null)); return SipResponse(200, "OK") }
         val tx = ClientTx(request, provisional, flow)
         val key = "$branch|${request.cseq.method}"
+        val wire = protect(request, null)
         clients[key] = tx
         try {
-            flow.send(request)
+            flow.send(wire)
             return withTimeout(transactionTimeoutMs) { tx.final.await() }
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
             throw SipTimeout("${request.method} ${request.uri}: no final response")
@@ -294,12 +319,53 @@ class UserAgent(
     }
 
     internal suspend fun sendResponse(tx: ServerTransaction, response: SipResponse) {
-        (tx.via ?: flow ?: throw IllegalStateException("no flow")).send(response)
+        (tx.via ?: flow ?: throw IllegalStateException("no flow")).send(protect(response, tx.request))
         if (response.isFinal) servers.remove("${tx.request.topVia.branch}|${tx.request.method}")
     }
 
+    /** The message with its body parts through [outgoingBodies]; unchanged when the filter leaves them. */
+    private fun protect(message: SipMessage, request: SipRequest?): SipMessage {
+        val filter = outgoingBodies ?: return message
+        val type = message.contentType ?: return message
+        if (message.body.isEmpty()) return message
+        // A body that cannot be read (a multipart without its boundary) is not sent at all rather than sent unchecked.
+        val parts = Multipart.parse(type, message.body)
+        val filtered = filter(SipTransmission(message, request), parts)
+        if (filtered == parts) return message
+        val single = filtered.size == 1 && !type.trim().lowercase().startsWith("multipart/")
+        return rebuilt(message, if (single) filtered.single().contentType to filtered.single().content else Multipart.encode(filtered))
+    }
+
+    /** The received message with its body parts through [incomingBodies]; a failure sets [SipMessage.protectionError]. */
+    private fun open(message: SipMessage, request: SipRequest?): SipMessage {
+        val filter = incomingBodies ?: return message
+        val type = message.contentType ?: return message
+        if (message.body.isEmpty()) return message
+        return try {
+            val parts = Multipart.parse(type, message.body)
+            val filtered = filter(SipTransmission(message, request), parts)
+            if (filtered == parts) message
+            else rebuilt(message, if (filtered.size == 1) filtered.single().contentType to filtered.single().content
+                                  else Multipart.encode(filtered, "mcx-opened"))
+        } catch (e: Exception) {
+            message.also { it.protectionError = e.message ?: e.toString() }
+        }
+    }
+
+    private fun rebuilt(message: SipMessage, body: Pair<String, ByteArray>): SipMessage {
+        val headers = message.headers.copy().set("Content-Type", body.first)
+        return when (message) {
+            is SipRequest -> SipRequest(message.method, message.uri, headers, body.second)
+            is SipResponse -> SipResponse(message.status, message.reason, headers, body.second)
+        }
+    }
+
     /** Dispatch a message received on the flow, or on [from], a flow the UE accepted (IMS AKA port_us). */
-    suspend fun receive(message: SipMessage, from: SipFlow? = null) {
+    suspend fun receive(received: SipMessage, from: SipFlow? = null) {
+        val message = when (received) {
+            is SipResponse -> open(received, clients["${received.topVia.branch}|${received.cseq.method}"]?.request)
+            is SipRequest -> open(received, null)
+        }
         when (message) {
             is SipResponse -> {
                 val key = "${message.topVia.branch}|${message.cseq.method}"
@@ -343,6 +409,18 @@ class UserAgent(
         if (servers.containsKey(key)) return // a retransmission; the transport is reliable, so drop it
         val tx = ServerTransaction(this, request, from)
         servers[key] = tx
+        // TS 24.379 clauses 6.6.3.4.2 and 6.6.2.4.2: content that fails the integrity check or cannot be decrypted is
+        // refused with 403 and Warning 139 or 140, before any other procedure; other protection failures (MCData
+        // signalling that cannot be opened, TS 24.282 clause 6.6.3.2) with 403 alone, as the Linux client.
+        request.protectionError?.let { error ->
+            val warning = when {
+                error.startsWith("139 ") -> "399 mcx \"139 integrity protection check failed\""
+                error.startsWith("140 ") -> "399 mcx \"140 unable to decrypt XML content\""
+                else -> null
+            }
+            tx.respond(403, extra = listOfNotNull(warning?.let { "Warning" to it }))
+            return
+        }
         scope.launch {
             try {
                 onRequest(tx)

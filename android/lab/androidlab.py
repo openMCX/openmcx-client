@@ -139,6 +139,11 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
                                                    if mcdata["user_id"] in fa.get("mcdata_users", [])]}
         if fd:
             bundle["mcdata"]["fd"] = fd
+        # TS 33.180 clauses 8 and 9.5 (the fixture's --protected): payload protection, signalling protection under the
+        # CSK and payload authentication, as the reference client has them.
+        for key in ("protect_payload", "protect_signalling", "authenticate_payload"):
+            if key in mcdata:
+                bundle["mcdata"][key] = bool(mcdata[key])
     mcvideo = ref.get("mcvideo")
     if mcvideo:
         # Chat groups (TS 24.281 §9.2.2) the user belongs to: joined on demand from the Call tab.
@@ -313,6 +318,13 @@ def create(args) -> None:
         # End-to-end protection (TS 33.180): media, transmission control and key management, with the
         # interoperability profile's Key Parameters IEI.
         command += ["--protected", "--key-parameters-iei", "0x79"]
+    for flag in ("xml_protection", "integrity_protection", "sign_payloads"):
+        if getattr(args, flag):
+            if not args.protected:
+                sys.exit(f"--{flag.replace('_', '-')} needs --protected")
+            # TS 24.379/24.281 clauses 6.6.2 and 6.6.3 (XML confidentiality and integrity, in the service
+            # configuration documents), TS 33.180 clause 8.5.5 (signed MCData payloads).
+            command.append(f"--{flag.replace('_', '-')}")
     if args.transport_keys:
         if not args.protected:
             sys.exit("--transport-keys needs --protected")
@@ -880,6 +892,11 @@ def main() -> None:
                    help="emergency and imminent peril, and the MCPTT emergency alert (the group priority policy)")
     c.add_argument("--protected", action="store_true",
                    help="end-to-end protection (TS 33.180): the KMS, protected media and transmission control")
+    c.add_argument("--xml-protection", action="store_true",
+                   help="with --protected: XML confidentiality protection of the signalling (service configuration)")
+    c.add_argument("--integrity-protection", action="store_true",
+                   help="with --protected: XML integrity protection of the signalling (service configuration)")
+    c.add_argument("--sign-payloads", action="store_true", help="with --protected: signed MCData payloads")
     c.add_argument("--transport-keys", action="store_true",
                    help="with --protected: pre-provisioned TrK and InK (TS 33.180 5.3.2) for client-a (both) and client-b "
                         "(TrK), written into their provisioning; signed KMS exchanges and TrK-wrapped keys")

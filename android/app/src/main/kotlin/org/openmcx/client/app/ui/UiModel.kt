@@ -354,7 +354,12 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     val network = (org.openmcx.client.app.NetworkStatus.current.value?.rows() ?: emptyList()) +
         org.openmcx.client.app.security.AccessDecision.rows(Engine.client?.imsAka, Engine.client?.sipConnectionSecurity) +
         // Whether pre-provisioned keys for the key management server are in the Keystore: their presence only.
-        listOfNotNull(Engine.client?.config?.security?.let { "Transport keys" to if (Engine.transportKeySummary.isEmpty()) "none" else "present" })
+        listOfNotNull(Engine.client?.config?.security?.let { "Transport keys" to if (Engine.transportKeySummary.isEmpty()) "none" else "present" }) +
+        listOfNotNull(Engine.client?.let { "Signalling protection" to SignallingProtectionText.of(it) }) +
+        listOfNotNull(Engine.client?.config?.mcdata?.takeIf { it.protectPayload || it.authenticatePayload }?.let {
+            "Message protection" to listOfNotNull("encrypted end to end".takeIf { _ -> it.protectPayload },
+                "signed by the sender".takeIf { _ -> it.authenticatePayload }).joinToString(", ")
+        })
     val client = Engine.client ?: return UiState(events = Engine.log.last(30).reversed(), batteryExempt = batteryExempt, network = network)
     val status = client.status.value
     val mcptt = Engine.mcptt
@@ -710,4 +715,31 @@ object EngineActions : UiActions {
     override fun downloadAttachment(id: String) = launch { Engine.fd?.download(id) }
     override fun rejectAttachment(id: String) = launch { Engine.fd?.reject(id) }
     override fun cancelAttachment(id: String) { Engine.fd?.cancel(id) }
+}
+
+/**
+ * The Settings row of the signalling protection the system asks of each service (its service configuration), one line,
+ * in plain words: "encrypted and signed", "signed", "encrypted", "off", or "not known yet" before the configuration is
+ * read; per service when they differ.
+ */
+object SignallingProtectionText {
+    fun of(client: org.openmcx.client.client.McxClient): String {
+        val services = listOfNotNull(
+            ("MCPTT" to "mcptt").takeIf { client.config.mcptt != null },
+            ("MCData" to "mcdata").takeIf { client.config.mcdata != null },
+            ("MCVideo" to "mcvideo").takeIf { client.config.mcvideo != null })
+        if (services.isEmpty()) return "off"
+        val states = services.map { (label, name) ->
+            label to (client.serviceProtection[name]?.let { (encrypted, signed) -> words(encrypted, signed) } ?: "not known yet")
+        }
+        return if (states.map { it.second }.distinct().size == 1) states.first().second
+        else states.joinToString(", ") { "${it.first} ${it.second}" }
+    }
+
+    fun words(encrypted: Boolean, signed: Boolean): String = when {
+        encrypted && signed -> "encrypted and signed"
+        encrypted -> "encrypted"
+        signed -> "signed"
+        else -> "off"
+    }
 }

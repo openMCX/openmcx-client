@@ -49,6 +49,8 @@ interface FdPeer {
     suspend fun refreshToken()
     fun groupPolicy(group: String): GroupFdPolicy?
     fun event(text: String)
+    /** TS 24.282 §6.6.3 with TS 33.180 §8.3: end-to-end payload protection, null without. */
+    val protection: McdataProtection? get() = null
 }
 
 /** [FdPeer] on the running [McxClient]. */
@@ -69,6 +71,7 @@ class ClientFdPeer(private val client: McxClient) : FdPeer {
     override suspend fun refreshToken() = client.refreshNow("token")
     override fun groupPolicy(group: String) = client.groupDocuments[group]?.fd
     override fun event(text: String) = client.event("fd: $text")
+    override val protection get() = client.mcdataProtection
 }
 
 /**
@@ -209,25 +212,46 @@ class FdService(
         val record = FdRecord(UUID.randomUUID().toString(), UUID.randomUUID().toString(), FdDirection.OUTGOING, target,
             if (group) target else null, metadata, localPath = file.path, state = FdState.STAGED, completionRequested = true)
         add(record)
+        var sealed: File? = null
         return try {
             update(record.id) { it.copy(state = FdState.UPLOADING, transferred = 0, error = null) }
+            // TS 33.180 §8.3 with TS 24.282 §10.2.2.1 steps 7 and 8: with `protect_payload` a one-to-one file is protected
+            // with the PCK shared with the recipient before it is uploaded (a series of Protected Payload messages); its
+            // metadata then describes the stored object, as the media storage function holds it. A group file is
+            // uploaded in clear, as the Linux client.
+            var toUpload = file
+            var described = metadata
+            var keyMessage: String? = null
+            val protection = peer.protection?.takeIf { it.protectsPayload && !group }
+            if (protection != null) {
+                val (key, message) = try { protection.pckFor(target) } catch (e: Exception) { throw FdError("file protection: ${e.message}") }
+                keyMessage = message
+                val bytes = protection.sealFile(file.readBytes(), key)
+                val stored = File(directory, "sealed/${record.id}").also { it.parentFile.mkdirs(); it.writeBytes(bytes) }
+                sealed = stored
+                toUpload = stored
+                described = metadata.copy(size = bytes.size.toLong(), sha256 = sha256(stored))
+            }
             val base = contentServer(if (group) target else null)
             val info = McdataInfo(requestType = if (group) "group-fd" else "one-to-one-fd", requestUri = if (group) target else null,
                 callingUserId = peer.userId)
+            val uploaded = toUpload
+            val sent = described
             val upload = authorised { headers ->
-                files.upload("$base/mcdata/files", headers, info.encode().toByteArray(), file, uploadName(metadata.name), progress(record.id, size))
+                files.upload("$base/mcdata/files", headers, info.encode().toByteArray(), uploaded, uploadName(metadata.name), progress(record.id, sent.size))
             }
             if (upload.status != 201) throw FdError("upload refused: HTTP ${upload.status}${httpReason(upload)}")
             val url = upload.header("Location")?.trim() ?: throw FdError("upload answered without a file URL")
             if (!trusted(url, base)) throw FdError("upload answered with an untrusted file URL")
             update(record.id) { it.copy(state = FdState.SENDING, url = url, transferred = size) }
             val signalling = FdSignalling(clock(), UUID.fromString(record.conversationId), UUID.fromString(record.id), url,
-                metadata.encode(), completionRequested = true)
+                described.encode(), completionRequested = true)
             val requestInfo = if (group) McdataInfo(requestType = "group-fd", requestUri = target, clientId = peer.clientId)
             else McdataInfo(requestType = "one-to-one-fd")
             val parts = mutableListOf(Part(McdataInfo.CONTENT_TYPE, requestInfo.encode().toByteArray()))
             if (!group) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOf(target)).toByteArray())
             parts += Part(McdataService.SIGNALLING, signalling.encode())
+            keyMessage?.let { parts += Part(McdataProtection.MIKEY, it.toByteArray()) }
             val response = peer.send(parts)
             if (!response.isSuccess) throw FdError("FD request: ${status(response)}")
             event("sent ${metadata.name} (${metadata.size} bytes) to $target: ${response.status}")
@@ -238,6 +262,8 @@ class FdService(
         } catch (e: Exception) {
             event("send ${record.id} failed: ${e.message}")
             update(record.id) { it.copy(state = FdState.FAILED, error = e.message ?: e.toString()) }!!
+        } finally {
+            sealed?.delete()
         }
     }
 
@@ -284,7 +310,15 @@ class FdService(
             record.metadata.sha256?.let { if (sha256(partial) != it) throw FdError("the file does not match its hash") }
             val target = File(directory, "files/$id/${localName(record.metadata.name)}")
             target.parentFile.mkdirs()
-            if (!partial.renameTo(target)) throw FdError("cannot store the file")
+            // TS 24.282 §10.2.3.1: the hash describes the stored object; a protected one-to-one file is then opened with
+            // the PCK shared with its sender (TS 33.180 §8.3), as the Linux client.
+            val protection = peer.protection?.takeIf { it.protectsPayload && record.group == null }
+            if (protection != null) {
+                val plain = try { protection.openFile(partial.readBytes(), record.peer, null) }
+                    catch (e: Exception) { protection.failures.incrementAndGet(); throw FdError("the protected file cannot be opened: ${e.message}") }
+                target.writeBytes(plain)
+                partial.delete()
+            } else if (!partial.renameTo(target)) throw FdError("cannot store the file")
             val done = update(id) { it.copy(state = FdState.COMPLETED, localPath = target.path, transferred = size) }!!
             event("downloaded ${record.metadata.name} ($size bytes) from ${record.peer}")
             if (done.completionRequested) notify(done, FdNotificationType.COMPLETED)
@@ -321,16 +355,35 @@ class FdService(
     }
 
     override suspend fun handle(tx: ServerTransaction): Boolean {
-        val status = receive(tx.request) ?: return false
-        tx.respond(status)
+        val (status, extra) = answer(tx.request) ?: return false
+        tx.respond(status, extra = extra)
         return true
     }
 
     /** Handle an incoming request; null when it is not for file distribution, else the status to answer. */
-    suspend fun receive(request: SipRequest): Int? {
+    suspend fun receive(request: SipRequest): Int? = answer(request)?.first
+
+    /** [receive], with the header fields of the answer. */
+    private suspend fun answer(request: SipRequest): Pair<Int, List<Pair<String, String>>>? {
         if (request.method != "MESSAGE" || !isFd(request)) return null
-        val parts = runCatching { Multipart.parse(request.contentType, request.body) }.getOrElse { return 400 }
+        val parts = runCatching { Multipart.parse(request.contentType, request.body) }.getOrElse { return 400 to emptyList() }
         val info = parts.firstOrNull { it.mediaType == McdataInfo.CONTENT_TYPE }?.let { runCatching { McdataInfo.parse(it.text) }.getOrNull() }
+        // TS 33.180 §8.3: the PCK that protects a one-to-one file comes with the request (TS 24.282 §10.2.4.2.2); a
+        // refused I_MESSAGE is answered 606 with warning 136, as the Linux client.
+        for (part in parts.filter { it.mediaType == McdataProtection.MIKEY }) {
+            val sender = info?.callingUserId ?: ""
+            try {
+                (peer.protection ?: throw FdError("MCData key management client unavailable")).acceptPck(part.text.trim(), sender)
+            } catch (e: Exception) {
+                peer.protection?.failures?.incrementAndGet()
+                event("PCK from $sender refused: ${e.message}")
+                return 606 to listOf("Warning" to McdataProtection.WARNING_136)
+            }
+        }
+        return receiveParts(parts, info) to emptyList()
+    }
+
+    private fun receiveParts(parts: List<Part>, info: McdataInfo?): Int {
         if (info?.requestType == "msf-disc-res") {
             val uri = info.controllerPsi ?: return 400
             discovery?.complete(uri) ?: event("unsolicited discovery answer")

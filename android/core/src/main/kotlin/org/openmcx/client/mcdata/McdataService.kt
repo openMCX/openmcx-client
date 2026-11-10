@@ -34,6 +34,8 @@ data class SentSds(
     val disposition: DispositionRequest?,
     val status: Int,
     val at: Long = System.currentTimeMillis(),
+    /** TS 24.282 §6.6.3.2: the DPPK-ID the payload was protected with; null when sent in the clear. */
+    val dppkId: Long? = null,
     /** Notifier MCData ID to the latest notification type from them. */
     val notifications: MutableMap<String, DispositionNotification> = ConcurrentHashMap(),
 )
@@ -51,6 +53,10 @@ data class ReceivedSds(
     /** Functional aliases (§22): the alias the sender presented, and the alias the message was sent to. */
     val senderAlias: String? = null,
     val calledAlias: String? = null,
+    /** TS 24.282 §6.6.3.2: the DPPK-ID of an end-to-end protected payload; null when it came in the clear. */
+    val dppkId: Long? = null,
+    /** TS 33.180 §8.5.5: the payload was signed by its sender and verified. */
+    val authenticated: Boolean = false,
 ) {
     @Volatile var displayed = false
     @Volatile var notified: DispositionNotification? = null
@@ -72,6 +78,8 @@ class McdataService(private val client: McxClient) : ServiceHandler {
     private val config = client.config.mcdata!!
     private val ua = client.ua
     private val scope = client.scope
+    /** TS 24.282 §6.6.3: end-to-end payload protection and authentication. */
+    private val protection: McdataProtection? = client.mcdataProtection
 
     private val _inbox = MutableStateFlow<List<ReceivedSds>>(emptyList())
     val inbox: StateFlow<List<ReceivedSds>> = _inbox
@@ -115,7 +123,11 @@ class McdataService(private val client: McxClient) : ServiceHandler {
         val parts = mutableListOf(Part(McdataInfo.CONTENT_TYPE, info.encode().toByteArray()))
         if (!group) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOf(target)).toByteArray())
         parts += Part(SIGNALLING, signalling.encode())
-        parts += Part(PAYLOAD, data.encode())
+        var payload = data.encode()
+        val dppk = protect(target, group, toAlias, parts, payload)?.also { payload = it.second }?.first
+        // TS 33.180 §8.5.5: signed over the protected payload when both apply.
+        payload = protection?.sign(payload) ?: payload
+        parts += Part(PAYLOAD, payload)
         val response = ua.send(message(parts))
         if (toAlias && response.status == 300) {
             // The server names the MCData ID that holds the alias: the message goes to it, naming the alias called.
@@ -129,10 +141,34 @@ class McdataService(private val client: McxClient) : ServiceHandler {
             val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""
             throw SdsError("${response.status} ${response.reason}$warning", response.status)
         }
-        val sent = SentSds(signalling.messageId, conversationId, target, group, text, disposition, response.status)
+        val sent = SentSds(signalling.messageId, conversationId, target, group, text, disposition, response.status, dppkId = dppk)
         _outbox.value = (_outbox.value + sent).takeLast(100)
         event("sent ${if (group) "group" else "one-to-one"} SDS ${sent.messageId} to $target: ${response.status}")
         return sent
+    }
+
+    /**
+     * TS 24.282 §6.6.3.2 and §9.2.2.2.1 step 2c: with `protect_payload`, the DATA PAYLOAD of a one-to-one SDS protected
+     * with a PCK (its I_MESSAGE sent with it as an application/mikey part, step 2c viii, unless an unexpired context
+     * with the peer exists) and of a group SDS with the group's GMK; the DPPK-ID and the protected payload, null when
+     * unprotected (an SDS to a functional alias, whose recipient is not known yet, goes in the clear, as the Linux
+     * client). A required key that cannot be had stops the message: it is not sent in the clear.
+     */
+    private suspend fun protect(target: String, group: Boolean, toAlias: Boolean, parts: MutableList<Part>,
+                                payload: ByteArray): Pair<Long, ByteArray>? {
+        val protection = protection?.takeIf { it.protectsPayload } ?: return null
+        return try {
+            if (group) {
+                val key = protection.gmkFor(target)
+                key.csbId to protection.seal(payload, key)
+            } else if (!toAlias) {
+                val (key, message) = protection.pckFor(target)
+                if (message != null) parts += Part(McdataProtection.MIKEY, message.toByteArray())
+                key.csbId to protection.seal(payload, key)
+            } else null
+        } catch (e: org.openmcx.client.security.KeyError) {
+            throw SdsError("payload protection: ${e.message}")
+        }
     }
 
     override suspend fun handle(tx: ServerTransaction): Boolean {
@@ -149,7 +185,10 @@ class McdataService(private val client: McxClient) : ServiceHandler {
             when (MessageType.of(signalling.first().content)) {
                 MessageType.SDS_SIGNALLING_PAYLOAD -> {
                     val payload = parts.firstOrNull { it.mediaType == PAYLOAD } ?: run { tx.respond(400, "Bad Request"); return true }
-                    received(info, SdsSignalling.decode(signalling.first().content), DataPayload.decode(payload.content))
+                    val opened = openPayload(parts, info, payload.content)
+                    if (opened.failure != null) { tx.respond(606, extra = opened.failure); return true }
+                    received(info, SdsSignalling.decode(signalling.first().content), DataPayload.decode(opened.data!!),
+                        opened.dppkId, opened.authenticated)
                 }
                 MessageType.SDS_NOTIFICATION -> signalling.forEach { notification(info, SdsNotification.decode(it.content)) }
                 else -> { tx.respond(400, "Bad Request"); return true }
@@ -163,12 +202,61 @@ class McdataService(private val client: McxClient) : ServiceHandler {
         return true
     }
 
-    private fun received(info: McdataInfo, signalling: SdsSignalling, data: DataPayload) {
+    private class Opened(val data: ByteArray?, val dppkId: Long? = null, val authenticated: Boolean = false,
+                         val failure: List<Pair<String, String>>? = null)
+
+    /**
+     * TS 24.282 §9.2.2.2.2 step 3 and §6.6.3.2: accept the PCK sent with the message, verify a signed DATA PAYLOAD
+     * (bit 8, TS 33.180 §8.5.5) and decrypt a protected one (bit 7) end to end; a failure is answered 606, with warning
+     * 136 for a refused I_MESSAGE (as the Linux client).
+     */
+    private suspend fun openPayload(parts: List<Part>, info: McdataInfo, payload: ByteArray): Opened {
+        val sender = info.callingUserId ?: ""
+        val protection = protection
+        for (part in parts.filter { it.mediaType == McdataProtection.MIKEY }) {
+            try {
+                protection ?: throw org.openmcx.client.security.KeyError("MCData key management client unavailable")
+                protection.acceptPck(part.text.trim(), sender)
+            } catch (e: Exception) {
+                protection?.failures?.incrementAndGet()
+                event("PCK from $sender refused: ${e.message}")
+                return Opened(null, failure = listOf("Warning" to McdataProtection.WARNING_136))
+            }
+        }
+        var data = payload
+        var authenticated = false
+        if (data.isNotEmpty() && (data[0].toInt() and 0x80) != 0) {
+            try {
+                data = (protection ?: throw org.openmcx.client.security.KeyError("no key material to verify a signed payload")).verify(data, sender)
+                authenticated = true
+            } catch (e: Exception) {
+                protection?.failures?.incrementAndGet()
+                event("payload signature from $sender refused: ${e.message}")
+                return Opened(null, failure = emptyList())
+            }
+        }
+        var dppk: Long? = null
+        if (data.isNotEmpty() && (data[0].toInt() and 0x40) != 0) {
+            try {
+                protection ?: throw org.openmcx.client.security.KeyError("no key material for a protected payload")
+                dppk = protection.keyId(data)
+                data = protection.open(data, info.callingUserId, info.callingGroupId)
+            } catch (e: Exception) {
+                protection?.failures?.incrementAndGet()
+                event("protected payload from $sender${info.callingGroupId?.let { " on $it" } ?: ""} undecryptable: ${e.message}")
+                return Opened(null, failure = emptyList())
+            }
+        }
+        return Opened(data, dppk, authenticated)
+    }
+
+    private fun received(info: McdataInfo, signalling: SdsSignalling, data: DataPayload, dppkId: Long? = null, authenticated: Boolean = false) {
         // A re-delivery after an UNDELIVERED report carries the same message ID: answer, but once.
         if (_inbox.value.any { it.messageId == signalling.messageId }) { event("duplicate SDS ${signalling.messageId}"); return }
         val sender = info.callingUserId ?: signalling.sender ?: "unknown"
         val message = ReceivedSds(signalling.messageId, signalling.conversationId, sender, info.callingGroupId,
-            data.payloads, signalling.disposition, signalling.inReplyTo, senderAlias = info.functionalAlias, calledAlias = info.calledFunctionalAlias)
+            data.payloads, signalling.disposition, signalling.inReplyTo, senderAlias = info.functionalAlias, calledAlias = info.calledFunctionalAlias,
+            dppkId = dppkId, authenticated = authenticated)
         _inbox.value = (_inbox.value + message).takeLast(100)
         event("received SDS ${message.messageId} from $sender${message.group?.let { " on $it" } ?: ""}: ${message.text}")
         // Messages for an application are not shown to the user (§9.2.1.2); this client has no applications.
