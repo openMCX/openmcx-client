@@ -62,7 +62,9 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
   else if (mode == "manual")
     headers = {{"Answer-Mode", "Manual"}};
   else if (mode == "force-auto")
-    headers = {{"Priv-Answer-Mode", "Auto"}};
+    // TS 24.379 clause 6.2.6.1 item 14a with RFC 5373 section 7.1: "Auto" with the "require" parameter (the UAS
+    // has to honour it or reject the request; TS 37.579-2 tables 6.2.5.3.3-1, 6.2.14.3.3-1, 6.2.16.3.3-1).
+    headers = {{"Priv-Answer-Mode", "Auto;require"}};
   else
     throw std::runtime_error("private call mode must be auto, manual or force-auto");
   // Set only once the request is accepted, so that a refused command leaves no override for the next call.
