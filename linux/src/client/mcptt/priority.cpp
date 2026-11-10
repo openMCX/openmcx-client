@@ -216,7 +216,11 @@ std::vector<SipHeader> Client::priority_headers(const McpttInfo &info) const {
                      : info.emergency == false || info.imminent_peril == false ? "normal"
                      : emergency_                                              ? "emergency"
                      : imminent_                                               ? "imminent"
-                                                                               : "normal";
+                                                                               : "";
+  // TS 24.379 clause 10.1.1.2.1.1 items 12 and 13: an initial request of a normal call carries no Resource-Priority;
+  // the "normal" value (clause 6.2.8.1.15, NOTE) only returns a priority call to normal (emergency or imminent
+  // peril false in the request), as TS 37.579-1 table 5.5.2.5.1-1 has it (EMERGENCY-CALL or IMMPERIL-CALL only).
+  if (!*name) return {};
   const auto value = values.value(name, std::string{});
   if (value.empty()) {
     if (info.emergency || info.imminent_peril)

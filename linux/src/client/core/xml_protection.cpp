@@ -341,20 +341,25 @@ const std::string &Client::identity_hiding_csk() {
 //------------------------------------------------------------------------------
 // The MCPTT CSK in use from now on, with its upload I_MESSAGE when this client made it. Lab use: with the environment
 // variable MCX_CSK_KEYLOGFILE set (as SSLKEYLOGFILE for TLS), the CSK is appended to that file, one line
-// "CSK <MCPTT ID> <CSK-ID> <hex key>", so that a capture of its protected signalling can be decrypted.
+// "CSK <MCPTT ID> <CSK-ID> <hex key> <hex MIKEY RAND>", so that a capture of its protected signalling (the XML of
+// TS 33.180 clause 9.3 and the floor control SRTCP of clause 9.4, whose key derivation takes the RAND) can be
+// decrypted.
 void Client::adopt_csk(const keying::KeyMessage &csk, std::string upload) {
   csk_ = csk;
   csk_message_ = std::move(upload);
   status_["csk_id"] = csk.csb_id;
   if (const char *file = std::getenv("MCX_CSK_KEYLOGFILE"); file && *file) {
     std::ofstream log(file, std::ios::app);
-    std::string hex;
-    for (const auto octet : csk.key) {
-      char digits[3];
-      std::snprintf(digits, sizeof digits, "%02x", octet);
-      hex += digits;
-    }
-    log << "CSK " << user() << ' ' << csk.csb_id << ' ' << hex << '\n';
+    const auto hex = [](const auto &octets) {
+      std::string out;
+      for (const auto octet : octets) {
+        char digits[3];
+        std::snprintf(digits, sizeof digits, "%02x", octet);
+        out += digits;
+      }
+      return out;
+    };
+    log << "CSK " << user() << ' ' << csk.csb_id << ' ' << hex(csk.key) << ' ' << hex(csk.random) << '\n';
   }
 }
 

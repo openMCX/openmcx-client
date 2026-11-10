@@ -57,7 +57,8 @@ void Client::command(const std::string &command_line) {
 //     clause 12.1.1.2);
 //   regroup create|users|remove: regroup using a preconfigured group (clause 16.2.1.1, clause 16.3.1.1,
 //     clause 16.2.1.2);
-//   priority <0..99>, answer-mode auto|manual, ambient-source <wav>|none: local settings;
+//   priority <0..99>, answer-mode auto|manual, commencement auto|manual, ambient-source <wav>|none: local settings
+//     (commencement: the Answer-Mode of this client's group call INVITEs);
 //   group <group> [from=<group>]: select and affiliate to a group (clause 9.2.1.2), fetching its group document;
 //   floor-confirm, queue-status, ptt <wav>, release: floor control (TS 24.380 clause 6.2.4.9.12, clause 6.2.4.9.9,
 //     clause 6.2.4.3.5, clause 6.2.4.5.3);
@@ -90,6 +91,10 @@ void Client::run_command(const std::string &cmd) {
     regroup_request_command(cmd);
   } else if (cmd.starts_with("priority ")) {
     floor_priority_command(cmd);
+  } else if (cmd == "commencement auto" || cmd == "commencement manual") {
+    // Local setting: the commencement mode requested of the invited clients of this client's group calls.
+    if (!dialog_.empty()) throw std::runtime_error("commencement mode requires idle state");
+    cfg_["mcptt"]["group_call_commencement"] = cmd.substr(13);
   } else if (cmd.starts_with("answer-mode ")) {
     answer_mode_command(cmd);
   } else if (cmd.starts_with("group ")) {
@@ -442,6 +447,14 @@ void Client::group_call_command(const std::string &cmd) {
   // TS 33.180 clauses 7.3.11 and 7.4.2: the call is keyed with the selected group's GMK (its preconfigured group's for
   // a regroup); without one, the answer is refused as before (check_remote).
   if (protected_media()) select_call_key(group());
+  // RFC 5373 section 3: the commencement mode the user asks of the invited clients ("commencement auto|manual",
+  // automatic by default), which the MCPTT server passes on (TS 24.379 clauses 6.3.2.2.6.2 step 4 and 6.3.4.1.2
+  // step 13); TS 37.579-1 table 5.5.2.5.1-1 has Answer-Mode "Auto" (or "Manual", condition MANUAL) and the Accept
+  // of the SDP and MCPTT-Info bodies in each initial INVITE.
+  if (cmd != "rejoin")
+    headers.push_back(
+        {"Answer-Mode", cfg_.at("mcptt").value("group_call_commencement", "auto") == "manual" ? "Manual" : "Auto"});
+  headers.push_back({"Accept", "application/sdp, " + std::string(mcptt_mime)});
   invite_group_call(cmd, chat, info, headers);
 }
 
