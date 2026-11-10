@@ -361,7 +361,9 @@ inline ImplicitWord implicit_word(std::string_view cmd) {
   const bool call_command = head == "call" || head.starts_with("call ") || head == "chat" ||
                             head.starts_with("chat ") || head.starts_with("private ") ||
                             head.starts_with("private-fa ") || head.starts_with("first-to-answer ") ||
-                            head.starts_with("first-to-answer-fa ") || head.starts_with("adhoc ");
+                            head.starts_with("first-to-answer-fa ") || head.starts_with("adhoc ") ||
+                            // an upgrade to an emergency or imminent peril group call (TS 24.380 clause 14.2.5)
+                            head == "emergency on" || head == "imminent on";
   if (!call_command) return result;
   result.command = std::string(head);
   result.requested = word != "no-implicit";

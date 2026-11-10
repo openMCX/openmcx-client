@@ -333,16 +333,53 @@ void Client::change_priority(bool emergency, bool enabled) {
   headers.push_back({"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"});
   headers.push_back(
       {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt\";require;explicit"});
+  // TS 37.579-1 table 5.5.2.5.1-1 (re_INVITE too): the Accept of the SDP and MCPTT-Info bodies.
+  if (active) headers.push_back({"Accept", "application/sdp, " + std::string(mcptt_mime)});
+  // TS 24.380 clauses 14.2.5 and 6.3.5.2.2 (the server's "implicit floor request due to an upgrade to an emergency
+  // group call or [...] to imminent peril"): an upgrade asked with "implicit[=<WAV>]" carries "mc_implicit_request"
+  // in its re-INVITE (TS 37.579-1 table 5.5.3.1.1-1, SDP_OFFER and IMPLICIT_GRANT_REQUESTED: no "mc_granted"); the
+  // answer's outcome is handled as for the initial INVITE (implicit_floor_answered). A cancellation never is one.
+  const auto implicit = enabled && active && !talking_ ? implicit_choice() : ImplicitChoice{};
+  if (implicit.requested) prepare_implicit_speech(implicit);
   priority_pending_ = true;
   try {
-    auto completed = [this](const SipResponse &response) {
+    auto completed = [this, implicit](const SipResponse &response) {
       if (response.status_code < 200) return;
       priority_pending_ = false;
       status_["priority_updates_completed"] = status_.value("priority_updates_completed", 0u) + 1;
       priority_response(response);
+      if (implicit.requested && response.status_code < 300) {
+        // The talk burst of the request, loaded once the answer's media is in place (its handling resets the
+        // transmission), before the granted floor is acted on.
+        prepare_implicit_speech(implicit);
+        call_answered_ = true;
+        implicit_floor_answered();
+      } else if (implicit.requested) {
+        implicit_offered_ = requesting_ = false;
+        call_answered_ = true;
+        early_floor_.clear();
+      }
       if (response.status_code >= 300) failure("priority update: " + std::to_string(response.status_code));
     };
-    if (active)
+    if (active && implicit.requested) {
+      // TS 24.380 clause 6.2.4.2.2 step 2, as for the initial INVITE: floor control messages that come before the
+      // 200 (OK) is handled (the Floor Granted of the accepted request often does) are stored and then acted on in
+      // 'U: pending Request' (implicit_floor_answered), not in 'U: has no permission'.
+      call_answered_ = false;
+      early_floor_.clear();
+      local_.implicit_request = true;
+      local_.granted = false;
+      implicit_offered_ = true;
+      try {
+        sip_.reinvite(dialog_, local_, info_parts(info), completed, headers);
+      } catch (...) {
+        local_.implicit_request = implicit_offered_ = false;
+        call_answered_ = true;
+        throw;
+      }
+      local_.implicit_request = false;
+      status_["implicit_floor_request"] = "offered";
+    } else if (active)
       sip_.reinvite(dialog_, local_, info_parts(info), completed, headers);
     else
       sip_.request("MESSAGE", service(), mcptt_mime, mcptt_info_xml(info), headers, completed);
