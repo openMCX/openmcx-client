@@ -118,6 +118,8 @@ void Client::run_command(const std::string &cmd) {
     chat_join_command(cmd);
   } else if (cmd == "conference-subscribe") {
     subscribe_conference(true);
+  } else if (cmd == "conference-unsubscribe") {
+    unsubscribe_conference();
   } else if (cmd.starts_with("callback ") || cmd.starts_with("callback-cancel ") ||
              cmd.starts_with("callback-fulfil ") || cmd.starts_with("remote-call ") ||
              cmd.starts_with("remote-group-call ") || cmd.starts_with("transfer ") || cmd.starts_with("forward ")) {

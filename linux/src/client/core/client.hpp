@@ -808,6 +808,7 @@ class Client {
   void affiliate();
 
   void subscribe_conference(bool force = false);
+  void unsubscribe_conference();
 
   // ---- MCPTT XML integrity protection, core/xml_protection.cpp (TS 24.379 clause 6.6.3; TS 33.180 clause 9.3.5) ----
   static constexpr const char *signed_mime = "application/vnd.3gpp.mcptt-signed+xml";

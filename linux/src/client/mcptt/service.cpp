@@ -376,7 +376,9 @@ void Client::affiliate() {
 // TS 24.379 clause 10.1.3.2: subscribe to the conference event package of the active group session.
 // force: diagnostic override used to exercise the server's broadcast rejection.
 void Client::subscribe_conference(bool force) {
-  if (!cfg_.at("mcptt").value("conference_notifications", true)) {
+  // mcptt.conference_notifications false: no subscription when a call starts, only on the user's request
+  // ("conference-subscribe", force).
+  if (!force && !cfg_.at("mcptt").value("conference_notifications", true)) {
     status_["conference_wait_reason"] = "disabled";
     return;
   }
@@ -426,6 +428,30 @@ void Client::subscribe_conference(bool force) {
         }
       },
       "application/vnd.3gpp.mcptt-info+xml", mcptt_info_xml(info));
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 10.1.3.2 (RFC 6665 section 4.1.2.3): the user ends the conference event package subscription of the
+// active group session: a SUBSCRIBE in its dialog with Expires 0, the same Accept, Accept-Contact and MCPTT-Info
+// (TS 37.579-1 table 5.5.2.14-1, re_SUBSCRIBE; TS 37.579-2 table 6.1.3.1.3.3-14).
+void Client::unsubscribe_conference() {
+  if (conference_subscription_.empty()) throw std::runtime_error("no conference event package subscription");
+  McpttInfo info;
+  info.request_uri = active_group();
+  info.client_id = client_id();
+  sip_.request_in_dialog(conference_subscription_, "SUBSCRIBE", mcptt_mime, mcptt_info_xml(info),
+                         {{"Event", "conference"},
+                          {"Expires", "0"},
+                          {"Accept", "application/conference-info+xml"},
+                          {"P-Preferred-Service", mcptt_icsi},
+                          {"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"},
+                          {"Accept-Contact",
+                           "*;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt\";require;explicit"}},
+                         [this](const SipResponse &response) {
+                           if (response.status_code >= 200)
+                             status_["conference_unsubscribe_result"] = response.status_code;
+                         });
+  event("conference_unsubscribe_requested");
 }
 
 } // namespace mcx
