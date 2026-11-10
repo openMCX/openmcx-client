@@ -651,6 +651,9 @@ Points to know:
   user's answer to a received request, shown as `affiliation_request` in the status). The server checks the rights
   of TS 24.484 clause 8.3.2.1. The own affiliation PUBLISH carries the Accept of application/pidf+xml, and its
   de-affiliation an empty `<status>` (TS 37.579-1 table 5.5.2.11-1, TS 37.579-2 table 5.3.3.3-23).
+- The MCPTT service settings (TS 24.379 clause 7.2.4): `settings-subscribe`, `settings-resubscribe` and
+  `settings-unsubscribe` (SUBSCRIBE, Event poc-settings, the Accept of application/poc-settings+xml, Expires
+  4294967295 or 0); the NOTIFYs are shown as `service_settings` (answer mode, user profile index).
 - Groups are created, formed and torn down in the users tree of `gms.group_creation_xui` (TS 24.481 clauses
   6.3.2.2.1 and 6.3.14.2: "a group creation XUI configuration parameter"), which activation takes from the
   `<group-creation-XUI>` of the UE initial configuration. TS 24.484 clause 7.2.2.7 item 6 also calls that element the

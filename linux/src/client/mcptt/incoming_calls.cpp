@@ -391,9 +391,10 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
     return mcvideo_affiliation_notify(message);
   if (mcvideo_enabled() && !message.dialog_id.empty() && mcvideo_alias_dialogs_.contains(message.dialog_id))
     return mcvideo_alias_notify(message);
-  // TS 24.379 clause 9.2.1.3: a target user's affiliation status.
+  // TS 24.379 clause 9.2.1.3 (a target user's affiliation status) and clause 7.2.4 (the MCPTT service settings).
   if (!message.dialog_id.empty() && target_affiliation_subscriptions_.contains(message.dialog_id))
     return target_affiliation_notify(message);
+  if (!message.dialog_id.empty() && message.dialog_id == settings_subscription_) return settings_notify(message);
   return affiliation_notify(message);
 }
 

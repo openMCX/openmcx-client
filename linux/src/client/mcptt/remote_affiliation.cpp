@@ -1,12 +1,12 @@
 //
 // OpenMCX Licence Information : AGPL-3.0-or-later
 //
-// Affiliation of other MCPTT users (member functions of Client):
+// Affiliation of other MCPTT users and the MCPTT service settings subscription (member functions of Client):
 // the affiliation status determination of a target user (TS 24.379 clause 9.2.1.3), the affiliation status change
-// in mandatory mode of a target user (clause 9.2.1.2) and the affiliation status change request in negotiated mode,
-// sent (clause 9.2.1.4) and received (clause 9.2.1.5).
+// in mandatory mode of a target user (clause 9.2.1.2), the affiliation status change request in negotiated mode, sent
+// (clause 9.2.1.4) and received (clause 9.2.1.5), and the determination of the MCPTT service settings (clause 7.2.4).
 //
-// Specifications: TS 24.379 V19.7.0 (Rel-19), RFC 3856, RFC 3903, RFC 6665.
+// Specifications: TS 24.379 V19.7.0 (Rel-19), RFC 3856, RFC 3903, RFC 4354, RFC 6665.
 #include "../core/client.hpp"
 
 #include <sstream>
@@ -76,6 +76,7 @@ std::pair<std::string, std::string> Client::target_body(const std::string &targe
 //   deaffiliate-user <MCPTT ID> <client ID>   clause 9.2.1.2, mandatory mode: the target no longer interested
 //   recommend-affiliation <MCPTT ID> affiliate|deaffiliate <group>...   clause 9.2.1.4: MESSAGE, negotiated mode
 //   affiliation-request accept|reject         clause 9.2.1.5: the user's answer to a received request
+//   settings-subscribe | settings-resubscribe | settings-unsubscribe   clause 7.2.4: the MCPTT service settings
 void Client::remote_affiliation_command(const std::string &cmd) {
   std::istringstream in(cmd);
   std::string verb;
@@ -95,9 +96,13 @@ void Client::remote_affiliation_command(const std::string &cmd) {
   }
   if (verb == "affiliation-request" && args.size() == 1 && (args[0] == "accept" || args[0] == "reject"))
     return answer_affiliation_request(args[0] == "accept");
+  if (verb == "settings-subscribe" && args.empty()) return subscribe_settings(false);
+  if (verb == "settings-resubscribe" && args.empty()) return subscribe_settings(true);
+  if (verb == "settings-unsubscribe" && args.empty()) return unsubscribe_settings();
   throw std::runtime_error("affiliation-subscribe|affiliation-unsubscribe <MCPTT ID>, affiliate-user <MCPTT ID> "
                            "<client ID> <group>..., deaffiliate-user <MCPTT ID> <client ID>, recommend-affiliation "
-                           "<MCPTT ID> affiliate|deaffiliate <group>..., affiliation-request accept|reject");
+                           "<MCPTT ID> affiliate|deaffiliate <group>..., affiliation-request accept|reject, "
+                           "settings-subscribe|settings-resubscribe|settings-unsubscribe");
 }
 
 //------------------------------------------------------------------------------
@@ -278,6 +283,83 @@ void Client::answer_affiliation_request(bool accept) {
   }
   if (leave_selected) return deaffiliate_command();
   if (publish) affiliate();
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 7.2.4: the SUBSCRIBE (Event poc-settings) to the originating participating function, the
+// mcptt-info naming this MCPTT user, the MCPTT ICSI, the Accept of application/poc-settings+xml and Expires
+// 4294967295 (item 6, current status and later notifications); `again`: the re-subscription in its dialog.
+void Client::subscribe_settings(bool again) {
+  const auto [type, body] = target_body(user());
+  const std::vector<SipHeader> headers{{"P-Preferred-Service", mcptt_icsi},
+                                       {"Accept", "application/poc-settings+xml"}};
+  if (again) {
+    if (settings_subscription_.empty()) throw std::runtime_error("no MCPTT service settings subscription");
+    auto in_dialog = headers;
+    in_dialog.push_back({"Event", "poc-settings"});
+    in_dialog.push_back({"Expires", "4294967295"});
+    sip_.request_in_dialog(settings_subscription_, "SUBSCRIBE", type, body, in_dialog,
+                           [this](const SipResponse &response) {
+                             if (response.status_code >= 200)
+                               status_["service_settings"]["resubscribe_status"] = response.status_code;
+                           });
+    return;
+  }
+  if (!settings_subscription_.empty()) throw std::runtime_error("already subscribed to the MCPTT service settings");
+  settings_subscription_ = sip_.subscribe(service(), "poc-settings", max_expires, headers,
+                                          [this](const SipResponse &response) {
+                                            if (response.status_code < 200) return;
+                                            status_["service_settings"]["subscription_status"] = response.status_code;
+                                            if (response.status_code >= 300)
+                                              schedule([this] { settings_subscription_.clear(); });
+                                          },
+                                          type, body);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 7.2.4: de-subscribe: the in-dialog SUBSCRIBE with Expires 0.
+void Client::unsubscribe_settings() {
+  if (settings_subscription_.empty()) throw std::runtime_error("no MCPTT service settings subscription");
+  const auto [type, body] = target_body(user());
+  sip_.request_in_dialog(settings_subscription_, "SUBSCRIBE", type, body,
+                         {{"P-Preferred-Service", mcptt_icsi},
+                          {"Event", "poc-settings"},
+                          {"Expires", "0"},
+                          {"Accept", "application/poc-settings+xml"}},
+                         [this](const SipResponse &response) {
+                           if (response.status_code >= 200)
+                             status_["service_settings"]["unsubscribe_status"] = response.status_code;
+                         });
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 7.2.4 with RFC 4354: a NOTIFY of the MCPTT service settings subscription, answered 200 (OK); the
+// settings are shown to the user (status service_settings).
+SipResponse Client::settings_notify(const SipMessage &message) {
+  SipResponse response;
+  response.status_code = 200;
+  if (message.from_uri != service() || asserted_identity(message) != service()) {
+    response.status_code = 403;
+    return response;
+  }
+  auto &state = status_["service_settings"];
+  state["notifies"] = state.value("notifies", 0) + 1;
+  if (const auto *settings = body_of(message, "application/poc-settings+xml")) {
+    const auto mode = settings->find("<answer-mode>");
+    if (mode != std::string::npos)
+      state["answer_mode"] = settings->substr(mode + 13, settings->find("</answer-mode>", mode) - mode - 13);
+    try {
+      state["user_profile_index"] = parse_profile_index(*settings);
+    } catch (const std::exception &) {
+    }
+  }
+  if (get_header(message.headers, "Subscription-State").starts_with("terminated")) {
+    settings_subscription_.clear();
+    state["subscribed"] = false;
+  } else {
+    state["subscribed"] = true;
+  }
+  return response;
 }
 
 } // namespace mcx

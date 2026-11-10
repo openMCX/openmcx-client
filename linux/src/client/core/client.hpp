@@ -1157,9 +1157,10 @@ private:
   // Affiliation status NOTIFY (TS 24.379 clause 9.2.1.3).
   SipResponse affiliation_notify(const SipMessage &message);
 
-  // ---- Other users' affiliations (mcptt/remote_affiliation.cpp) ----
-  // TS 24.379 clauses 9.2.1.2 (mandatory mode), 9.2.1.3 (target user), 9.2.1.4, 9.2.1.5 (negotiated mode).
+  // ---- Other users' affiliations and the MCPTT service settings (mcptt/remote_affiliation.cpp) ----
+  // TS 24.379 clauses 9.2.1.2 (mandatory mode), 9.2.1.3 (target user), 9.2.1.4, 9.2.1.5 (negotiated mode), 7.2.4.
   std::map<std::string, std::string> target_affiliation_subscriptions_; // dialog -> target MCPTT ID
+  std::string settings_subscription_;
   Json affiliation_request_; // the received request in negotiated mode awaiting the user's answer
   void remote_affiliation_command(const std::string &cmd);
   std::pair<std::string, std::string> target_body(const std::string &target, std::vector<BodyPart> extra = {});
@@ -1172,6 +1173,9 @@ private:
                              const std::vector<std::string> &leave);
   SipResponse affiliation_command_message(const SipMessage &message, const std::string &command);
   void answer_affiliation_request(bool accept);
+  void subscribe_settings(bool again);
+  void unsubscribe_settings();
+  SipResponse settings_notify(const SipMessage &message);
   // INVITE from the trusted core: MCData, MCVideo, re-INVITE, replacement and new calls.
   SipResponse incoming_clear_invite(const SipMessage &message);
   // re-INVITE of the emergency private call (TS 24.379 clause 11.1.1.2.1.3).
