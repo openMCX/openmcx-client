@@ -21,12 +21,22 @@ namespace mcx {
 //   fa activate|takeover|deactivate <alias>...   fa use <alias>|none   fa bind|unbind <alias> <group>[,<group>...]
 // Test aid: "fa publish 0|4294967295 [<alias>...]" sends exactly the aliases and the Expires given, as another
 // client would, so that the server's handling of the whole set (clause 9A.2.2.2.3 steps 12 and 13) can be exercised.
+// "fa subscribe" and "fa unsubscribe": the user's own status determination (clause 9A.2.1.3), and its end.
 void Client::functional_alias_command(const std::string &arguments) {
   std::istringstream words(arguments);
   std::string action, alias;
   words >> action;
   std::vector<std::string> aliases;
   while (words >> alias) aliases.push_back(alias);
+  // TS 24.379 clause 9A.2.1.3: the user asks for the current status and later notifications, or for their end.
+  if (action == "subscribe" || action == "unsubscribe") {
+    if (!aliases.empty() || !authorized_) throw std::runtime_error("usage: fa subscribe|unsubscribe");
+    if (action == "subscribe") {
+      if (!alias_status_dialog_.empty()) throw std::runtime_error("already subscribed to the functional alias status");
+      return alias_status_subscribe();
+    }
+    return alias_status_unsubscribe();
+  }
   if (action == "use") {
     if (aliases.size() != 1) throw std::runtime_error("usage: fa use <alias>|none");
     functional_alias_ = aliases.front() == "none" ? std::string{} : aliases.front();
@@ -108,8 +118,12 @@ void Client::send_alias_publish(const std::string &action, const std::vector<std
                                {"take_over", take_over},
                                {"p_id_fa", request.publish_id},
                                {"outcomes", Json::object()}};
+  // TS 37.579-1 table 5.5.2.11-1 (condition PRESENCE-EVENT): the Accept of application/pidf+xml.
   sip_.publish(service(), "multipart/mixed; boundary=" + boundary, body,
-               {{"Event", "presence"}, {"Expires", expires}, {"P-Preferred-Service", mcptt_icsi}},
+               {{"Event", "presence"},
+                {"Expires", expires},
+                {"P-Preferred-Service", mcptt_icsi},
+                {"Accept", "application/pidf+xml"}},
                [this, action, aliases, pid = request.publish_id](const SipResponse &response) {
                  if (response.status_code < 200) return;
                  if (status_["last_fa_result"].value("p_id_fa", "") == pid) {
@@ -152,6 +166,30 @@ void Client::alias_status_subscribe() {
       },
       part.content_type, part.body);
   event("functional_alias_subscription_requested");
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9A.2.1.3: "In order to re-subscribe or de-subscribe, the MCPTT client shall generate an in-dialog
+// SIP SUBSCRIBE request": Expires 0, the Accept of application/pidf+xml and the mcptt-info of the initial SUBSCRIBE
+// (TS 37.579-2 table 5.8.3.3-4 derives from TS 37.579-1 table 5.3.36.4-1); the final NOTIFY ends the dialog
+// (alias_status_notify).
+void Client::alias_status_unsubscribe() {
+  if (alias_status_dialog_.empty()) throw std::runtime_error("no functional alias status subscription");
+  McpttInfo info;
+  info.request_uri = user();
+  info.client_id = client_id();
+  info.service["request-type"] = "functional-alias-status-determination";
+  const auto part = info_parts(info).front();
+  sip_.request_in_dialog(alias_status_dialog_, "SUBSCRIBE", part.content_type, part.body,
+                         {{"Event", "presence"},
+                          {"Expires", "0"},
+                          {"Accept", "application/pidf+xml"},
+                          {"P-Preferred-Service", mcptt_icsi}},
+                         [this](const SipResponse &response) {
+                           if (response.status_code >= 200)
+                             status_["functional_alias_unsubscribe_result"] = response.status_code;
+                         });
+  event("functional_alias_unsubscribe_requested");
 }
 
 //------------------------------------------------------------------------------

@@ -116,8 +116,13 @@ const xmlsec::Profile &Client::mcptt_xml_profile() {
                                         "altitude",
                                         "horizontalaccuracy",
                                         "verticalaccuracy"},
+                                       // The PIDF's <tuple> "id", the MCPTT client ID (TS 24.379
+                                       // clause 4.8: "an MCPTT ID, an MCPTT Group ID, and an MCPTT
+                                       // client ID in an XML document published in SIP PUBLISH
+                                       // request for affiliation"; TS 37.579-1 table 5.5.3.5.1-1).
                                        {{"entry", "uri"},
                                         {"presence", "entity"},
+                                        {"tuple", "id"},
                                         {"affiliation", "group"},
                                         {"functionalAlias", "functionalAliasID"},
                                         {"user", "entity"}}};

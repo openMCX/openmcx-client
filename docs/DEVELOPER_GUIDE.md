@@ -659,6 +659,10 @@ Points to know:
   else the `<user-priority>` of the user's entry in the group document; none, no "mc_priority". The INVITE with an
   implicit floor request offers "mc_granted"; an answer with it grants the floor without a Floor Granted message
   (`implicit_floor_answered`).
+- Functional alias status (TS 24.379 clause 9A.2.1.3): `fa subscribe` and `fa unsubscribe` (in-dialog SUBSCRIBE,
+  Expires 0, with the mcptt-info of the initial one) let the user start and end the status determination, which a
+  status change otherwise starts by itself. The functional alias PUBLISH carries the Accept of application/pidf+xml.
+  The `<tuple>` `id` (the MCPTT client ID) of every PIDF is an encrypted URI (TS 24.379 clause 4.8).
 - Groups are created, formed and torn down in the users tree of `gms.group_creation_xui` (TS 24.481 clauses
   6.3.2.2.1 and 6.3.14.2: "a group creation XUI configuration parameter"), which activation takes from the
   `<group-creation-XUI>` of the UE initial configuration. TS 24.484 clause 7.2.2.7 item 6 also calls that element the
