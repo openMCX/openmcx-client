@@ -315,6 +315,9 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
   if (alert && !emergency) throw std::runtime_error("alert requires an emergency first-to-answer call");
   if (to_alias && emergency) throw std::runtime_error("emergency calls to a functional alias are not implemented");
   std::vector<SipHeader> headers;
+  // TS 37.579-1 table 5.5.2.5.1-1: the Accept of the SDP and MCPTT-Info bodies; Answer-Mode "any value if present"
+  // (TS 37.579-2 table 6.2.20.3.3-1).
+  headers.push_back({"Accept", "application/sdp, " + std::string(mcptt_mime)});
   if (emergency) {
     info.emergency = true;
     info.alert = alert;
