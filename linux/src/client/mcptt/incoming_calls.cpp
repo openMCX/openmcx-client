@@ -81,6 +81,11 @@ SipResponse Client::incoming_clear_message(const SipMessage &message) {
     if (auto handled = mcvideo_location_incoming(message)) return *handled;
     return mcvideo_message(message);
   }
+  // TS 24.379 clause 9.2.1.5: an affiliation status change request in negotiated mode, with the MCPTT ICSI in
+  // P-Asserted-Service, from the participating function.
+  if (const auto *command = body_of(message, "application/vnd.3gpp.mcptt-affiliation-command+xml");
+      command && get_header(message.headers, "P-Asserted-Service") == mcptt_icsi)
+    return affiliation_command_message(message, *command);
   if (message.from_uri == service())
     if (auto handled = location_incoming(message)) return *handled;
   if (mcdata_enabled() && message.from_uri == mcdata_service()) {
@@ -386,6 +391,9 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
     return mcvideo_affiliation_notify(message);
   if (mcvideo_enabled() && !message.dialog_id.empty() && mcvideo_alias_dialogs_.contains(message.dialog_id))
     return mcvideo_alias_notify(message);
+  // TS 24.379 clause 9.2.1.3: a target user's affiliation status.
+  if (!message.dialog_id.empty() && target_affiliation_subscriptions_.contains(message.dialog_id))
+    return target_affiliation_notify(message);
   return affiliation_notify(message);
 }
 

@@ -217,6 +217,11 @@ void Client::run_command(const std::string &cmd) {
     reuse_floor_ssrc_ = true;
   } else if (cmd == "hangup") {
     hangup_command();
+  } else if (cmd.starts_with("affiliation-subscribe ") || cmd.starts_with("affiliation-unsubscribe ") ||
+             cmd.starts_with("affiliate-user ") || cmd.starts_with("deaffiliate-user ") ||
+             cmd.starts_with("recommend-affiliation ") || cmd.starts_with("affiliation-request ")) {
+    // TS 24.379 clauses 9.2.1.2 to 9.2.1.5 (mcptt/remote_affiliation.cpp).
+    remote_affiliation_command(cmd);
   } else if (cmd == "affiliate") {
     if (!authorized_) throw std::runtime_error("authorization required");
     desired_affiliation_ = true;
@@ -669,11 +674,12 @@ void Client::deaffiliate_command() {
     release();
     if (!dialog_.empty()) sip_.bye(dialog_);
   }
-  auto [type, body] = publish_body(true);
+  auto [type, body] = publish_body(true, true);
   sip_.publish(service(), type, body,
                {{"P-Preferred-Service", mcptt_icsi},
                 {"Event", "presence"},
                 {"Expires", "0"},
+                {"Accept", "application/pidf+xml"},
                 {"SIP-If-Match", affiliation_etag_}},
                [this](const SipResponse &response) {
                  if (response.status_code == 200) {

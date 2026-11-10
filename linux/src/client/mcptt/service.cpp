@@ -92,7 +92,7 @@ void Client::failure(const std::string &what) {
 //------------------------------------------------------------------------------
 // TS 24.379 clause 7.2.2 (poc-settings and the CSK upload of TS 33.180 clause 5.4) or clause 9.2.1.2 (the
 // affiliation pidf+xml): the multipart body of the service authorisation or affiliation SIP PUBLISH.
-std::pair<std::string, std::string> Client::publish_body(bool affiliation) {
+std::pair<std::string, std::string> Client::publish_body(bool affiliation, bool leaving) {
   McpttInfo info;
   info.client_id = client_id();
   info.access_token = token_;
@@ -103,6 +103,9 @@ std::pair<std::string, std::string> Client::publish_body(bool affiliation) {
     // TS 24.379 clause 9.2.1.2: the selected group and the groups monitored besides it.
     std::vector<std::string> groups{group()};
     groups.insert(groups.end(), monitored_groups_.begin(), monitored_groups_.end());
+    // leaving: the user is no longer interested in any group (TS 24.379 clause 9.2.1.2 item 4, Expires 0); the PIDF
+    // has an empty <status> (NOTE 2: it may be left out; TS 37.579-2 table 5.3.3.3-23 has it present but empty).
+    if (leaving) groups.clear();
     Affiliation request{user(), client_id(), random_id(), groups, {}};
     parts.push_back({"application/pidf+xml", affiliation_xml(request, false)});
   } else {
@@ -346,7 +349,11 @@ void Client::affiliate() {
   if (!desired_affiliation_ || !authorized_ || group().empty()) return;
   auto [type, body] = publish_body(true);
   // TS 24.379 clause 9.2.1.2: the MCPTT ICSI in P-Preferred-Service, as for every MCPTT PUBLISH.
-  std::vector<SipHeader> headers{{"P-Preferred-Service", mcptt_icsi}, {"Event", "presence"}, {"Expires", "4294967295"}};
+  // TS 37.579-1 table 5.5.2.11-1 (condition PRESENCE-EVENT): the Accept of application/pidf+xml.
+  std::vector<SipHeader> headers{{"P-Preferred-Service", mcptt_icsi},
+                                 {"Event", "presence"},
+                                 {"Expires", "4294967295"},
+                                 {"Accept", "application/pidf+xml"}};
   const bool refresh = !affiliation_etag_.empty();
   if (refresh) headers.push_back({"SIP-If-Match", affiliation_etag_});
   sip_.publish(service(), type, body, headers, [this, refresh](const SipResponse &response) {

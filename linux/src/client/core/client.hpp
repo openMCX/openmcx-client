@@ -741,7 +741,7 @@ class Client {
             {"service_routes", status->service_routes}};
   }
 
-  std::pair<std::string, std::string> publish_body(bool affiliation);
+  std::pair<std::string, std::string> publish_body(bool affiliation, bool leaving = false);
 
   std::pair<std::string, std::string> affiliation_subscribe_body();
 
@@ -1156,6 +1156,22 @@ private:
   SipResponse conference_notify(const SipMessage &message);
   // Affiliation status NOTIFY (TS 24.379 clause 9.2.1.3).
   SipResponse affiliation_notify(const SipMessage &message);
+
+  // ---- Other users' affiliations (mcptt/remote_affiliation.cpp) ----
+  // TS 24.379 clauses 9.2.1.2 (mandatory mode), 9.2.1.3 (target user), 9.2.1.4, 9.2.1.5 (negotiated mode).
+  std::map<std::string, std::string> target_affiliation_subscriptions_; // dialog -> target MCPTT ID
+  Json affiliation_request_; // the received request in negotiated mode awaiting the user's answer
+  void remote_affiliation_command(const std::string &cmd);
+  std::pair<std::string, std::string> target_body(const std::string &target, std::vector<BodyPart> extra = {});
+  void subscribe_target_affiliation(const std::string &target);
+  void unsubscribe_target_affiliation(const std::string &target);
+  SipResponse target_affiliation_notify(const SipMessage &message);
+  void publish_target_affiliation(const std::string &target, const std::string &client,
+                                  const std::vector<std::string> &groups);
+  void recommend_affiliation(const std::string &target, const std::vector<std::string> &affiliate,
+                             const std::vector<std::string> &leave);
+  SipResponse affiliation_command_message(const SipMessage &message, const std::string &command);
+  void answer_affiliation_request(bool accept);
   // INVITE from the trusted core: MCData, MCVideo, re-INVITE, replacement and new calls.
   SipResponse incoming_clear_invite(const SipMessage &message);
   // re-INVITE of the emergency private call (TS 24.379 clause 11.1.1.2.1.3).

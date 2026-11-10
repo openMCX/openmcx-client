@@ -643,6 +643,14 @@ Points to know:
   subscriptions are sent without XML protection (`document_subscription`). The environment variable
   `MCX_CSK_KEYLOGFILE` (lab use, like `SSLKEYLOGFILE`) appends each CSK the client adopts (`adopt_csk`) to a file so
   that a capture of its protected signalling can be decrypted.
+- Other users' affiliations (`mcptt/remote_affiliation.cpp`, TS 24.379 clauses 9.2.1.2 to 9.2.1.5): the
+  commands `affiliation-subscribe|affiliation-unsubscribe <MCPTT ID>` (the target's affiliation status, no
+  SIMPLE-FILTER: clause 9.2.1.3 item 7), `affiliate-user <MCPTT ID> <client ID> <group>...` and `deaffiliate-user
+  <MCPTT ID> <client ID>` (mandatory mode), `recommend-affiliation <MCPTT ID> affiliate|deaffiliate <group>...`
+  (negotiated mode, a MESSAGE with the affiliation-command of annex F.4) and `affiliation-request accept|reject` (the
+  user's answer to a received request, shown as `affiliation_request` in the status). The server checks the rights
+  of TS 24.484 clause 8.3.2.1. The own affiliation PUBLISH carries the Accept of application/pidf+xml, and its
+  de-affiliation an empty `<status>` (TS 37.579-1 table 5.5.2.11-1, TS 37.579-2 table 5.3.3.3-23).
 - Groups are created, formed and torn down in the users tree of `gms.group_creation_xui` (TS 24.481 clauses
   6.3.2.2.1 and 6.3.14.2: "a group creation XUI configuration parameter"), which activation takes from the
   `<group-creation-XUI>` of the UE initial configuration. TS 24.484 clause 7.2.2.7 item 6 also calls that element the
