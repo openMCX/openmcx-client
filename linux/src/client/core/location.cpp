@@ -19,8 +19,12 @@ void Client::send_location_report(location::Report report) {
   if (!location_alias_.empty()) report.location.functional_alias = std::exchange(location_alias_, {});
   const auto body = location::to_xml(report, location::Service::Mcptt);
   const auto target = location_server_.empty() ? service() : location_server_;
+  // Item 4: the g.3gpp.mcptt media feature tag; TS 37.579-1 table 5.5.2.7.1-1 (ac-value[1]) also has the g.3gpp.icsi-ref
+  // one, as the client's regroup requests have both (TS 24.379 clause 16.2.1.1 items 1 and 2).
   sip_.request("MESSAGE", target, mcptt_location_mime, body,
-               {{"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"}, {"P-Preferred-Service", mcptt_icsi}},
+               {{"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"},
+                {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(mcptt_icsi) + "\";require;explicit"},
+                {"P-Preferred-Service", mcptt_icsi}},
                [this](const SipResponse &response) {
                  if (response.status_code < 200) return;
                  if (response.status_code >= 300) failure("location report: " + std::to_string(response.status_code));
@@ -212,10 +216,24 @@ void Client::location_position_command(std::istringstream &in, std::uint64_t now
 
 //------------------------------------------------------------------------------
 // Test aid: "location radio <dimension> <value>" sets this UE's radio cell, tracking area or other radio dimension
-// for the MCPTT, MCData and MCVideo location reporting.
+// for the MCPTT, MCData and MCVideo location reporting; "neighbours" or "nr_neighbours" its neighbouring cells.
 void Client::location_radio_command(std::istringstream &in, std::uint64_t now) {
   std::string dimension, value;
   if (!(in >> dimension >> value)) throw std::runtime_error("location radio <dimension> <value>");
+  // "location radio neighbours|nr_neighbours <cell>[,<cell>...]|none": the neighbouring cells it hears.
+  if (dimension == "neighbours" || dimension == "nr_neighbours") {
+    std::vector<std::string> cells;
+    for (std::size_t start = 0; value != "none" && start <= value.size();) {
+      const auto end = std::min(value.find(',', start), value.size());
+      if (end > start) cells.push_back(value.substr(start, end - start));
+      start = end + 1;
+    }
+    const auto kind = dimension == "neighbours" ? location::Dimension::Cell : location::Dimension::NrCell;
+    location_.neighbours(kind, cells);
+    mcdata_location_.neighbours(kind, cells);
+    mcvideo_location_.neighbours(kind, cells);
+    return;
+  }
   static const std::map<std::string, location::Dimension> names = {
       {"cell", location::Dimension::Cell},
       {"nr_cell", location::Dimension::NrCell},
