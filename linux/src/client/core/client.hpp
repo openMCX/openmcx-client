@@ -22,6 +22,7 @@
 #include "transport_key_config.hpp"
 #include "mcx/floor.hpp"
 #include "mcx/http.hpp"
+#include "mcx/ice.hpp"
 #include "mcx/ipconn.hpp"
 #include "mcx/key_client.hpp"
 #include "mcx/key_documents.hpp"
@@ -32,6 +33,7 @@
 #include "mcx/protocol.hpp"
 #include "mcx/mbms.hpp"
 #include "mcx/multicast.hpp"
+#include "mcx/pre_established.hpp"
 #include "mcx/protected_call.hpp"
 #include "mcx/runtime.hpp"
 #include "mcx/seal_location.hpp"
@@ -2359,8 +2361,36 @@ private:
   void group_call_command(const std::string &cmd);
   // Floor and media set-up and the INVITE of a group call.
   void invite_group_call(const std::string &cmd, bool chat, McpttInfo &info, const std::vector<SipHeader> &headers);
-  // "pre-establish": test aid for the server's pre-established session refusal.
-  void pre_establish_command();
+  // ---- Pre-established session (mcptt/pre_established.cpp): TS 24.379 clause 8, TS 24.380 clause 9.2 ----
+  // TS 24.379 clause 8.2.1: the client's pre-established session: its dialog, the URI identifying it (the Contact of
+  // the 200 (OK)), its media on the client's speech and floor sockets plus an RTCP socket, its ICE agent (clause 4.9:
+  // the controlling agent, as the offerer) and the call setup control state machine of TS 24.380 clause 9.2.2.
+  struct PreSession {
+    std::string dialog, uri;
+    MediaDescription local;
+    std::optional<MediaDescription> remote;
+    std::unique_ptr<UdpSocket> rtcp;
+    std::unique_ptr<IceAgent> ice;
+    std::unique_ptr<PreEstablishedClient> control;
+    std::string state = "establishing"; // "establishing", "established", "releasing"
+  };
+  std::unique_ptr<PreSession> pre_session_;
+  // "pre-establish [implicit]" (TS 24.379 clause 8.2.1); "pre-session-modify [implicit|explicit] [update]"
+  // (clause 8.3.1.1); "pre-session-release" (clause 8.4.1.1).
+  void pre_establish_command(const std::string &cmd);
+  void pre_session_modify_command(const std::string &cmd);
+  void pre_session_release_command();
+  void pre_session_answered(const SipResponse &response);
+  std::unique_ptr<IceAgent> pre_session_agent(const MediaDescription &local);
+  // TS 24.379 clauses 8.3.1.2 and 8.4.1.2: a request in the session's dialog; nothing when it is not.
+  std::optional<SipResponse> pre_session_request(const SipMessage &message);
+  // TS 24.380 clauses 9.2.2.2.2 and 9.2.2.3.3: the session's dialog confirmed or ended; false when it is not.
+  bool pre_session_state(std::string_view dialog, SipCallState state);
+  bool pre_session_media(std::string_view dialog, const MediaDescription &media);
+  // TS 24.379 clause 4.9 (RFC 8445 section 7.3, RFC 7983): a STUN datagram of a socket of the session.
+  bool pre_session_stun(IceStream stream, unsigned component, const Datagram &datagram);
+  void pre_session_poll();
+  void pre_session_status();
   // "chat-join <group>": test aid for the server's implicit affiliation checks.
   void chat_join_command(const std::string &cmd);
   // "ptt <wav>": request the floor and transmit (TS 24.380 clause 6.2.4.3.5).

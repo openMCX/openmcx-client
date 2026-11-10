@@ -299,10 +299,17 @@ Client::Client(Json cfg, bool disable_tls)
       sip_(client_sip_config(cfg_, disable_tls),
            {[this](const SipMessage &message) { return incoming(message); },
             [this](std::string_view id, SipCallState state, int code) {
+              if (pre_session_state(id, state)) return;
               if (mcvideo_closing(id, state) || mcvideo_call_state(id, state)) return;
               call_state(id, state, code);
             },
             [this](std::string_view dialog, const MediaDescription &media) {
+              try {
+                if (pre_session_media(dialog, media)) return;
+              } catch (const std::exception &error) {
+                failure(std::string("pre-established session media: ") + error.what());
+                return;
+              }
               if (mcvideo_closing_.contains(std::string(dialog))) return;
               // The media of the MCVideo call's dialog: a refusal ends that call (mcvideo_end_call and its own
               // dialog), never the MCPTT call of dialog_.
@@ -452,6 +459,7 @@ void Client::run() {
   while (!stopping) run_once();
   release();
   if (!dialog_.empty()) sip_.bye(dialog_);
+  if (pre_session_) sip_.bye(pre_session_->dialog);
   for (int index = 0; index < 20; index++) sip_.poll(std::chrono::milliseconds(10));
   save_audio();
   sip_.stop();
@@ -790,6 +798,7 @@ void Client::run_once() {
   for (int index = 0; index < 32; index++) {
     auto datagram = floor_.receive();
     if (!datagram) break;
+    if (pre_session_stun(IceStream::Control, 1, *datagram)) continue; // RFC 7983: ICE checks of the session
     try {
       floor_packet(*datagram);
     } catch (const std::exception &error) {
@@ -805,6 +814,7 @@ void Client::run_once() {
   for (int index = 0; index < 32; index++) {
     auto datagram = audio_.receive();
     if (!datagram) break;
+    if (pre_session_stun(IceStream::Audio, 1, *datagram)) continue;
     try {
       audio_packet(*datagram);
     } catch (const std::exception &error) {
@@ -813,6 +823,7 @@ void Client::run_once() {
     }
   }
   if (mcvideo_enabled()) mcvideo_poll();
+  pre_session_poll();
   try {
     tick();
   } catch (const std::exception &error) {

@@ -42,6 +42,7 @@ add_executable(mcx-client
     src/client/mcptt/multicast.cpp
     src/client/core/mbms.cpp
     src/client/mcptt/priority.cpp
+    src/client/mcptt/pre_established.cpp
     src/client/mcptt/private_call.cpp
     src/client/mcptt/private_services.cpp
     src/client/mcptt/regroup.cpp

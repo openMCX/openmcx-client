@@ -65,7 +65,9 @@ void Client::command(const std::string &command_line) {
 //   call [broadcast] [emergency|imminent], chat [emergency|imminent], rejoin, call force: prearranged group call
 //     (clause 10.1.1.2.1.1), chat group call (clause 10.1.2.2.1.1), rejoin by session identity; a call command may
 //     end in implicit[=<WAV>] or no-implicit (take_implicit_choice);
-//   pre-establish, chat-join <group>: test aids for the server's refusals;
+//   pre-establish [implicit], pre-session-modify [implicit|explicit] [update], pre-session-release: the
+//     pre-established session (clauses 8.2.1, 8.3.1.1, 8.4.1.1; mcptt/pre_established.cpp);
+//   chat-join <group>: test aid for the server's refusals;
 //   hangup: release the call (clause 10.1.1.2.3.1, clause 11.1.3.1.1.1, ambient clause 11.1.6.2.1.3);
 //   affiliate, deaffiliate: affiliation status change (clause 9.2.1.2);
 //   options <SIP URI>: reachability probe (RFC 3261 section 11);
@@ -107,8 +109,12 @@ void Client::run_command(const std::string &cmd) {
              cmd == "call broadcast" || cmd == "call broadcast emergency" || cmd == "call broadcast imminent" ||
              cmd == "chat" || cmd == "chat emergency" || cmd == "chat imminent" || cmd == "call force") {
     group_call_command(cmd);
-  } else if (cmd == "pre-establish") {
-    pre_establish_command();
+  } else if (cmd == "pre-establish" || cmd.starts_with("pre-establish ")) {
+    pre_establish_command(cmd);
+  } else if (cmd.starts_with("pre-session-modify")) {
+    pre_session_modify_command(cmd);
+  } else if (cmd == "pre-session-release") {
+    pre_session_release_command();
   } else if (cmd.starts_with("chat-join ")) {
     chat_join_command(cmd);
   } else if (cmd == "conference-subscribe") {
@@ -490,34 +496,6 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
         headers);
   });
   status_["last_call_failure"] = nullptr;
-  status_["call_state"] = "calling";
-}
-
-//------------------------------------------------------------------------------
-// Test aid: an INVITE to the pre-established session PSI (TS 24.379 clause 8.2.1).
-// Pre-established sessions are not implemented; this exercises the server's
-// clause 8.2.2 step 5 refusal (403, warning 100).
-void Client::pre_establish_command() {
-  if (!authorized_ || !dialog_.empty())
-    throw std::runtime_error("pre-established session setup requires authorized idle state");
-  const auto &mcptt = cfg_.at("mcptt");
-  const auto target = mcptt.value("pre_established_uri", service() + ";mcptt-pre-established");
-  McpttInfo info;
-  info.client_id = client_id();
-  local_.floor_priority.reset();
-  local_.floor_ssrc = random_ssrc();
-  floor_sequence_.reset();
-  floor_timers_ = participant_timers();
-  status_["last_call_failure"] = nullptr;
-  dialog_ = sip_.invite(target, local_, info_parts(info), [this](const SipResponse &response) {
-    if (response.status_code >= 300) {
-      status_["last_call_failure"] = {{"status", response.status_code},
-                                      {"warning", std::string(get_header(response.headers, "Warning"))}};
-      failure("pre-established session setup: " + std::to_string(response.status_code));
-    } else if (response.status_code >= 200 && !dialog_.empty()) {
-      sip_.bye(dialog_); // unexpected acceptance: do not keep an unmanaged session
-    }
-  });
   status_["call_state"] = "calling";
 }
 
