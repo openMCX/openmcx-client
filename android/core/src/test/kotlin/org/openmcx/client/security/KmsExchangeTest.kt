@@ -108,6 +108,32 @@ class KmsExchangeTest {
             assertThrows(bad, IllegalArgumentException::class.java) { TransportKeyEntries.parse(Json.parseToJsonElement(bad).jsonObject) }
     }
 
+    /** The KMS answers the init for the token's user (the account), signed under the account's keys; an identity
+     *  without keys of its own (an MCData or MCVideo ID) verifies it with the account's and fetches its KeyProvision
+     *  unsigned. */
+    @Test fun initVerifiedWithTheAccountKeys() {
+        val seen = mutableListOf<Pair<String, ByteArray?>>()
+        val http = object : org.openmcx.client.http.HttpClient {
+            override suspend fun request(method: String, url: String, headers: Map<String, String>, body: ByteArray?): org.openmcx.client.http.HttpResponse {
+                seen += url to body
+                if (url.endsWith("/init")) return org.openmcx.client.http.HttpResponse(200, emptyMap(), signedInit(trk).toByteArray())
+                throw IllegalStateException("keyprov not expected")
+            }
+        }
+        val client = KeyClient(http, "https://kms:8443", "sip:alice.mcdata@mcx.test", user, WireProfile(10, 1, 0x79, 0x78),
+            transportKeys = { null }, accountTransportKeys = { UserTransportKeys(trk, null) })
+        // The signature (checked first) and the binding pass under the account's TrK; only the vector's fixed Time of
+        // 2026-09-28 is then refused as stale (table D.3.1-1), after the verification.
+        val e = runCatching { kotlinx.coroutines.runBlocking { client.provision("token") } }.exceptionOrNull()
+        assertEquals("stale KMS response", e?.message)
+        assertTrue(seen[0].second != null) // the init request signed under the account's TrK
+        // With the identity's keys only, the account's signed init is refused (the old behaviour of both clients).
+        val wrong = KeyClient(http, "https://kms:8443", "sip:alice.mcdata@mcx.test", user, WireProfile(10, 1, 0x79, 0x78),
+            transportKeys = { null }, accountTransportKeys = { null })
+        val refused = runCatching { kotlinx.coroutines.runBlocking { wrong.provision("token") } }.exceptionOrNull()
+        assertEquals("XML signatures require a verifying profile", refused?.message)
+    }
+
     /** Clause 5.3.2: through the HTTP proxy "the TrK shall be used": without one the exchange is refused before any request. */
     @Test fun kmsThroughTheProxyNeedsATrk() {
         var requests = 0

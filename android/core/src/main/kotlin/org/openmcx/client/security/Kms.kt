@@ -277,6 +277,9 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
                 val profile: WireProfile, private val skew: Long = Mikey.DEFAULT_CLOCK_SKEW_S,
                 private val warn: (String) -> Unit = {}, kmsId: String? = null,
                 private val transportKeys: () -> UserTransportKeys? = { null },
+                /** The account's (the MCPTT ID's) TrK and InK, for the KMS init, which the KMS answers for the token's
+                 *  user; [transportKeys] are this identity's, for its key provisioning. */
+                private val accountTransportKeys: () -> UserTransportKeys? = transportKeys,
                 /** The KMS is reached through the home HTTP proxy (`kms_via_proxy`): a TrK is then required. */
                 private val viaProxy: Boolean = false) {
     private val kmsUri = kmsUri.trimEnd('/')
@@ -321,14 +324,16 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
     private suspend fun refresh() {
         // TS 33.180 clause 5.3.2 and annex D.2.2: with this identity's InK or TrK, signed requests, and the responses
         // verified and their keys unwrapped with them; the keys are looked up for this exchange only (clause 5.11.1).
+        // The init request names no identity: the KMS answers for the token's user (the account), with the account's
+        // keys; the KeyProvision request names this identity, with this identity's keys.
+        val accountTransport = accountTransportKeys()?.takeIf { it.integrity != null }
         val transport = transportKeys()?.takeIf { it.integrity != null }
         // Clause 5.3.2: "If the KMS does connect to and employ the use of the HTTP proxy, then for public safety users the
         // TrK shall be used as defined in clause 9.3.3".
-        if (viaProxy && transport?.trk == null)
+        if (viaProxy && (transport?.trk == null || accountTransport?.trk == null))
             throw KeyError("the KMS is reached through the HTTP proxy, which needs a TrK for $identity")
-        val init = fetch("init", transport?.let { KmsDocuments.requestXml(account, kmsId, url("init"), Mikey.nowNtp(), it) })
-        // The init request names no identity: the KMS answers for the token's user.
-        val public = KmsDocuments.parseInit(init, account, kmsId, url("init"), Mikey.nowNtp(), transport)
+        val init = fetch("init", accountTransport?.let { KmsDocuments.requestXml(account, kmsId, url("init"), Mikey.nowNtp(), it) })
+        val public = KmsDocuments.parseInit(init, account, kmsId, url("init"), Mikey.nowNtp(), accountTransport)
         val keyprov = fetch("keyprov", transport?.let { KmsDocuments.requestXml(identity, kmsId, url("keyprov"), Mikey.nowNtp(), it) })
         // The UID form of this KMS's keys decides the identifier of every ECCSI and SAKKE operation under it (UidForm).
         val provisioned = KmsDocuments.parseKeyProv(keyprov, public, identity, url("keyprov"), Mikey.nowNtp(), transport, detectUidForm = true)

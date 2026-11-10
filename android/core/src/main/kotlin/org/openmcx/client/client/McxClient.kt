@@ -245,7 +245,8 @@ class McxClient(
         val keys = keyClients[service] ?: KeyClient(kmsHttp, security.kmsUri, userId, account,
             WireProfile(security.messageType, security.algorithm, security.keyParametersIei,
                 security.encryptedPayloadIei),
-            security.mikeyClockSkewS, { event(it) }, security.kmsId, { transportKeys(userId) }, security.kmsViaProxy)
+            security.mikeyClockSkewS, { event(it) }, security.kmsId, { transportKeys(userId) },
+            accountTransportKeys = { transportKeys(account) }, viaProxy = security.kmsViaProxy)
             .also { keyClients[service] = it }
         keys.provision(token)
         if (csks[service] == null) {
