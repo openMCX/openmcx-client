@@ -100,6 +100,10 @@ const xmlsec::Profile &Client::mcptt_xml_profile() {
                                         "originated-by",
                                         "associated-group-id",
                                         "location-of-functional-alias-URI",
+                                        // TS 24.379 clause 4.8: "functional alias" is sensitive application data
+                                        // (TS 37.579-1 table 5.5.3.2.1-1, FUNCTIONAL_ALIAS: encrypted).
+                                        "functional-alias-URI",
+                                        "called-functional-alias-URI",
                                         "emergency-ind",
                                         "alert-ind",
                                         "imminentperil-ind",
