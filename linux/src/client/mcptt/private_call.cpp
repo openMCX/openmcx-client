@@ -155,7 +155,10 @@ std::vector<BodyPart> Client::private_call_parts(const std::string &target, bool
 // with a KMS Redirect Response (TS 33.180 clause 5.2.8.2.5) and failures; the outcome of a remote, transfer or
 // forwarding request (clause 11.1.8.2.2, clause 11.1.9.2.2).
 void Client::private_call_response(const std::string &target, const SipResponse &response) {
-  if (followup_ && followup_->target == target && response.status_code > 100) {
+  // TS 24.379 clause 11.1.7.2.2: a remotely initiated private call is reported "upon completion of the procedures of
+  // clause 11.1.1.2.1.1", on the final response (its outcome); a transfer or forwarding on the first one.
+  if (followup_ && followup_->target == target && response.status_code > 100 &&
+      (followup_->kind != "remote" || response.status_code >= 200)) {
     // TS 24.379 clause 11.1.8.2.2 and clause 11.1.9.2.2: ringing, progress, 2xx or 480/175 mean success.
     const bool forwarded =
         response.status_code == 480 && client_rules::has_warning(get_header(response.headers, "Warning"), 175);
