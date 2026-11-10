@@ -1169,6 +1169,12 @@ private:
   void subscribe_target_affiliation(const std::string &target);
   void unsubscribe_target_affiliation(const std::string &target);
   SipResponse target_affiliation_notify(const SipMessage &message);
+  // TS 24.379 clause 9.2.1.6: "group-data-subscribe [<group>]" and "group-data-unsubscribe": the subscription to a
+  // group's dynamic data (the group call ongoing information), and its NOTIFYs.
+  void group_data_command(const std::string &cmd);
+  std::pair<std::string, std::string> group_data_body(const std::string &group);
+  SipResponse group_data_notify(const SipMessage &message);
+  std::string group_data_dialog_, group_data_group_;
   void publish_target_affiliation(const std::string &target, const std::string &client,
                                   const std::vector<std::string> &groups);
   void recommend_affiliation(const std::string &target, const std::vector<std::string> &affiliate,

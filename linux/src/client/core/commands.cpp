@@ -249,6 +249,8 @@ void Client::run_command(const std::string &cmd) {
     group_management_command(cmd);
   } else if (cmd.starts_with("seal ")) {
     seal_command(cmd);
+  } else if (cmd.starts_with("group-data-")) {
+    group_data_command(cmd);
   } else if (cmd.starts_with("location ")) {
     location_command(cmd);
   } else if (cmd.starts_with("mcvideo-")) {

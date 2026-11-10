@@ -391,6 +391,8 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
     return mcvideo_affiliation_notify(message);
   if (mcvideo_enabled() && !message.dialog_id.empty() && mcvideo_alias_dialogs_.contains(message.dialog_id))
     return mcvideo_alias_notify(message);
+  // TS 24.379 clause 9.2.1.6: the group dynamic data subscription.
+  if (!message.dialog_id.empty() && message.dialog_id == group_data_dialog_) return group_data_notify(message);
   // TS 24.379 clause 9.2.1.3 (a target user's affiliation status) and clause 7.2.4 (the MCPTT service settings).
   if (!message.dialog_id.empty() && target_affiliation_subscriptions_.contains(message.dialog_id))
     return target_affiliation_notify(message);

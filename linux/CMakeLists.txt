@@ -45,6 +45,7 @@ add_executable(mcx-client
     src/client/mcptt/private_call.cpp
     src/client/mcptt/private_services.cpp
     src/client/mcptt/regroup.cpp
+    src/client/mcptt/group_data.cpp
     src/client/mcptt/remote_affiliation.cpp
     src/client/mcptt/service.cpp
     src/client/mcptt/speech_capture.cpp
