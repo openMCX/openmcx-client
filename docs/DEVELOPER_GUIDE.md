@@ -654,6 +654,11 @@ Points to know:
 - The MCPTT service settings (TS 24.379 clause 7.2.4): `settings-subscribe`, `settings-resubscribe` and
   `settings-unsubscribe` (SUBSCRIBE, Event poc-settings, the Accept of application/poc-settings+xml, Expires
   4294967295 or 0); the NOTIFYs are shown as `service_settings` (answer mode, user profile index).
+- Floor priority and "mc_granted" (TS 24.380 clauses 14.2.3 and 14.2.4): the group call's "mc_priority" is the
+  configured floor priority (`configured_floor_priority`): `mcptt.maximum_floor_priority` (or `mcptt.floor_priority`),
+  else the `<user-priority>` of the user's entry in the group document; none, no "mc_priority". The INVITE with an
+  implicit floor request offers "mc_granted"; an answer with it grants the floor without a Floor Granted message
+  (`implicit_floor_answered`).
 - Groups are created, formed and torn down in the users tree of `gms.group_creation_xui` (TS 24.481 clauses
   6.3.2.2.1 and 6.3.14.2: "a group creation XUI configuration parameter"), which activation takes from the
   `<group-creation-XUI>` of the UE initial configuration. TS 24.484 clause 7.2.2.7 item 6 also calls that element the

@@ -446,14 +446,31 @@ void Client::group_call_command(const std::string &cmd) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.380 clause 14.2.3: "The MCPTT client should base floor priority on the configured value": the
+// mcptt.maximum_floor_priority (or mcptt.floor_priority) of the configuration, else the <user-priority> of this user's
+// <entry> in the selected group's document (TS 24.481 clause 7.2.4.2; TS 37.579-1 table 5.5.7.1-1 gives user A "3");
+// nothing when neither is configured.
+std::optional<unsigned> Client::configured_floor_priority() const {
+  const auto &mcptt = cfg_.at("mcptt");
+  if (mcptt.contains("maximum_floor_priority")) return mcptt.at("maximum_floor_priority").get<unsigned>();
+  if (mcptt.contains("floor_priority")) return mcptt.at("floor_priority").get<unsigned>();
+  const auto document = group_documents_.find(group());
+  if (document != group_documents_.end() && document->contains("user_priority"))
+    return document->at("user_priority").get<unsigned>();
+  return std::nullopt;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.379 clause 10.1.1.2.1.1 and clause 10.1.2.2.1.1: set up the floor and media of a group call (an ad hoc
 // rejoin by session identity: clause 17.2.5.1.1) and send its INVITE.
 void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &info,
                                const std::vector<SipHeader> &headers) {
-  const unsigned maximum_priority =
-      cfg_.at("mcptt").value("maximum_floor_priority", cfg_.at("mcptt").value("floor_priority", 0u));
-  if (maximum_priority > 99) throw std::runtime_error("maximum floor priority must be 0..99");
-  local_.floor_priority = static_cast<std::uint8_t>(maximum_priority);
+  // TS 24.380 clause 14.2.3: "mc_priority" when a floor priority other than the default is required
+  // (configured_floor_priority); none configured: the default, no "mc_priority".
+  const auto maximum_priority = configured_floor_priority();
+  if (maximum_priority && *maximum_priority > 99) throw std::runtime_error("maximum floor priority must be 0..99");
+  local_.floor_priority.reset();
+  if (maximum_priority) local_.floor_priority = static_cast<std::uint8_t>(*maximum_priority);
   // Test aid ("next-floor-ssrc previous"): the call offers the floor SSRC of this client's previous call, which the
   // server refuses under the CSK (TS 24.380 clause 4.3.3.1, RFC 7714 section 8.4); once.
   const auto previous = local_.floor_ssrc;

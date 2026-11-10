@@ -589,8 +589,25 @@ std::optional<SipResponse> Client::group_document_notify(const SipMessage &messa
         for (std::size_t at = response.body.find("<entry"); at != std::string::npos;
              at = response.body.find("<entry", at + 1)) {
           const auto uri = response.body.find("uri=\"", at);
-          if (uri != std::string::npos)
-            members.push_back(response.body.substr(uri + 5, response.body.find('"', uri + 5) - uri - 5));
+          if (uri == std::string::npos) continue;
+          const auto id = response.body.substr(uri + 5, response.body.find('"', uri + 5) - uri - 5);
+          members.push_back(id);
+          // TS 24.481 clause 7.2.4.2: this user's <user-priority>, its configured floor priority (TS 24.380 clause
+          // 14.2.3; configured_floor_priority).
+          if (id == user()) {
+            const auto close = response.body.find("</entry>", at);
+            const auto next = response.body.find("<entry", at + 1);
+            const auto end = std::min(close, next);
+            // The element may carry a namespace declaration (<user-priority xmlns="...">3</user-priority>).
+            const auto tag = response.body.find("user-priority", at);
+            const auto open_end = tag == std::string::npos ? tag : response.body.find('>', tag);
+            if (open_end != std::string::npos && open_end < end && response.body[open_end - 1] != '/') {
+              try {
+                document["user_priority"] = std::stoul(response.body.substr(open_end + 1));
+              } catch (const std::exception &) {
+              }
+            }
+          }
         }
         document["members"] = members;
       });

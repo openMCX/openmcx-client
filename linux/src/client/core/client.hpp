@@ -742,6 +742,7 @@ class Client {
   }
 
   std::pair<std::string, std::string> publish_body(bool affiliation, bool leaving = false);
+  std::optional<unsigned> configured_floor_priority() const;
 
   std::pair<std::string, std::string> affiliation_subscribe_body();
 

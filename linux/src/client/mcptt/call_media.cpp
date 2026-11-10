@@ -49,6 +49,8 @@ void Client::check_remote(const MediaDescription &media, bool private_call) {
 MediaDescription Client::negotiated_media(MediaDescription media) const {
   media.queueing = client_rules::answer_parameter_kept(media.queueing, local_.queueing);
   media.implicit_request = client_rules::answer_parameter_kept(media.implicit_request, implicit_offered_);
+  // "mc_granted" is offered with this client's implicit floor request only (invite_with_implicit).
+  media.granted = client_rules::answer_parameter_kept(media.granted, implicit_offered_);
   return media;
 }
 
@@ -81,13 +83,17 @@ void Client::invite_with_implicit(bool implicit, bool own, const std::function<v
   early_floor_.clear();
   call_answered_ = false;
   local_.implicit_request = implicit;
+  // TS 24.380 clause 14.2.4: "mc_granted" in the SDP offer of the initial INVITE, this client accepting a floor
+  // granted in the 200 (OK) (implicit_floor_answered); with its own implicit floor request (TS 37.579-1 table
+  // 5.5.3.1.1-1, INITIAL_SDP_OFFER).
+  local_.granted = implicit && own;
   try {
     invite();
   } catch (...) {
-    local_.implicit_request = implicit_offered_ = false;
+    local_.implicit_request = local_.granted = implicit_offered_ = false;
     throw;
   }
-  local_.implicit_request = false;
+  local_.implicit_request = local_.granted = false;
   implicit_offered_ = implicit && own;
   // The outcome of the last implicit floor request: "offered", then "accepted" or "not accepted".
   if (implicit_offered_) status_["implicit_floor_request"] = "offered";
@@ -110,6 +116,25 @@ void Client::implicit_floor_answered() {
     transmit_offset_ = 0;
     status_["implicit_floor_request"] = "not accepted";
     event("implicit_floor_request_not_accepted", {{"dialog", dialog_}});
+    return;
+  }
+  // TS 24.380 clause 14.3.4 and clause 12.1.2.2 NOTE 2: "mc_granted" in the answer: "the floor has been granted to
+  // the offerer", with the audio SSRC of "mc_ssrc" (clause 14.3.6); no Floor Granted message follows.
+  if (remote_->granted && remote_->granted_audio_ssrc) {
+    floor_timers_.granted_in_answer(local_.floor_ssrc);
+    audio_ssrc_ = remote_->granted_audio_ssrc;
+    talking_ = true;
+    requesting_ = false;
+    next_audio_ = monotonic_ms();
+    status_["implicit_floor_request"] = "granted in the answer";
+    event("floor_granted", {{"by", "sdp answer"}});
+    for (const auto &datagram : stored) {
+      try {
+        floor_packet(datagram);
+      } catch (const std::exception &error) {
+        failure(std::string("stored floor message: ") + error.what());
+      }
+    }
     return;
   }
   floor_timers_.expect_implicit_grant(floor_message(FloorType::Request), monotonic_ms());
@@ -308,7 +333,7 @@ FloorPacket Client::floor_message(FloorType type) const {
   if (type == FloorType::Request) packet.fields.push_back(location_not_provided_field());
   if (type == FloorType::Request)
     packet.fields.push_back(priority_field(static_cast<std::uint8_t>(
-        std::min<unsigned>(cfg_.at("mcptt").value("floor_priority", 0u), remote_->floor_priority.value_or(0)))));
+        std::min<unsigned>(configured_floor_priority().value_or(0), remote_->floor_priority.value_or(0)))));
   return packet;
 }
 
