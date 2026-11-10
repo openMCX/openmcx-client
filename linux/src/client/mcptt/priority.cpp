@@ -252,6 +252,24 @@ void Client::change_private_priority(bool enable, bool with_alert) {
   if (enable && with_alert)
     parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
   auto headers = priority_headers(info);
+  // TS 37.579-1 table 5.5.2.5.1-1 (re_INVITE too): P-Preferred-Service, the Accept-Contact of the MCPTT ICSI and
+  // feature tag, and the Accept of the SDP and MCPTT-Info bodies, as in the group call's priority re-INVITE.
+  headers.push_back({"P-Preferred-Service", mcptt_icsi});
+  headers.push_back({"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"});
+  headers.push_back(
+      {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt\";require;explicit"});
+  headers.push_back({"Accept", "application/sdp, " + std::string(mcptt_mime)});
+  // "emergency on implicit[=<WAV>]": the upgrade carries an implicit floor request, as for a group call
+  // (change_priority; TS 24.380 clause 14.2.5; TS 37.579-2 6.2.1 step 20; conformance GAPS.md C46).
+  const auto implicit = enable && remote_->control == MediaControl::floor && !talking_ ? implicit_choice()
+                                                                                       : ImplicitChoice{};
+  if (implicit.requested) {
+    call_answered_ = false;
+    early_floor_.clear();
+    local_.implicit_request = true;
+    local_.granted = false;
+    implicit_offered_ = true;
+  }
   const int previous_mpea = mpea_;
   if (enable) {
     mepc_ = 2;
@@ -265,10 +283,19 @@ void Client::change_private_priority(bool enable, bool with_alert) {
   try {
     sip_.reinvite(
         dialog_, local_, parts,
-        [this, enable, previous_mpea](const SipResponse &response) {
+        [this, enable, previous_mpea, implicit](const SipResponse &response) {
           if (response.status_code < 200) return;
           priority_pending_ = false;
           status_["priority_updates_completed"] = status_.value("priority_updates_completed", 0u) + 1;
+          if (implicit.requested && response.status_code < 300) {
+            prepare_implicit_speech(implicit);
+            call_answered_ = true;
+            implicit_floor_answered();
+          } else if (implicit.requested) {
+            implicit_offered_ = requesting_ = false;
+            call_answered_ = true;
+            early_floor_.clear();
+          }
           if (response.status_code < 300) {
             if (enable) {
               mepp_ = 2;
@@ -300,7 +327,15 @@ void Client::change_private_priority(bool enable, bool with_alert) {
         headers);
   } catch (...) {
     priority_pending_ = false;
+    if (implicit.requested) {
+      local_.implicit_request = implicit_offered_ = false;
+      call_answered_ = true;
+    }
     throw;
+  }
+  if (implicit.requested) {
+    local_.implicit_request = false;
+    status_["implicit_floor_request"] = "offered";
   }
   event("private_priority_requested", {{"emergency", enable}, {"alert", with_alert}});
 }
