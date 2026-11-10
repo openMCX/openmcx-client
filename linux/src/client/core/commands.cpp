@@ -625,6 +625,11 @@ void Client::chat_join_command(const std::string &cmd) {
 void Client::ptt_command(const std::string &cmd) {
   if (!remote_ || status_.value("call_state", "") != "active") throw std::runtime_error("PTT requires active call");
   if (talking_ || requesting_) throw std::runtime_error("PTT already active");
+  // TS 24.380 clause 8.2.3.7 (Floor Taken, clause 6.2.4.3.3): "'0' The receiver is not permitted to request floor";
+  // the request is refused locally, no Floor Request is sent (TS 37.579-2 6.2.14 step 6A, 6.2.17 step 4A: verdict F
+  // if one is), until a later Floor Taken without that field or with '1', or the call ends.
+  if (status_.contains("permission_to_request") && status_["permission_to_request"] == false)
+    throw std::runtime_error("not permitted to request the floor (Floor Taken, Permission to Request the Floor '0')");
   if (cmd == "ptt live") {
     start_live_transmission();
   } else {

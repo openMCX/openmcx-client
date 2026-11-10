@@ -433,7 +433,8 @@ void Client::ambient_call(const std::string &arguments) {
             event("ambient_call_answered", {{"role", ambient_->role}, {"release_allowed", ambient_->release_allowed}});
           }
         },
-        {{"Priv-Answer-Mode", "Auto"}}); // step 14
+        {{"Priv-Answer-Mode", "Auto;require"}, // step 14 (RFC 5373 section 7.1: "require")
+         {"Accept", "application/sdp, " + std::string(mcptt_mime)}}); // TS 37.579-1 table 5.5.2.5.1-1
   });
   bind_private_key(key, true);
   ambient_->dialog = dialog_;

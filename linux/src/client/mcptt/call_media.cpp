@@ -490,6 +490,9 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     receive_ssrc_ = 0;
   } else if (packet.type == FloorType::Taken) {
     receive_ssrc_ = 0;
+    // The Permission to Request the Floor of the latest Floor Taken (TS 24.380 clause 8.2.3.7; optional: without it,
+    // no restriction), which ptt_command honours.
+    status_.erase("permission_to_request");
     for (auto &field : packet.fields) {
       if (field.id == static_cast<unsigned>(FloorFieldId::GrantedPartyIdentity))
         status_["floor_owner"] = read_granted_party_identity(field);
