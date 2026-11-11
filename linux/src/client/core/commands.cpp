@@ -9,6 +9,7 @@
 // TS 23.379 V19.11.0 (Rel-19), RFC 3261.
 
 #include "client.hpp"
+#include "mcx/refer.hpp"
 
 namespace mcx {
 
@@ -371,20 +372,37 @@ void Client::answer_command(const std::string &cmd) {
   if (!pending_answer_ || dialog_.empty()) throw std::runtime_error("no incoming call awaiting answer");
   auto response = *pending_answer_;
   pending_answer_.reset();
-  if (cmd == "reject" && (call_type_ == "private" || call_type_ == "adhoc")) {
-    // TS 24.379 clause 6.2.3.2.1: a declined private call invitation.
-    response = {};
-    response.status_code = 480;
-    response.headers = {{"Warning", "399 mcx \"110 user declined the call invitation\""}};
-  } else if (cmd == "reject") {
-    response.status_code = 486;
-    response.reason = "Busy Here";
+  if (cmd == "reject") {
+    if (call_type_ == "private" || call_type_ == "adhoc") {
+      // TS 24.379 clause 6.2.3.2.1: a declined private call invitation.
+      response = {};
+      response.status_code = 480;
+      response.headers = {{"Warning", "399 mcx \"110 user declined the call invitation\""}};
+    } else {
+      response.status_code = 486;
+      response.reason = "Busy Here";
+    }
+    // TS 24.379 clause 10.1.1.2.2.2: a call offered in the pre-established session is answered by its re-INVITE
+    // transaction; declined, the session stays without a call.
+    if (auto transaction = std::exchange(pre_session_reinvite_, std::nullopt)) {
+      sip_.respond(*transaction, response);
+      clear_call_state();
+      return;
+    }
   } else if (call_type_ == "private" && first_to_answer_ && protected_media() && response.local_media) {
     // TS 24.379 clause 11.1.1.2.1.2 step 5: the invitee encapsulates a PCK to the caller
     // in its SDP answer. The caller initiated the call (TS 33.180 annex E.1.3).
     const auto key = offer_private_key(private_peer_);
     response.local_media->key_mgmt = local_.key_mgmt;
     bind_private_key(key, false);
+  }
+  if (auto transaction = std::exchange(pre_session_reinvite_, std::nullopt)) {
+    // TS 24.380 clause 9.2.2.3.6: the 200 (OK) to the re-INVITE puts the session in use; the Connect follows.
+    sip_.respond(*transaction, response);
+    if (pre_session_) pre_session_->control->call_reinvite_answered();
+    pre_session_answering_ = true;
+    status_["call_state"] = "answering";
+    return;
   }
   sip_.answer(dialog_, response);
 }
@@ -477,6 +495,17 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
   floor_timers_ = participant_timers();
   call_type_ = adhoc_rejoin ? "adhoc" : chat ? "chat" : info.broadcast == true ? "broadcast" : "prearranged";
   call_group_ = adhoc_rejoin ? last_call_group_ : std::string{};
+  // TS 24.379 clauses 10.1.1.2.2.1 and 10.1.2.2.2.1: with an established pre-established session not in use (and
+  // mcptt.calls_over_pre_established, by default true), the call is set up over it with a REFER.
+  if (cmd != "rejoin" && !adhoc_rejoin && pre_session_usable()) {
+    invite_with_implicit(implicit.requested, true, [&] {
+      dialog_ = pre_session_refer_call({info.request_uri}, info_parts(info), refer_accept_contacts(), headers,
+                                       local_.implicit_request);
+    });
+    status_["last_call_failure"] = nullptr;
+    status_["call_state"] = "calling";
+    return;
+  }
   invite_with_implicit(implicit.requested, true, [&] {
     dialog_ = sip_.invite(
         cmd == "rejoin" ? session_uri_ : service(), local_, info_parts(info),
@@ -584,9 +613,27 @@ void Client::hangup_command() {
       if (ambient_hidden()) return;
       throw std::runtime_error("ambient listening call release not permitted");
     }
+    // TS 24.379 clause 11.1.6.2.2.3 step 2 (clause 6.2.5.2): over the session, REFER "BYE".
+    if (call_over_pre_session()) {
+      talking_ = requesting_ = live_talk_ = false;
+      transmit_.clear();
+      transmit_offset_ = 0;
+      floor_timers_ = participant_timers();
+      return pre_session_leave();
+    }
     if (!ambient_hidden()) release();
     if (!dialog_.empty()) sip_.bye(dialog_);
     return;
+  }
+  // TS 24.379 clause 10.1.1.2.3.2: a call over the pre-established session is left by REFER "BYE" (clause 6.2.4.2).
+  // TS 24.380 clause 6.2.4.7.2: the leaving floor participant stops sending floor control messages and media, and
+  // sends no Floor Release (which would end a broadcast group call first, TS 24.379 clause 4.12).
+  if (call_over_pre_session()) {
+    talking_ = requesting_ = live_talk_ = false;
+    transmit_.clear();
+    transmit_offset_ = 0;
+    floor_timers_ = participant_timers();
+    return pre_session_leave();
   }
   release();
   if (!dialog_.empty()) sip_.bye(dialog_);

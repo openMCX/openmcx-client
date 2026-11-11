@@ -9,6 +9,7 @@
 // TS 24.481 V19.3.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19), TS 23.379 V19.11.0 (Rel-19), RFC 3891.
 
 #include "client.hpp"
+#include "mcx/refer.hpp"
 
 namespace mcx {
 
@@ -614,7 +615,27 @@ SipResponse Client::incoming_clear_invite(const SipMessage &message) {
     return group_call_reinvite(message);
   // RFC 3891 (TS 24.379 clause 11.1.8.2.2): a transferred user's call replacing the
   // call that announced the transfer; the replaced call is ended.
-  if (const auto replaces = get_header(message.headers, "Replaces"); !replaces.empty()) {
+  // RFC 3891 with TS 24.379 clauses 6.3.2.2.5.3 step 1 and 6.3.2.2.6.3 step 1 (TS 37.579-2 test 6.2.23): a call that
+  // replaces the pre-established session (one without a call); answered as any call, it ends the session once
+  // confirmed (RFC 3891 section 3).
+  bool replaces_session = false;
+  if (const auto replaces = get_header(message.headers, "Replaces"); !replaces.empty() && pre_session_)
+    if (const auto ids = sip_.dialog_identifiers(pre_session_->dialog)) {
+      try {
+        replaces_session = replaces_names(parse_replaces(replaces), *ids);
+      } catch (const std::exception &) {
+        replaces_session = false;
+      }
+      if (replaces_session) {
+        if (!dialog_.empty() || pre_session_->control->state() == PreEstablishedClientState::InUse) {
+          response.status_code = 486;
+          return response;
+        }
+        pre_session_replaced_by_ = message.dialog_id;
+        event("pre_session_replace_offered", {{"session", pre_session_->dialog}, {"by", message.dialog_id}});
+      }
+    }
+  if (const auto replaces = get_header(message.headers, "Replaces"); !replaces.empty() && !replaces_session) {
     const auto call_id = std::string(replaces.substr(0, replaces.find(';')));
     if (dialog_.empty() || call_id != dialog_ || call_type_ != "private") {
       response.status_code = 481;
