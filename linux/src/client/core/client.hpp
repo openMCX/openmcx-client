@@ -566,6 +566,9 @@ class Client {
   bool transfer_kept_ = false;
   std::string announced_target_, announced_replaces_, next_call_replaces_;
   bool replacing_call_ = false;
+  // RFC 3891 (TS 24.379 clauses 6.3.2.2.5.3 step 1 and 6.3.2.2.6.3 step 1): the dialog of an incoming call whose
+  // Replaces names the pre-established session; once it is confirmed the session is ended with a BYE.
+  std::string pre_session_replaced_by_;
   Json service_outcomes_ = Json::object();
   // Ad hoc group emergency alert state (TS 24.379 clause 12.1A.1, annex G.20): "AH-MEA 1..3".
   int ah_mea_ = 1;
@@ -2420,6 +2423,12 @@ private:
     std::string state = "establishing"; // "establishing", "established", "releasing"
   };
   std::unique_ptr<PreSession> pre_session_;
+  bool pre_session_implicit_ = false; // the call's REFER carried an implicit floor request (TS 24.379 clause 6.4)
+  // TS 24.379 clause 10.1.1.2.2.2: a call offered by re-INVITE in the session (manual commencement) waits for the
+  // user's answer by this transaction; the call is "answering" until the Connect gives its session identity.
+  std::optional<std::string> pre_session_reinvite_;
+  bool pre_session_answering_ = false;
+  SipResponse pre_session_call_offer(const SipMessage &message);
   // "pre-establish [implicit]" (TS 24.379 clause 8.2.1); "pre-session-modify [implicit|explicit] [update]"
   // (clause 8.3.1.1); "pre-session-release" (clause 8.4.1.1).
   void pre_establish_command(const std::string &cmd);
@@ -2436,6 +2445,17 @@ private:
   bool pre_session_stun(IceStream stream, unsigned component, const Datagram &datagram);
   void pre_session_poll();
   void pre_session_status();
+  // Calls over the session (TS 24.379 clauses 10.1.1.2.2, 10.1.2.2.2, 6.2.4.2; TS 24.380 clause 9.2.2).
+  [[nodiscard]] bool pre_session_usable() const;
+  [[nodiscard]] bool call_over_pre_session() const { return dialog_.starts_with("pre-call-"); }
+  std::string pre_session_refer_call(const std::vector<std::string> &targets, std::vector<BodyPart> parts,
+                                     std::vector<SipHeader> entry_headers, const std::vector<SipHeader> &headers,
+                                     bool with_sdp);
+  void pre_session_leave();
+  bool pre_session_floor(const Datagram &datagram);
+  void pre_session_message(const PreEstablishedMessage &message);
+  void pre_session_connected(const PreEstablishedMessage &connect);
+  void pre_session_send(const PreEstablishedMessage &message);
   // "chat-join <group>": test aid for the server's implicit affiliation checks.
   void chat_join_command(const std::string &cmd);
   // "ptt <wav>": request the floor and transmit (TS 24.380 clause 6.2.4.3.5).

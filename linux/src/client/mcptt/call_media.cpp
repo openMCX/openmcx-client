@@ -155,6 +155,17 @@ void Client::implicit_floor_answered() {
 // (and subscribe to its conference event package, TS 24.379 clause 10.1.3.2) or clear its state on release
 // (TS 24.380 clause 6.2.2).
 void Client::call_state(std::string_view id, SipCallState state, int code) {
+  // RFC 3891 section 3: the call that replaced the pre-established session is established: the session ends.
+  if (!pre_session_replaced_by_.empty() && id == pre_session_replaced_by_ &&
+      (state == SipCallState::confirmed || state == SipCallState::disconnected)) {
+    pre_session_replaced_by_.clear();
+    if (state == SipCallState::confirmed && pre_session_) {
+      pre_session_->state = "releasing";
+      event("pre_session_replaced", {{"session", pre_session_->dialog}, {"by", std::string(id)}});
+      sip_.bye(pre_session_->dialog);
+      pre_session_status();
+    }
+  }
   if (!ipcon_dialog_.empty() && id == ipcon_dialog_) {
     if (state == SipCallState::disconnected) {
       if (ipcon_result_.is_object() && ipcon_result_.value("state", "") == "open") ipcon_result_["state"] = "released";
@@ -407,6 +418,9 @@ std::string Client::server_target(const std::string &address, std::uint16_t port
 // (clause 6.2.4.4.4), Floor Revoke (clause 6.2.4.5.4), Floor Idle (clause 6.2.4.3.2) or Floor Taken
 // (clause 6.2.4.3.3).
 void Client::floor_packet(const Datagram &datagram) {
+  // TS 24.380 clause 4.1.2.1: the pre-established session's media plane control channel carries its call control
+  // messages and, during a call over the session, that call's floor control (mcptt/pre_established.cpp).
+  if (pre_session_floor(datagram)) return;
   // TS 24.380 clause 6.2.4.2.2 step 2: before the 200 (OK) of a call offered with an implicit floor request, a
   // floor control message for this client's floor SSRC is stored, and checked in full once the request is
   // accepted (implicit_floor_answered).
