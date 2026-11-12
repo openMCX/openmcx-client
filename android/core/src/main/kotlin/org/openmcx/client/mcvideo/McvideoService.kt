@@ -274,8 +274,8 @@ class McvideoService(
     private fun event(text: String) = client.event("mcvideo: $text")
     private fun changed(call: VideoCall) { _calls.value = _calls.value.toList(); listener?.changed(call) }
 
-    private fun commonHeaders(request: SipRequest) {
-        request.headers.add("Contact", client.contactFor(McService.MCVIDEO))
+    private fun commonHeaders(request: SipRequest, initialInvite: Boolean = false) {
+        request.headers.add("Contact", if (initialInvite) client.sessionContact(McService.MCVIDEO) else client.contactFor(McService.MCVIDEO))
             .add("Allow", ALLOW)
             .add("Supported", "timer")
             .add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCVIDEO)}\";require;explicit")
@@ -442,7 +442,7 @@ class McvideoService(
         call.media = media
         try {
             val request = ua.newRequest("INVITE", config.psi, NameAddr(config.psi))
-            commonHeaders(request)
+            commonHeaders(request, initialInvite = true)
             request.headers.add("Session-Expires", "1800").add("Min-SE", "90")
             when (commencement) {
                 Commencement.AUTOMATIC -> request.headers.add("Answer-Mode", "Auto")
@@ -621,7 +621,7 @@ class McvideoService(
         }
         if (!call.hidden) listener?.incoming(call)
         if (manual) {
-            tx.respond(180, extra = listOf("Require" to "timer", "Contact" to client.contactFor(McService.MCVIDEO)))
+            tx.respond(180, extra = listOf("Require" to "timer", "Contact" to client.sessionContact(McService.MCVIDEO)))
             call.state = "ringing"
             changed(call)
             val decision = withTimeoutOrNull(MANUAL_ANSWER_MS) {
@@ -655,7 +655,7 @@ class McvideoService(
         val offered = request.headers["Session-Expires"]?.substringBefore(';')?.trim()?.toIntOrNull() ?: 90
         call.sessionExpires = offered
         val response = tx.response(200, body = McvideoSdp.answer(remote, local).toByteArray(), contentType = "application/sdp", extra = listOf(
-            "Contact" to client.contactFor(McService.MCVIDEO), "Require" to "timer", "Supported" to "timer",
+            "Contact" to client.sessionContact(McService.MCVIDEO), "Require" to "timer", "Supported" to "timer",
             "Session-Expires" to "$offered;refresher=uas", "Allow" to ALLOW))
         call.dialog = Dialog.fromRequest(request, tx.localTag)
         call.sessionUri = request.headers["Contact"]?.let { runCatching { NameAddr.parse(it).uri }.getOrNull() }

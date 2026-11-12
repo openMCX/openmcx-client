@@ -246,8 +246,8 @@ class McpttService(
     private fun event(text: String) = client.event("mcptt: $text")
     private fun changed(call: Call) { _calls.value = _calls.value.toList(); listener?.changed(call) }
 
-    private fun commonHeaders(request: SipRequest) {
-        request.headers.add("Contact", client.contactFor(McService.MCPTT))
+    private fun commonHeaders(request: SipRequest, initialInvite: Boolean = false) {
+        request.headers.add("Contact", if (initialInvite) client.sessionContact(McService.MCPTT) else client.contactFor(McService.MCPTT))
             .add("Allow", ALLOW)
             .add("Supported", "timer")
             .add("Accept-Contact", "*;+g.3gpp.mcptt;require;explicit")
@@ -370,7 +370,7 @@ class McpttService(
         call.media = media
         try {
             val request = ua.newRequest("INVITE", config.psi, NameAddr(config.psi))
-            commonHeaders(request)
+            commonHeaders(request, initialInvite = true)
             request.headers.add("Session-Expires", config.sessionExpires.coerceAtLeast(90).toString()).add("Min-SE", "90")
             when (commencement) {
                 Commencement.AUTOMATIC -> request.headers.add("Answer-Mode", "Auto")
@@ -519,7 +519,7 @@ class McpttService(
         }
         listener?.incoming(call)
         if (manual) {
-            tx.respond(180, extra = listOf("Require" to "timer", "Contact" to client.contactFor(McService.MCPTT)))
+            tx.respond(180, extra = listOf("Require" to "timer", "Contact" to client.sessionContact(McService.MCPTT)))
             call.state = "ringing"
             changed(call)
             val decision = withTimeoutOrNull(config.manualAnswerTimeout * 1000L) {
@@ -557,7 +557,7 @@ class McpttService(
         call.sessionExpires = offered
         val answer = McpttSdp.answer(remote, local)
         val response = tx.response(200, body = answer.toByteArray(), contentType = "application/sdp", extra = listOf(
-            "Contact" to client.contactFor(McService.MCPTT), "Require" to "timer", "Supported" to "timer",
+            "Contact" to client.sessionContact(McService.MCPTT), "Require" to "timer", "Supported" to "timer",
             "Session-Expires" to "$offered;refresher=uas", "Allow" to ALLOW))
         call.dialog = Dialog.fromRequest(tx.request, tx.localTag)
         media.start(remote)

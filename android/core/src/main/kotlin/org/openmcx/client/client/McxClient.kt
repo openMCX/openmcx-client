@@ -819,7 +819,21 @@ class McxClient(
 
     // Registration (TS 24.379 §7.2.1, TS 24.282 §7.2.1, RFC 5626).
 
-    private fun registerContact(): String = "<${ua.contactUri()}>" + contactParams()
+    private fun registerContact(): String = "<${ua.contactUri()}>" + contactParams() + mediaFeatureTags
+
+    /**
+     * TS 24.229 §5.1.1.2.1 c), §5.1.3.1 and §5.1.4.1: "The UE shall include the media feature tags defined in RFC 3840
+     * [62] and RFC 5688 [120] for all supported streaming media types" in the REGISTER Contact, the initial INVITE and
+     * the responses to it other than 100 (Trying). RFC 3840 §10 ties each tag to an SDP media type (RFC 4566 §5.14):
+     * "audio" for MCPTT speech, "video" with MCVideo, "application" for the floor control stream ("m=application ... udp
+     * MCPTT", TS 24.380 §12.1.1) and the MCVideo transmission control stream (TS 24.581); base tags in a Contact (RFC
+     * 3840 §9). Not "control" (the RFC 2327 media type, removed by RFC 4566 §8.2.1) and not "+sip.message" for MCData's
+     * MSRP (RFC 4569, which TS 24.229 does not cite). The same tags as the Linux client.
+     */
+    private val mediaFeatureTags: String get() = if (config.mcvideo != null) ";audio;video;application" else ";audio;application"
+
+    /** The Contact of an initial INVITE and of the 18x and 2xx answering one: [contactFor] with the media feature tags. */
+    fun sessionContact(service: McService) = contactFor(service) + mediaFeatureTags
 
     /** The expiry a REGISTER asks for: TS 24.229 §5.1.1.2.1's 600 000 s with IMS AKA, else the configured one. */
     private fun registerExpires(): Int = if (imsAka != null) IMS_AKA_REGISTER_EXPIRES else config.sip.registerExpires

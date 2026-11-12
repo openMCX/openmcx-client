@@ -92,12 +92,15 @@ inline SipConfig client_sip_config(const Json &cfg, bool disable_tls) {
   }
   // TS 24.281 clause 7.2.1AA: a client that also uses MCVideo registers its tag and ICSI.
   if (cfg.contains("mcvideo")) config.other_services.push_back(&mcvideo_service);
-  // TS 24.229 clauses 5.1.1.2.1 c), 5.1.3.1 and 5.1.4.1: the RFC 3840 media feature tags of the streaming media types
-  // the client supports, "audio" (section 10.1: MCPTT speech) and, with MCVideo, "video" (section 10.5), as the base
-  // tags appear in a Contact (section 9: no "+", no "sip.", no value for TRUE). Not "application" or "control" for the
-  // floor control and transmission control streams, nor a tag for MCData's MSRP (m=message): whether those are
-  // streaming media types is not settled by the text (Known limitations "Media feature tags of RFC 3840").
-  config.media_feature_tags = cfg.contains("mcvideo") ? ";audio;video" : ";audio";
+  // TS 24.229 clauses 5.1.1.2.1 c), 5.1.3.1 and 5.1.4.1: "The UE shall include the media feature tags defined in RFC
+  // 3840 [62] and RFC 5688 [120] for all supported streaming media types". RFC 3840 section 10 ties each tag to an SDP
+  // media type (RFC 4566 section 5.14): "audio" (section 10.1) for MCPTT speech, "application" (section 10.2) for the
+  // floor control stream ("m=application ... udp MCPTT", TS 24.380 clause 12.1.1), the MCVideo transmission control
+  // stream (TS 24.581) and the MCData IP connectivity stream (TS 24.282 clause 20.2.0a), and with MCVideo "video"
+  // (section 10.5); written as base tags in a Contact (section 9: no "+", no "sip.", no value for TRUE). Not "control"
+  // (the SDP media type "control" of RFC 2327, removed by RFC 4566 section 8.2.1). Not "+sip.message" for MCData's MSRP
+  // (m=message): RFC 4569 defines it, which TS 24.229 does not cite (Known limitations "Media feature tags").
+  config.media_feature_tags = cfg.contains("mcvideo") ? ";audio;video;application" : ";audio;application";
   // sip.access_network_info (off by default), for a test system: the P-Access-Network-Info header field value the
   // client inserts (SipConfig::access_network_info). TS 24.229 clause 5.1.2A.1.1 asks for it "if available to the UE
   // (as defined in the access technology specific annexes)", which no annex defines for plain IP or a VPN; the ETSI
