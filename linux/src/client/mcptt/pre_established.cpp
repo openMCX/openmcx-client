@@ -71,19 +71,21 @@ void Client::pre_establish_command(const std::string &cmd) {
 
 //------------------------------------------------------------------------------
 // TS 24.379 clause 8.2.1: the final response to the INVITE: a 2xx gives the URI identifying the session (its Contact,
-// TS 24.379 clause 8.2.2 step 9 a); the negotiated media come with on_media (pre_session_media). A failure ends it.
+// TS 24.379 clause 8.2.2 step 9 a); the negotiated media come with on_media (pre_session_media). A failure ends it
+// and is recorded (TS 24.379 clause 8.2.2 step 5: 403 with warning text 100) even when the SIP engine reported the
+// dialog's end first (it notifies the disconnected state before it dispatches the final response, so
+// pre_session_state may already have cleared the session).
 void Client::pre_session_answered(const SipResponse &response) {
-  if (!pre_session_) return;
-  if (response.status_code / 100 == 2) {
-    pre_session_->uri = contact_uri_of(get_header(response.headers, "Contact"));
+  if (response.status_code >= 300) {
+    status_["last_call_failure"] = {{"status", response.status_code},
+                                    {"warning", std::string(get_header(response.headers, "Warning"))}};
+    event("pre_session_failed", {{"status", response.status_code}});
+    if (pre_session_ && pre_session_->state == "establishing") pre_session_.reset();
+    pre_session_status();
     return;
   }
-  if (response.status_code < 300) return;
-  status_["last_call_failure"] = {{"status", response.status_code},
-                                  {"warning", std::string(get_header(response.headers, "Warning"))}};
-  event("pre_session_failed", {{"status", response.status_code}});
-  pre_session_.reset();
-  pre_session_status();
+  if (!pre_session_) return;
+  if (response.status_code / 100 == 2) pre_session_->uri = contact_uri_of(get_header(response.headers, "Contact"));
 }
 
 //------------------------------------------------------------------------------
