@@ -13,6 +13,7 @@
 
 #include "mcx/keying.hpp"
 #include "mcx/sip.hpp"
+#include "mcx/xml_security.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -63,6 +64,34 @@ inline bool subscription_procedure(const std::vector<BodyPart> &parts) {
     }
     return false;
   });
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 6.6.1.4 (TS 24.281 clause 6.6.1.4, TS 24.282 clause 6.5.1.4): a received SIP request whose
+// signatures or encrypted XML elements name an XPK-ID (ds:KeyName) the receiver does not hold is refused. The XPK of
+// clause 6.6.3.4.2 step 4 cannot be obtained, so the signature validation of XMLDSig clause 3.2.2 fails and step 5
+// sends 403 with "139 integrity protection check failed"; the decryption of clause 6.6.2.4.2 step 2 (XML Encryption
+// 1.1 clause 4.4 needs the key) fails and step 3 sends 403 with "140 unable to decrypt XML content". Neither clause
+// names an unknown XPK-ID in so many words (spec text defect, reported), but no reading lets the request be processed
+// unverified or still encrypted (clause 6.6.1.4 steps 1 b) and 2 b)). Throws with the warning code first, which the
+// client's request dispatch answers with that 403.
+// Not covered, as the specs give no outcome there (kept as they were and reported): a SIP response (the only failure
+// action, a 403, cannot answer a response), encrypted URI attributes (clause 6.6.2.4.3 has no failure step) and a
+// body without a ds:KeyName (TS 33.180 clauses 9.3.4.2 and 9.3.5: the key is then "known ... through other means").
+// held(id): whether the receiver holds that XPK-ID; xml_part(type): a body type whose XML elements are encrypted.
+template <class Held, class XmlPart>
+void refuse_unknown_keys(const std::vector<BodyPart> &parts, std::string_view signed_mime, Held held,
+                         XmlPart xml_part) {
+  for (const auto &part : parts) {
+    if (part.content_type == signed_mime) {
+      if (const auto id = xmlsec::signature_key_id(part.body); id && !held(*id))
+        throw std::runtime_error("139 signed under an XPK-ID this client does not hold");
+    } else if (xml_part(part.content_type) && part.body.find("EncryptedData") != std::string::npos) {
+      // The element half of xmlsec::is_protected(); xmlsec::key_id() names the first encrypted URI or element.
+      if (const auto id = xmlsec::key_id(part.body); id && !held(*id))
+        throw std::runtime_error("140 XML content encrypted under an XPK-ID this client does not hold");
+    }
+  }
 }
 
 } // namespace mcx::xml_gate

@@ -333,6 +333,9 @@ class SignallingProtection(
     }
 
     private fun openIncoming(transmission: SipTransmission, parts: List<Part>): List<Part> {
+        // A request naming an XPK-ID this client does not hold is refused first: the MCPTT, MCVideo and MCData CSKs are
+        // held (the MCData CSK also while it is uploaded, below).
+        if (!transmission.isResponse) refuseUnknownKeys(parts) { id -> McService.entries.any { csk(it)?.csbId == id } }
         if (McService.entries.none { csk(it) != null }) return parts
         // The XPK a body names: this client's MCPTT CSK or its MCVideo CSK (TS 24.281 clause 6.6.2.2).
         fun keyFor(id: Long?): XmlProtection.Key? = when {
@@ -464,6 +467,34 @@ class SignallingProtection(
                 "CL_NeighbouringNcgi", "CL_BearingAndSpeed", "longitude", "latitude", "altitude", "horizontalaccuracy",
                 "verticalaccuracy"),
             setOf("entry" to "uri", "presence" to "entity", "affiliation" to "group", "functionalAlias" to "functionalAliasID"))
+
+        /**
+         * TS 24.379 clause 6.6.1.4 (TS 24.281 clause 6.6.1.4, TS 24.282 clause 6.5.1.4): a received SIP request whose
+         * signatures or encrypted XML elements name an XPK-ID (ds:KeyName) the receiver does not hold is refused. The XPK
+         * of clause 6.6.3.4.2 step 4 cannot be obtained, so the signature validation of XMLDSig clause 3.2.2 fails and
+         * step 5 sends 403 with "139 integrity protection check failed"; the decryption of clause 6.6.2.4.2 step 2 (XML
+         * Encryption 1.1 clause 4.4 needs the key) fails and step 3 sends 403 with "140 unable to decrypt XML content".
+         * Neither clause names an unknown XPK-ID in so many words (spec text defect, reported), but no reading lets the
+         * request be processed unverified or still encrypted (clause 6.6.1.4 steps 1 b) and 2 b)). Throws a [KeyError]
+         * with the warning code first, which the user agent answers with that 403.
+         * Not covered, as the specs give no outcome there (kept as they were and reported): a SIP response (the only
+         * failure action, a 403, cannot answer a response), encrypted URI attributes (clause 6.6.2.4.3 has no failure
+         * step) and a body without a ds:KeyName (TS 33.180 clauses 9.3.4.2 and 9.3.5: the key is then "known ... through
+         * other means"). The same check as the Linux client's xml_gate::refuse_unknown_keys.
+         */
+        fun refuseUnknownKeys(parts: List<Part>, held: (Long) -> Boolean) {
+            for (part in parts) {
+                if (part.mediaType == SIGNED) {
+                    val id = try { XmlProtection.signatureKeyId(part.text) } catch (e: Exception) { throw KeyError("139 ${e.message}") }
+                    if (id != null && !held(id)) throw KeyError("139 signed under an XPK-ID this client does not hold")
+                } else if ((mcpttXmlPart(part.mediaType) || mcvideoXmlPart(part.mediaType) || mcdataXmlPart(part.mediaType)) &&
+                    part.text.contains("EncryptedData")) {
+                    // The element half of XmlProtection.isProtected; XmlProtection.keyId names the first encrypted URI or element.
+                    val id = try { XmlProtection.keyId(part.text) } catch (e: Exception) { throw KeyError("140 ${e.message}") }
+                    if (id != null && !held(id)) throw KeyError("140 XML content encrypted under an XPK-ID this client does not hold")
+                }
+            }
+        }
 
         /** RFC 2392: the Content-ID of a body part, without its angle brackets; null without one. */
         fun contentId(part: Part): String? = part.headers.firstOrNull { it.first.equals("Content-ID", true) }

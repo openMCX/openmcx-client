@@ -32,6 +32,7 @@ import org.openmcx.client.security.XmlProtection
 import org.openmcx.client.sip.Headers
 import org.openmcx.client.sip.SipFlow
 import org.openmcx.client.sip.SipRequest
+import org.openmcx.client.sip.SipResponse
 import org.openmcx.client.sip.SipTransmission
 import org.openmcx.client.sip.UaIdentity
 import org.openmcx.client.sip.UserAgent
@@ -277,5 +278,44 @@ class SignallingProtectionTest {
         val other = XmlProtection.Key(ByteArray(16) { 7 }, key.id, key.user)
         val wrong = Part(McpttInfo.CONTENT_TYPE, XmlProtection.encrypt(String(mcpttInfo.content), other, XmlProtection.signallingProfile()).toByteArray())
         assertTrue(deliver(listOf(wrong, pocSettings), "z9hG4bK2")!!.contains("140"))
+    }
+
+    /** A request under an XPK-ID this client does not hold: 139 for signatures, 140 for encrypted elements (TS 24.379
+     * clauses 6.6.3.4.2 steps 4-5 and 6.6.2.4.2 steps 2-3); a response is left as before (no outcome in the specs). */
+    @Test fun unknownXpkIdIs139Or140InARequest() {
+        csks[McService.MCPTT] = csk(0x20000001)
+        val unknown = XmlProtection.Key(ByteArray(16) { 9 }, 0x2000000AL, "sip:alice.mcptt@mcx.test")
+        val signedOnly = String(mcpttInfo.content).let { info ->
+            listOf(Part(McpttInfo.CONTENT_TYPE, info.toByteArray(), listOf("Content-ID" to "<i@s>")),
+                Part(SignallingProtection.SIGNED, XmlProtection.sign(listOf(XmlProtection.SignedBody("i@s", info)), unknown,
+                    SignallingProtection.SIGNED_NAMESPACE).toByteArray()))
+        }
+        val signed = assertThrows(KeyError::class.java) { incoming(request("NOTIFY", "sip:alice@x"), signedOnly) }
+        assertTrue(signed.message!!.startsWith("139 "))
+        val encrypted = Part(McpttInfo.CONTENT_TYPE,
+            XmlProtection.encrypt(String(mcpttInfo.content), unknown, XmlProtection.signallingProfile()).toByteArray())
+        assertTrue(assertThrows(KeyError::class.java) { incoming(request("NOTIFY", "sip:alice@x"), listOf(encrypted)) }.message!!.startsWith("140 "))
+        // Without any CSK at all, the same.
+        csks.clear()
+        assertTrue(assertThrows(KeyError::class.java) { incoming(request("NOTIFY", "sip:alice@x"), listOf(encrypted)) }.message!!.startsWith("140 "))
+        // A response: no outcome in the specs, left as it was.
+        csks[McService.MCPTT] = csk(0x20000001)
+        val response = SipResponse(200, "OK", Headers().add("CSeq", "1 PUBLISH").add("Call-ID", "c1@x"))
+        val passed = protection.incoming(SipTransmission(response, null), listOf(encrypted))
+        assertEquals(listOf(encrypted.text), passed.map { it.text })
+    }
+
+    @Test fun theUserAgentRefusesAnUnknownXpkIdWith140() = withUa { ua, core ->
+        csks[McService.MCPTT] = csk(0x20000001)
+        val unknown = XmlProtection.Key(ByteArray(16) { 9 }, 0x2000000AL, "sip:alice.mcptt@mcx.test")
+        val encrypted = Part(McpttInfo.CONTENT_TYPE,
+            XmlProtection.encrypt(String(mcpttInfo.content), unknown, XmlProtection.signallingProfile()).toByteArray())
+        val (type, body) = Multipart.encode(listOf(encrypted, pocSettings))
+        val headers = Headers().add("Via", "SIP/2.0/TLS 127.0.0.1:5061;branch=z9hG4bKu1").add("From", "<sip:mcptt@mcx.test>;tag=s")
+            .add("To", "<sip:alice@mcx.test>").add("Call-ID", "u1@s").add("CSeq", "1 MESSAGE").add("Content-Type", type)
+        ua.receive(SipRequest("MESSAGE", "sip:alice@x", headers, body))
+        val answer = core.answer()
+        assertEquals(403, answer.status)
+        assertTrue(answer.headers["Warning"]!!.contains("140"))
     }
 }

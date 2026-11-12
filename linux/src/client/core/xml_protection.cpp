@@ -277,15 +277,25 @@ bool Client::unprotected_subscription(const SipTransmission &transmission, const
 //------------------------------------------------------------------------------
 // TS 24.379 clause 6.6.1.4 and TS 24.281 clause 6.6.1.4: before any other procedure, verify the signatures of a
 // received SIP message (clause 6.6.3.4.2; failure raises "139 ...") and decrypt its XML elements
-// (clause 6.6.2.4.2) under the MCPTT or MCVideo CSK.
-std::vector<BodyPart> Client::protect_incoming(const SipTransmission &, std::vector<BodyPart> parts) {
-  if (!csk_ && !mcvideo_csk_ && !mcdata_csk_) return parts;
+// (clause 6.6.2.4.2) under the MCPTT or MCVideo CSK. A request naming an XPK-ID this client does not hold is
+// refused first (xml_gate::refuse_unknown_keys: 403 with 139 or 140).
+std::vector<BodyPart> Client::protect_incoming(const SipTransmission &transmission, std::vector<BodyPart> parts) {
   // The XPK a body names: this client's MCPTT CSK or its MCVideo CSK (TS 24.281 clause 6.6.2.2).
   const auto key_for = [this](std::optional<std::uint32_t> id) -> std::optional<xmlsec::Key> {
     if (id && csk_ && *id == csk_->csb_id) return xml_key();
     if (id && mcvideo_csk_ && *id == mcvideo_csk_->csb_id) return mcvideo_xml_key();
     return std::nullopt;
   };
+  if (!transmission.response)
+    xml_gate::refuse_unknown_keys(
+        parts, signed_mime,
+        // The XPK-IDs held: the MCPTT, MCVideo and MCData CSKs (the MCData CSK also while it is uploaded, below).
+        [this](std::uint32_t id) {
+          return (csk_ && csk_->csb_id == id) || (mcvideo_csk_ && mcvideo_csk_->csb_id == id) ||
+                 (mcdata_csk_ && mcdata_csk_->csb_id == id);
+        },
+        [](const std::string &type) { return mcptt_xml_part(type) || mcvideo_xml_part(type) || mcdata_xml_part(type); });
+  if (!csk_ && !mcvideo_csk_ && !mcdata_csk_) return parts;
   // TS 24.282 clause 6.5.3.2: signatures of the MCData server are under the MCData CSK (also while it is uploaded:
   // the server's first request can overtake its 200 (OK) to the service authorisation).
   const auto signing_key_for = [this, &key_for](std::optional<std::uint32_t> id) -> std::optional<xmlsec::Key> {

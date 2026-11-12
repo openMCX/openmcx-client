@@ -4,7 +4,8 @@
 
 // The gate of required XML protection (src/client/core/xml_gate.hpp): a message falls under it by the requirement
 // alone (confidentiality-only, integrity-only, both, none), and it is not sent without the service's CSK or past the
-// CSK's Expiry time or once revoked (TS 33.180 annexes E.6.9 and E.6.10).
+// CSK's Expiry time or once revoked (TS 33.180 annexes E.6.9 and E.6.10); a received request naming an XPK-ID the
+// receiver does not hold is refused with 139 or 140 (TS 24.379 clauses 6.6.3.4.2 and 6.6.2.4.2).
 //
 // Specifications: TS 24.379 V19.8.0 (Rel-19), TS 24.282 V19.8.0 (Rel-19), TS 33.180 V19.5.0 (Rel-19).
 
@@ -39,6 +40,20 @@ bool info_part(const std::string &type) { return type == "application/vnd.3gpp.m
 
 bool xml_part(const std::string &type) { return type.ends_with("+xml"); }
 } // namespace
+
+//------------------------------------------------------------------------------
+// Helper: the refusal of a received request's bodies (xml_gate::refuse_unknown_keys) when only XPK-ID 7 is held; ""
+// when accepted, else the warning code (the first three characters of the reason).
+std::string unknown_key_refusal(const std::vector<mcx::BodyPart> &parts) {
+  try {
+    mcx::xml_gate::refuse_unknown_keys(
+        parts, "application/vnd.3gpp.mcptt-signed+xml", [](std::uint32_t id) { return id == 7; },
+        [](const std::string &type) { return type == "application/vnd.3gpp.mcptt-info+xml"; });
+  } catch (const std::exception &error) {
+    return std::string(error.what()).substr(0, 3);
+  }
+  return "";
+}
 
 int main() {
   using mcx::xml_gate::applies;
@@ -84,6 +99,41 @@ int main() {
         "GKTP subscription");
   check(!mcx::xml_gate::subscription_procedure(list("sip:alice@mcx.test")), "a resource list of users: none");
   check(!mcx::xml_gate::subscription_procedure(publish), "no resource list: none");
+
+  // A received request naming an XPK-ID not held: signatures 139, encrypted elements 140; the held XPK-ID passes (its
+  // verification and decryption follow in the client); a body without protection or without a ds:KeyName passes.
+  {
+    mcx::xmlsec::Key held, unknown;
+    held.id = 7;
+    unknown.id = 9;
+    held.user = unknown.user = "sip:alice@mcx.test";
+    held.xpk.fill(1);
+    unknown.xpk.fill(2);
+    const std::string info = "<mcpttinfo xmlns=\"urn:3gpp:ns:mcpttInfo:1.0\"><mcptt-Params><mcptt-request-uri type=\"Normal\">"
+                             "<mcpttURI>sip:group@mcx.test</mcpttURI></mcptt-request-uri></mcptt-Params></mcpttinfo>";
+    const auto signed_parts = [&info](const mcx::xmlsec::Key &key) {
+      return std::vector<mcx::BodyPart>{
+          {"application/vnd.3gpp.mcptt-info+xml", info, "a@mcx"},
+          {"application/vnd.3gpp.mcptt-signed+xml",
+           mcx::xmlsec::sign({{"a@mcx", info}}, key, "urn:3gpp:ns:mcpttSignedDoc:1.0")}};
+    };
+    const auto encrypted_parts = [&info](const mcx::xmlsec::Key &key) {
+      return std::vector<mcx::BodyPart>{{"application/vnd.3gpp.mcptt-info+xml",
+                                         mcx::xmlsec::encrypt(info, key, mcx::xmlsec::signalling_profile())}};
+    };
+    check(unknown_key_refusal(signed_parts(unknown)) == "139", "signature under an unknown XPK-ID: 139");
+    check(unknown_key_refusal(signed_parts(held)).empty(), "signature under the held XPK-ID passes");
+    check(unknown_key_refusal(encrypted_parts(unknown)) == "140", "element under an unknown XPK-ID: 140");
+    check(unknown_key_refusal(encrypted_parts(held)).empty(), "element under the held XPK-ID passes");
+    check(unknown_key_refusal({{"application/vnd.3gpp.mcptt-info+xml", info}}).empty(), "plain body passes");
+    auto no_name = encrypted_parts(unknown);
+    const auto from = no_name[0].body.find("<ds:KeyInfo"), to = no_name[0].body.find("</ds:KeyInfo>");
+    check(from != std::string::npos && to != std::string::npos, "test document has a ds:KeyInfo");
+    if (from != std::string::npos && to != std::string::npos) {
+      no_name[0].body.erase(from, to + 13 - from);
+      check(unknown_key_refusal(no_name).empty(), "element without a ds:KeyName: left as before");
+    }
+  }
 
   if (failures) return 1;
   std::puts("xml gate: ok");
