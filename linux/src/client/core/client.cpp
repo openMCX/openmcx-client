@@ -10,6 +10,9 @@
 // TS 33.180 V19.4.0 (Rel-19).
 
 #include "client.hpp"
+#include <cstdlib>
+#include <fstream>
+#include <set>
 
 #include <charconv>
 
@@ -168,9 +171,40 @@ void Client::send_speech_frame(const std::array<std::int16_t, 320> &frame, bool 
 }
 
 //------------------------------------------------------------------------------
+// Lab use only, like SSLKEYLOGFILE: with the environment variable MCX_CSK_KEYLOGFILE set, each CSK the client holds
+// (MCPTT, MCVideo, MCData) is appended once to that file as "CSK <MC service user ID> <CSK-ID> <hex key> <hex RAND>",
+// so that a capture of its protected signalling (TS 33.180 clause 9.3) and transmission/floor control (clause 9.4)
+// can be decrypted by a test system. Nothing is written without the variable.
+namespace {
+void keylog_csk(const std::optional<keying::KeyMessage> &csk, const std::string &user) {
+  static std::set<std::pair<std::string, std::uint32_t>> logged;
+  const char *file = std::getenv("MCX_CSK_KEYLOGFILE");
+  if (!file || !*file || !csk || user.empty() || !logged.emplace(user, csk->csb_id).second) return;
+  static const char *digits = "0123456789abcdef";
+  auto hex = [](auto begin, auto end) {
+    std::string out;
+    for (auto it = begin; it != end; ++it) {
+      const auto byte = static_cast<std::uint8_t>(*it);
+      out += digits[byte >> 4];
+      out += digits[byte & 15];
+    }
+    return out;
+  };
+  std::ofstream log(file, std::ios::app);
+  log << "CSK " << user << ' ' << csk->csb_id << ' ' << hex(csk->key.begin(), csk->key.end()) << ' '
+      << hex(csk->random.begin(), csk->random.end()) << '\n';
+}
+} // namespace
+
+//------------------------------------------------------------------------------
 // Helper: the status file (every 200 ms): the floor state, priorities, call, services, registration and
 // authorisation, then the MCData and MCVideo parts; the received audio is saved with it.
 void Client::save_status(std::uint64_t now) {
+  if (std::getenv("MCX_CSK_KEYLOGFILE")) {
+    keylog_csk(csk_, cfg_.contains("mcptt") ? user() : std::string());
+    keylog_csk(mcvideo_csk_, cfg_.contains("mcvideo") ? mcvideo_user() : std::string());
+    keylog_csk(mcdata_csk_, cfg_.contains("mcdata") ? mcdata_user() : std::string());
+  }
   floor_and_priority_status();
   // A listened-to client shows no call (TS 24.379 clause 11.1.6.2.0); the "ambient" entry is
   // test instrumentation, not a user indication.
