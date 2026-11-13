@@ -93,7 +93,7 @@ void Client::adhoc_call(const std::string &arguments) {
   status_["last_call_failure"] = nullptr;
   invite_with_implicit(implicit.requested, true, [&] {
     dialog_ = sip_.invite(
-        service(), local_, parts,
+        service(), local_, with_talking_location(parts, implicit.requested),
         [this](const SipResponse &response) {
           if (response.status_code >= 200 && response.status_code < 300) {
             // The server returns the generated ad hoc group identity (TS 24.379 clause 17.2.2.1.1, 2xx step 4).

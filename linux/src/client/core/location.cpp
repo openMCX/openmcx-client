@@ -12,6 +12,28 @@
 namespace mcx {
 
 //------------------------------------------------------------------------------
+// TS 24.379 clauses 10.1.1.2.1.1 step 16 a), 10.1.2.2.1.1 step 15 a), 10.1.2.2.2.1 step 3 c) iii), 11.1.1.2.1.1 step
+// 13 a), 11.1.6.2.2.1 step 8 f) ii) and 17.2.2.1.1 step 14a a): with an implicit floor request (implicit) and
+// <allow-location-info-when-talking> "true" in the MCPTT user profile, the call request carries a location-info body
+// with a <Report> of the location the client knows (no TriggerId: not a report of clause 13.3.4). Not added when
+// the request already has one (the emergency alert's, clause 6.2.9.1) or no location is known. mcptt
+// .location_when_talking "always" sends it whatever the profile says: a lab option, to check the participating
+// function's handling, not for operational use.
+std::vector<BodyPart> Client::with_talking_location(std::vector<BodyPart> parts, bool implicit) {
+  if (!implicit) return parts;
+  const bool always = cfg_.at("mcptt").value("location_when_talking", std::string("profile")) == "always";
+  if (!always && !(profile_loaded_ && profile_actions_.contains("allow-location-info-when-talking"))) return parts;
+  if (std::any_of(parts.begin(), parts.end(), [](const BodyPart &part) { return part.content_type == mcptt_location_mime; }))
+    return parts;
+  auto report = location_.current();
+  if (!report.location.coordinate && !report.location.serving_ecgi && !report.location.serving_ncgi) return parts;
+  report.location.timestamp = utc_timestamp();
+  parts.push_back({mcptt_location_mime, location::to_xml(report, location::Service::Mcptt)});
+  event("talking_location_sent", location::to_json(report));
+  return parts;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.379 clause 13.3.4.2: send a location information report: a SIP MESSAGE with the location-info body to the
 // participating function that sent the configuration (or the MCPTT server).
 void Client::send_location_report(location::Report report) {

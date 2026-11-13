@@ -125,7 +125,7 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
   } else {
     invite_with_implicit(implicit.requested, true, [&] {
       dialog_ = sip_.invite(
-          service(), local_, parts,
+          service(), local_, with_talking_location(parts, implicit.requested),
           [this, target](const SipResponse &response) { private_call_response(target, response); }, headers);
     });
   }
@@ -396,7 +396,7 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
   }
   invite_with_implicit(implicit.requested, true, [&] {
     dialog_ = sip_.invite(
-        service(), local_, parts,
+        service(), local_, with_talking_location(parts, implicit.requested),
         [this](const SipResponse &response) {
           if (response.status_code == 183 && status_.value("call_state", "") == "calling")
             status_["call_state"] = "progress";
@@ -467,7 +467,8 @@ void Client::ambient_call(const std::string &arguments) {
     // Feature-Caps allows the release (clause 11.1.6.2.2.3).
     std::erase_if(parts, [](const BodyPart &part) { return part.content_type == resource_lists_mime; });
     invite_with_implicit(true, !listening, [&] {
-      dialog_ = pre_session_refer_call({target}, std::move(parts), {{"Priv-Answer-Mode", "Auto"}}, {}, true);
+      dialog_ = pre_session_refer_call({target}, with_talking_location(std::move(parts), type == "local-init"),
+                                       {{"Priv-Answer-Mode", "Auto"}}, {}, true);
     });
     bind_private_key(key, true);
     ambient_->dialog = dialog_;

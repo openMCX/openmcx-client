@@ -1032,6 +1032,8 @@ private:
   void location_signal(location::Event event) { location_.signal(event, monotonic_ms()); }
 
   void send_location_report(location::Report report);
+  // The location sent with an implicit floor request (core/location.cpp).
+  std::vector<BodyPart> with_talking_location(std::vector<BodyPart> parts, bool implicit);
 
   static std::string utc_timestamp();
 

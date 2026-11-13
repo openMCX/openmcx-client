@@ -499,8 +499,8 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
   // mcptt.calls_over_pre_established, by default true), the call is set up over it with a REFER.
   if (cmd != "rejoin" && !adhoc_rejoin && pre_session_usable()) {
     invite_with_implicit(implicit.requested, true, [&] {
-      dialog_ = pre_session_refer_call({info.request_uri}, info_parts(info), refer_accept_contacts(), headers,
-                                       local_.implicit_request);
+      dialog_ = pre_session_refer_call({info.request_uri}, with_talking_location(info_parts(info), implicit.requested),
+                                       refer_accept_contacts(), headers, local_.implicit_request);
     });
     status_["last_call_failure"] = nullptr;
     status_["call_state"] = "calling";
@@ -508,7 +508,7 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
   }
   invite_with_implicit(implicit.requested, true, [&] {
     dialog_ = sip_.invite(
-        cmd == "rejoin" ? session_uri_ : service(), local_, info_parts(info),
+        cmd == "rejoin" ? session_uri_ : service(), local_, with_talking_location(info_parts(info), implicit.requested),
         [this](const SipResponse &response) {
           if (response.status_code >= 200 && response.status_code < 300) {
             remember_session(response.headers);
