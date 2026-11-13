@@ -118,8 +118,9 @@ void Client::subscribe_keys() {
   auto parts = info_parts(info);
   parts.push_back({"application/resource-lists+xml", keying::gktp_resource_list(key_group)});
   const auto boundary = "mcx-" + random_id();
+  // TS 24.481 clause 6.3.13.2.1 step e: the ICSI in P-Preferred-Service.
   key_subscription_ = sip_.subscribe(
-      gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(), {},
+      gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
       [this](const SipResponse &response) {
         if (response.status_code < 200) return;
         if (response.status_code >= 300) {
@@ -227,7 +228,7 @@ void Client::update_key_subscriptions() {
     parts.push_back({"application/resource-lists+xml", keying::gktp_resource_list(key_group)});
     const auto boundary = "mcx-" + random_id();
     const auto dialog = sip_.subscribe(
-        gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(), {},
+        gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
         [this, key_group](const SipResponse &response) {
           if (response.status_code < 200) return;
           const auto found = extra_key_subscriptions_.find(key_group);

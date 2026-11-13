@@ -1346,6 +1346,10 @@ private:
     // overtake the 200 (OK) the SIP core carries. Held until the answer names its source.
     std::vector<Datagram> early_control;
     bool granted = false, requesting = false;
+    // TS 24.281 clause 12.2.2.2 step 1 (and clause 15.2.1.1 step 13 for the viewed-to client): the callee's request to
+    // transmit, sent as a Transmission Request once the call is active when the offer had no mc_implicit_request to
+    // accept (TS 24.581 clause 14.3.1: an answer has no fmtp parameter the offer had not).
+    bool request_on_active = false;
     std::uint32_t video_ssrc = 0, frame = 0;
     std::uint32_t received_ssrc = 0; // the transmitting user's video SSRC being decoded
     // Decoding starts at an IDR picture: at a new stream, on joining late and on

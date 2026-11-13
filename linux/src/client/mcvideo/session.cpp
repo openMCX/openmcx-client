@@ -123,9 +123,13 @@ void Client::mcvideo_ambient_call(const std::string &target, const std::string &
   // TS 24.281 clause 15.2.1.1, step 4 of the 200 (OK) handling, known already: the originator's role.
   call.ambient_role = type == "local-init" ? "viewed-to" : "viewing";
   call.may_release = false; // until the 200 (OK) carries the release capability (TS 24.281 clause 15.2.1.3)
-  call.local.implicit_request = type == "local-init"; // step 12
-  // The viewing user only receives video, the viewed-to user only sends it.
+  // Steps 12 and 13 with TS 24.281 clause 6.4: the offer carries mc_implicit_request in both cases: an implicit
+  // request of this client (local-init), or a request to grant the terminating client (remote-init).
+  call.local.implicit_request = true;
+  // The viewing user only receives video, the viewed-to user only sends it: TS 24.281 clause 6.2.1 step 3c sets the
+  // direction on the video media ("a=recvonly" remote-init, "a=sendonly" local-init); the audio follows it.
   call.local.direction = type == "local-init" ? "sendonly" : "recvonly";
+  if (call.local.video) call.local.video->direction = call.local.direction;
   McpttInfo info;
   info.session_type = "ambient-viewing"; // step 7
   info.ambient_listening_type = type;    // step 8: <ambient-viewing-type>
@@ -282,15 +286,28 @@ SipResponse Client::mcvideo_answer_invite(const SipMessage &message, const Mcptt
     answer.direction = "recvonly";
   else if (message.remote_media->direction == "recvonly")
     answer.direction = "sendonly";
+  // The same for the video media (TS 24.281 clause 6.2.1 step 3c puts the ambient viewing direction there).
+  if (answer.video && message.remote_media->video) {
+    const auto &offered = message.remote_media->video->direction;
+    answer.video->direction = offered == "sendonly" ? "recvonly" : offered == "recvonly" ? "sendonly" : answer.direction;
+  }
   // TS 24.281 clause 12.2.2.2 step 1: the pulled callee requests the permission to transmit implicitly;
   // so does the viewed-to callee of a remote-init ambient viewing call (TS 24.281 clause 15.2.1.1 step 13).
-  answer.implicit_request =
+  // TS 24.581 clause 14.3.1: "The SDP fmtp attribute shall not include parameters that were not present in the
+  // associated SDP offer", and in an answer mc_implicit_request accepts the offerer's request (clause 14): the answer
+  // carries it only when the offer did; otherwise the callee asks with a Transmission Request once the call is active.
+  const bool callee_requests =
       (mcvideo_call_->video_mode == "one-to-one video pull" || mcvideo_call_->ambient_role == "viewed-to") &&
       answer.control != MediaControl::none;
+  answer.implicit_request = callee_requests && message.remote_media->implicit_request;
+  mcvideo_call_->request_on_active = callee_requests && !message.remote_media->implicit_request;
   answer.video->payload_type = message.remote_media->video->payload_type;
   mcvideo_call_->local = answer;
   response.status_code = 200;
   response.local_media = answer;
+  // TS 24.281 clauses 6.2.3.1.1 step 2 and 6.2.3.1.2 (automatic commencement, private and group calls) and
+  // 6.2.3.2.1 step 2 (the 180 of manual commencement, a copy of this response): the option tag "timer" in Require.
+  response.headers.push_back({"Require", "timer"});
 
   // TS 24.281 clause 6.2.3: a private call rings unless automatic commencement applies (Priv-Answer-Mode
   // Auto forces it; Answer-Mode Manual, or mcvideo.answer_mode manual, asks the user).
@@ -429,6 +446,14 @@ bool Client::mcvideo_call_state(std::string_view dialog, SipCallState state) {
                                                                 : location::Event::GroupCallNonEmergency,
                                monotonic_ms());
     if (mcvideo_call_->local.control == MediaControl::none) mcvideo_start_sending(mcvideo_call_->local.video->ssrc);
+    if (std::exchange(mcvideo_call_->request_on_active, false) && !mcvideo_call_->granted)
+      schedule([this] {
+        try {
+          if (mcvideo_call_ && !mcvideo_call_->granted && !mcvideo_call_->requesting) mcvideo_request_transmission();
+        } catch (const std::exception &error) {
+          event("mcvideo_transmission_request_failed", {{"reason", error.what()}});
+        }
+      });
     schedule([this] { mcvideo_subscribe_conference(); });
   } else if (state == SipCallState::disconnected) {
     // A call to a functional alias may end in a 300, whose response comes after this.
