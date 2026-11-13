@@ -352,6 +352,19 @@ void test_call_floor_ssrcs() {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.380 clauses 4.3.3.1 and 14.4: with a peer that allocated "mc_floor_ssrc" (multiplexing), messages go out
+// with its SSRC and only this client's own comes in; with one that did not (0: the TS 37.579 test system), they go
+// out with this client's own SSRC and any SSRC comes in.
+void test_floor_ssrc_without_multiplexing() {
+  using mcx::client_rules::floor_send_ssrc;
+  using mcx::client_rules::floor_ssrc_accepted;
+  check(floor_send_ssrc(7, 9) == 9, "multiplexing: the SSRC the peer allocated");
+  check(floor_send_ssrc(7, 0) == 7, "no multiplexing: this client's own SSRC");
+  check(floor_ssrc_accepted(7, 7, 9) && !floor_ssrc_accepted(0x12345678, 7, 9), "multiplexing: only this client's");
+  check(floor_ssrc_accepted(0x12345678, 7, 0) && floor_ssrc_accepted(7, 7, 0), "no multiplexing: the peer's own");
+}
+
+//------------------------------------------------------------------------------
 // TS 24.229 clauses 5.1.1.3, 5.1.1.4.1 and 5.1.1.5A.
 void test_reg_event_rules() {
   using mcx::client_rules::contact_address;
@@ -370,6 +383,7 @@ void test_reg_event_rules() {
 
 int main() {
   test_call_floor_ssrcs();
+  test_floor_ssrc_without_multiplexing();
   test_call_key_group();
   test_data_pck_end();
   test_notifiers();

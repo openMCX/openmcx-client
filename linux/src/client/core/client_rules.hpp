@@ -419,6 +419,22 @@ inline std::set<std::uint32_t> call_floor_ssrcs(std::uint32_t local, std::option
 }
 
 //------------------------------------------------------------------------------
+// TS 24.380 clauses 4.3.3.1 and 14.4 (MCVideo: TS 24.581): the SSRC in the RTCP header of the floor (transmission)
+// control and pre-established session call control messages this client sends: the one the peer allocated for them
+// ([remote], its "mc_floor_ssrc"), or, from a peer without multiplexing that allocated none (0), this client's own
+// [local] (RFC 3550 section 6.1: a sender's SSRC). The TS 37.579 test system is such a peer: "When there is no
+// multiplexing (normal case), the RTCP SSRCs have no meaning" (TS 37.579-5, R5-236320, R5-236323).
+inline std::uint32_t floor_send_ssrc(std::uint32_t local, std::uint32_t remote) { return remote ? remote : local; }
+
+//------------------------------------------------------------------------------
+// TS 24.380 clauses 4.3.3.1 and 14.4: whether a received control message with RTCP SSRC [received] belongs to this
+// client's stream: with multiplexing ([remote] allocated, non-zero) only the SSRC this client allocated ([local]);
+// from a peer without it, any SSRC (the peer sends with its own, which the channel's port already tells apart).
+inline bool floor_ssrc_accepted(std::uint32_t received, std::uint32_t local, std::uint32_t remote) {
+  return !remote || received == local;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.229 clause 5.1.1.3: the reg event subscription is refreshed "either 600 seconds before the expiration time if
 // the initial subscription was for greater than 1200 seconds, or when half of the time has expired if the initial
 // subscription was for 1200 seconds or less"; clause 5.1.1.4.1 times a reregistration the same way from the duration

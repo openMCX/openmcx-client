@@ -119,6 +119,14 @@ inline SipConfig client_sip_config(const Json &cfg, bool disable_tls) {
   // the MC client ID (TS 24.379 clause 4.10), as the Android client does (a client behind NAT, or on the server's
   // computer). Off by default: a plain Contact the core connects to.
   if (cfg.at("sip").value("outbound", false)) config.outbound_instance = cfg.at("mcptt").at("client_id");
+
+  // The participating function's SDP as TS 24.380 and the TS 37.579 test system send it, not only as the OpenMCX
+  // servers do (SdpReadOptions): a media plane control section without "mc_floor_ssrc" (clauses 14.2.7, 14.3.8: only
+  // with multiplexing; the peer's floor control messages then carry its own SSRC, call_media.cpp floor_packet), and a
+  // pre-established session's candidates without ICE credentials (an ICE lite peer: the session's media go to its
+  // "c=" and "m=" addresses, mcptt/pre_established.cpp pre_session_media).
+  config.sdp_read.floor_ssrc_optional = true;
+  config.sdp_read.ice_without_credentials = true;
   return config;
 }
 

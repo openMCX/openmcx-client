@@ -569,7 +569,10 @@ void Client::mcvideo_start_sending(std::uint32_t ssrc) {
 void Client::mcvideo_send_control(transmission::Type type, std::vector<FloorField> fields) {
   auto &call = *mcvideo_call_;
   if (!call.remote) throw std::runtime_error("MCVideo call has no negotiated media yet");
-  transmission::Packet packet{type, false, call.remote->floor_ssrc, std::move(fields)};
+  // TS 24.581 clauses 4.3.3.1 and 14.4: the server's "mc_transmission_ssrc", or this client's own from a server
+  // without multiplexing (client_rules::floor_send_ssrc).
+  transmission::Packet packet{type, false, client_rules::floor_send_ssrc(call.local.floor_ssrc, call.remote->floor_ssrc),
+                              std::move(fields)};
   auto bytes = transmission::encode(packet);
   // TS 24.281 clause 4.7.1: transmission control is SRTCP under this client's CSK (CS-ID 8, TS 33.180 table E.1.3-1).
   if (protected_floor()) bytes = mcvideo_protection_.protect_floor(bytes);
@@ -625,7 +628,9 @@ void Client::mcvideo_control_packet(const Datagram &datagram) {
   if (!sent_by_server(datagram.source, call.remote->floor_address, call.remote->floor_port)) return;
   const auto packet =
       transmission::decode(protected_floor() ? mcvideo_protection_.unprotect_floor(datagram.bytes) : datagram.bytes);
-  if (!transmission::from_server(packet.type) || packet.ssrc != call.local.floor_ssrc) return;
+  if (!transmission::from_server(packet.type) ||
+      !client_rules::floor_ssrc_accepted(packet.ssrc, call.local.floor_ssrc, call.remote->floor_ssrc))
+    return;
   mcvideo_control_message(packet);
 }
 

@@ -12,6 +12,11 @@
 #include <arpa/inet.h>
 
 namespace mcx {
+namespace {
+// floor_packet: the floor control messages with an SSRC other than this client's kept before the answer of a call with
+// an implicit floor request (a server without multiplexing sends with its own; TS 24.380 clause 14.4).
+constexpr std::size_t kEarlyFloorOtherSsrc = 8;
+} // namespace
 
 //------------------------------------------------------------------------------
 // TS 24.379 clause 6.2.1: check the server's SDP against this client's offer (floor control, SSRC, media profile,
@@ -324,7 +329,7 @@ void Client::send_floor(FloorType type) {
 FloorPacket Client::floor_message(FloorType type) const {
   FloorPacket packet;
   packet.type = type;
-  packet.ssrc = remote_->floor_ssrc;
+  packet.ssrc = client_rules::floor_send_ssrc(local_.floor_ssrc, remote_->floor_ssrc);
   packet.ack_required = type == FloorType::Release && cfg_.at("mcptt").value("floor_ack", true);
 
   // TS 24.380 clause 8.2.3.15: the call type of this call, including an emergency
@@ -423,16 +428,21 @@ void Client::floor_packet(const Datagram &datagram) {
   if (pre_session_floor(datagram)) return;
   // TS 24.380 clause 6.2.4.2.2 step 2: before the 200 (OK) of a call offered with an implicit floor request, a
   // floor control message for this client's floor SSRC is stored, and checked in full once the request is
-  // accepted (implicit_floor_answered).
+  // accepted (implicit_floor_answered). Whether the server multiplexes (and so uses that SSRC) is known only from
+  // the answer (TS 24.380 clause 14.4), so a few messages with another SSRC are kept as well.
   if (implicit_offered_ && !call_answered_) {
-    if (wire_ssrc(datagram.bytes, true) == local_.floor_ssrc) early_floor_.push_back(datagram);
+    if (wire_ssrc(datagram.bytes, true) == local_.floor_ssrc || early_floor_.size() < kEarlyFloorOtherSsrc)
+      early_floor_.push_back(datagram);
     return;
   }
   if (!remote_ || !sent_by_server(datagram.source, remote_->floor_address, remote_->floor_port)) return;
-  if (wire_ssrc(datagram.bytes, true) != local_.floor_ssrc) return;
+  // TS 24.380 clauses 4.3.3.1 and 14.4: the SSRC this client allocated, or any from a server without multiplexing
+  // (client_rules::floor_ssrc_accepted).
+  if (!client_rules::floor_ssrc_accepted(wire_ssrc(datagram.bytes, true), local_.floor_ssrc, remote_->floor_ssrc))
+    return;
   auto bytes = protected_floor() ? protection_.unprotect_floor(datagram.bytes) : datagram.bytes;
   auto packet = decode_floor(bytes);
-  if (packet.ssrc != local_.floor_ssrc) return;
+  if (!client_rules::floor_ssrc_accepted(packet.ssrc, local_.floor_ssrc, remote_->floor_ssrc)) return;
   floor_message(packet, false);
 }
 
@@ -450,7 +460,7 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
   if (packet.ack_required) {
     FloorPacket ack;
     ack.type = FloorType::Ack;
-    ack.ssrc = remote_->floor_ssrc;
+    ack.ssrc = client_rules::floor_send_ssrc(local_.floor_ssrc, remote_->floor_ssrc);
     ack.fields = {source_field(0), message_type_field(packet.type)};
     transmit_floor(ack);
   }

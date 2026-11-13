@@ -50,7 +50,15 @@ void Client::pre_establish_command(const std::string &cmd) {
   const auto target = mcptt.value("pre_established_uri", service() + ";mcptt-pre-established");
   auto session = std::make_unique<PreSession>();
   session->local = local_;
+  // TS 24.380 clause 14.2.3: "mc_priority" when a floor priority other than the default is required, based on the
+  // configured value (configured_floor_priority: mcptt.floor_priority, or the selected group's <user-priority>), as
+  // in an on-demand call's offer; none configured: no "mc_priority". TS 37.579-1 table 5.5.3.1.1-1 and the TS 37.579
+  // test suite expect it (any value 1..255) in every MCPTT offer, this one included.
   session->local.floor_priority.reset();
+  if (const auto priority = configured_floor_priority()) {
+    if (*priority > 99) throw std::runtime_error("maximum floor priority must be 0..99");
+    session->local.floor_priority = static_cast<std::uint8_t>(*priority);
+  }
   session->local.floor_ssrc = random_ssrc();
   session->local.granted_audio_ssrc = 0;
   session->local.implicit_request = cmd.ends_with(" implicit");
@@ -61,9 +69,16 @@ void Client::pre_establish_command(const std::string &cmd) {
   session->ice = pre_session_agent(session->local);
   session->local.ice = session->ice->local_description();
   pre_session_ = std::move(session);
+  // TS 24.380 clause 14.2.4: "mc_granted" in the offer of the initial INVITE, "when it is acceptable for the MCPTT
+  // client to receive a granted indication in the SIP 200 (OK) response" (it is; the floor is only ever granted for an
+  // implicit request, TS 24.380 clause 14.3.4). Clause 14.5: never in a later offer, so only the INVITE's copy has
+  // it, not the session's media the later offers start from. TS 37.579-1 table 5.5.3.1.1-1 (INITIAL_SDP_OFFER) and
+  // the TS 37.579 test suite expect it here.
+  auto offer = pre_session_->local;
+  offer.granted = true;
   // TS 37.579-1 table 5.3.3.4-1: Accept "application/sdp" only (no MCPTT-Info is offered or expected).
   pre_session_->dialog = sip_.invite(
-      target, pre_session_->local, {}, [this](const SipResponse &response) { pre_session_answered(response); },
+      target, offer, {}, [this](const SipResponse &response) { pre_session_answered(response); },
       {{"Accept", "application/sdp"}});
   pre_session_status();
   event("pre_session_requested", {{"dialog", pre_session_->dialog}, {"implicit", pre_session_->local.implicit_request}});
@@ -96,8 +111,11 @@ bool Client::pre_session_media(std::string_view dialog, const MediaDescription &
                                                                           : std::string{};
   // RFC 3264 section 8.2: a call over the session without floor control keeps the session's control channel.
   pre_session_->remote = session_media_keeping_control(media, pre_session_->remote);
-  // TS 24.380 clause 4.3: the Acknowledge carries the SSRC of the participating function's "mc_floor_ssrc".
-  pre_session_->control->set_ssrc(pre_session_->remote->floor_ssrc);
+  // TS 24.380 clause 4.3: the Acknowledge carries the SSRC of the participating function's "mc_floor_ssrc", or, from
+  // one without multiplexing (none: TS 24.380 clause 14.4, the TS 37.579 test system), this client's own
+  // (client_rules::floor_send_ssrc).
+  pre_session_->control->set_ssrc(
+      client_rules::floor_send_ssrc(pre_session_->local.floor_ssrc, pre_session_->remote->floor_ssrc));
   if (media.ice && pre_session_->ice) {
     if (pre_session_->ice->state() == IceState::Gathered) {
       pre_session_->ice->start(*pre_session_->remote->ice);
@@ -400,7 +418,10 @@ bool Client::pre_session_floor(const Datagram &datagram) {
   if (!sent_by_server(datagram.source, remote.floor_address, remote.floor_port)) return false;
   // An on-demand call (its own ports at the server) is not the session's.
   if (!dialog_.empty() && !call_over_pre_session()) return false;
-  if (wire_ssrc(datagram.bytes, true) != pre_session_->local.floor_ssrc) return true;
+  // TS 24.380 clauses 4.3.3.1 and 14.4: the SSRC this client allocated, or any from a participating function without
+  // multiplexing (client_rules::floor_ssrc_accepted; the TS 37.579 test system sends with its own).
+  const auto local_ssrc = pre_session_->local.floor_ssrc;
+  if (!client_rules::floor_ssrc_accepted(wire_ssrc(datagram.bytes, true), local_ssrc, remote.floor_ssrc)) return true;
   const auto bytes = protected_floor() ? protection_.unprotect_floor(datagram.bytes) : datagram.bytes;
   if (is_pre_established_message(bytes)) {
     if (const auto message = decode_pre_established(bytes)) pre_session_message(*message);
@@ -408,7 +429,7 @@ bool Client::pre_session_floor(const Datagram &datagram) {
   }
   if (!call_over_pre_session() || !remote_) return true; // floor control outside a call: nothing to do
   auto packet = decode_floor(bytes);
-  if (packet.ssrc == local_.floor_ssrc) floor_message(packet, false);
+  if (client_rules::floor_ssrc_accepted(packet.ssrc, local_.floor_ssrc, remote.floor_ssrc)) floor_message(packet, false);
   return true;
 }
 
