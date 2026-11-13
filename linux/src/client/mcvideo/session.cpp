@@ -11,6 +11,8 @@
 
 #include "client.hpp"
 
+#include <cstring>
+
 namespace mcx {
 
 //------------------------------------------------------------------------------
@@ -164,13 +166,37 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
   if (!mcvideo_authorized_ || !mcvideo_affiliated_)
     throw std::runtime_error("MCVideo call requires authorisation and affiliation");
   if (mcvideo_call_) throw std::runtime_error("an MCVideo call is in progress");
+  // TS 24.281 clause 9.2.1.2.1.1: the group document of the called group (served to members only): a group with
+  // <preconfigured-group-use-only> "true" is not called (steps 1 and 2: tell the user, skip the procedure), and a
+  // temporary group's <on-network-temporary> names its constituent groups for <associated-group-id> (step 14 d) i)).
+  const auto called = !chat_group.empty() ? chat_group : !target_group.empty() ? target_group : mcvideo_group();
+  std::vector<std::string> constituents;
+  {
+    const auto document = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(called), {},
+                                        {{"Authorization", bearer()}});
+    if (document.status == 200) {
+      if (group_preconfigured_use_only(document.body)) {
+        event("mcvideo_call_not_allowed", {{"group", called}, {"reason", "preconfigured-group-use-only"}});
+        status_["mcvideo_call_not_allowed"] = called;
+        throw std::runtime_error("calls are not allowed on the indicated group");
+      }
+      const auto &body = document.body;
+      for (std::size_t at = body.find("constituent-MCPTT-group-ID>"); at != std::string::npos;
+           at = body.find("constituent-MCPTT-group-ID>", at + 1)) {
+        const auto start = at + std::strlen("constituent-MCPTT-group-ID>");
+        if (start < 2 || body[at - 1] == '/') continue; // a closing tag
+        const auto end = body.find('<', start);
+        if (end != std::string::npos && end > start) constituents.push_back(body.substr(start, end - start));
+      }
+    }
+  }
   mcvideo_call_ = new_mcvideo_call();
   const McvideoCallSetup setup{mcvideo_call_};
   auto &call = *mcvideo_call_;
 
   // A prearranged call to another group than the selected one, such as a regroup's
   // temporary group identity (TS 24.281 clause 21.2.1.3), names it in target_group.
-  call.group = !chat_group.empty() ? chat_group : !target_group.empty() ? target_group : mcvideo_group();
+  call.group = called;
   call.state = "calling";
   // TS 24.281 clause 4.7.1: a group call's media under the group's GMK, offered as RTP/SAVP.
   if (protected_media()) {
@@ -181,6 +207,7 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
   call.requesting = implicit;
   McpttInfo info;
   info.session_type = chat_group.empty() ? "prearranged" : "chat";
+  call.type = info.session_type; // its re-INVITEs repeat it (TS 24.281 clause 9.2.2.2.1.5 step 4)
   info.request_uri = call.group;
   info.client_id = client_id();
   // TS 24.281 clauses 9.2.1.2.1.1 and 9.2.2.2.1.1: the activated functional alias this user presents.
@@ -188,8 +215,11 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
 
   // TS 24.281 clause 9.2.1.2.1.1 step 14 d) i): a call on a group regroup names, in <associated-group-id>, the
   // constituent group it is placed from: this user's own group if it is one of them, else the first.
-  if (mcvideo_regroups_.contains(call.group)) {
-    const auto groups = mcvideo_regroups_.at(call.group).value("groups", std::vector<std::string>{});
+  {
+    auto groups = mcvideo_regroups_.contains(call.group)
+                      ? mcvideo_regroups_.at(call.group).value("groups", std::vector<std::string>{})
+                      : std::vector<std::string>{};
+    if (groups.empty()) groups = constituents; // a temporary group of the GMS (TS 24.481 clause 6.3.14)
     if (!groups.empty())
       info.associated_group =
           std::find(groups.begin(), groups.end(), mcvideo_group()) != groups.end() ? mcvideo_group() : groups.front();
@@ -200,16 +230,41 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
     info.alert = false;
   }
   if (priority == "imminent") info.imminent_peril = true;
-  call.priority = priority.empty() ? "normal" : priority;
+  // TS 24.281 clause 9.2.1.2.1.1: a broadcast group call (<broadcast-ind> true).
+  if (priority == "broadcast") {
+    info.broadcast = true;
+    call.broadcast = true;
+  }
+  call.priority = priority.empty() || priority == "broadcast" ? "normal" : priority;
   auto headers = mcvideo_call_headers();
   for (const auto &header : mcvideo_priority_headers(info)) headers.push_back(header);
+  // TS 24.281 clause 9.2.1.2.4.1: a re-join sends this INVITE to the MCVideo session identity instead of the PSI.
+  const auto request_uri = std::exchange(mcvideo_rejoin_target_, std::string());
   call.dialog = sip_.invite(
-      mcvideo_service_uri(), call.local, {{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}},
+      request_uri.empty() ? mcvideo_service_uri() : request_uri, call.local,
+      {{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}},
       [this, generation = call.generation](const SipResponse &response) {
         mcvideo_invite_answered(generation, response);
       },
       headers);
   event("mcvideo_call_requested", {{"group", call.group}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 9.2.1.2.4.1: re-join the last group session this user left: the group call INVITE of clause
+// 9.2.1.2.1.1 with the session identity as its Request-URI, without an implicit transmission request.
+void Client::mcvideo_rejoin_call() {
+  if (mcvideo_rejoin_uri_.empty()) throw std::runtime_error("no MCVideo group session to re-join");
+  mcvideo_rejoin_target_ = mcvideo_rejoin_uri_;
+  try {
+    if (mcvideo_rejoin_type_ == "chat")
+      mcvideo_group_call(false, mcvideo_rejoin_group_);
+    else
+      mcvideo_group_call(false, {}, {}, mcvideo_rejoin_group_);
+  } catch (...) {
+    mcvideo_rejoin_target_.clear();
+    throw;
+  }
 }
 
 //------------------------------------------------------------------------------
@@ -454,7 +509,10 @@ bool Client::mcvideo_call_state(std::string_view dialog, SipCallState state) {
           event("mcvideo_transmission_request_failed", {{"reason", error.what()}});
         }
       });
-    schedule([this] { mcvideo_subscribe_conference(); });
+    // TS 24.281 clause 9.2.3.2: at once, unless mcvideo.conference_auto_subscribe is false (the user subscribes with
+    // mcvideo-conference-subscribe).
+    if (cfg_.at("mcvideo").value("conference_auto_subscribe", true))
+      schedule([this] { mcvideo_subscribe_conference(); });
   } else if (state == SipCallState::disconnected) {
     // A call to a functional alias may end in a 300, whose response comes after this.
     if (mcvideo_call_->to_alias)
@@ -488,6 +546,24 @@ void Client::mcvideo_subscribe_conference() {
         }
       },
       mcvideo_service.info_mime, service_info_xml(info, mcvideo_service));
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 9.2.3.2 with RFC 6665 section 4.1.2.3: the user ends the conference event subscription: a
+// SUBSCRIBE in its dialog with Expires 0.
+void Client::mcvideo_unsubscribe_conference() {
+  if (!mcvideo_call_ || mcvideo_call_->conference_subscription.empty())
+    throw std::runtime_error("no MCVideo conference subscription");
+  const auto dialog = std::exchange(mcvideo_call_->conference_subscription, std::string());
+  McpttInfo info;
+  info.request_uri = mcvideo_call_->group;
+  info.client_id = client_id();
+  sip_.request_in_dialog(dialog, "SUBSCRIBE", mcvideo_service.info_mime, service_info_xml(info, mcvideo_service),
+                         {{"Event", "conference"}, {"Expires", "0"}, {"Accept", "application/conference-info+xml"}},
+                         [this](const SipResponse &response) {
+                           event("mcvideo_conference_unsubscribed", {{"status", response.status_code}});
+                         });
+  event("mcvideo_conference_unsubscribing");
 }
 
 //------------------------------------------------------------------------------
@@ -553,6 +629,12 @@ void Client::mcvideo_end_call(const std::string &reason, bool dialog_ended) {
   // [dialog_ended]: the SIP stack reported the dialog's end; otherwise the dialog stays the MCVideo service's until it
   // does (mcvideo_closing_).
   if (!dialog_ended && !call.dialog.empty()) mcvideo_closing_.insert(call.dialog);
+  // TS 24.281 clause 9.2.1.2.4.1: a group session can be re-joined while it goes on.
+  if ((call.type == "prearranged" || call.type == "chat") && !call.session_uri.empty()) {
+    mcvideo_rejoin_uri_ = call.session_uri;
+    mcvideo_rejoin_group_ = call.group;
+    mcvideo_rejoin_type_ = call.type;
+  }
   mcvideo_last_call_ = {{"group", call.group},
                         {"type", call.type},
                         {"video_mode", call.video_mode},
@@ -606,7 +688,7 @@ void Client::mcvideo_send_control(transmission::Type type, std::vector<FloorFiel
 void Client::mcvideo_request_transmission() {
   if (!mcvideo_call_ || mcvideo_call_->state != "active") throw std::runtime_error("no active MCVideo call");
   mcvideo_call_->requesting = true;
-  mcvideo_send_control(transmission::Type::Request);
+  mcvideo_send_control(transmission::Type::Request, mcvideo_indicator_fields());
   event("mcvideo_transmission_requested");
 }
 
@@ -629,13 +711,16 @@ void Client::mcvideo_remote_transmission(const std::string &target, bool start) 
 // TS 24.581 clause 6.2.4.5.3: the user ends the transmission ("mcvideo-end", or its older name "mcvideo-release"):
 // send Transmission end request (TS 24.581 clause 9.2.20); the server answers with Transmission end response. On-network
 // the transmission participant never sends Transmission Release (TS 24.581 clause 9.2.7): clause 6.2.4 has no state
-// that sends it. T101 retransmission is not implemented. Ending a pending or queued request (TS 24.581 clauses 6.2.4.4.7
-// and 6.2.4.9.4) is not supported.
+// that sends it. T101 retransmission is not implemented. A pending or queued request is cancelled the same way
+// (TS 24.581 clauses 6.2.4.4.7 and 6.2.4.9.4: "Send Transmission end request message").
 void Client::mcvideo_end_transmission() {
-  if (!mcvideo_call_ || !mcvideo_call_->granted) throw std::runtime_error("not transmitting MCVideo");
+  if (!mcvideo_call_ || (!mcvideo_call_->granted && !mcvideo_call_->requesting))
+    throw std::runtime_error("not transmitting or requesting MCVideo");
+  const bool cancelling = !mcvideo_call_->granted;
   mcvideo_call_->granted = false;
+  mcvideo_call_->requesting = false;
   mcvideo_send_control(transmission::Type::EndRequest);
-  event("mcvideo_transmission_ended");
+  event(cancelling ? "mcvideo_transmission_request_cancelled" : "mcvideo_transmission_ended");
 }
 
 //------------------------------------------------------------------------------
@@ -733,7 +818,7 @@ void Client::mcvideo_control_message(const transmission::Packet &packet) {
     event("mcvideo_transmission_taken", {{"by", call.transmitter}}); // step 2: notify the user
     event("mcvideo_reception_notified", {{"by", call.transmitter}, {"automatic", automatic}});
     if (!automatic && cfg_.at("mcvideo").value("auto_receive", true))
-      mcvideo_send_control(transmission::Type::ReceiveMediaRequest);
+      mcvideo_send_control(transmission::Type::ReceiveMediaRequest, mcvideo_indicator_fields());
     break;
   }
   case transmission::Type::MediaReceptionNotification:
@@ -742,7 +827,8 @@ void Client::mcvideo_control_message(const transmission::Packet &packet) {
     call.receiving = false;
     if (const auto *field = transmission::find(packet, Field::UserId)) call.transmitter = read_user_id(*field);
     event("mcvideo_reception_notified", {{"by", call.transmitter}});
-    if (cfg_.at("mcvideo").value("auto_receive", true)) mcvideo_send_control(transmission::Type::ReceiveMediaRequest);
+    if (cfg_.at("mcvideo").value("auto_receive", true))
+      mcvideo_send_control(transmission::Type::ReceiveMediaRequest, mcvideo_indicator_fields());
     break;
   case transmission::Type::ReceiveMediaResponse:
     // TS 24.581 clauses 6.2.5.4.5 and 9.2.15: without a Reject Cause the reception is accepted.

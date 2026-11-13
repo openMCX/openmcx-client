@@ -1337,6 +1337,7 @@ private:
     bool may_release = true;
     unsigned generation = 0;                   // matches a late INVITE response to this call
     std::string priority = "normal";           // emergency, imminent or normal, as the server last said (clause 4.6)
+    bool broadcast = false;                    // a broadcast group call (<broadcast-ind>, TS 24.281 clause 9.2.1.2.1.1)
     std::optional<SipResponse> pending_answer; // a ringing private call (manual commencement)
     MediaDescription local;
     std::optional<MediaDescription> remote;
@@ -1446,6 +1447,9 @@ private:
   std::vector<SipHeader> mcvideo_priority_headers(const McpttInfo &info) const;
 
   void mcvideo_note_priority(const McpttInfo &info);
+  // TS 24.581 clauses 6.2.4.3.2 step 2b and 6.2.5.3.3 step 1b: the Transmission Indicator of a broadcast, emergency or
+  // imminent peril call (none for a normal call).
+  std::vector<FloorField> mcvideo_indicator_fields() const;
 
   void mcvideo_change_priority(bool emergency, bool enabled);
 
@@ -1465,7 +1469,7 @@ private:
 
   void mcvideo_private_call(const std::string &target, std::string mode, bool no_control = false,
                             bool emergency = false, const std::string &session_type = "private", bool to_alias = false,
-                            const std::string &called_alias = {});
+                            const std::string &called_alias = {}, bool implicit = false);
 
   void mcvideo_server_call(const std::string &session_type, const std::string &url = {});
 
@@ -1581,6 +1585,22 @@ private:
   // TS 24.281 clause 13.2.2.4: the <video-push-url> of the server's recording, from its SIP INFO.
   std::string mcvideo_push_url_;
 
+  // TS 24.281 clause 9.2.1.2.4.1: the last group session this user left (its session identity and group), for a re-join.
+  std::string mcvideo_rejoin_uri_, mcvideo_rejoin_group_, mcvideo_rejoin_type_, mcvideo_rejoin_target_;
+  // TS 24.281 clauses 7.2.4 and 8.2.1.2 to 8.2.1.5 (mcvideo/settings_affiliation.cpp): the settings subscription, the
+  // subscriptions to other users' affiliation (dialog -> MCVideo ID, or "poc-settings"), their last notified
+  // affiliation, and a received negotiated-mode request awaiting the user.
+  std::string mcvideo_settings_subscription_;
+  std::map<std::string, std::string> mcvideo_extra_subscriptions_;
+  std::map<std::string, Affiliation> mcvideo_target_affiliations_;
+  Json mcvideo_affiliation_command_;
+  void mcvideo_settings_command(const std::string &verb, std::istringstream &words);
+  void mcvideo_target_affiliation_command(const std::string &verb, std::istringstream &words);
+  SipResponse mcvideo_extra_notify(const SipMessage &message);
+  SipResponse mcvideo_affiliation_command_message(const SipMessage &message);
+  void mcvideo_affiliation_command_answer(bool accept);
+  std::string mcvideo_client_filter();
+  void mcvideo_rejoin_call();
   void mcvideo_group_call(bool implicit = false, const std::string &chat_group = {}, const std::string &priority = {},
                           const std::string &target_group = {});
 
@@ -1601,6 +1621,7 @@ private:
   bool mcvideo_call_state(std::string_view dialog, SipCallState state);
 
   void mcvideo_subscribe_conference();
+  void mcvideo_unsubscribe_conference();
 
   SipResponse mcvideo_conference_notify(const SipMessage &message);
 

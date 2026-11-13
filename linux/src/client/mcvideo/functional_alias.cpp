@@ -116,7 +116,10 @@ void Client::mcvideo_alias_unsubscribe(const std::string &alias) {
                                   [&](const auto &subscription) { return subscription.second == alias; });
   if (found == mcvideo_alias_dialogs_.end()) throw std::runtime_error("no functional alias status subscription");
   sip_.request_in_dialog(found->first, "SUBSCRIBE", "", "",
-                         {{"Event", "presence"}, {"Expires", "0"}, {"P-Preferred-Service", mcvideo_service.icsi}});
+                         {{"Event", "presence"},
+                          {"Expires", "0"},
+                          {"Accept", "application/pidf+xml"}, // TS 24.281 clause 20.2.1.3
+                          {"P-Preferred-Service", mcvideo_service.icsi}});
 }
 
 //------------------------------------------------------------------------------

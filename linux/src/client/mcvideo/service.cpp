@@ -210,17 +210,33 @@ void Client::mcvideo_authorize(const std::string &token) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.281 clause 8.3.2.2 (RFC 4661): the simple-filter restricting presence notifications to this MCVideo client:
+// the "pidf" and "mcvideoPI10" bindings and one <filter> (an id, no uri) including this client's tuple.
+std::string Client::mcvideo_client_filter() {
+  return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+         "<filter-set xmlns=\"urn:ietf:params:xml:ns:simple-filter\"><ns-bindings>"
+         "<ns-binding prefix=\"pidf\" urn=\"urn:ietf:params:xml:ns:pidf\"/>"
+         "<ns-binding prefix=\"mcvideoPI10\" urn=\"urn:3gpp:ns:mcvideoPresInfo:1.0\"/>"
+         "</ns-bindings><filter id=\"" +
+         random_id().substr(0, 12) +
+         "\"><what><include>//pidf:presence/pidf:tuple[@id=&quot;" + xml_escape(client_id()) +
+         "&quot;]</include></what></filter></filter-set>";
+}
+
+//------------------------------------------------------------------------------
 // TS 24.281 clause 8.2.1.3: the affiliation status determination procedure: SUBSCRIBE to this user's affiliation
 // status at the MCVideo server.
 void Client::mcvideo_subscribe() {
   if (!mcvideo_authorized_ || !mcvideo_subscription_.empty()) return;
   mcvideo_status_known_ = false;
-  // Step 2: the mcvideo-info with <mcvideo-request-uri> set to this user's MCVideo ID.
+  // Step 2: the mcvideo-info with <mcvideo-request-uri> set to this user's MCVideo ID; step 7: the groups of this user
+  // at this client, restricted with a simple-filter body (clause 8.3.2.2).
   McpttInfo info;
   info.request_uri = mcvideo_user();
   info.client_id = client_id();
-  const auto [type, body] =
-      message_body({{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}}, "mcvideo-" + random_id());
+  const auto [type, body] = message_body({{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
+                                          {"application/simple-filter+xml", mcvideo_client_filter()}},
+                                         "mcvideo-" + random_id());
   mcvideo_subscription_ = sip_.subscribe(
       mcvideo_service_uri(), "presence", 4294967295u,
       {{"P-Preferred-Service", mcvideo_service.icsi}, {"Accept", "application/pidf+xml"}},
@@ -349,16 +365,17 @@ void Client::mcvideo_affiliate(bool affiliate, const std::string &group) {
 //------------------------------------------------------------------------------
 // Helper: the MCVideo test commands, each dispatched to the procedure it starts:
 //   mcvideo-affiliate [group]   mcvideo-deaffiliate   mcvideo-authorize [token]
-//   mcvideo-call [implicit]   mcvideo-chat <group>   mcvideo-private <MCVideo ID> [auto|manual|force-auto] [no-control]
+//   mcvideo-call [implicit] [emergency|imminent|broadcast] [group=<group>]   mcvideo-chat <group> [implicit]
+//   [emergency|imminent]   mcvideo-private <MCVideo ID> [auto|manual|force-auto] [no-control] [emergency] [implicit]
 //   mcvideo-answer   mcvideo-reject   mcvideo-transmit   mcvideo-end (also mcvideo-release)
-//   mcvideo-call emergency|imminent   mcvideo-emergency on|off   mcvideo-imminent on|off   mcvideo-alert on|off
+//   mcvideo-emergency on|off   mcvideo-imminent on|off   mcvideo-alert on|off
 //   mcvideo-receive   mcvideo-stop-receiving   mcvideo-hangup
 //   mcvideo-push <MCVideo ID> [auto|manual|force-auto]   mcvideo-pull <MCVideo ID> [auto|manual|force-auto]
 //   mcvideo-remote-transmit <MCVideo ID>   mcvideo-remote-cancel <MCVideo ID>
 //   mcvideo-push-server   mcvideo-pull-server <video URL>
 //   mcvideo-ambient <MCVideo ID> remote|local
 //   mcvideo-adhoc <MCVideo ID>...   mcvideo-adhoc criteria <criteria>
-//   mcvideo-call group=<group>   mcvideo-regroup create <TGI> <preconfigured group> groups|users <URI>,...
+//   mcvideo-regroup create <TGI> <preconfigured group> groups|users <URI>,...
 //   mcvideo-regroup remove <TGI>
 //   mcvideo-fa activate|takeover|deactivate <alias>...   mcvideo-fa use <alias>|none
 //   mcvideo-private-fa <alias> [auto|manual|force-auto]
@@ -376,10 +393,23 @@ void Client::mcvideo_command(const std::string &cmd) {
   if (verb == "mcvideo-affiliate") return mcvideo_affiliate(true, argument);
   if (verb == "mcvideo-deaffiliate") return mcvideo_affiliate(false);
   if (verb == "mcvideo-authorize") return mcvideo_authorize(argument);
+  // mcvideo-call [implicit] [emergency|imminent|broadcast] [group=<group>]: TS 24.281 clause 9.2.1.2.1.1 with the
+  // implicit transmission request of clause 6.4, an emergency or imminent peril call (clauses 6.2.8.1.1, 6.2.8.1.9), a
+  // broadcast group call, or a call to another group (e.g. a regroup's temporary group identity), in any order.
   if (verb == "mcvideo-call") {
-    if (argument == "emergency" || argument == "imminent") return mcvideo_group_call(false, {}, argument);
-    if (argument.starts_with("group=")) return mcvideo_group_call(false, {}, {}, argument.substr(6));
-    return mcvideo_group_call(argument == "implicit");
+    bool implicit = false;
+    std::string priority, group;
+    for (auto word = argument; !word.empty(); word.clear(), words >> word) {
+      if (word == "implicit")
+        implicit = true;
+      else if (word == "emergency" || word == "imminent" || word == "broadcast")
+        priority = word;
+      else if (word.starts_with("group="))
+        group = word.substr(6);
+      else
+        throw std::runtime_error("mcvideo-call [implicit] [emergency|imminent|broadcast] [group=<group>]");
+    }
+    return mcvideo_group_call(implicit, {}, priority, group);
   }
   if (verb == "mcvideo-emergency" || verb == "mcvideo-imminent") {
     if (argument != "on" && argument != "off") throw std::runtime_error(verb + " on|off");
@@ -450,9 +480,21 @@ void Client::mcvideo_command(const std::string &cmd) {
     return mcvideo_server_call("one-from-server video pull", argument);
   }
   if (verb == "mcvideo-answer" || verb == "mcvideo-reject") return mcvideo_answer_command(verb);
+  // mcvideo-chat <chat group> [implicit] [emergency|imminent]: TS 24.281 clause 9.2.2.2.1.1, with the implicit
+  // transmission request (clause 6.4) and the priority of an emergency or imminent peril chat call (clause 6.2.8).
   if (verb == "mcvideo-chat") {
     if (argument.empty()) throw std::runtime_error("mcvideo-chat needs a chat group");
-    return mcvideo_group_call(false, argument);
+    bool implicit = false;
+    std::string priority;
+    for (std::string word; words >> word;) {
+      if (word == "implicit")
+        implicit = true;
+      else if (word == "emergency" || word == "imminent")
+        priority = word;
+      else
+        throw std::runtime_error("mcvideo-chat <chat group> [implicit] [emergency|imminent]");
+    }
+    return mcvideo_group_call(implicit, argument, priority);
   }
   if (verb == "mcvideo-transmit") return mcvideo_request_transmission();
   if (verb == "mcvideo-remote-transmit" || verb == "mcvideo-remote-cancel")
@@ -460,24 +502,52 @@ void Client::mcvideo_command(const std::string &cmd) {
   if (verb == "mcvideo-end" || verb == "mcvideo-release") return mcvideo_end_transmission();
   if (verb == "mcvideo-receive" || verb == "mcvideo-stop-receiving") return mcvideo_reception_command(verb);
   if (verb == "mcvideo-hangup") return mcvideo_hangup_command();
+  // TS 24.281 clause 9.2.3.2: the user subscribes to, or unsubscribes from, the call's conference event package.
+  if (verb == "mcvideo-conference-subscribe") {
+    if (!mcvideo_call_ || mcvideo_call_->state != "active") throw std::runtime_error("no active MCVideo call");
+    return mcvideo_subscribe_conference();
+  }
+  if (verb == "mcvideo-conference-unsubscribe") return mcvideo_unsubscribe_conference();
+  if (verb == "mcvideo-rejoin") return mcvideo_rejoin_call();
+  // TS 24.281 clause 6.2.3: the user's answer mode for incoming private calls (mcvideo.answer_mode), changed at run time.
+  if (verb == "mcvideo-answer-mode") {
+    if (argument != "auto" && argument != "manual") throw std::runtime_error("mcvideo-answer-mode auto|manual");
+    cfg_["mcvideo"]["answer_mode"] = argument;
+    status_["mcvideo_answer_mode"] = argument;
+    event("mcvideo_answer_mode", {{"mode", argument}});
+    return;
+  }
+  // TS 24.281 clause 7.2.4 and clauses 8.2.1.2 to 8.2.1.5 (mcvideo/settings_affiliation.cpp).
+  if (verb.starts_with("mcvideo-settings-")) {
+    std::istringstream rest(cmd.substr(verb.size()));
+    return mcvideo_settings_command(verb, rest);
+  }
+  if (verb == "mcvideo-affiliation-subscribe" || verb == "mcvideo-affiliation-unsubscribe" ||
+      verb == "mcvideo-affiliate-remote" || verb == "mcvideo-affiliation-accept" || verb == "mcvideo-affiliation-decline") {
+    std::istringstream rest(cmd.substr(verb.size()));
+    return mcvideo_target_affiliation_command(verb, rest);
+  }
   throw std::runtime_error("unknown MCVideo command");
 }
 
 //------------------------------------------------------------------------------
-// TS 24.281 clause 10.2.2.2.1: mcvideo-private <MCVideo ID> [auto|manual|force-auto] [no-control] [emergency].
+// TS 24.281 clause 10.2.2.2.1: mcvideo-private <MCVideo ID> [auto|manual|force-auto] [no-control] [emergency]
+// [implicit] (the implicit transmission request of clause 6.4).
 void Client::mcvideo_private_command(const std::string &argument, std::istringstream &words) {
   std::string mode, extra;
-  bool no_control = false, emergency = false;
+  bool no_control = false, emergency = false, implicit = false;
   words >> mode;
   while (words >> extra) {
     if (extra == "no-control")
       no_control = true;
     else if (extra == "emergency")
       emergency = true;
+    else if (extra == "implicit")
+      implicit = true;
     else
       throw std::runtime_error("unknown mcvideo-private option " + extra);
   }
-  return mcvideo_private_call(argument, mode, no_control, emergency);
+  return mcvideo_private_call(argument, mode, no_control, emergency, "private", false, {}, implicit);
 }
 
 //------------------------------------------------------------------------------
@@ -565,8 +635,15 @@ void Client::mcvideo_answer_command(const std::string &verb) {
 // TS 24.581 clause 6.2.5: mcvideo-receive or mcvideo-stop-receiving: transmission control requests about reception.
 void Client::mcvideo_reception_command(const std::string &verb) {
   if (!mcvideo_call_) throw std::runtime_error("no MCVideo call");
-  return mcvideo_send_control(verb == "mcvideo-receive" ? transmission::Type::ReceiveMediaRequest
-                                                        : transmission::Type::ReceptionEndRequest);
+  if (verb == "mcvideo-receive")
+    return mcvideo_send_control(transmission::Type::ReceiveMediaRequest, mcvideo_indicator_fields());
+  // TS 24.581 clause 6.2.5.5.3 step 1b: the User ID, Audio SSRC and Video SSRC of the transmitting user.
+  const auto &call = *mcvideo_call_;
+  std::vector<FloorField> fields;
+  if (!call.transmitter.empty()) fields.push_back(transmission::transmitting_user_field(call.transmitter));
+  fields.push_back(audio_ssrc_field(call.transmitter_audio_ssrc));
+  fields.push_back(transmission::video_ssrc_field(call.transmitter_video_ssrc));
+  return mcvideo_send_control(transmission::Type::ReceptionEndRequest, std::move(fields));
 }
 
 //------------------------------------------------------------------------------

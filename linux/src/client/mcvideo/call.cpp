@@ -33,12 +33,26 @@ std::vector<SipHeader> Client::mcvideo_priority_headers(const McpttInfo &info) c
 void Client::mcvideo_note_priority(const McpttInfo &info) {
   if (!mcvideo_call_) return;
   auto &call = *mcvideo_call_;
+  if (info.broadcast == true) call.broadcast = true;
   if (info.emergency == true)
     call.priority = "emergency";
   else if (info.imminent_peril == true)
     call.priority = "imminent";
   else if (info.emergency == false || info.imminent_peril == false)
     call.priority = "normal";
+}
+
+//------------------------------------------------------------------------------
+// TS 24.581 clauses 6.2.4.3.2 step 2b and 6.2.5.3.3 step 1b with clause 9.2.3.11: the Transmission Indicator (B
+// broadcast, D emergency, E imminent peril) of a broadcast, emergency or imminent peril call.
+std::vector<FloorField> Client::mcvideo_indicator_fields() const {
+  if (!mcvideo_call_) return {};
+  std::uint16_t bits = 0;
+  if (mcvideo_call_->broadcast) bits |= 0x4000;
+  if (mcvideo_call_->priority == "emergency") bits |= 0x1000;
+  if (mcvideo_call_->priority == "imminent") bits |= 0x0800;
+  if (bits == 0) return {};
+  return {floor_indicator_field(bits)};
 }
 
 //------------------------------------------------------------------------------
@@ -120,6 +134,12 @@ SipResponse Client::mcvideo_message(const SipMessage &message) {
     return response;
   }
   const auto info = message_info(message, mcvideo_service);
+  // TS 24.281 clause 8.2.1.5: an affiliation status change request in negotiated mode.
+  const bool command = message.content_type == "application/vnd.3gpp.mcvideo-affiliation-command+xml" ||
+                       std::any_of(message.parts.begin(), message.parts.end(), [](const auto &part) {
+                         return part.content_type == "application/vnd.3gpp.mcvideo-affiliation-command+xml";
+                       });
+  if (command) return mcvideo_affiliation_command_message(message);
 
   // TS 24.281 clause 12.1A.1.3: an ad hoc group emergency alert notification, its cancellation, or the
   // receipt of this user's own alert.
@@ -285,7 +305,8 @@ std::vector<SipHeader> Client::mcvideo_call_headers() const {
 // TS 24.281 clause 10.2.3.1: the offer has no transmission control, and both parties send. A one-to-one video push or pull
 // (TS 24.281 clauses 13.2.2.1, 12.2.2.1) is this call with its <session-type>.
 void Client::mcvideo_private_call(const std::string &target, std::string mode, bool no_control, bool emergency,
-                                  const std::string &session_type, bool to_alias, const std::string &called_alias) {
+                                  const std::string &session_type, bool to_alias, const std::string &called_alias,
+                                  bool implicit) {
   if (!mcvideo_authorized_) throw std::runtime_error("MCVideo call requires authorisation");
   if (mcvideo_call_) throw std::runtime_error("an MCVideo call is in progress");
   if (target.empty() || target == mcvideo_user()) throw std::runtime_error("private call requires another MCVideo ID");
@@ -316,6 +337,10 @@ void Client::mcvideo_private_call(const std::string &target, std::string mode, b
   if (no_control) {
     call.local.control = MediaControl::none;
     call.local.queueing = false;
+  } else if (implicit) {
+    // TS 24.281 clause 6.4 with TS 24.581 clause 14.2.5: the user asked to transmit with the call setup.
+    call.local.implicit_request = true;
+    call.requesting = true;
   }
   McpttInfo info;
   info.session_type = session_type;
