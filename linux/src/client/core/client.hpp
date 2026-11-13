@@ -1262,6 +1262,28 @@ private:
 
   SipResponse mcvideo_key_notify(const SipMessage &message);
 
+  // TS 33.180 clause 5.7 and TS 24.281 clause 4.7.1: the GMK of every MCVideo group the user may call or be called on
+  // (its affiliated groups, regroups and temporary groups), each through its own GKTP subscription to the MCVideo
+  // server (TS 24.481 clause 6.3.13.2.1); a group call's media use the key of the call's group.
+  std::map<std::string, keying::KeyMessage> mcvideo_group_keys_;              // key group -> latest GMK
+  std::map<std::string, std::string> mcvideo_extra_key_subscriptions_;       // key group -> dialog
+  std::map<std::string, std::int64_t> mcvideo_extra_key_refresh_at_;        // dialog -> refresh time
+  std::set<std::string> mcvideo_wanted_key_groups_;                          // groups called without a key yet
+  std::string mcvideo_key_group_of(const std::string &group) const;
+  bool mcvideo_use_group_key(const std::string &group);
+  void mcvideo_update_key_subscriptions();
+  void mcvideo_refresh_extra_key_subscription(const std::string &dialog);
+  bool mcvideo_key_dialog(const std::string &dialog) const;
+  // A group call asked for before its group's GMK is held (a chat group joined with implicit affiliation, a new
+  // temporary group): it is placed once the key arrives, and fails if the key subscription is refused or ended.
+  struct McvideoKeyWait {
+    std::string key_group;
+    std::int64_t deadline_ms = 0;
+    std::function<void()> place;
+  };
+  std::optional<McvideoKeyWait> mcvideo_key_wait_;
+  void mcvideo_key_wait_done(const std::string &key_group, bool installed);
+
   bool mcvideo_authorized_ = false, mcvideo_affiliated_ = false, mcvideo_status_known_ = false;
   bool mcvideo_desired_affiliation_ = true;
   std::string mcvideo_auth_etag_, mcvideo_affiliation_etag_, mcvideo_subscription_;

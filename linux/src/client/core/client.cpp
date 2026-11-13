@@ -48,6 +48,9 @@ void Client::tick() {
       if (at && std::time(nullptr) >= at) refresh_extra_key_subscription(dialog);
   if (mcvideo_keys_ && mcvideo_key_refresh_at_ && std::time(nullptr) >= mcvideo_key_refresh_at_)
     refresh_key_subscription(true);
+  if (mcvideo_keys_)
+    for (const auto &[dialog, at] : std::map(mcvideo_extra_key_refresh_at_))
+      if (at && std::time(nullptr) >= at) mcvideo_refresh_extra_key_subscription(dialog);
   configuration_subscription_tick();
   status_["protected_media"] = protected_media();
   status_["protected_floor"] = protected_floor();

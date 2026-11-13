@@ -69,14 +69,16 @@ void Client::mcvideo_subscribe_keys() {
           return;
         }
         mcvideo_key_refresh_at_ = key_refresh_time(response);
+        schedule([this] { mcvideo_update_key_subscriptions(); });
       },
       "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary));
   mcvideo_key_group_ = mcvideo_group();
 }
 
 //------------------------------------------------------------------------------
-// TS 24.481 clause 6.3.13.2.1: the NOTIFY (RFC 5875 xcap-diff) of the GKTP subscription: open the GMK it carries
-// (TS 33.180) and protect the group's media with it.
+// TS 24.481 clause 6.3.13.2.1: the NOTIFY (RFC 5875 xcap-diff) of a GKTP subscription to the MCVideo server (the
+// selected group's or one of mcvideo_update_key_subscriptions): open the GMK it carries (TS 33.180) and keep it for
+// its group; the media use it now if its group is that of the call in progress, or, without a call, the selected one.
 SipResponse Client::mcvideo_key_notify(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
@@ -84,21 +86,205 @@ SipResponse Client::mcvideo_key_notify(const SipMessage &message) {
     response.status_code = 403;
     return response;
   }
+  const bool selected = message.dialog_id == mcvideo_key_subscription_;
+  std::string key_group = selected ? mcvideo_key_group_ : std::string{};
+  if (!selected)
+    for (const auto &[group, dialog] : mcvideo_extra_key_subscriptions_)
+      if (dialog == message.dialog_id) key_group = group;
+  if (key_group.empty()) {
+    response.status_code = 481; // RFC 6665 section 4.1.3
+    return response;
+  }
+  const auto in_use = mcvideo_key_group_of(mcvideo_call_ && !mcvideo_call_->group.empty() ? mcvideo_call_->group
+                                                                                          : mcvideo_group());
   if (get_header(message.headers, "Subscription-State").starts_with("terminated")) {
-    mcvideo_protection_.clear_group();
-    mcvideo_key_subscription_.clear();
+    mcvideo_group_keys_.erase(key_group);
+    mcvideo_wanted_key_groups_.erase(key_group); // asked again only when called again
+    if (key_group == in_use) mcvideo_protection_.clear_group();
+    if (selected) {
+      mcvideo_key_subscription_.clear();
+    } else {
+      mcvideo_extra_key_refresh_at_.erase(message.dialog_id);
+      mcvideo_extra_key_subscriptions_.erase(key_group);
+    }
+    event("mcvideo_group_key_subscription_ended", {{"group_id", key_group}});
+    schedule([this, key_group] { mcvideo_key_wait_done(key_group, false); });
     return response;
   }
   if (!mcvideo_keys_ || message.content_type != "application/xcap-diff+xml") {
     response.status_code = 400;
     return response;
   }
-  const auto document = keying::parse_gktp_xcap_diff(message.body, mcvideo_key_group_, xcap_root());
-  const auto key = mcvideo_keys_->open_group(gms_identity(), mcvideo_key_group_, document);
-  mcvideo_protection_.set_group(key);
-  status_["mcvideo_group_key_id"] = key.csb_id;
-  event("mcvideo_group_key_installed", {{"group_id", mcvideo_key_group_}, {"key_id", key.csb_id}});
+  const auto document = keying::parse_gktp_xcap_diff(message.body, key_group, xcap_root());
+  const auto key = mcvideo_keys_->open_group(gms_identity(), key_group, document);
+  mcvideo_group_keys_[key_group] = key;
+  mcvideo_wanted_key_groups_.erase(key_group);
+  if (key_group == in_use) mcvideo_protection_.set_group(key);
+  if (selected) status_["mcvideo_group_key_id"] = key.csb_id;
+  Json held = Json::object();
+  for (const auto &[group, held_key] : mcvideo_group_keys_) held[group] = held_key.csb_id;
+  status_["mcvideo_group_keys"] = held;
+  event("mcvideo_group_key_installed",
+        {{"group_id", key_group}, {"key_id", key.csb_id}, {"selected", key_group == in_use}});
+  schedule([this, key_group] { mcvideo_key_wait_done(key_group, true); });
   return response;
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clause 5.7: the group whose GMK protects a call on [group]: for a regroup using a preconfigured group
+// (TS 24.281 clause 21), that group's (TS 24.281 clause 21.2.1.3: the regroup takes its configuration from it);
+// otherwise the group itself, a temporary group of the GMS included (TS 24.481 clause 6.3.14: the GMS keys it).
+std::string Client::mcvideo_key_group_of(const std::string &group) const {
+  if (mcvideo_regroups_.contains(group))
+    if (const auto preconfigured = mcvideo_regroups_.at(group).value("preconfigured", std::string{});
+        !preconfigured.empty())
+      return preconfigured;
+  return group;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 4.7.1: select the GMK of [group] for the media; false when it is not held (it is then subscribed
+// to, so that a later call finds it).
+bool Client::mcvideo_use_group_key(const std::string &group) {
+  const auto key_group = mcvideo_key_group_of(group);
+  if (const auto found = mcvideo_group_keys_.find(key_group); found != mcvideo_group_keys_.end()) {
+    try {
+      mcvideo_protection_.set_group(found->second);
+      return true;
+    } catch (const std::exception &error) {
+      event("mcvideo_group_key_unusable", {{"group_id", key_group}, {"reason", error.what()}});
+      mcvideo_group_keys_.erase(found);
+    }
+  }
+  if (key_group != mcvideo_key_group_ && !mcvideo_wanted_key_groups_.contains(key_group)) {
+    mcvideo_wanted_key_groups_.insert(key_group);
+    schedule([this] { mcvideo_update_key_subscriptions(); });
+  }
+  return false;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.481 clause 6.3.13.2.1: a GKTP subscription to the MCVideo server for each further group whose GMK the user
+// needs (TS 33.180 clause 5.7): the affiliated groups, the regroups' key groups and the groups called without a key;
+// those no longer needed end (Expires 0).
+void Client::mcvideo_update_key_subscriptions() {
+  if (!protected_media() || !mcvideo_keys_ || !mcvideo_authorized_ || mcvideo_key_subscription_.empty()) return;
+  std::set<std::string> wanted(mcvideo_wanted_key_groups_);
+  for (const auto &group : mcvideo_groups_) wanted.insert(mcvideo_key_group_of(group));
+  for (const auto &group : mcvideo_extra_groups_) wanted.insert(mcvideo_key_group_of(group));
+  for (const auto &[tgi, regroup] : mcvideo_regroups_.items()) wanted.insert(mcvideo_key_group_of(tgi));
+  wanted.erase(mcvideo_key_group_);
+  wanted.erase(std::string{});
+  for (auto it = mcvideo_extra_key_subscriptions_.begin(); it != mcvideo_extra_key_subscriptions_.end();) {
+    if (wanted.contains(it->first)) {
+      ++it;
+      continue;
+    }
+    mcvideo_extra_key_refresh_at_.erase(it->second);
+    try {
+      sip_.request_in_dialog(it->second, "SUBSCRIBE", "", "",
+                             {{"Event", "xcap-diff"}, {"Expires", "0"}, {"P-Preferred-Service", mcvideo_service.icsi}});
+    } catch (const std::exception &error) {
+      event("mcvideo_group_key_subscription_end_failed", {{"group_id", it->first}, {"reason", error.what()}});
+    }
+    mcvideo_group_keys_.erase(it->first);
+    it = mcvideo_extra_key_subscriptions_.erase(it);
+  }
+  for (const auto &key_group : wanted) {
+    if (mcvideo_extra_key_subscriptions_.contains(key_group)) continue;
+    McpttInfo info;
+    info.access_token = token_;
+    info.client_id = client_id();
+    info.request_uri = key_group;
+    std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
+                                {"application/resource-lists+xml", keying::gktp_resource_list(key_group)}};
+    const auto boundary = "mcx-" + random_id();
+    const auto dialog = sip_.subscribe(
+        mcvideo_service_uri(), "xcap-diff", key_subscription_expires_s(),
+        {{"P-Preferred-Service", mcvideo_service.icsi}},
+        [this, key_group](const SipResponse &response) {
+          if (response.status_code < 200) return;
+          const auto found = mcvideo_extra_key_subscriptions_.find(key_group);
+          if (found == mcvideo_extra_key_subscriptions_.end()) return;
+          if (response.status_code >= 300) {
+            event("mcvideo_group_key_subscription_refused", {{"group_id", key_group}, {"status", response.status_code}});
+            mcvideo_extra_key_refresh_at_.erase(found->second);
+            mcvideo_extra_key_subscriptions_.erase(found);
+            mcvideo_wanted_key_groups_.erase(key_group); // not asked again until called again
+            mcvideo_key_wait_done(key_group, false);
+            return;
+          }
+          mcvideo_extra_key_refresh_at_[found->second] = key_refresh_time(response);
+        },
+        "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary));
+    mcvideo_extra_key_subscriptions_[key_group] = dialog;
+    event("mcvideo_group_key_subscription", {{"group_id", key_group}});
+  }
+}
+
+//------------------------------------------------------------------------------
+// RFC 6665 section 4.1.2.2: a further MCVideo GKTP subscription refreshed in its dialog; a refused or failed refresh
+// ends it, and mcvideo_update_key_subscriptions subscribes again.
+void Client::mcvideo_refresh_extra_key_subscription(const std::string &dialog) {
+  mcvideo_extra_key_refresh_at_[dialog] = 0;
+  std::string key_group;
+  for (const auto &[group, held] : mcvideo_extra_key_subscriptions_)
+    if (held == dialog) key_group = group;
+  if (key_group.empty()) {
+    mcvideo_extra_key_refresh_at_.erase(dialog);
+    return;
+  }
+  auto resubscribe = [this, key_group, dialog](const std::string &reason) {
+    event("group_key_subscription_refresh_failed", {{"service", "mcvideo"}, {"group_id", key_group}, {"reason", reason}});
+    const auto current = mcvideo_extra_key_subscriptions_.find(key_group);
+    if (current == mcvideo_extra_key_subscriptions_.end() || current->second != dialog) return;
+    mcvideo_extra_key_subscriptions_.erase(current);
+    mcvideo_extra_key_refresh_at_.erase(dialog);
+    schedule([this] { mcvideo_update_key_subscriptions(); });
+  };
+  try {
+    sip_.request_in_dialog(dialog, "SUBSCRIBE", "application/resource-lists+xml", keying::gktp_resource_list(key_group),
+                           {{"Event", "xcap-diff"}, {"Expires", std::to_string(key_subscription_expires_s())}},
+                           [this, dialog, resubscribe](const SipResponse &response) {
+                             if (response.status_code < 200 || !mcvideo_extra_key_refresh_at_.contains(dialog)) return;
+                             if (response.status_code >= 300) {
+                               resubscribe(std::to_string(response.status_code));
+                               return;
+                             }
+                             mcvideo_extra_key_refresh_at_[dialog] = key_refresh_time(response);
+                           });
+  } catch (const std::exception &error) {
+    resubscribe(error.what());
+  }
+}
+
+//------------------------------------------------------------------------------
+// The call waiting for the GMK of [key_group] (mcvideo_group_call): placed when the key is installed; on a refused
+// or ended subscription, or past its deadline (key_group empty, from mcvideo_tick), it fails.
+void Client::mcvideo_key_wait_done(const std::string &key_group, bool installed) {
+  if (!mcvideo_key_wait_) return;
+  if (!key_group.empty() && mcvideo_key_wait_->key_group != key_group) return;
+  if (key_group.empty() && monotonic_ms() < mcvideo_key_wait_->deadline_ms) return;
+  auto waiting = std::move(*mcvideo_key_wait_);
+  mcvideo_key_wait_.reset();
+  if (!installed) {
+    failure("MCVideo group key unavailable for " + waiting.key_group);
+    return;
+  }
+  try {
+    waiting.place();
+  } catch (const std::exception &error) {
+    failure(error.what());
+  }
+}
+
+//------------------------------------------------------------------------------
+// Helper: whether [dialog] is one of the MCVideo GKTP subscriptions.
+bool Client::mcvideo_key_dialog(const std::string &dialog) const {
+  if (dialog.empty()) return false;
+  if (dialog == mcvideo_key_subscription_) return true;
+  return std::any_of(mcvideo_extra_key_subscriptions_.begin(), mcvideo_extra_key_subscriptions_.end(),
+                     [&dialog](const auto &entry) { return entry.second == dialog; });
 }
 
 //------------------------------------------------------------------------------
@@ -302,6 +488,7 @@ SipResponse Client::mcvideo_affiliation_notify(const SipMessage &message) {
     schedule([this, ok = groups.contains(group)] { mcvideo_selection_affiliated(ok); });
   }
   event("mcvideo_affiliation_status", {{"groups", groups}, {"terminated", terminated}});
+  schedule([this] { mcvideo_update_key_subscriptions(); });
   if (terminated) {
     mcvideo_subscription_.clear();
     mcvideo_status_known_ = false;

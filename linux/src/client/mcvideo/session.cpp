@@ -73,6 +73,8 @@ void Client::mcvideo_regroup_notified(const Regroup &regroup) {
   }
   status_["mcvideo_regroups"] = mcvideo_regroups_;
   event("mcvideo_regroup_notification", {{"regroup", regroup.regroup_uri}, {"action", regroup.action}});
+  // TS 33.180 clause 5.7: the GMK of a new regroup or temporary group, before a call on it.
+  schedule([this] { mcvideo_update_key_subscriptions(); });
 }
 
 //------------------------------------------------------------------------------
@@ -190,6 +192,17 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
       }
     }
   }
+  // TS 24.281 clause 4.7.1 and TS 33.180 clause 5.7: the call's media need the called group's GMK; without it the
+  // key is subscribed to (mcvideo_use_group_key) and the call placed once it arrives.
+  if (protected_media() && !mcvideo_use_group_key(called)) {
+    if (mcvideo_key_wait_) throw std::runtime_error("an MCVideo call is waiting for its group key");
+    mcvideo_key_wait_ = McvideoKeyWait{mcvideo_key_group_of(called), monotonic_ms() + 10000,
+                                       [this, implicit, chat_group, priority, target_group] {
+                                         mcvideo_group_call(implicit, chat_group, priority, target_group);
+                                       }};
+    event("mcvideo_call_waiting_for_key", {{"group", called}});
+    return;
+  }
   mcvideo_call_ = new_mcvideo_call();
   const McvideoCallSetup setup{mcvideo_call_};
   auto &call = *mcvideo_call_;
@@ -198,9 +211,11 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
   // temporary group identity (TS 24.281 clause 21.2.1.3), names it in target_group.
   call.group = called;
   call.state = "calling";
-  // TS 24.281 clause 4.7.1: a group call's media under the group's GMK, offered as RTP/SAVP.
+  // TS 24.281 clause 4.7.1: a group call's media under the GMK of the called group (TS 33.180 clause 5.7: each group
+  // has its own), offered as RTP/SAVP.
   if (protected_media()) {
-    if (!mcvideo_protection_.group_ready()) throw std::runtime_error("MCVideo group key unavailable");
+    if (!mcvideo_use_group_key(called) || !mcvideo_protection_.group_ready())
+      throw std::runtime_error("MCVideo group key unavailable for " + called);
     call.local.protected_media = true;
   }
   call.local.implicit_request = implicit;
@@ -443,7 +458,9 @@ std::optional<SipResponse> Client::mcvideo_accept_protection(const SipMessage &m
       }
       mcvideo_bind_pck(*key, false);
     }
-  } else if (!mcvideo_protection_.group_ready()) {
+  } else if (!mcvideo_use_group_key(mcvideo_call_->group) || !mcvideo_protection_.group_ready()) {
+    // TS 24.281 clause 4.7.1: the media of the call's group need that group's GMK.
+    event("mcvideo_group_key_missing", {{"group_id", mcvideo_call_->group}});
     response.status_code = 488;
     return response;
   }
@@ -654,6 +671,8 @@ void Client::mcvideo_end_call(const std::string &reason, bool dialog_ended) {
   if (call.pck_id) mcvideo_protection_.end_private(call.pck_id);
   if (!call.conference_subscription.empty()) mcvideo_retired_subscriptions_.insert(call.conference_subscription);
   mcvideo_call_.reset();
+  // Back to the selected group's GMK (TS 33.180 clause 5.7) for the next call.
+  if (protected_media()) mcvideo_use_group_key(mcvideo_group());
 }
 
 //------------------------------------------------------------------------------
@@ -909,6 +928,7 @@ void Client::mcvideo_video_packet(const Datagram &datagram, bool multicast) {
 // TS 26.281 clause 4.1.1: H.264 frames of the test pattern, or of mcvideo.live (15 per second unless configured), while
 // granted, in RTP by RFC 6184.
 void Client::mcvideo_tick(std::uint64_t now) {
+  if (mcvideo_key_wait_) mcvideo_key_wait_done({}, false); // past its deadline only
   if (!mcvideo_call_) return;
   auto &call = *mcvideo_call_;
   if (!call.granted || !call.remote || !call.remote->video || !call.encoder || now < call.next_frame) return;

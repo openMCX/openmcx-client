@@ -265,7 +265,7 @@ std::vector<BodyPart> Client::protect_outgoing(const SipTransmission &transmissi
 bool Client::unprotected_subscription(const SipTransmission &transmission, const std::vector<BodyPart> &parts) const {
   const auto &dialog = transmission.call_id;
   if (!dialog.empty() &&
-      (dialog == config_subscription_ || dialog == key_subscription_ || dialog == mcvideo_key_subscription_ ||
+      (dialog == config_subscription_ || dialog == key_subscription_ || mcvideo_key_dialog(dialog) ||
        group_doc_subscriptions_.contains(dialog) || key_subscriptions_.contains(dialog) ||
        std::any_of(extra_key_subscriptions_.begin(), extra_key_subscriptions_.end(),
                    [&dialog](const auto &entry) { return entry.second == dialog; })))

@@ -360,7 +360,7 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
       configuration_subscription_ended(std::string(get_header(message.headers, "Subscription-State")));
     return response;
   }
-  if (mcvideo_enabled() && !message.dialog_id.empty() && message.dialog_id == mcvideo_key_subscription_)
+  if (mcvideo_enabled() && mcvideo_key_dialog(message.dialog_id))
     return mcvideo_key_notify(message);
   if (get_header(message.headers, "Event") == "xcap-diff") return group_key_notify(message);
 
