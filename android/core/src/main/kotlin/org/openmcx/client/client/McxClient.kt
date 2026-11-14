@@ -108,9 +108,13 @@ interface ServiceHandler {
     suspend fun logOff() {}
 }
 
-/** [refused]: why the client does not start the service (the system requires what the client does not support). */
+/**
+ * [refused]: why the service is not authorised: the client does not start it (the system requires what the client does
+ * not support), or its key management or its service authorisation failed, in which case [nextRetryAt] (seconds since
+ * the epoch) is when the client tries it again on the same registration.
+ */
 data class ServiceState(val authorised: Boolean = false, val affiliations: Map<String, String> = emptyMap(),
-    val refused: String? = null)
+    val refused: String? = null, val nextRetryAt: Long? = null)
 
 /** What the client reports: its start-up phase and the state of each service. */
 data class ClientStatus(
@@ -441,10 +445,19 @@ class McxClient(
     @Volatile private var signedOut = false
     @Volatile private var signInRequest = CompletableDeferred<Unit>()
 
-    /** Try to reach the servers now instead of at the end of the back-off (the user's Retry now). */
+    /** Try to reach the servers now instead of at the end of the back-off (the user's Retry now), and the refused services. */
     fun retryNow() {
         reconnectNow.complete(Unit)
+        val waiting = serviceRetryNow
+        serviceRetryNow = CompletableDeferred()
+        waiting.complete(Unit)
     }
+
+    /** Completed by [retryNow]: the refused services' retries ([retryService]) go at once. */
+    @Volatile private var serviceRetryNow = CompletableDeferred<Unit>()
+
+    /** The retries of the services refused in the current start-up ([refuseService]); they end with it. */
+    private val serviceRetries = java.util.concurrent.ConcurrentHashMap<McService, kotlinx.coroutines.Job>()
 
     /**
      * IdMS refused the refresh token (account suspended, devices revoked, a system that no longer knows the device) and
@@ -568,9 +581,10 @@ class McxClient(
     private suspend fun renewToken() {
         event("renewing the access token")
         refreshTokens()
-        config.mcptt?.let { authorise(McService.MCPTT) }
-        config.mcdata?.let { authorise(McService.MCDATA) }
-        config.mcvideo?.let { authorise(McService.MCVIDEO) }
+        // A refused service is not authorised again here: its retry ([retryService]) takes the new token.
+        if (config.mcptt != null && _status.value.mcptt.authorised) authorise(McService.MCPTT)
+        if (config.mcdata != null && _status.value.mcdata.authorised) authorise(McService.MCDATA)
+        if (config.mcvideo != null && _status.value.mcvideo.authorised) authorise(McService.MCVIDEO)
     }
 
     private suspend fun refreshTokens() {
@@ -639,13 +653,20 @@ class McxClient(
         scope.launch { regSubscribe() }
         authenticateUser(lifeline)
         if (documentsOnNotify()) configureFromNotify(lifeline)
-        config.mcptt?.let { bringUp(McService.MCPTT, it.groups.ifEmpty { profile?.groups ?: emptyList() }) }
-        config.mcdata?.let { bringUp(McService.MCDATA, it.groups) }
-        config.mcvideo?.let { bringUp(McService.MCVIDEO, it.groups) }
-        setPhase("ready")
-        _status.update { it.copy(lastError = null, offlineSince = null, nextRetryAt = null) }
-        housekeeping?.cancel()
-        housekeeping = scope.launch { housekeeping() }
+        try {
+            config.mcptt?.let { bringUp(McService.MCPTT, it.groups.ifEmpty { profile?.groups ?: emptyList() }, lifeline) }
+            config.mcdata?.let { bringUp(McService.MCDATA, it.groups, lifeline) }
+            config.mcvideo?.let { bringUp(McService.MCVIDEO, it.groups, lifeline) }
+            servicesSettled()
+            _status.update { it.copy(offlineSince = null, nextRetryAt = null) }
+            housekeeping?.cancel()
+            housekeeping = scope.launch { housekeeping() }
+            lifeline.await()
+        } finally {
+            // The refused services' retries belong to this registration: a new start-up brings every service up again.
+            serviceRetries.values.forEach { it.cancel() }
+            serviceRetries.clear()
+        }
         val cause = lifeline.await()
         housekeeping?.cancel()
         _status.update { it.copy(registered = false) }
@@ -1221,7 +1242,8 @@ class McxClient(
             request = serviceRequest(service, "PUBLISH", "poc-settings", parts()).also { it.headers.add("Expires", "4294967295") }
             response = ua.send(request)
         }
-        // §7.2.2: not authorised; the start-up is tried again after a growing delay. A 486 (§7.3.3 steps 3a and 3b,
+        // §7.2.2: not authorised; this service is tried again after a growing delay, on the same registration
+        // ([refuseService]). A 486 (§7.3.3 steps 3a and 3b,
         // warning 164, MCVideo 166, MCData 228) means the user is authorised on another client: the retry succeeds
         // once that one logs off or its authorisation ends. A refused request may still have spent its CSK upload (the
         // server opens it first): the retry uploads a new CSK.
@@ -1460,8 +1482,79 @@ class McxClient(
         event("${service.name} affiliated to $groups")
     }
 
-    private suspend fun bringUp(service: McService, groups: List<String>) {
-        if (!authorise(service)) return
+    /**
+     * [service] is not authorised (its key management or its service authorisation failed): the reason in its state,
+     * and a retry on the same registration after the start-up's growing delay ([ClientConfig.recovery], no value of the
+     * specifications: TS 33.180 C-2 and C-3 "may be repeated ... as necessary", without a timer), at once on Retry now.
+     */
+    private fun refuseService(service: McService, groups: List<String>, lifeline: CompletableDeferred<Throwable?>, reason: String) {
+        val message = "${service.name} not authorised: $reason"
+        event(message)
+        updateService(service) { it.copy(authorised = false, refused = message) }
+        _status.update { it.copy(lastError = message) }
+        if (serviceRetries[service]?.isActive == true) return
+        serviceRetries[service] = scope.launch { retryService(service, groups, lifeline) }
+    }
+
+    private suspend fun retryService(service: McService, groups: List<String>, lifeline: CompletableDeferred<Throwable?>) {
+        var backoff = config.recovery.firstRetryMs
+        while (true) {
+            val now = serviceRetryNow
+            updateService(service) { it.copy(nextRetryAt = clock() + backoff / 1000) }
+            withTimeoutOrNull(backoff) { select<Unit> { now.onAwait {}; lifeline.onAwait {} } }
+            if (lifeline.isCompleted || loggedOff || signedOut) return
+            backoff = if (now.isCompleted) config.recovery.firstRetryMs else (backoff * 2).coerceAtMost(config.recovery.lastRetryMs)
+            updateService(service) { it.copy(nextRetryAt = null) }
+            try {
+                if (authorise(service)) bringUpAuthorised(service, groups)
+                servicesSettled()
+                return
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                if (lifeline.isCompleted || loggedOff || signedOut) return
+                val message = "${service.name} not authorised: ${e.message ?: e}"
+                event(message)
+                updateService(service) { it.copy(authorised = false, refused = message) }
+                _status.update { it.copy(lastError = message) }
+            }
+        }
+    }
+
+    /**
+     * After the services were brought up or retried: "ready" while at least one MC service is authorised, otherwise the
+     * "limited service" state of TS 33.180 clause 5.1.1 (registered, no MC service authorised); the last error stays
+     * while a configured service is not authorised.
+     */
+    private fun servicesSettled() {
+        val states = listOfNotNull(config.mcptt?.let { _status.value.mcptt }, config.mcdata?.let { _status.value.mcdata },
+            config.mcvideo?.let { _status.value.mcvideo })
+        val none = states.isNotEmpty() && states.none { it.authorised }
+        _status.update { it.copy(limitedService = none, lastError = if (states.all { s -> s.authorised }) null else it.lastError) }
+        setPhase(if (none) "limited-service" else "ready")
+    }
+
+    private suspend fun bringUp(service: McService, groups: List<String>, lifeline: CompletableDeferred<Throwable?>) {
+        // TS 33.180 clause 5.1.1: the SIP registration (step A), the user authentication (B) and the MC service
+        // authorisation with its key management (C, C-2 and C-3 "may be repeated ... as necessary") are separate steps;
+        // TS 24.379 clause 7.2.2 (TS 24.281, TS 24.282 the same): a failed authorisation means "the MCPTT client is not
+        // authorised", for that service. So a failed key management or service authorisation of one service leaves the
+        // registration and the other services as they are, and that service is tried again ([refuseService]).
+        val authorised = try {
+            authorise(service)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (loggedOff || signedOut || lifeline.isCompleted) throw e
+            refuseService(service, groups, lifeline, e.message ?: e.toString())
+            return
+        }
+        if (!authorised) return
+        bringUpAuthorised(service, groups)
+    }
+
+    /** After the service authorisation: the documents (MCPTT), the subscription, the affiliation, the aliases. */
+    private suspend fun bringUpAuthorised(service: McService, groups: List<String>) {
         // Once MCPTT is authorised: the document subscriptions not made before it (as the Linux client, after the
         // service authorisation), next to the affiliation.
         if (service == McService.MCPTT)

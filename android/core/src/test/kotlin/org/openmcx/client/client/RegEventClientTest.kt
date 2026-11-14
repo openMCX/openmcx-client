@@ -171,19 +171,21 @@ class RegEventClientTest {
     }
 
     /**
-     * §5.1.1.3: a start-up that fails after the registration (the MC service refused) starts over with an initial
-     * registration on a new flow, and that registration has its own reg event subscription.
+     * §5.1.1.3: a start-up that ends after the registration (here the flow is dropped; a refused MC service no longer
+     * ends it, ServiceRefusalTest) starts over with an initial registration on a new flow, and that registration has
+     * its own reg event subscription.
      */
     @Test
-    fun aFailedStartUpSubscribesAgainAfterTheNextRegistration() = runBlocking {
+    fun aNewStartUpSubscribesAgainAfterTheNextRegistration() = runBlocking {
         val cores = CopyOnWriteArrayList<Core>()
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-        val client = McxClient(scope, config(), noHttp, connector = { _, _ -> Core(refusePublish = cores.isEmpty()).also { cores += it } })
+        val client = McxClient(scope, config(), noHttp, connector = { _, _ -> Core().also { cores += it } })
         client.tokens = tokens()
         client.serviceProtection = mapOf("mcptt" to (false to false))
         client.start()
         waitFor("first flow subscribed") { cores.isNotEmpty() && cores[0].requests.any { it.method == "SUBSCRIBE" && it.headers["Event"] == "reg" } }
-        waitFor("a new flow after the failed start-up", 30) { cores.size >= 2 }
+        client.reconnect("test")
+        waitFor("a new flow after the ended start-up", 30) { cores.size >= 2 }
         waitFor("ready on the new flow", 30) { client.status.value.phase == "ready" }
         waitFor("reg subscription on the new flow") { cores[1].requests.any { it.method == "SUBSCRIBE" && it.headers["Event"] == "reg" } }
         assertTrue(client.status.value.regSubscribed)

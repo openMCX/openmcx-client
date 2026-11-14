@@ -538,8 +538,8 @@ class DebugControl(private val context: Context) {
         val s = client.status.value
         fun service(state: org.openmcx.client.client.ServiceState) =
             JSONObject().put("authorised", state.authorised).put("affiliations", JSONObject(state.affiliations))
-                .put("refused", state.refused ?: JSONObject.NULL)
-        return JSONObject().put("phase", s.phase).put("registered", s.registered)
+                .put("refused", state.refused ?: JSONObject.NULL).put("next_retry_at", state.nextRetryAt ?: JSONObject.NULL)
+        return JSONObject().put("phase", s.phase).put("registered", s.registered).put("limited_service", s.limitedService)
             .put("user", client.config.sip.publicUserId)
             .put("mcptt", service(s.mcptt)).put("mcdata", service(s.mcdata)).put("mcvideo", service(s.mcvideo))
             .put("token_expires_at", s.tokenExpiresAt).put("token_refreshes", s.tokenRefreshes).put("password_logins", s.passwordLogins)

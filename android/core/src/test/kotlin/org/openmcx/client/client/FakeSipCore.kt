@@ -23,7 +23,9 @@ import java.util.concurrent.atomic.AtomicInteger
  * presence: as asked, and for Expires 0 the final NOTIFY after the 200), anything else 200. It records the client's
  * requests and its answers to the core's NOTIFYs, and sends NOTIFYs on a recorded subscription.
  */
-internal class FakeSipCore(val refusePublish: Boolean = false) : Connection {
+internal class FakeSipCore(
+                            /** A status other than 200 for a request (e.g. one service's authorisation PUBLISH), or null. */
+                            val statusFor: (SipRequest) -> Int? = { null }) : Connection {
     val requests = CopyOnWriteArrayList<SipRequest>()
     val answers = LinkedBlockingQueue<SipResponse>()
     private val toClient = LinkedBlockingQueue<ByteArray>()
@@ -74,7 +76,7 @@ internal class FakeSipCore(val refusePublish: Boolean = false) : Connection {
             "PUBLISH" -> headers.add("SIP-ETag", "e${requests.size}").add("Expires", request.headers["Expires"] ?: "0")
             "SUBSCRIBE" -> headers.add("Expires", if (event == "reg") "3761" else request.headers["Expires"]!!)
         }
-        if (refusePublish && request.method == "PUBLISH") { toClient.put(SipResponse(500, "Server Internal Error", headers).encode()); return }
+        statusFor(request)?.let { toClient.put(SipResponse(it, "Refused", headers).encode()); return }
         toClient.put(SipResponse(200, "OK", headers).encode())
         if (request.method == "SUBSCRIBE" && event == "presence" && request.headers["Expires"] == "0")
             notify(request, "presence", "terminated;reason=timeout", null, null)
