@@ -328,6 +328,9 @@ void Client::mcvideo_authorize(const std::string &token) {
   McpttInfo info;
   info.access_token = token.empty() ? token_ : token;
   info.client_id = client_id();
+  // TS 24.281 clauses 7.2.1 steps 3 / c) and 7.2.2 steps 4 c) / 5 c): <gw-mcvideo-usage> "true" when this client
+  // reaches the MCVideo system through an MCVideo gateway UE (mcvideo.via_gateway_ue, a deployment setting).
+  if (cfg_.at("mcvideo").value("via_gateway_ue", false)) info.gateway_usage = true;
   std::vector<SipHeader> headers{{"Expires", "4294967295"}};
   const bool refresh = by_register ? mcvideo_authorized_ : !mcvideo_auth_etag_.empty() && token.empty();
   if (refresh && !by_register) headers.push_back({"SIP-If-Match", mcvideo_auth_etag_});
@@ -567,13 +570,17 @@ void Client::mcvideo_affiliate(bool affiliate, const std::string &group) {
 //   mcvideo-call [implicit] [emergency|imminent|broadcast] [group=<group>]   mcvideo-chat <group> [implicit]
 //   [emergency|imminent]   mcvideo-private <MCVideo ID> [auto|manual|force-auto] [no-control] [emergency] [implicit]
 //   mcvideo-answer   mcvideo-reject   mcvideo-transmit   mcvideo-end (also mcvideo-release)
-//   mcvideo-emergency on|off   mcvideo-imminent on|off   mcvideo-alert on|off
+//   mcvideo-emergency on|off [alert=<MCVideo ID>]   mcvideo-imminent on|off   mcvideo-alert on|off
+//   mcvideo-imminent-cancel [group]   mcvideo-queue-position
+//   mcvideo-gdd-subscribe <group> [fetch] [status|broadcast|regroup|call|affiliated]...
+//   mcvideo-gdd-resubscribe <group>   mcvideo-gdd-unsubscribe <group>
 //   mcvideo-receive   mcvideo-stop-receiving   mcvideo-hangup
 //   mcvideo-push <MCVideo ID> [auto|manual|force-auto]   mcvideo-pull <MCVideo ID> [auto|manual|force-auto]
 //   mcvideo-remote-transmit <MCVideo ID>   mcvideo-remote-cancel <MCVideo ID>
 //   mcvideo-push-server   mcvideo-pull-server <video URL>
 //   mcvideo-ambient <MCVideo ID> remote|local
-//   mcvideo-adhoc <MCVideo ID>...   mcvideo-adhoc criteria <criteria>   mcvideo-adhoc-release (mcvideo-hangup leaves)
+//   mcvideo-adhoc [emergency|imminent] <MCVideo ID>...   mcvideo-adhoc [emergency|imminent] criteria <criteria>
+//   mcvideo-adhoc-modify add|remove <MCVideo ID>... | criteria <criteria>   mcvideo-adhoc-release (mcvideo-hangup leaves)
 //   mcvideo-regroup create <TGI> <preconfigured group> groups|users <URI>,...
 //   mcvideo-regroup remove <TGI>
 //   mcvideo-fa activate|takeover|deactivate <alias>...   mcvideo-fa use <alias>|none
@@ -581,7 +588,7 @@ void Client::mcvideo_affiliate(bool affiliate, const std::string &group) {
 //   mcvideo-fa-subscribe [alias]   mcvideo-fa-fetch [alias]   mcvideo-fa-unsubscribe [alias]
 //   mcvideo-fa-bind <alias> <group>[,<group>...]   mcvideo-fa-unbind <alias> <group>[,<group>...]
 //   mcvideo-select-remote <MCVideo ID> <group>
-//   mcvideo-adhoc-alert <criteria>   mcvideo-adhoc-alert cancel
+//   mcvideo-adhoc-alert <criteria>   mcvideo-adhoc-alert cancel   mcvideo-adhoc-alert modify <criteria>
 //   mcvideo-location request [refresh] [filter <area> in|out] [fa <alias>] [no-list] [<MCVideo ID>...]
 //   mcvideo-location configure <MCVideo ID>[,<MCVideo ID>...] <configuration JSON>
 void Client::mcvideo_command(const std::string &cmd) {
@@ -611,9 +618,21 @@ void Client::mcvideo_command(const std::string &cmd) {
     return mcvideo_group_call(implicit, {}, priority, group);
   }
   if (verb == "mcvideo-emergency" || verb == "mcvideo-imminent") {
-    if (argument != "on" && argument != "off") throw std::runtime_error(verb + " on|off");
-    return mcvideo_change_priority(verb == "mcvideo-emergency", argument == "on");
+    if (argument != "on" && argument != "off") throw std::runtime_error(verb + " on|off [alert=<MCVideo ID>]");
+    // mcvideo-emergency off alert=<MCVideo ID>: also cancel that user's emergency alert (TS 24.281 clauses
+    // 6.2.8.1.14 step 3 and 6.2.8.3.8 step 3).
+    std::string alert_of;
+    for (std::string word; words >> word;)
+      if (word.starts_with("alert="))
+        alert_of = word.substr(6);
+      else
+        throw std::runtime_error(verb + " on|off [alert=<MCVideo ID>]");
+    return mcvideo_change_priority(verb == "mcvideo-emergency", argument == "on", alert_of);
   }
+  // TS 24.581 clause 6.2.4.9.3: mcvideo-queue-position.
+  if (verb == "mcvideo-queue-position") return mcvideo_queue_position_request();
+  // TS 24.281 clause 9.2.5.2.1: mcvideo-imminent-cancel [group].
+  if (verb == "mcvideo-imminent-cancel") return mcvideo_imminent_cancel(argument);
   if (verb == "mcvideo-alert") {
     if (argument != "on" && argument != "off") throw std::runtime_error("mcvideo-alert on|off");
     return mcvideo_alert(argument == "on");
@@ -664,6 +683,11 @@ void Client::mcvideo_command(const std::string &cmd) {
 
   // TS 24.281 clause 22.2.2.1.1: an ad hoc group call to MCVideo users or by criteria.
   if (verb == "mcvideo-adhoc") return mcvideo_adhoc_command(argument, words);
+  if (verb == "mcvideo-adhoc-modify") {
+    std::string rest;
+    std::getline(words, rest);
+    return mcvideo_adhoc_modify(argument + rest);
+  }
   // TS 24.281 clause 15.2.1.1: an ambient viewing call, viewing the target (remote) or
   // being viewed by it (local).
   if (verb == "mcvideo-ambient") {
@@ -721,6 +745,10 @@ void Client::mcvideo_command(const std::string &cmd) {
   if (verb.starts_with("mcvideo-settings-")) {
     std::istringstream rest(cmd.substr(verb.size()));
     return mcvideo_settings_command(verb, rest);
+  }
+  if (verb == "mcvideo-gdd-subscribe" || verb == "mcvideo-gdd-resubscribe" || verb == "mcvideo-gdd-unsubscribe") {
+    std::istringstream rest(cmd.substr(verb.size()));
+    return mcvideo_gdd_command(verb, rest);
   }
   if (verb == "mcvideo-affiliation-subscribe" || verb == "mcvideo-affiliation-unsubscribe" ||
       verb == "mcvideo-affiliate-remote" || verb == "mcvideo-affiliation-accept" || verb == "mcvideo-affiliation-decline") {
@@ -800,14 +828,83 @@ void Client::mcvideo_regroup_request_command(const std::string &argument, std::i
 // TS 24.281 clause 22.2.2.1.1: an ad hoc group call to MCVideo users or by criteria.
 void Client::mcvideo_adhoc_command(const std::string &argument, std::istringstream &words) {
   std::vector<std::string> targets;
-  std::string criteria;
-  if (argument == "criteria")
+  std::string criteria, priority, first = argument;
+  // mcvideo-adhoc [emergency|imminent] <MCVideo ID>... | criteria <criteria> (TS 24.281 clauses 6.2.8.1.19, 6.2.8.1.23)
+  if (first == "emergency" || first == "imminent") {
+    priority = first;
+    first.clear();
+    words >> first;
+  }
+  if (first == "criteria")
     std::getline(words >> std::ws, criteria);
   else {
-    if (!argument.empty()) targets.push_back(argument);
+    if (!first.empty()) targets.push_back(first);
     for (std::string more; words >> more;) targets.push_back(more);
   }
-  return mcvideo_adhoc_call(targets, criteria);
+  return mcvideo_adhoc_call(targets, criteria, priority);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 22.2.6.1.1: an authorised user modifies the participant list or the participant criteria of the
+// ongoing ad hoc group call (on-demand session) by re-INVITE: the mcvideo-info body as the session was established
+// (step 1); a resource-lists body with the users to invite ("method" INVITE) or to remove ("method" BYE) (step 2), or,
+// for a call set up by criteria, the new <call-participants-criteria> (step 2a); the established media (step 3).
+// Both at once are refused (NOTE). The outcome goes to the status (mcvideo_adhoc_modify_result).
+void Client::mcvideo_adhoc_modify(const std::string &arguments) {
+  if (!mcvideo_call_ || mcvideo_call_->type != "adhoc" || mcvideo_call_->state != "active")
+    throw std::runtime_error("no active MCVideo ad hoc group call");
+  auto &call = *mcvideo_call_;
+  if (call.modify_pending) throw std::runtime_error("an ad hoc call modification is pending");
+  require_mcvideo_profile("allow-to-modify-adhoc-group-call-participants-info", "ad hoc call participants modification");
+  std::vector<std::string> entries;
+  std::string criteria, method;
+  std::istringstream words(arguments);
+  for (std::string word; words >> word;) {
+    if (entries.empty() && method.empty() && word == "criteria") {
+      std::getline(words >> std::ws, criteria);
+      break;
+    }
+    if (word == "add")
+      method = "INVITE";
+    else if (word == "remove")
+      method = "BYE";
+    else if (method.empty())
+      throw std::runtime_error("mcvideo-adhoc-modify add|remove <MCVideo ID>... | criteria <criteria>");
+    else
+      entries.push_back(word + ";method=" + method);
+  }
+  if (entries.empty() == criteria.empty()) throw std::runtime_error("modify either the participant list or the criteria");
+  // Step 2a applies to a session established by criteria only.
+  if (!criteria.empty() && call.adhoc_criteria.empty())
+    throw std::runtime_error("the ad hoc call was not set up by participant criteria");
+  McpttInfo info;
+  info.session_type = "adhoc";
+  info.client_id = client_id();
+  info.functional_alias = mcvideo_presented_alias();
+  info.participant_criteria = criteria.empty() ? call.adhoc_criteria : criteria;
+  if (call.priority == "emergency") info.adhoc_emergency = true;
+  if (call.priority == "imminent") info.imminent_peril = true;
+  std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}};
+  if (!entries.empty()) parts.push_back({resource_lists_mime, resource_list_xml(entries)});
+  call.modify_pending = true;
+  try {
+    sip_.reinvite(
+        call.dialog, call.local, parts,
+        [this, generation = call.generation, criteria](const SipResponse &response) {
+          if (response.status_code < 200) return;
+          status_["mcvideo_adhoc_modify_result"] = {{"status", response.status_code},
+                                                    {"warning", std::string(get_header(response.headers, "Warning"))}};
+          if (!mcvideo_call_ || mcvideo_call_->generation != generation) return;
+          mcvideo_call_->modify_pending = false;
+          if (response.status_code < 300 && !criteria.empty()) mcvideo_call_->adhoc_criteria = criteria;
+          event("mcvideo_adhoc_modified", {{"status", response.status_code}});
+        },
+        mcvideo_call_headers());
+  } catch (...) {
+    call.modify_pending = false;
+    throw;
+  }
+  event("mcvideo_adhoc_modify_requested", {{"entries", entries}, {"criteria", criteria}});
 }
 
 //------------------------------------------------------------------------------
@@ -820,9 +917,12 @@ void Client::mcvideo_answer_command(const std::string &verb) {
     // TS 24.281 clause 10.2.2.2.2 steps 1 and 2: the invited user declines: a reject code with the warning text of
     // clause 4.4.2 ("110 user declined the call invitation"), or, for a user the MCVideo user profile authorises
     // to restrict the reason for failure (<allow-failure-restriction>, TS 24.484), 480 without a warning text.
+    // A group call declined in manual commencement always carries the warning text (TS 24.281 clause 6.2.3.2.2
+    // step 2).
+    const bool group = mcvideo_call_->type != "private";
     response = SipResponse{};
     response.status_code = 480;
-    if (!mcvideo_profile_allows("allow-failure-restriction"))
+    if (group || !mcvideo_profile_allows("allow-failure-restriction"))
       response.headers = {{"Warning", "399 mcx \"" + warning_text(mcvideo_service, Warning::declined) + "\""}};
     mcvideo_end_call("declined");
   } else {

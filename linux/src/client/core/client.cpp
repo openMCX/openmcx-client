@@ -675,6 +675,7 @@ void Client::read_service_configurations(std::vector<std::string> services) {
       if (response.status != 200) throw std::runtime_error("HTTP " + std::to_string(response.status));
       service_priorities_[service] = parse_service_resource_priorities(response.body);
       service_protection_[service] = parse_service_protection(response.body);
+      service_adhoc_[service] = parse_service_adhoc(response.body);
       event("document_retrieved", {{"resource", path}, {"bytes", response.body.size()}});
     } catch (const std::exception &error) {
       event("service_configuration_unavailable", {{"service", service}, {"reason", error.what()}});
@@ -684,6 +685,8 @@ void Client::read_service_configurations(std::vector<std::string> services) {
   for (const auto &[service, protection] : service_protection_)
     status_["service_protection"][service] = {{"confidentiality", protection.confidentiality},
                                               {"integrity", protection.integrity}};
+  for (const auto &[service, adhoc] : service_adhoc_)
+    status_["service_adhoc"][service] = {{"supported", adhoc.supported}, {"max_participants", adhoc.max_participants}};
 }
 
 //------------------------------------------------------------------------------

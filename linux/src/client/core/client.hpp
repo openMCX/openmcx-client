@@ -21,6 +21,7 @@
 #include "handoff.hpp"
 #include "transport_key_config.hpp"
 #include "mcx/floor.hpp"
+#include "mcx/group_dynamic_data.hpp"
 #include "mcx/http.hpp"
 #include "mcx/ice.hpp"
 #include "mcx/ipconn.hpp"
@@ -571,6 +572,8 @@ class Client {
   // <signalling-protection> of each service configuration document read (an absent element is enabled); a service
   // without an entry has not been read, so whether its protection applies is not known.
   std::map<std::string, ServiceProtection> service_protection_;
+  // TS 24.484 clause 9.4.2.1 item c: the ad hoc group call support of each service configuration read.
+  std::map<std::string, ServiceAdhoc> service_adhoc_;
   std::optional<ServiceProtection> protection_of(const std::string &service) const;
   void require_protection_known(const std::string &service, const std::vector<BodyPart> &parts) const;
   // mcptt.documents_on_notify: the sign-in waits for the MCPTT service configuration document of the configuration
@@ -1323,6 +1326,8 @@ private:
   void mcvideo_regroup_request_command(const std::string &argument, std::istringstream &words);
   // "mcvideo-adhoc": ad hoc group call to users or by criteria (TS 24.281 clause 22.2.2.1.1).
   void mcvideo_adhoc_command(const std::string &argument, std::istringstream &words);
+  // TS 24.281 clause 22.2.6.1.1: mcvideo-adhoc-modify add|remove <MCVideo ID>... | criteria <criteria>.
+  void mcvideo_adhoc_modify(const std::string &arguments);
   // "mcvideo-answer", "mcvideo-reject": answer a ringing call (TS 24.281 clause 10.2.2.2.2).
   void mcvideo_answer_command(const std::string &verb);
   // "mcvideo-receive", "mcvideo-stop-receiving": reception control requests (TS 24.581 clause 6.2.5).
@@ -1366,6 +1371,9 @@ private:
     std::string priority = "normal";           // emergency, imminent or normal, as the server last said (clause 4.6)
     bool broadcast = false;                    // a broadcast group call (<broadcast-ind>, TS 24.281 clause 9.2.1.2.1.1)
     std::optional<SipResponse> pending_answer; // a ringing private call (manual commencement)
+    std::string priority_requested;            // an emergency or imminent peril ad hoc call before its 2xx
+    std::string adhoc_criteria;                // the participant criteria an ad hoc call was set up with
+    bool modify_pending = false;               // an ad hoc participants modification awaits its response
     MediaDescription local;
     std::optional<MediaDescription> remote;
     std::unique_ptr<UdpSocket> audio, video, control;
@@ -1391,6 +1399,11 @@ private:
     video::Depacketizer depacketizer;
     unsigned sent = 0, received = 0, undecoded = 0, revocations = 0;
     std::optional<unsigned> queue_position; // from Queue Position Info (TS 24.581 clause 9.2.12)
+    // TS 24.581 clauses 11.1.1 and 11.2.1: the transmission participant's timers T100 to T104 and counters C100 to
+    // C104 (mcx::transmission::ParticipantTimers), for a call with transmission control once its media are
+    // negotiated; and the timeouts given to the user (clauses 6.2.4.4.4, 6.2.4.6.3, 6.2.4.9.8, 6.2.5.4.4, 6.2.5.6.3).
+    std::optional<transmission::ParticipantTimers> timers;
+    std::vector<std::string> timeouts;
     // TS 24.281 clause 9.2.3: the session's focus URI and the conference event subscription to it.
     std::string session_uri, conference_subscription;
     std::map<std::string, std::string> participants; // MCVideo ID -> RFC 4575 status
@@ -1479,9 +1492,18 @@ private:
   // imminent peril call (none for a normal call).
   std::vector<FloorField> mcvideo_indicator_fields() const;
 
-  void mcvideo_change_priority(bool emergency, bool enabled);
+  void mcvideo_change_priority(bool emergency, bool enabled, const std::string &cancel_alert_of = {});
 
   void mcvideo_alert(bool enabled);
+
+  // TS 24.281 clause 9.2.5.2 (annex G.7): the MCVideo imminent peril group state of each group with one known
+  // ("MVIG 1: no-imminent-peril", "MVIG 2: in-progress", "MVIG 3: cancel-pending"), from the imminent peril indications
+  // received and this user's cancellations.
+  Json mcvideo_imminent_groups_ = Json::object();
+  void mcvideo_set_imminent_state(const std::string &group, int state);
+  // TS 24.281 clause 9.2.5.2.1: cancel the in-progress imminent peril state of a group without an ongoing call
+  // (SIP MESSAGE); with this client's call on the group, the re-INVITE of clause 9.2.1.2.1.5 instead.
+  void mcvideo_imminent_cancel(const std::string &group);
 
   SipResponse mcvideo_message(const SipMessage &message);
 
@@ -1550,6 +1572,10 @@ private:
   // alerts received by ad hoc group identity, and the last response.
   int mcvideo_ah_mea_ = 1;
   std::string mcvideo_adhoc_alert_group_;
+  // TS 24.281 clause 12.1A.1.5: the ad hoc group emergency alert's participant criteria as last confirmed.
+  std::string mcvideo_adhoc_alert_criteria_;
+  // TS 24.281 clause 12.1A.1.4: mcvideo-adhoc-alert modify <criteria>.
+  void mcvideo_adhoc_alert_modify(const std::string &criteria);
   Json mcvideo_adhoc_alerts_ = Json::object(), mcvideo_adhoc_alert_result_ = nullptr;
 
   void mcvideo_adhoc_alert(const std::string &arguments);
@@ -1613,7 +1639,8 @@ private:
 
   void mcvideo_regroup_notified(const Regroup &regroup);
 
-  void mcvideo_adhoc_call(const std::vector<std::string> &targets, const std::string &criteria);
+  void mcvideo_adhoc_call(const std::vector<std::string> &targets, const std::string &criteria,
+                          const std::string &priority = {});
 
   void mcvideo_ambient_call(const std::string &target, const std::string &type);
 
@@ -1633,6 +1660,14 @@ private:
   Json mcvideo_affiliation_command_;
   void mcvideo_settings_command(const std::string &verb, std::istringstream &words);
   void mcvideo_target_affiliation_command(const std::string &verb, std::istringstream &words);
+  // TS 24.281 clause 8.2.1.6: the subscriptions to group dynamic data, by group (their dialogs are entries
+  // "gdd:<group>" of mcvideo_extra_subscriptions_), and the dynamic data last notified per group:
+  //   mcvideo-gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]
+  //   mcvideo-gdd-resubscribe <group>   mcvideo-gdd-unsubscribe <group>
+  std::map<std::string, std::string> mcvideo_gdd_dialogs_;
+  Json mcvideo_gdd_ = Json::object();
+  void mcvideo_gdd_command(const std::string &verb, std::istringstream &words);
+  SipResponse mcvideo_gdd_notify(const SipMessage &message, const std::string &group);
   SipResponse mcvideo_extra_notify(const SipMessage &message);
   SipResponse mcvideo_affiliation_command_message(const SipMessage &message);
   void mcvideo_affiliation_command_answer(bool accept);
@@ -1667,6 +1702,14 @@ private:
   void mcvideo_start_sending(std::uint32_t ssrc);
 
   void mcvideo_send_control(transmission::Type type, std::vector<FloorField> fields = {});
+  // Helper: encode, protect and send one transmission control packet to the server (no timer registration).
+  void mcvideo_send_packet(const transmission::Packet &packet);
+  // TS 24.581 clauses 11.1.1 and 11.2.1: the timer values (mcvideo.transmission_timers, in ms, and counter limits).
+  transmission::ParticipantTimerOptions mcvideo_timer_options() const;
+  // TS 24.581 clauses 6.2.4 and 6.2.5: the timers' resends and give-ups, from mcvideo_tick.
+  void mcvideo_timers_tick(std::uint64_t now);
+  // TS 24.581 clause 6.2.4.9.3: mcvideo-queue-position, the user asks for the queue position.
+  void mcvideo_queue_position_request();
 
   void mcvideo_request_transmission();
 
@@ -2517,6 +2560,10 @@ public:
   void read_mcdata_profile();
 
   bool mcvideo_profile_allows(const std::string &action) const;
+  // TS 24.281 clauses 6.2.8.1.6 to 6.2.8.1.10, 6.2.8.1.22, 6.2.8.1.27 and 6.2.8.3.1: refuses (throws) a user request
+  // whose action the MCVideo user profile does not grant; the procedure is then skipped and the user told
+  // (mcvideo_not_authorised event, status mcvideo_not_authorised).
+  void require_mcvideo_profile(const char *action, const char *what);
 
   // ---- IdMS sign-in and token renewal (core/tokens.cpp) ----
   // Logs in at the IdMS and takes the access token, once its identity matches this client.

@@ -28,11 +28,31 @@ std::vector<SipHeader> Client::mcvideo_priority_headers(const McpttInfo &info) c
 }
 
 //------------------------------------------------------------------------------
+// TS 24.281 clauses 6.2.8.1.6 (emergency alert), 6.2.8.1.7 (cancelling an in-progress group emergency), 6.2.8.1.8
+// (emergency and imminent peril group calls), 6.2.8.1.10 (cancelling an imminent peril group call), 6.2.8.1.22
+// (priority ad hoc group calls), 6.2.8.1.27 (ad hoc group emergency alert) and 6.2.8.3.1 (emergency private call,
+// its cancellation, emergency alert to a user): a request is authorised only when the element of the <ruleset> of the
+// MCVideo user profile (TS 24.484 clause 9.3.2) is "true"; "In all other cases" (also without a profile) it is an
+// unauthorised request, which is not sent. The <MCVideoGroupInitiation> conditions of clause 6.2.8.1.8 a) and b) are
+// not checked: the profile parser does not read them.
+void Client::require_mcvideo_profile(const char *action, const char *what) {
+  if (mcvideo_profile_allows(action)) return;
+  status_["mcvideo_not_authorised"] = {{"action", action}, {"request", what}};
+  event("mcvideo_not_authorised", {{"action", action}, {"request", what}});
+  throw std::runtime_error(std::string("not authorised by the MCVideo user profile: ") + what + " (" + action + ")");
+}
+
+//------------------------------------------------------------------------------
 // Helper: record the call's priority (emergency, imminent peril or normal) from the <emergency-ind> and
 // <imminentperil-ind> of a received mcvideo-info body.
 void Client::mcvideo_note_priority(const McpttInfo &info) {
   if (!mcvideo_call_) return;
   auto &call = *mcvideo_call_;
+  // TS 24.281 clause 9.2.1.2.1.2 steps 4 c) and 5 b): the group's imminent peril state follows the indications.
+  if (call.type != "private") {
+    if (info.imminent_peril == true) mcvideo_set_imminent_state(call.group, 2);
+    if (info.emergency == true || info.imminent_peril == false) mcvideo_set_imminent_state(call.group, 1);
+  }
   if (info.broadcast == true) call.broadcast = true;
   if (info.emergency == true)
     call.priority = "emergency";
@@ -59,18 +79,45 @@ std::vector<FloorField> Client::mcvideo_indicator_fields() const {
 // TS 24.281 clauses 9.2.1.2.1.3 to 9.2.1.2.1.5 (group call) and 10.2.2.2.4, 10.2.2.2.5 (private call): upgrade the
 // call to emergency or imminent peril, or cancel it, by re-INVITE in the call's dialog, with the mcvideo-info body of
 // TS 24.281 clauses 6.2.8.1 and 6.2.8.3.
-void Client::mcvideo_change_priority(bool emergency, bool enabled) {
+//
+// TS 24.281 clauses 6.2.8.1.14 (group) and 6.2.8.3.8 (private call): a cancellation may also cancel the emergency
+// alert of another user (cancel_alert_of, its originator): <alert-ind> "false" and <originated-by> set to that user,
+// for a user authorised to cancel emergency alerts (clauses 6.2.8.1.6 and 6.2.8.3.1.3). The cancelled emergency
+// state is "cancel-pending" (MVEG 3, MVEPP 3) until the final response.
+void Client::mcvideo_change_priority(bool emergency, bool enabled, const std::string &cancel_alert_of) {
   if (!mcvideo_call_ || mcvideo_call_->state != "active") throw std::runtime_error("no active MCVideo call");
   auto &call = *mcvideo_call_;
+  // The user's authorisation for the change (TS 24.281 clauses 6.2.8.1.7, 6.2.8.1.8, 6.2.8.1.10 for a group call,
+  // clause 6.2.8.3.1 for a private call).
+  if (call.type == "private") {
+    if (!emergency) throw std::runtime_error("a private call has no imminent peril state");
+    require_mcvideo_profile(enabled ? "allow-emergency-private-call" : "allow-cancel-private-emergency-call",
+                            enabled ? "emergency private call" : "emergency private call cancellation");
+  } else if (emergency) {
+    require_mcvideo_profile(enabled ? "allow-emergency-group-call" : "allow-cancel-group-emergency",
+                            enabled ? "emergency group call" : "in-progress emergency group state cancellation");
+  } else {
+    require_mcvideo_profile(enabled ? "allow-imminent-peril-call" : "allow-cancel-imminent-peril",
+                            enabled ? "imminent peril group call" : "imminent peril group call cancellation");
+  }
   McpttInfo info;
   info.session_type = call.type;
   info.client_id = client_id();
   if (call.type != "private") info.request_uri = call.group;
 
+  if (!cancel_alert_of.empty()) {
+    if (!emergency || enabled) throw std::runtime_error("only an emergency cancellation can cancel another user's alert");
+    if (cancel_alert_of == mcvideo_user()) throw std::runtime_error("alert= names another user's emergency alert");
+    require_mcvideo_profile("allow-cancel-emergency-alert", "emergency alert cancellation");
+  }
   // TS 24.281 clause 6.2.8.1.1 step 3: an emergency comes with an alert indication (false: no alert).
   if (emergency) {
     info.emergency = enabled;
     if (enabled) info.alert = false;
+    if (!cancel_alert_of.empty()) {
+      info.alert = false;                   // clauses 6.2.8.1.14 3) a), 6.2.8.3.8 3) a)
+      info.originated_by = cancel_alert_of; // clauses 6.2.8.1.14 3) b), 6.2.8.3.8 3) b)
+    }
   } else {
     info.imminent_peril = enabled;
   }
@@ -82,17 +129,24 @@ void Client::mcvideo_change_priority(bool emergency, bool enabled) {
   for (const auto &header : mcvideo_priority_headers(info)) headers.push_back(header);
   sip_.reinvite(
       call.dialog, call.local, parts,
-      [this, emergency, enabled](const SipResponse &response) {
+      [this, emergency, enabled, cancel_alert_of](const SipResponse &response) {
         if (response.status_code < 200) return;
         mcvideo_alert_result_ = {{"action", emergency ? "emergency" : "imminent"},
                                  {"enabled", enabled},
                                  {"status", response.status_code},
                                  {"warning", std::string(get_header(response.headers, "Warning"))}};
+        if (!cancel_alert_of.empty()) mcvideo_alert_result_["cancelled_alert_of"] = cancel_alert_of;
         if (response.status_code < 300 && mcvideo_call_)
           mcvideo_call_->priority = enabled ? (emergency ? "emergency" : "imminent") : "normal";
+        if (response.status_code < 300 && !cancel_alert_of.empty()) mcvideo_alerts_.erase(cancel_alert_of);
+        status_["mcvideo_priority_state"] = response.status_code < 300 ? (enabled ? "in-progress" : "none")
+                                                                      : (enabled ? "none" : "in-progress");
       },
       headers);
-  event("mcvideo_priority_change_requested", {{"emergency", emergency}, {"enabled", enabled}});
+  // MVEG 3 / MVEPP 3 (cancel-pending) or the pending upgrade, until the final response.
+  status_["mcvideo_priority_state"] = enabled ? "requested" : "cancel-pending";
+  event("mcvideo_priority_change_requested",
+        {{"emergency", emergency}, {"enabled", enabled}, {"cancel_alert_of", cancel_alert_of}});
 }
 
 //------------------------------------------------------------------------------
@@ -100,6 +154,9 @@ void Client::mcvideo_change_priority(bool emergency, bool enabled) {
 // cancellation (TS 24.281 clause 11.2.1.2).
 void Client::mcvideo_alert(bool enabled) {
   if (!mcvideo_authorized_) throw std::runtime_error("MCVideo alert requires authorisation");
+  // TS 24.281 clause 6.2.8.1.6: the user's authorisation for the alert or its cancellation.
+  require_mcvideo_profile(enabled ? "allow-activate-emergency-alert" : "allow-cancel-emergency-alert",
+                          enabled ? "emergency alert" : "emergency alert cancellation");
   McpttInfo info;
   info.request_uri = mcvideo_group();
   info.client_id = client_id();
@@ -123,6 +180,49 @@ void Client::mcvideo_alert(bool enabled) {
 }
 
 //------------------------------------------------------------------------------
+// Helper: the MCVideo imminent peril group state of a group (TS 24.281 annex G.7), in the status document.
+void Client::mcvideo_set_imminent_state(const std::string &group, int state) {
+  if (group.empty()) return;
+  static const char *names[] = {"", "MVIG 1: no-imminent-peril", "MVIG 2: in-progress", "MVIG 3: cancel-pending"};
+  mcvideo_imminent_groups_[group] = names[state];
+  status_["mcvideo_imminent_groups"] = mcvideo_imminent_groups_;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 9.2.5.2.1: a SIP MESSAGE (out of dialog) to the participating MCVideo function cancelling the
+// in-progress imminent peril state of a prearranged group on which there is no call: P-Preferred-Service and
+// Accept-Contact with the MCVideo ICSI (steps 2, 3), the mcvideo-info body with the group, <imminentperil-ind> "false",
+// the client ID and the functional alias in use (step 5), the state "MVIG 3: cancel-pending" (step 7); a 2xx sets
+// "MVIG 1: no-imminent-peril", a 4xx, 5xx or 6xx "MVIG 2: in-progress".
+void Client::mcvideo_imminent_cancel(const std::string &target) {
+  if (!mcvideo_authorized_) throw std::runtime_error("MCVideo requires authorisation");
+  const auto group = target.empty() ? mcvideo_group() : target;
+  // With this client in a call on the group, the cancellation is the call's re-INVITE (clause 9.2.1.2.1.5).
+  if (mcvideo_call_ && mcvideo_call_->group == group && mcvideo_call_->state == "active")
+    return mcvideo_change_priority(false, false);
+  // Step 1: the user's authorisation (clause 6.2.8.1.10); unauthorised, the user is told and nothing is sent.
+  require_mcvideo_profile("allow-cancel-imminent-peril", "in-progress imminent peril group state cancellation");
+  McpttInfo info;
+  info.request_uri = group;                           // step 5 a)
+  info.imminent_peril = false;                        // step 5 b)
+  info.client_id = client_id();                       // step 5 c)
+  info.functional_alias = mcvideo_presented_alias();  // step 5 d)
+  const std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}};
+  const auto [type, body] = message_body(parts, "mcvideo-" + random_id());
+  mcvideo_set_imminent_state(group, 3); // step 7
+  sip_.request("MESSAGE", mcvideo_service_uri(), type, body, mcvideo_call_headers(), // steps 2, 3, 6, 8
+               [this, group](const SipResponse &response) {
+                 if (response.status_code < 200) return;
+                 mcvideo_set_imminent_state(group, response.status_code < 300 ? 1 : 2);
+                 mcvideo_alert_result_ = {{"action", "imminent-state-cancel"},
+                                          {"group", group},
+                                          {"status", response.status_code},
+                                          {"warning", std::string(get_header(response.headers, "Warning"))}};
+               });
+  event("mcvideo_imminent_cancel_requested", {{"group", group}});
+}
+
+//------------------------------------------------------------------------------
 // TS 24.281 clause 6.2.0.1: the SIP MESSAGE requests to the MCVideo client, by kind: ad hoc group
 // emergency alert, group selection change, and
 // (TS 24.281 clause 11.2.1.3) an alert of another user from the controlling function, or its cancellation.
@@ -141,6 +241,19 @@ SipResponse Client::mcvideo_message(const SipMessage &message) {
                        });
   if (command) return mcvideo_affiliation_command_message(message);
 
+  // TS 24.281 clause 12.1A.1.5: the controlling function's response to this user's participant criteria
+  // modification (<resp-type> "ad-hoc-emergency-alert-participant-criteria-modification"): the ad hoc group identity
+  // and the criteria are stored (step 1) and shown (step 2); the 200 (OK) answers it (step 3).
+  if (const auto resp = info.service.find("resp-type");
+      resp != info.service.end() && resp->second == "ad-hoc-emergency-alert-participant-criteria-modification") {
+    if (!info.calling_group.empty()) mcvideo_adhoc_alert_group_ = info.calling_group;
+    mcvideo_adhoc_alert_criteria_ = info.participant_criteria;
+    status_["mcvideo_adhoc_alert_criteria"] = {{"group", mcvideo_adhoc_alert_group_},
+                                               {"criteria", mcvideo_adhoc_alert_criteria_}};
+    event("mcvideo_adhoc_alert_criteria_modified",
+          {{"group", mcvideo_adhoc_alert_group_}, {"criteria", mcvideo_adhoc_alert_criteria_}});
+    return response;
+  }
   // TS 24.281 clause 12.1A.1.3: an ad hoc group emergency alert notification, its cancellation, or the
   // receipt of this user's own alert.
   if (info.adhoc_alert.has_value()) {
@@ -197,6 +310,14 @@ SipResponse Client::mcvideo_message(const SipMessage &message) {
     }
     event("mcvideo_alert_received", {{"from", origin}, {"active", *info.alert}});
   }
+  // TS 24.281 clause 9.2.5.2.2: a notification of the cancellation of a group's in-progress imminent peril state
+  // (<imminentperil-ind> "false"): the user is shown the group and the user who cancelled it (step 1 a)), the group's
+  // state is "MVIG 1: no-imminent-peril" (step 1 b)); the 200 (OK) answers it (steps 2, 3).
+  if (info.imminent_peril == false && !info.alert.has_value()) {
+    const auto group = info.calling_group.empty() ? info.request_uri : info.calling_group;
+    mcvideo_set_imminent_state(group, 1);
+    event("mcvideo_imminent_state_cancelled", {{"group", group}, {"by", info.calling_user}});
+  }
   mcvideo_note_priority(info);
   return response;
 }
@@ -241,8 +362,21 @@ void Client::mcvideo_invite_answered(unsigned generation, const SipResponse &res
           if (part.content_type == mcvideo_service.info_mime)
             if (const auto group = parse_service_info(part.body, mcvideo_service).calling_group; !group.empty())
               mcvideo_call_->group = group;
+      // TS 24.281 clause 6.2.8.1.20: the priority ad hoc call is granted ("MVEAGC 3: emergency-call-granted", the ad
+      // hoc group "MVEAG 2: in-progress"; or the imminent peril equivalents).
+      if (const auto priority = std::exchange(mcvideo_call_->priority_requested, {}); !priority.empty()) {
+        mcvideo_call_->priority = priority;
+        status_["mcvideo_adhoc_priority_state"] = priority == "emergency" ? "MVEAGC 3: emergency-call-granted"
+                                                                          : "MVIAGC 3: imminent-peril-call-granted";
+      }
       return;
     }
+    // TS 24.281 clause 6.2.8.1.21: a refused priority ad hoc call goes back to "MVEAGC 1: emergency-gc-capable"
+    // ("MVIAGC 1: imminent-peril-gc-capable"), the ad hoc group to no emergency (no imminent peril).
+    if (!mcvideo_call_->priority_requested.empty())
+      status_["mcvideo_adhoc_priority_state"] = mcvideo_call_->priority_requested == "emergency"
+                                                    ? "MVEAGC 1: emergency-gc-capable"
+                                                    : "MVIAGC 1: imminent-peril-gc-capable";
     mcvideo_end_call("refused");
   }
   if (response.status_code >= 300 && mcvideo_last_call_.value("generation", 0u) == generation) {
@@ -310,6 +444,8 @@ void Client::mcvideo_private_call(const std::string &target, std::string mode, b
   if (!mcvideo_authorized_) throw std::runtime_error("MCVideo call requires authorisation");
   if (mcvideo_call_) throw std::runtime_error("an MCVideo call is in progress");
   if (target.empty() || target == mcvideo_user()) throw std::runtime_error("private call requires another MCVideo ID");
+  // TS 24.281 clause 6.2.8.3.1.1: an emergency private call needs <allow-emergency-private-call>.
+  if (emergency) require_mcvideo_profile("allow-emergency-private-call", "emergency private call");
   if (mode.empty()) mode = "auto";
   auto headers = mcvideo_call_headers();
   if (mode == "auto")

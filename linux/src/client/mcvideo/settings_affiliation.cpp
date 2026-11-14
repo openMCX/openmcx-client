@@ -185,6 +185,110 @@ void Client::mcvideo_target_affiliation_command(const std::string &verb, std::is
 }
 
 //------------------------------------------------------------------------------
+// TS 24.281 clause 8.2.1.6: the subscription to a group's dynamic data. The initial SUBSCRIBE (event package
+// presence, RFC 3856): to the participating function's PSI (step 1), with the mcvideo-info body naming the group
+// (step 2), P-Preferred-Service (step 3), Expires 4294967295 (step 4) or 0 to fetch the current state only (step 5),
+// Accept application/pidf+xml (step 6) and the per-group dynamic data simple-filter of clause 8.3.2.2 naming the group
+// and the items asked for (step 7; none asks for all). In the dialog: Expires 4294967295 (re-subscribe, step 1) or 0
+// (de-subscribe, step 2), with the Accept (step 3).
+void Client::mcvideo_gdd_command(const std::string &verb, std::istringstream &words) {
+  if (!mcvideo_authorized_) throw std::runtime_error("MCVideo group dynamic data requires authorisation");
+  std::string group;
+  words >> group;
+  if (group.empty()) throw std::runtime_error(verb + " <group>");
+  if (verb == "mcvideo-gdd-subscribe") {
+    if (mcvideo_gdd_dialogs_.contains(group)) throw std::runtime_error("already subscribed to " + group);
+    bool fetch = false;
+    GroupDynamicDataFilter filter;
+    filter.group = group;
+    filter.id = "gdd-" + random_id().substr(0, 8);
+    for (std::string item; words >> item;) {
+      if (item == "fetch") fetch = true;
+      else if (item == "status") filter.group_status = true;
+      else if (item == "broadcast") filter.broadcast_alias = true;
+      else if (item == "regroup") filter.regroup_alias = true;
+      else if (item == "call") filter.call_ongoing = true;
+      else if (item == "affiliated") filter.affiliated = true;
+      else throw std::runtime_error("mcvideo-gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]");
+    }
+    McpttInfo info;
+    info.request_uri = group; // step 2
+    info.client_id = client_id();
+    const auto [type, body] =
+        message_body({{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
+                      {"application/simple-filter+xml", group_dynamic_data_filter_xml(filter)}}, // step 7
+                     "mcvideo-" + random_id());
+    const auto dialog = sip_.subscribe(
+        mcvideo_service_uri(), "presence", fetch ? 0U : 4294967295U, // steps 1, 4, 5
+        {{"P-Preferred-Service", mcvideo_service.icsi}, {"Accept", "application/pidf+xml"}}, // steps 3, 6
+        [this, group](const SipResponse &response) {
+          if (response.status_code < 200) return;
+          mcvideo_gdd_[group]["subscription_status"] = response.status_code;
+          status_["mcvideo_group_dynamic_data"] = mcvideo_gdd_;
+          if (response.status_code >= 300) mcvideo_gdd_dialogs_.erase(group);
+          event("mcvideo_gdd_subscription", {{"group", group}, {"status", response.status_code}});
+        },
+        type, body);
+    mcvideo_extra_subscriptions_[dialog] = "gdd:" + group;
+    if (!fetch) mcvideo_gdd_dialogs_[group] = dialog;
+    return;
+  }
+  const auto found = mcvideo_gdd_dialogs_.find(group);
+  if (found == mcvideo_gdd_dialogs_.end()) throw std::runtime_error("no group dynamic data subscription to " + group);
+  const bool resubscribe = verb == "mcvideo-gdd-resubscribe";
+  if (!resubscribe && verb != "mcvideo-gdd-unsubscribe") throw std::runtime_error("unknown group dynamic data command");
+  sip_.request_in_dialog(found->second, "SUBSCRIBE", "", "",
+                         {{"Event", "presence"},
+                          {"Accept", "application/pidf+xml"},
+                          {"Expires", resubscribe ? "4294967295" : "0"}},
+                         [this, group, resubscribe](const SipResponse &response) {
+                           event(resubscribe ? "mcvideo_gdd_resubscribed" : "mcvideo_gdd_unsubscribed",
+                                 {{"group", group}, {"status", response.status_code}});
+                         });
+  if (!resubscribe) mcvideo_gdd_dialogs_.erase(found);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 8.2.1.6: a NOTIFY with the application/pidf+xml body of per-group dynamic data (clause 8.3.1.2):
+// the group's status (with ModifiedBy), its broadcast and regroup aliases, whether a call is ongoing and its
+// affiliated members are taken as the group's dynamic data.
+SipResponse Client::mcvideo_gdd_notify(const SipMessage &message, const std::string &group) {
+  SipResponse response;
+  response.status_code = 200;
+  std::string body;
+  if (message.parts.empty()) {
+    if (message.content_type.starts_with("application/pidf+xml")) body = message.body;
+  } else {
+    for (const auto &part : message.parts)
+      if (part.content_type.starts_with("application/pidf+xml")) body = part.body;
+  }
+  if (body.empty()) return response; // RFC 6665: a NOTIFY without state (e.g. a final one)
+  try {
+    const auto data = parse_group_dynamic_data(body);
+    if (!data.group.empty() && data.group != group) throw std::runtime_error("dynamic data of another group");
+    Json members = Json::array();
+    for (const auto &member : data.members) {
+      Json clients = Json::array();
+      for (const auto &client : member.clients) clients.push_back(client.client);
+      members.push_back({{"id", member.id}, {"clients", clients}, {"functional_aliases", member.functional_aliases}});
+    }
+    auto &entry = mcvideo_gdd_[group];
+    entry["group_status"] = data.group_status;
+    entry["modified_by"] = data.modified_by;
+    entry["broadcast_alias"] = data.broadcast_alias;
+    entry["regroup_alias"] = data.regroup_alias;
+    entry["call_ongoing"] = data.call_ongoing ? Json(*data.call_ongoing) : Json();
+    entry["members"] = members;
+    entry["notifications"] = entry.value("notifications", 0) + 1;
+    status_["mcvideo_group_dynamic_data"] = mcvideo_gdd_;
+    event("mcvideo_gdd_notified", {{"group", group}, {"group_status", data.group_status}, {"members", members.size()}});
+  } catch (const std::exception &error) {
+    event("mcvideo_gdd_unread", {{"group", group}, {"reason", error.what()}});
+  }
+  return response;
+}
+
+//------------------------------------------------------------------------------
 // RFC 6665 section 4.1.3: the NOTIFYs of the subscriptions above: poc-settings (TS 24.281 clause 7.2.4) and another
 // user's affiliation (clause 8.2.1.3), whose client ID and groups are kept for a mandatory-mode change.
 SipResponse Client::mcvideo_extra_notify(const SipMessage &message) {
@@ -201,6 +305,11 @@ SipResponse Client::mcvideo_extra_notify(const SipMessage &message) {
   if (subject == "poc-settings") {
     event("mcvideo_settings_notified", {{"body", !message.body.empty() || !message.parts.empty()}});
     return response;
+  }
+  if (subject.starts_with("gdd:")) {
+    const auto group = subject.substr(4);
+    if (get_header(message.headers, "Subscription-State").starts_with("terminated")) mcvideo_gdd_dialogs_.erase(group);
+    return mcvideo_gdd_notify(message, group);
   }
   const auto &body = message.parts.empty() ? message.body : message.parts.front().body;
   if (body.empty()) return response;
