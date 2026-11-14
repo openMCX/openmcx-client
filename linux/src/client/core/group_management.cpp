@@ -60,18 +60,26 @@ std::string Client::group_document_xml(const std::string &group, const std::vect
 
 //------------------------------------------------------------------------------
 // TS 24.484 clauses 6.3.3.2.2 and 6.3.4.2: the configuration management client retrieves a user's profile document
-// and updates it. "profile-revoke <MCPTT ID> <action> [<profile index>]": an administrator removes an action from a
-// user's profile document, mcptt-user-profile-<index>.xml (clause 8.3.1A; index 1 by default), and replaces it.
+// and updates it.
+//   "profile-revoke <MCPTT ID> <action> [<profile index>]": an administrator removes an action from a user's MCPTT
+//   user profile document, mcptt-user-profile-<index>.xml (clause 8.3.1A; index 1 by default), and replaces it.
+//   "mcvideo-profile-set <MCVideo ID> <action> true|false [<profile index>]": an administrator sets an action of a
+//   user's MCVideo user profile document, mcvideo-user-profile-<index>.xml (clause 9.3.1A), and replaces it.
 void Client::profile_command(const std::string &cmd) {
   std::istringstream words(cmd);
-  std::string verb, id, action;
+  std::string verb, id, action, value = "false";
   unsigned index = 1;
   words >> verb >> id >> action;
+  const bool video = verb == "mcvideo-profile-set";
+  if (video) words >> value;
   if (!(words >> index)) index = 1;
-  if (verb != "profile-revoke" || id.empty() || action.empty() || index < 1 || index > 255)
-    throw std::runtime_error("profile-revoke <MCPTT ID> <action> [<profile index>]");
-  const auto url = cms_xcap_root() + "/org.3gpp.mcptt.user-profile/users/" +
-                   xcap_segment(id) + "/mcptt-user-profile-" + std::to_string(index) + ".xml";
+  if ((verb != "profile-revoke" && !video) || id.empty() || action.empty() || index < 1 || index > 255 ||
+      (value != "true" && value != "false"))
+    throw std::runtime_error(video ? "mcvideo-profile-set <MCVideo ID> <action> true|false [<profile index>]"
+                                   : "profile-revoke <MCPTT ID> <action> [<profile index>]");
+  const std::string service = video ? "mcvideo" : "mcptt";
+  const auto url = cms_xcap_root() + "/org.3gpp." + service + ".user-profile/users/" + xcap_segment(id) + "/" +
+                   service + "-user-profile-" + std::to_string(index) + ".xml";
   const auto current = http_.request("GET", url, {}, {{"Authorization", bearer()}});
   if (current.status != 200) {
     status_["xcap_last"] = {{"method", "GET"},
@@ -79,31 +87,39 @@ void Client::profile_command(const std::string &cmd) {
                             {"status", current.status},
                             {"body", current.body.substr(0, 1000)},
                             {"etag", ""}};
+    event("xcap_request", {{"method", "GET"}, {"status", current.status}});
     return;
   }
-  // TS 24.484 clause 8.3.2.1 item 11: a right is a boolean element of the ruleset
-  // actions; it is revoked by setting it to false.
+  // TS 24.484 clauses 8.3.2.1 and 9.3.2.1 item 11: a right is a boolean element of the ruleset actions; revoking it
+  // sets it to false, granting it to true.
   auto body = current.body;
-  bool revoked = false;
-  for (std::size_t at = 0; !revoked && (at = body.find("<" + action, at)) != std::string::npos; ++at) {
+  const std::string from = value == "true" ? "false" : "true";
+  bool changed = false, already = false;
+  for (std::size_t at = 0; !changed && (at = body.find("<" + action, at)) != std::string::npos; ++at) {
     const auto after = at + 1 + action.size();
     if (after >= body.size() || (body[after] != '>' && body[after] != ' ')) continue;
     const auto open_end = body.find('>', after);
     if (open_end == std::string::npos || body[open_end - 1] == '/') continue;
     const auto close = body.find("</" + action + ">", open_end);
     if (close == std::string::npos) continue;
-    auto value = body.substr(open_end + 1, close - open_end - 1);
-    value.erase(0, value.find_first_not_of(" \t\r\n"));
-    value.erase(value.find_last_not_of(" \t\r\n") + 1);
-    if (value != "true" && value != "1") continue;
-    body.replace(open_end + 1, close - open_end - 1, "false");
-    revoked = true;
+    auto text = body.substr(open_end + 1, close - open_end - 1);
+    text.erase(0, text.find_first_not_of(" \t\r\n"));
+    text.erase(text.find_last_not_of(" \t\r\n") + 1);
+    const auto normal = text == "1" ? std::string("true") : text == "0" ? std::string("false") : text;
+    if (normal == value) already = true;
+    if (normal != from) continue;
+    body.replace(open_end + 1, close - open_end - 1, value);
+    changed = true;
   }
-  if (!revoked) throw std::runtime_error("the profile does not grant " + action);
+  if (!changed && already) {
+    event("xcap_request", {{"method", "none"}, {"status", 200}, {"unchanged", action}});
+    return;
+  }
+  if (!changed) throw std::runtime_error("the profile has no " + action + " to set to " + value);
 
-  // The MIME type of the user profile document (TS 24.484 clause 8.3.2.5).
-  std::map<std::string, std::string> headers{{"Authorization", bearer()},
-                                             {"Content-Type", "application/vnd.3gpp.mcptt-user-profile+xml"}};
+  // The MIME type of the user profile document (TS 24.484 clauses 8.3.2.5 and 9.3.2.5).
+  std::map<std::string, std::string> headers{
+      {"Authorization", bearer()}, {"Content-Type", "application/vnd.3gpp." + service + "-user-profile+xml"}};
   if (current.headers.contains("etag")) headers["If-Match"] = current.headers.at("etag");
   const auto response = http_.request("PUT", url, body, headers);
   status_["xcap_last"] = {{"method", "PUT"},

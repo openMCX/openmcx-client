@@ -438,6 +438,16 @@ void Client::read_mcvideo_profile() {
   mcvideo_profile_ = {{"user_id", profile.user_id}, {"profile_index", profile.profile_index},
                       {"groups", profile.groups},   {"private_call_targets", profile.private_call_targets},
                       {"actions", profile.actions}, {"etag", response.headers.at("etag")}};
+  // TS 24.281 clause 20.2.1.4: the functional aliases with location criteria, evaluated from the next position.
+  mcvideo_alias_rules_.clear();
+  mcvideo_alias_area_inside_.clear();
+  Json located = Json::array();
+  for (const auto &alias : profile.functional_aliases)
+    if (alias.has_location_criteria()) {
+      mcvideo_alias_rules_.push_back(alias);
+      located.push_back({{"alias", alias.alias}, {"manual_deactivation_locked", alias.manual_deactivation_locked}});
+    }
+  mcvideo_profile_["location_functional_aliases"] = located;
   status_["mcvideo_profile"] = mcvideo_profile_;
   event("document_retrieved", {{"resource", path}, {"bytes", response.body.size()}});
   event("mcvideo_profile_read", {{"groups", profile.groups.size()}, {"actions", profile.actions.size()}});

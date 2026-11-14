@@ -97,8 +97,12 @@ void Client::end_service_subscriptions(bool send) {
   mcvideo_extra_key_subscriptions_.clear();
   mcvideo_extra_key_refresh_at_.clear();
   mcvideo_wanted_key_groups_.clear();
+  mcvideo_left_selected_ = false;
+  mcvideo_alias_area_inside_.clear();
+  mcvideo_aliases_by_location_.clear();
   mcvideo_group_keys_.clear();
   mcvideo_key_wait_.reset();
+  mcvideo_closing_key_subscriptions_.clear();
   end(config_subscription_, "xcap-diff", mcptt_icsi);
   config_expires_at_ = 0;
   end(alias_status_dialog_, "presence", mcptt_icsi);

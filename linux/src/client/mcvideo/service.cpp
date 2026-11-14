@@ -92,6 +92,12 @@ SipResponse Client::mcvideo_key_notify(const SipMessage &message) {
     for (const auto &[group, dialog] : mcvideo_extra_key_subscriptions_)
       if (dialog == message.dialog_id) key_group = group;
   if (key_group.empty()) {
+    // RFC 6665 section 4.1.2.3: the final NOTIFY of a subscription this client ended is accepted
+    if (mcvideo_closing_key_subscriptions_.contains(message.dialog_id)) {
+      if (get_header(message.headers, "Subscription-State").starts_with("terminated"))
+        mcvideo_closing_key_subscriptions_.erase(message.dialog_id);
+      return response;
+    }
     response.status_code = 481; // RFC 6665 section 4.1.3
     return response;
   }
@@ -188,6 +194,7 @@ void Client::mcvideo_update_key_subscriptions() {
       event("mcvideo_group_key_subscription_end_failed", {{"group_id", it->first}, {"reason", error.what()}});
     }
     mcvideo_group_keys_.erase(it->first);
+    mcvideo_closing_key_subscriptions_.insert(it->second);
     it = mcvideo_extra_key_subscriptions_.erase(it);
   }
   for (const auto &key_group : wanted) {
@@ -282,7 +289,7 @@ void Client::mcvideo_key_wait_done(const std::string &key_group, bool installed)
 // Helper: whether [dialog] is one of the MCVideo GKTP subscriptions.
 bool Client::mcvideo_key_dialog(const std::string &dialog) const {
   if (dialog.empty()) return false;
-  if (dialog == mcvideo_key_subscription_) return true;
+  if (dialog == mcvideo_key_subscription_ || mcvideo_closing_key_subscriptions_.contains(dialog)) return true;
   return std::any_of(mcvideo_extra_key_subscriptions_.begin(), mcvideo_extra_key_subscriptions_.end(),
                      [&dialog](const auto &entry) { return entry.second == dialog; });
 }
@@ -512,12 +519,17 @@ void Client::mcvideo_affiliate(bool affiliate, const std::string &group) {
   McpttInfo info;
   info.request_uri = mcvideo_user();
   info.client_id = client_id();
-  auto affiliation = Affiliation{mcvideo_user(), client_id(), random_id(), {mcvideo_group()}, {}};
+  if (!affiliate) mcvideo_left_selected_ = false;
+  auto affiliation = Affiliation{mcvideo_user(), client_id(), random_id(), {}, {}};
+  if (!mcvideo_left_selected_) affiliation.groups.push_back(mcvideo_group());
   for (const auto &extra : mcvideo_extra_groups_)
     if (extra != mcvideo_group()) affiliation.groups.push_back(extra);
   if (!group.empty() &&
       std::find(affiliation.groups.begin(), affiliation.groups.end(), group) == affiliation.groups.end())
     affiliation.groups.push_back(group);
+  // TS 24.281 clause 8.2.1.2 4) and NOTE 2: no group left is Expires zero; the PIDF then names no group (an empty
+  // <status>), not the groups being left.
+  if (!affiliate) affiliation.groups.clear();
   affiliation.mcvideo = true;
   mcvideo_sent_pid_ = affiliation.publication_id;
   std::vector<SipHeader> headers{{"Expires", affiliate ? "4294967295" : "0"}};
@@ -561,7 +573,7 @@ void Client::mcvideo_affiliate(bool affiliate, const std::string &group) {
 //   mcvideo-remote-transmit <MCVideo ID>   mcvideo-remote-cancel <MCVideo ID>
 //   mcvideo-push-server   mcvideo-pull-server <video URL>
 //   mcvideo-ambient <MCVideo ID> remote|local
-//   mcvideo-adhoc <MCVideo ID>...   mcvideo-adhoc criteria <criteria>
+//   mcvideo-adhoc <MCVideo ID>...   mcvideo-adhoc criteria <criteria>   mcvideo-adhoc-release (mcvideo-hangup leaves)
 //   mcvideo-regroup create <TGI> <preconfigured group> groups|users <URI>,...
 //   mcvideo-regroup remove <TGI>
 //   mcvideo-fa activate|takeover|deactivate <alias>...   mcvideo-fa use <alias>|none
@@ -689,6 +701,7 @@ void Client::mcvideo_command(const std::string &cmd) {
   if (verb == "mcvideo-end" || verb == "mcvideo-release") return mcvideo_end_transmission();
   if (verb == "mcvideo-receive" || verb == "mcvideo-stop-receiving") return mcvideo_reception_command(verb);
   if (verb == "mcvideo-hangup") return mcvideo_hangup_command();
+  if (verb == "mcvideo-adhoc-release") return mcvideo_adhoc_release_command();
   // TS 24.281 clause 9.2.3.2: the user subscribes to, or unsubscribes from, the call's conference event package.
   if (verb == "mcvideo-conference-subscribe") {
     if (!mcvideo_call_ || mcvideo_call_->state != "active") throw std::runtime_error("no active MCVideo call");
@@ -842,6 +855,18 @@ void Client::mcvideo_hangup_command() {
   const auto dialog = mcvideo_call_->dialog;
   mcvideo_end_call("hangup");
   return sip_.bye(dialog);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 22.2.3.1.1: the user releases the ad hoc group call, for every participant (the controlling function
+// releases the session on this Reason from an authorised user, clause 6.3.3.2.4 3A)): the BYE of clause 6.2.5.1 with a
+// Reason header (RFC 3326) SIP;cause=200;text="User requested release". mcvideo-hangup leaves it (clause 22.2.4.1.1,
+// 6.2.4.1: a BYE without this Reason).
+void Client::mcvideo_adhoc_release_command() {
+  if (!mcvideo_call_ || mcvideo_call_->type != "adhoc") throw std::runtime_error("no MCVideo ad hoc group call");
+  const auto dialog = mcvideo_call_->dialog;
+  mcvideo_end_call("release");
+  return sip_.bye(dialog, {}, {{"Reason", "SIP;cause=200;text=\"User requested release\""}});
 }
 
 //------------------------------------------------------------------------------

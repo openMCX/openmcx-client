@@ -171,15 +171,21 @@ std::optional<SipResponse> Client::mcvideo_location_incoming(const SipMessage &m
 void Client::mcvideo_area_affiliation(const std::string &group, bool entered) {
   if (group.empty()) throw std::runtime_error("the notice names no group");
   if (group == mcvideo_group()) {
-    // The selected group is in every affiliation request this client sends (mcvideo_affiliate): it can leave
-    // only with the extra groups.
-    if (!entered && !mcvideo_extra_groups_.empty())
-      throw std::runtime_error("the selected MCVideo group stays affiliated with the other groups");
-    return mcvideo_affiliate(entered);
+    // TS 24.281 clause 11.2.1.4 2): the configured group is affiliated to or de-affiliated from like any other; while
+    // other groups stay affiliated, leaving it re-publishes the remaining set without it (clause 8.2.1.2 5c).
+    if (entered) {
+      mcvideo_left_selected_ = false;
+      return mcvideo_affiliate(true);
+    }
+    if (mcvideo_extra_groups_.empty()) return mcvideo_affiliate(false);
+    mcvideo_left_selected_ = true;
+    return mcvideo_affiliate(true);
   }
   if (entered) return mcvideo_affiliate(true, group);
   if (mcvideo_extra_groups_.erase(group) == 0) throw std::runtime_error("not affiliated to the group");
-  // The remaining set again, without the group (TS 24.281 clause 8.2.1.2: the whole set in each request).
+  // The remaining set again, without the group (TS 24.281 clause 8.2.1.2: the whole set in each request); nothing
+  // left is a de-affiliation.
+  if (mcvideo_left_selected_ && mcvideo_extra_groups_.empty()) return mcvideo_affiliate(false);
   mcvideo_affiliate(true);
 }
 

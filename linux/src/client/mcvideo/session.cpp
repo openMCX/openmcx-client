@@ -764,6 +764,29 @@ void Client::mcvideo_control_packet(const Datagram &datagram) {
 void Client::mcvideo_control_message(const transmission::Packet &packet) {
   auto &call = *mcvideo_call_;
   using transmission::Field;
+  // TS 24.581 clause 6.2 (e.g. 6.2.4.4.6, 6.2.4.6.4, 6.2.4.9.2, 6.2.5.4.5, 6.2.5.5.5), step 1 for every message the
+  // server sends with the x bit set (clause 9.2.2.1): a Transmission control Ack (clause 9.2.31) with the Source field
+  // '0' (the participant) and the Message Name and Message Type (clauses 9.2.3.18 and 9.2.3.10: the subtype with its
+  // first bit zero) of the acknowledged message, read back from the message's own encoding.
+  if (packet.ack_required && packet.type != transmission::Type::Ack) {
+    auto plain = packet;
+    plain.ack_required = false;
+    const auto bytes = transmission::encode(plain);
+    mcvideo_send_control(
+        transmission::Type::Ack,
+        {{static_cast<std::uint8_t>(Field::Source), {0, 0}},
+         {static_cast<std::uint8_t>(Field::MessageName), {bytes[8], bytes[9], bytes[10], bytes[11], 0, 0}},
+         {static_cast<std::uint8_t>(Field::MessageType), {static_cast<std::uint8_t>(bytes[0] & 0x0f), 0}}});
+  }
+  // TS 24.581 clauses 9.2.21 and 9.2.27: the transmitting user's identity and SSRCs in an end response or a reception
+  // end request or response (an unknown audio SSRC is left out).
+  const auto transmitter_fields = [](const std::string &user, std::optional<std::uint32_t> audio, std::uint32_t video) {
+    std::vector<FloorField> fields;
+    if (!user.empty()) fields.push_back(transmission::transmitting_user_field(user));
+    if (audio) fields.push_back(audio_ssrc_field(*audio));
+    fields.push_back(transmission::video_ssrc_field(video));
+    return fields;
+  };
   switch (packet.type) {
   case transmission::Type::Granted: {
     // TS 24.581 clauses 6.2.4.4.6 and 9.2.5: the SSRCs to transmit with.
@@ -799,26 +822,68 @@ void Client::mcvideo_control_message(const transmission::Packet &packet) {
     event("mcvideo_remote_transmission_answered", mcvideo_remote_result_);
     break;
   }
-  case transmission::Type::Revoked:
-    // TS 24.581 clause 6.2.4.5.5: stop sending media (step 3) and, the RTP stream terminated (step 4a), send
-    // Transmission End Request (TS 24.581 clause 9.2.20); the server answers with Transmission End Response. The
-    // queueing alternative of step 4b (Queue Position Request) is not taken: the revoke does not say the
-    // transmission is queued. T101 retransmission is not implemented (as for mcvideo-end).
+  case transmission::Type::Revoked: {
+    // TS 24.581 clause 6.2.4.5.5: stop sending media (step 3), then by the revoke reason (clause 9.2.10.2): cause #7
+    // (queue the transmission) enters 'U: queued transmission' with a Queue Position Request (step 4b); any other
+    // terminates the RTP stream with a Transmission End Request (step 4a), which the server answers with Transmission
+    // End Response. T101/T102 retransmission is not implemented (as for mcvideo-end).
     if (const auto *field = transmission::find(packet, Field::RejectCause))
       call.revoke_cause = read_reject_cause(*field).cause;
     ++call.revocations;
-    if (call.granted) {
-      call.granted = false;
+    const bool was_granted = call.granted;
+    call.granted = false;
+    if (call.revoke_cause == 7) {
+      call.requesting = true;
+      mcvideo_send_control(transmission::Type::QueuePositionRequest);
+    } else if (was_granted) {
       mcvideo_send_control(transmission::Type::EndRequest);
     }
-    event("mcvideo_transmission_revoked", {{"cause", call.revoke_cause}});
+    event("mcvideo_transmission_revoked", {{"cause", call.revoke_cause}, {"queued", call.revoke_cause == 7}});
+    break;
+  }
+  case transmission::Type::EndRequest:
+    // TS 24.581 clause 6.2.4.5.7: the server ends this participant's permission to transmit: inform the user (step 1),
+    // stop sending media (step 3), send Transmission End Response (step 4, clause 9.2.21) and enter 'U: has no
+    // permission to transmit' (step 5).
+    ++call.revocations;
+    call.granted = call.requesting = false;
+    call.queue_position.reset();
+    mcvideo_send_control(transmission::Type::EndResponse, transmitter_fields(mcvideo_user(), {}, call.video_ssrc));
+    event("mcvideo_transmission_revoked", {{"by", "server"}});
+    break;
+  case transmission::Type::ReceptionEndRequest: {
+    // TS 24.581 clause 6.2.5.5.5: the server ends the reception: inform the user (step 2), stop displaying (step 4) and
+    // send Media reception end response (step 5) naming the stream (clause 9.2.27), as the request names it.
+    std::string user = call.transmitter;
+    std::optional<std::uint32_t> audio = call.transmitter_audio_ssrc;
+    std::uint32_t video = call.transmitter_video_ssrc;
+    if (const auto *field = transmission::find(packet, Field::TransmittingUserId))
+      user = transmission::read_transmitting_user(*field);
+    if (const auto *field = transmission::find(packet, Field::AudioSsrc)) audio = read_audio_ssrc(*field);
+    if (const auto *field = transmission::find(packet, Field::VideoSsrc)) video = transmission::read_video_ssrc(*field);
+    call.receiving = false;
+    ++call.reception_ends;
+    mcvideo_send_control(transmission::Type::ReceptionEndResponse, transmitter_fields(user, audio, video));
+    event("mcvideo_reception_ended", {{"by", "server"}});
+    break;
+  }
+  case transmission::Type::ReceptionOverrideNotification:
+    // TS 24.581 clause 6.2.5.5.4: the reception is overridden: inform the user (step 1) and send Media reception end
+    // request (step 3, clause 9.2.26) for the stream received; the server answers with Media reception end response.
+    ++call.reception_ends;
+    mcvideo_send_control(
+        transmission::Type::ReceptionEndRequest,
+        transmitter_fields(call.transmitter, call.transmitter_audio_ssrc, call.transmitter_video_ssrc));
+    event("mcvideo_reception_overridden", {{"by", call.transmitter}});
+    break;
+  case transmission::Type::EndNotify:
+    // TS 24.581 clause 6.2.5.3.4: inform the user that another user's transmission ended.
+    event("mcvideo_transmission_end_notified", {{"by", call.transmitter}});
     break;
   case transmission::Type::MediaTransmissionNotification: {
     // TS 24.581 clause 6.2.5.3.2: the server announces another participant's transmission (on-network, clauses
     // 6.3.6.3.3 and 6.3.7.3.3, it replaces Transmission Arbitration Taken and Media Reception Notification).
-    if (packet.ack_required) // step 1: the Transmission control Ack (Message Type '6', Source '0')
-      mcvideo_send_control(transmission::Type::Ack, {{static_cast<std::uint8_t>(Field::MessageType), {6, 0}},
-                                                     {static_cast<std::uint8_t>(Field::Source), {0, 0}}});
+    // Step 1, the Transmission control Ack, is sent above for every message that asks for one.
     ++call.reception_notifications;
     // Step 3: the transmitting user and its SSRCs; the user is the sender a protected group call's video is keyed by.
     if (const auto *field = transmission::find(packet, Field::TransmittingUserId))
@@ -1001,6 +1066,7 @@ void Client::mcvideo_call_status() {
                             "mcvideo_participants",
                             "mcvideo_receiving",
                             "mcvideo_reception_notifications",
+                            "mcvideo_reception_ends",
                             "mcvideo_transmitter_ssrcs",
                             "mcvideo_reception_reject_cause",
                             "mcvideo_skipped_before_key",
@@ -1045,6 +1111,7 @@ void Client::mcvideo_call_status() {
     status_["mcvideo_session_uri"] = call.session_uri;
     status_["mcvideo_receiving"] = call.receiving;
     status_["mcvideo_reception_notifications"] = call.reception_notifications;
+    status_["mcvideo_reception_ends"] = call.reception_ends;
     status_["mcvideo_transmitter_ssrcs"] = {{"audio", call.transmitter_audio_ssrc},
                                             {"video", call.transmitter_video_ssrc}};
     status_["mcvideo_reception_reject_cause"] = call.reception_reject_cause;

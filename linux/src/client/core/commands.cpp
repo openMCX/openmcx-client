@@ -234,7 +234,7 @@ void Client::run_command(const std::string &cmd) {
     mbms_command(cmd);
   } else if (cmd.starts_with("monitor ")) {
     monitor_command(cmd);
-  } else if (cmd.starts_with("profile-revoke ")) {
+  } else if (cmd.starts_with("profile-revoke ") || cmd.starts_with("mcvideo-profile-set ")) {
     profile_command(cmd);
   } else if (cmd.starts_with("group-create ") || cmd.starts_with("group-delete ") || cmd.starts_with("group-member ") ||
              cmd.starts_with("group-subscribe ") || cmd.starts_with("group-resubscribe ") ||

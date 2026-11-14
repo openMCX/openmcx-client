@@ -1269,6 +1269,7 @@ private:
   std::map<std::string, std::string> mcvideo_extra_key_subscriptions_;       // key group -> dialog
   std::map<std::string, std::int64_t> mcvideo_extra_key_refresh_at_;        // dialog -> refresh time
   std::set<std::string> mcvideo_wanted_key_groups_;                          // groups called without a key yet
+  std::set<std::string> mcvideo_closing_key_subscriptions_;                  // ended, until their final NOTIFY
   std::string mcvideo_key_group_of(const std::string &group) const;
   bool mcvideo_use_group_key(const std::string &group);
   void mcvideo_update_key_subscriptions();
@@ -1292,6 +1293,9 @@ private:
   // The groups this client asks to be affiliated to besides its configured group;
   // a PUBLISH carries the client's whole set (clause 8.2.1.2).
   std::set<std::string> mcvideo_extra_groups_;
+  // The configured group, when the client left it on exit from its group geographic area (TS 24.281 clause 11.2.1.4
+  // 2b) while other groups stay affiliated: left out of every PUBLISH until the area is entered again.
+  bool mcvideo_left_selected_ = false;
   Json mcvideo_last_result_; // the outcome of the last authorisation or affiliation request
 
   void mcvideo_request(const std::string &event_name, const std::vector<BodyPart> &parts,
@@ -1325,6 +1329,7 @@ private:
   void mcvideo_reception_command(const std::string &verb);
   // "mcvideo-hangup": release the MCVideo call.
   void mcvideo_hangup_command();
+  void mcvideo_adhoc_release_command();
 
   void mcvideo_status();
 
@@ -1393,6 +1398,7 @@ private:
     // Reception control (TS 24.581 clause 4.1.1.2): transmissions announced by Media Transmission Notification
     // (on-network) or Media Reception Notification, and whether this client receives the current one.
     unsigned reception_notifications = 0;
+    unsigned reception_ends = 0; // receptions ended or overridden by the server (TS 24.581 clauses 6.2.5.5.4, 6.2.5.5.5)
     bool receiving = true;
     // The transmitting user's SSRCs from the Media Transmission Notification (TS 24.581 clause 6.2.5.3.2 step 3).
     std::uint32_t transmitter_audio_ssrc = 0, transmitter_video_ssrc = 0;
@@ -1514,7 +1520,16 @@ private:
 
   std::string mcvideo_presented_alias() const;
 
-  void mcvideo_functional_alias(const std::string &action, const std::vector<std::string> &aliases);
+  // by_location: the change TS 24.281 clause 20.2.1.4 starts when a location criterion is met (not the user's).
+  void mcvideo_functional_alias(const std::string &action, const std::vector<std::string> &aliases,
+                                bool by_location = false);
+  // TS 24.281 clause 20.2.1.4 with TS 24.484 clause 9.3.2.1 item 10: the functional aliases of the MCVideo user profile
+  // with location criteria, whether the position was inside each criterion's area at the last position (by alias,
+  // criterion and area; none before the first position), and the aliases activated by a location criterion.
+  std::vector<McvideoProfile::FunctionalAlias> mcvideo_alias_rules_;
+  std::map<std::string, bool> mcvideo_alias_area_inside_;
+  std::set<std::string> mcvideo_aliases_by_location_;
+  void mcvideo_alias_location(const location::Point &position);
 
   // TS 24.281 clause 20.2.1.3: status determination subscriptions, by dialog: the alias followed, or
   // empty for this user's own aliases. mcvideo_alias_users holds, per alias, the users
