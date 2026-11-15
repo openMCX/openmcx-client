@@ -985,6 +985,14 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
     throw std::runtime_error("usage: " + verb +
                              " [delivery|read|both] [app=<n>] [ext-app=<id>] [metadata=<text>] "
                              "[content=text|binary|hyperlinks|location] [priority=<n>] [escaped] <target> <text>");
+  // TS 24.282 clause 11.1 step 3: a one-to-one SDS larger than <max-data-size-sds-bytes> of the MCData service
+  // configuration is not allowed ("shall not continue"): refused here, nothing sent.
+  if ((verb == "sds" || verb == "sds-fa") && mcdata_tx_limits_.max_data_size_sds &&
+      text.size() > *mcdata_tx_limits_.max_data_size_sds) {
+    event("mcdata_sds_not_allowed", {{"reason", "max-data-size-sds-bytes"}, {"size", text.size()},
+                                     {"limit", *mcdata_tx_limits_.max_data_size_sds}});
+    throw std::runtime_error("SDS larger than <max-data-size-sds-bytes> (TS 24.282 clause 11.1 step 3)");
+  }
   // TS 24.282 clause 9.2.1.1 2): a one-to-one or pre-arranged group standalone SDS whose payload is larger than the
   // <max-payload-size-sds-cplane-bytes> of the MCData service configuration goes over the media plane (clause
   // 9.2.3.2.3); the payload size is the Payload IE's contents less its content type octet (clause 9.2.2.3.1 NOTE 4).
