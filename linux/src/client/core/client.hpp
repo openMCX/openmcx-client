@@ -1395,6 +1395,9 @@ private:
     // no-alert" to "MVPEA 4: Emergency-alert-cancel-pending"), and the state before a pending cancellation (clause
     // 10.2.2.2.4, a refusal without a body reverts it).
     int alert_state = 1, alert_state_before = 1;
+    // An emergency group call whose INVITE carried this user's emergency alert (<alert-ind> "true", TS 24.281 clause
+    // 6.2.8.1.1 step 2): its final response sets the MCVideo emergency alert state (clauses 6.2.8.1.4, 6.2.8.1.5).
+    bool group_alert = false;
     bool broadcast = false;                    // a broadcast group call (<broadcast-ind>, TS 24.281 clause 9.2.1.2.1.1)
     std::optional<SipResponse> pending_answer; // a ringing private call (manual commencement)
     std::string priority_requested;            // an emergency or imminent peril ad hoc call before its 2xx
@@ -1530,6 +1533,19 @@ private:
   // Emergency alerts (TS 24.281 clause 11.2): this user's, and those received by origin.
   bool mcvideo_alerting_ = false;
   Json mcvideo_alerts_ = Json::object(), mcvideo_alert_result_;
+  // The MCVideo emergency alert state of an alert sent with an emergency group call (TS 24.281 annex G.5): 1 "MVEA 1:
+  // no-alert", 2 "MVEA 2: emergency-alert-confirm-pending", 3 "MVEA 3: emergency-alert-initiated".
+  int mcvideo_group_alert_state_ = 1;
+  // The generation of the emergency group call whose INVITE carried that alert: its final response sets the state
+  // even when the failed INVITE's dialog has ended the call first (SipCallState::disconnected comes first).
+  unsigned mcvideo_group_alert_generation_ = 0;
+  void mcvideo_set_group_alert_state(int state);
+  // The MCVideo emergency state (TS 24.281 annex G.1): set by an emergency alert or an emergency group or private
+  // call the user initiates, cleared only by the cancellation of that alert or call (by its initiator, or of the alert
+  // by an authorised user) or by the user clearing it manually; the release of the call does not clear it. While it
+  // is set, every group call the user originates is an emergency group call (clause 6.2.8.1.1, NOTE 1).
+  bool mcvideo_emergency_state_ = false;
+  void mcvideo_set_emergency_state(bool set, const char *cause);
 
   std::vector<SipHeader> mcvideo_priority_headers(const McpttInfo &info) const;
 
@@ -1762,7 +1778,7 @@ private:
   std::string mcvideo_client_filter();
   void mcvideo_rejoin_call();
   void mcvideo_group_call(bool implicit = false, const std::string &chat_group = {}, const std::string &priority = {},
-                          const std::string &target_group = {});
+                          const std::string &target_group = {}, bool alert = false);
 
   static bool one_to_one_video(const std::string &session_type);
 

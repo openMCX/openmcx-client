@@ -632,7 +632,7 @@ void Client::mcvideo_publish_affiliation(bool affiliate, const std::vector<std::
 //   mcvideo-affiliate [group]   mcvideo-deaffiliate [group]   mcvideo-authorize [token]
 //   mcvideo-settings-publish [remove]   mcvideo-settings-subscribe [fetch]   mcvideo-settings-resubscribe
 //   mcvideo-settings-unsubscribe   mcvideo-affiliation-accept [<group>...]   mcvideo-affiliation-decline
-//   mcvideo-call [implicit] [emergency|imminent|broadcast] [group=<group>]   mcvideo-chat <group> [implicit]
+//   mcvideo-call [implicit] [emergency [alert]|imminent|broadcast] [group=<group>]   mcvideo-chat <group> [implicit]
 //   [emergency|imminent]   mcvideo-private <MCVideo ID> [auto|manual|force-auto] [no-control] [emergency] [alert]
 //   [implicit]
 //   mcvideo-answer   mcvideo-reject   mcvideo-transmit   mcvideo-end (also mcvideo-release)
@@ -672,21 +672,25 @@ void Client::mcvideo_command(const std::string &cmd) {
   if (verb == "mcvideo-authorize") return mcvideo_authorize(argument);
   // mcvideo-call [implicit] [emergency|imminent|broadcast] [group=<group>]: TS 24.281 clause 9.2.1.2.1.1 with the
   // implicit transmission request of clause 6.4, an emergency or imminent peril call (clauses 6.2.8.1.1, 6.2.8.1.9), a
-  // broadcast group call, or a call to another group (e.g. a regroup's temporary group identity), in any order.
+  // broadcast group call, or a call to another group (e.g. a regroup's temporary group identity), in any order. With
+  // alert, an emergency group call that also sends the user's emergency alert (clause 6.2.8.1.1 step 2).
   if (verb == "mcvideo-call") {
-    bool implicit = false;
+    bool implicit = false, alert = false;
     std::string priority, group;
     for (auto word = argument; !word.empty(); word.clear(), words >> word) {
       if (word == "implicit")
         implicit = true;
       else if (word == "emergency" || word == "imminent" || word == "broadcast")
         priority = word;
+      else if (word == "alert")
+        alert = true;
       else if (word.starts_with("group="))
         group = word.substr(6);
       else
-        throw std::runtime_error("mcvideo-call [implicit] [emergency|imminent|broadcast] [group=<group>]");
+        throw std::runtime_error("mcvideo-call [implicit] [emergency [alert]|imminent|broadcast] [group=<group>]");
     }
-    return mcvideo_group_call(implicit, {}, priority, group);
+    if (alert && priority != "emergency") throw std::runtime_error("mcvideo-call alert goes with emergency");
+    return mcvideo_group_call(implicit, {}, priority, group, alert);
   }
   if (verb == "mcvideo-emergency" || verb == "mcvideo-imminent") {
     if (argument != "on" && argument != "off")
@@ -1031,6 +1035,9 @@ void Client::mcvideo_hangup_command() {
   if (!mcvideo_call_) throw std::runtime_error("no MCVideo call");
   // TS 24.281 clause 15.2.1.3 step 1: an ambient viewing call is released only with the release capability.
   if (!mcvideo_call_->may_release) throw std::runtime_error("ambient viewing call release not allowed");
+  // TS 24.281 clause 6.2.8.1.17 step 1 c): an emergency group call released while its alert is "MVEA 2: emergency-
+  // alert-confirm-pending" (the call still being established) returns the alert state to "MVEA 1: no-alert".
+  if (mcvideo_call_->group_alert && mcvideo_group_alert_state_ == 2) mcvideo_set_group_alert_state(1);
   const auto dialog = mcvideo_call_->dialog;
   mcvideo_end_call("hangup");
   return sip_.bye(dialog);

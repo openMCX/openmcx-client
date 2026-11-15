@@ -215,7 +215,7 @@ bool Client::ambient_release_capability(const std::vector<SipHeader> &headers) {
 // INVITE also requests the permission to transmit (TS 24.281 clause 6.4, mc_implicit_request of
 // TS 24.581 clause 14.2.5). TS 24.281 clause 9.2.2.2.1.1: with a chat group, the client joins the group's chat session instead.
 void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, const std::string &priority,
-                                const std::string &target_group) {
+                                const std::string &target_group, bool alert) {
   if (!mcvideo_authorized_ || !mcvideo_affiliated_)
     throw std::runtime_error("MCVideo call requires authorisation and affiliation");
   if (mcvideo_call_) throw std::runtime_error("an MCVideo call is in progress");
@@ -257,8 +257,8 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
   if (protected_media() && !mcvideo_use_group_key(called)) {
     if (mcvideo_key_wait_) throw std::runtime_error("an MCVideo call is waiting for its group key");
     mcvideo_key_wait_ = McvideoKeyWait{mcvideo_key_group_of(called), monotonic_ms() + 10000,
-                                       [this, implicit, chat_group, priority, target_group] {
-                                         mcvideo_group_call(implicit, chat_group, priority, target_group);
+                                       [this, implicit, chat_group, priority, target_group, alert] {
+                                         mcvideo_group_call(implicit, chat_group, priority, target_group, alert);
                                        }};
     event("mcvideo_call_waiting_for_key", {{"group", called}});
     return;
@@ -299,30 +299,76 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
       info.associated_group =
           std::find(groups.begin(), groups.end(), mcvideo_group()) != groups.end() ? mcvideo_group() : groups.front();
   }
-  // TS 24.281 clauses 6.2.8.1.1 and 6.2.8.1.9: an emergency (with alert-ind false) or imminent peril group call.
-  if (priority == "emergency") {
-    info.emergency = true;
-    info.alert = false;
+  // TS 24.281 clauses 6.2.8.1.1 and 6.2.8.1.9: an emergency or imminent peril group call. Clause 6.2.8.1.1 steps 2
+  // and 3: with the user's emergency alert, when the alert is authorised (clause 6.2.8.1.6: <allow-activate-emergency-
+  // alert> and the group targeted for alerts) and the MCVideo emergency alert state is "MVEA 1: no-alert", <alert-ind>
+  // "true", "MVEA 2: emergency-alert-confirm-pending" and the location of the emergency alert trigger (clause 6.2.9.1);
+  // without it (or unauthorised), "false" in "MVEA 1: no-alert"; in another alert state no <alert-ind>.
+  //
+  // TS 24.281 clauses 9.2.1.2.1.1 / 9.2.2.2.1.1 step 1 with clause 6.2.8.1.1 (first case, NOTE 1): while the MCVideo
+  // emergency state is set (annex G.1), a group call the user originates (also one requested as an imminent peril
+  // call) is an MCVideo emergency group call, when the user and the group are authorised for one (clause 6.2.8.1.8).
+  // A broadcast group call keeps its own kind.
+  bool in_emergency_state = false;
+  if (mcvideo_emergency_state_ && priority != "emergency" && priority != "broadcast" &&
+      mcvideo_profile_allows("allow-emergency-group-call")) {
+    try {
+      require_mcvideo_target("emergency_group_initiation", called, "emergency group call");
+      in_emergency_state = true;
+    } catch (const std::exception &) {
+    }
   }
-  if (priority == "imminent") info.imminent_peril = true;
+  std::vector<BodyPart> parts{{mcvideo_service.info_mime, {}}};
+  if (priority == "emergency" || in_emergency_state) {
+    info.emergency = true;
+    bool authorised = false;
+    if (alert) {
+      authorised = mcvideo_profile_allows("allow-activate-emergency-alert");
+      if (authorised) {
+        try {
+          require_mcvideo_target("group_emergency_alert", call.group, "emergency alert");
+        } catch (const std::exception &) {
+          authorised = false;
+        }
+      } else {
+        event("mcvideo_not_authorised",
+              {{"action", "allow-activate-emergency-alert"}, {"request", "emergency alert with a group call"}});
+      }
+    }
+    if (mcvideo_group_alert_state_ == 1) info.alert = alert && authorised;
+    if (info.alert == true) {
+      call.group_alert = true;
+      parts.push_back(
+          {mcvideo_service.location_mime, service_location_xml(configured_emergency_location(), mcvideo_service)});
+    }
+  }
+  // Clause 6.2.8.1.1, second case: an emergency group call the user requests sets the MCVideo emergency state.
+  if (priority == "emergency") mcvideo_set_emergency_state(true, "emergency group call");
+  if (priority == "imminent" && !in_emergency_state) info.imminent_peril = true;
   // TS 24.281 clause 9.2.1.2.1.1: a broadcast group call (<broadcast-ind> true).
   if (priority == "broadcast") {
     info.broadcast = true;
     call.broadcast = true;
   }
-  call.priority = priority.empty() || priority == "broadcast" ? "normal" : priority;
+  call.priority = in_emergency_state                              ? "emergency"
+                  : priority.empty() || priority == "broadcast" ? "normal"
+                                                                : priority;
   auto headers = mcvideo_call_headers();
   for (const auto &header : mcvideo_priority_headers(info)) headers.push_back(header);
   // TS 24.281 clause 9.2.1.2.4.1: a re-join sends this INVITE to the MCVideo session identity instead of the PSI.
   const auto request_uri = std::exchange(mcvideo_rejoin_target_, std::string());
+  parts.front().body = service_info_xml(info, mcvideo_service);
   call.dialog = sip_.invite(
-      request_uri.empty() ? mcvideo_service_uri() : request_uri, mcvideo_initial_offer(call),
-      {{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}},
+      request_uri.empty() ? mcvideo_service_uri() : request_uri, mcvideo_initial_offer(call), parts,
       [this, generation = call.generation](const SipResponse &response) {
         mcvideo_invite_answered(generation, response);
       },
       headers);
-  event("mcvideo_call_requested", {{"group", call.group}});
+  if (call.group_alert) {
+    mcvideo_set_group_alert_state(2);
+    mcvideo_group_alert_generation_ = call.generation;
+  }
+  event("mcvideo_call_requested", {{"group", call.group}, {"alert", call.group_alert}});
 }
 
 //------------------------------------------------------------------------------

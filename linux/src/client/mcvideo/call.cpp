@@ -257,6 +257,14 @@ std::vector<FloorField> Client::mcvideo_reception_fields() const {
 // state is "cancel-pending" (MVEG 3, MVEPP 3) until the final response.
 void Client::mcvideo_change_priority(bool emergency, bool enabled, const std::string &cancel_alert_of,
                                      bool own_alert) {
+  // TS 24.281 annex G.1, state-clearing event "MCVideo user manually clears the state": outside a call, cancelling
+  // the emergency clears the MCVideo emergency state locally (no signalling; an outstanding emergency alert is
+  // cancelled with mcvideo-alert off, clause 11.2.1.2).
+  if (emergency && !enabled && cancel_alert_of.empty() && !own_alert && !mcvideo_call_ && mcvideo_emergency_state_) {
+    mcvideo_set_emergency_state(false, "cleared by the user");
+    mcvideo_alert_result_ = {{"action", "emergency"}, {"enabled", false}, {"status", 0}, {"manual", true}};
+    return;
+  }
   if (!mcvideo_call_ || mcvideo_call_->state != "active") throw std::runtime_error("no active MCVideo call");
   auto &call = *mcvideo_call_;
   // The user's authorisation for the change (TS 24.281 clauses 6.2.8.1.7, 6.2.8.1.8, 6.2.8.1.10 for a group call,
@@ -339,6 +347,12 @@ void Client::mcvideo_change_priority(bool emergency, bool enabled, const std::st
         if (!cancel_alert_of.empty()) mcvideo_alert_result_["cancelled_alert_of"] = cancel_alert_of;
         if (response.status_code < 300 && mcvideo_call_)
           mcvideo_call_->priority = enabled ? (emergency ? "emergency" : "imminent") : "normal";
+        // TS 24.281 annex G.1: an upgrade to an emergency call sets the MCVideo emergency state; the emergency call
+        // cancelled by its initiator clears it when no emergency alert of the user is outstanding.
+        if (response.status_code < 300 && emergency && enabled) mcvideo_set_emergency_state(true, "emergency call");
+        if (response.status_code < 300 && emergency && !enabled && cancel_alert_of.empty() &&
+            mcvideo_group_alert_state_ == 1 && !mcvideo_alerting_)
+          mcvideo_set_emergency_state(false, "emergency call cancelled");
         if (response.status_code < 300 && !cancel_alert_of.empty()) mcvideo_alerts_.erase(cancel_alert_of);
         status_["mcvideo_priority_state"] = response.status_code < 300 ? (enabled ? "in-progress" : "none")
                                                                       : (enabled ? "none" : "in-progress");
@@ -432,6 +446,26 @@ void Client::mcvideo_private_alert_info(const McpttInfo &info) {
 }
 
 //------------------------------------------------------------------------------
+// Helper: the MCVideo emergency alert state (TS 24.281 annex G.5) of the alert sent with an emergency group call, in
+// the status document.
+void Client::mcvideo_set_group_alert_state(int state) {
+  static const char *names[] = {"", "MVEA 1: no-alert", "MVEA 2: emergency-alert-confirm-pending",
+                                "MVEA 3: emergency-alert-initiated"};
+  if (state < 1 || state > 3) return;
+  mcvideo_group_alert_state_ = state;
+  status_["mcvideo_alert_state"] = names[state];
+}
+
+//------------------------------------------------------------------------------
+// Helper: the MCVideo emergency state (TS 24.281 annex G.1), in the status document.
+void Client::mcvideo_set_emergency_state(bool set, const char *cause) {
+  if (mcvideo_emergency_state_ == set) return;
+  mcvideo_emergency_state_ = set;
+  status_["mcvideo_emergency_state"] = set ? "set" : "clear";
+  event("mcvideo_emergency_state", {{"state", set ? "set" : "clear"}, {"cause", cause}});
+}
+
+//------------------------------------------------------------------------------
 // TS 24.281 clause 11.2.1.1: an MCVideo emergency alert on the configured group, with this UE's location, or its
 // cancellation (TS 24.281 clause 11.2.1.2).
 void Client::mcvideo_alert(bool enabled) {
@@ -459,6 +493,9 @@ void Client::mcvideo_alert(bool enabled) {
                              {"status", response.status_code},
                              {"warning", std::string(get_header(response.headers, "Warning"))}};
     if (response.status_code < 300) mcvideo_alerting_ = enabled;
+    // TS 24.281 annex G.1: the emergency alert initiated sets the MCVideo emergency state, its cancellation by the
+    // initiator clears it.
+    if (response.status_code < 300) mcvideo_set_emergency_state(enabled, enabled ? "emergency alert" : "emergency alert cancelled");
   });
   event("mcvideo_alert_requested", {{"enabled", enabled}});
 }
@@ -626,6 +663,20 @@ SipResponse Client::mcvideo_message(const SipMessage &message) {
 // the record of a call that the dialog's end has already closed.
 void Client::mcvideo_invite_answered(unsigned generation, const SipResponse &response) {
   if (response.status_code < 200) return;
+  // TS 24.281 clauses 6.2.8.1.4 step 1 b) and 6.2.8.1.5 step 1 c): the final response to an emergency group call that
+  // carried this user's emergency alert: a 2xx without the mcvideo-warn-code "149" (a SIP INFO request follows,
+  // clause 6.2.8.1.13) initiates the alert ("MVEA 3: emergency-alert-initiated"); a 4xx, 5xx or 6xx returns it to
+  // "MVEA 1: no-alert". Kept by the call's generation: a refused INVITE's dialog may have ended the call already.
+  if (mcvideo_group_alert_generation_ == generation && generation != 0 && response.status_code != 407 &&
+      response.status_code != 401) {
+    if (response.status_code < 300 && mcvideo_group_alert_state_ == 2 && !info_pending(response)) {
+      mcvideo_set_group_alert_state(3);
+      mcvideo_alerting_ = true;
+    } else if (response.status_code >= 300 && mcvideo_group_alert_state_ == 2) {
+      mcvideo_set_group_alert_state(1);
+    }
+    mcvideo_group_alert_generation_ = 0;
+  }
   // TS 33.180 clause 5.6 ("The receiving MCX client and any MCX Server through which the SIP INVITE is routed, may
   // respond with a KMS Redirect Response (KRR)") and annex D.4.1 (a SIP 488 with the KRR body).
   if (response.status_code == 488 && mcvideo_kms_redirect(generation, response)) return;
@@ -917,6 +968,7 @@ void Client::mcvideo_private_call(const std::string &target, std::string mode, b
   bool with_alert = false;
   if (emergency) {
     info.emergency = true;
+    mcvideo_set_emergency_state(true, "emergency private call"); // annex G.1: "MCVideo emergency private call initiated"
     with_alert = alert && mcvideo_private_alert_authorised(target);
     info.alert = with_alert;
     call.priority = "emergency";
