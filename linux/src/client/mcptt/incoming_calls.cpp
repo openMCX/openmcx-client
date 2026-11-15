@@ -294,6 +294,12 @@ SipResponse Client::mcvideo_call_info(const SipMessage &message) {
     event("mcvideo_push_url", {{"url", mcvideo_push_url_}});
     return response;
   }
+  // TS 24.281 clause 10.2.2.2.1 (and 10.2.2.2.4, 10.2.2.2.5): an INFO in a private call's dialog with the
+  // g.3gpp.mcvideo-info package and one or more of <alert-ind>, <imminentperil-ind> and <emergency-ind> follows clause
+  // 6.2.8.3.7; it is answered 200 (OK) (TS 24.229, RFC 6086 section 4.2.2).
+  if (mcvideo_call_->type == "private" && get_header(message.headers, "Info-Package") == "g.3gpp.mcvideo-info" &&
+      (info.alert || info.emergency || info.imminent_peril))
+    mcvideo_private_alert_info(info);
   mcvideo_note_priority(info);
   return response;
 }
@@ -360,7 +366,7 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
       configuration_subscription_ended(std::string(get_header(message.headers, "Subscription-State")));
     return response;
   }
-  if (mcvideo_enabled() && !message.dialog_id.empty() && message.dialog_id == mcvideo_key_subscription_)
+  if (mcvideo_enabled() && mcvideo_key_dialog(message.dialog_id))
     return mcvideo_key_notify(message);
   if (get_header(message.headers, "Event") == "xcap-diff") return group_key_notify(message);
 
@@ -387,6 +393,9 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
     return mcdata_affiliation_notify(message);
   if (mcvideo_enabled() && !message.dialog_id.empty() && message.dialog_id == mcvideo_subscription_)
     return mcvideo_affiliation_notify(message);
+  // TS 24.281 clauses 7.2.4 and 8.2.1.3: the settings subscription and those to other users' affiliation.
+  if (mcvideo_enabled() && !message.dialog_id.empty() && mcvideo_extra_subscriptions_.contains(message.dialog_id))
+    return mcvideo_extra_notify(message);
   if (mcvideo_enabled() && !message.dialog_id.empty() && mcvideo_alias_dialogs_.contains(message.dialog_id))
     return mcvideo_alias_notify(message);
   return affiliation_notify(message);

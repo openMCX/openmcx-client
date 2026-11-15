@@ -209,6 +209,27 @@ void test_rtp_sequence() {
   check(!window.fresh(9, 1) && window.fresh(9, 1999), "a jump past the window forgets the older packets");
 }
 
+//------------------------------------------------------------------------------
+// TS 24.581 clauses 14.2.3, 14.2.6, 14.3.3, 14.4, 12.1.2.2, 6.2.4.3.2 and 6.2.5.3.3: the offered, negotiated and
+// requested MCVideo transmission and reception priorities.
+void test_mc_priorities() {
+  using mcx::client_rules::negotiated_mc_priority;
+  using mcx::client_rules::offered_mc_priority;
+  using mcx::client_rules::request_priority;
+  using P = std::optional<std::uint8_t>;
+  check(!offered_mc_priority(0), "default priority not offered");
+  check(offered_mc_priority(5) == P(5) && offered_mc_priority(255) == P(99), "configured priority offered");
+  check(negotiated_mc_priority(false, P(5), P(3)) == P(3), "offerer: the lower answer");
+  check(negotiated_mc_priority(false, P(5), P(9)) == P(5), "offerer: an answer above the offer is capped");
+  check(!negotiated_mc_priority(false, std::nullopt, P(3)), "offerer: a parameter not offered is discarded");
+  check(!negotiated_mc_priority(false, P(5), std::nullopt), "offerer: no answer parameter, default priority");
+  check(negotiated_mc_priority(true, std::nullopt, P(4)) == P(4) && negotiated_mc_priority(true, P(5), P(4)) == P(4),
+        "answerer: the offered value");
+  check(request_priority(5, P(3)) == P(3) && request_priority(2, P(3)) == P(2), "request capped by the negotiated");
+  check(!request_priority(0, P(3)) && !request_priority(5, std::nullopt) && !request_priority(5, P(0)),
+        "default request priority: no field");
+}
+
 } // namespace
 
 //------------------------------------------------------------------------------
@@ -388,6 +409,7 @@ int main() {
   test_implicit_word();
   test_answer_parameters();
   test_reg_event_rules();
+  test_mc_priorities();
   if (failures) std::fprintf(stderr, "%d check(s) failed\n", failures);
   return failures ? 1 : 0;
 }

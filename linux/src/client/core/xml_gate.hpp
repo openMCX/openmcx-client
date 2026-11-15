@@ -94,4 +94,28 @@ void refuse_unknown_keys(const std::vector<BodyPart> &parts, std::string_view si
   }
 }
 
+//------------------------------------------------------------------------------
+// TS 24.281 clause 6.6.2.4.2 step 1 (TS 24.379 likewise): "if the <EncryptedData> XML element or any of its
+// sub-elements ... are not present": whether an element marked type="Encrypted" (annex F.1.3 3)a), F.3.3 2)) holds
+// no <EncryptedData> as its content (an empty element, or other content).
+inline bool encrypted_without_data(std::string_view xml) {
+  static constexpr std::string_view mark = "type=\"Encrypted\"";
+  for (std::size_t at = xml.find(mark); at != std::string_view::npos; at = xml.find(mark, at + mark.size())) {
+    const auto open = xml.rfind('<', at);
+    const auto close = xml.find('>', at);
+    if (open == std::string_view::npos || close == std::string_view::npos) return true;
+    // only the attribute of an element start tag (not text that quotes it)
+    if (xml.find('>', open) < at) continue;
+    if (xml[close - 1] == '/') return true;
+    auto next = xml.find_first_not_of(" \t\r\n", close + 1);
+    if (next == std::string_view::npos || xml[next] != '<') return true;
+    auto name_end = xml.find_first_of(" \t\r\n/>", next + 1);
+    if (name_end == std::string_view::npos) return true;
+    auto name = xml.substr(next + 1, name_end - next - 1);
+    if (const auto colon = name.find(':'); colon != std::string_view::npos) name = name.substr(colon + 1);
+    if (name != "EncryptedData") return true;
+  }
+  return false;
+}
+
 } // namespace mcx::xml_gate

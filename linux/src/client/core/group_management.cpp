@@ -43,35 +43,67 @@ void Client::xcap_request(const std::string &method, const std::string &url, con
 }
 
 //------------------------------------------------------------------------------
-// Helper: a group document (TS 24.481 clause 7.2) of the group with its members.
-std::string Client::group_document_xml(const std::string &group, const std::vector<std::string> &members) {
+// Helper: TS 24.481 clauses 7.2.2 and 7.2.8: the <supported-services> of an MCVideo group document: a <service> with
+// the "enabler" attribute the MCVideo ICSI (TS 24.281) and a <group-media> with an <mcvideo-video-media> element (the
+// test view: TS 37.579-1 tables 5.5.7.4-1 and 5.5.7.4-2, condition MCVIDEO).
+static std::string mcvideo_supported_services() {
+  return std::string("<oxe:supported-services xmlns:oxe=\"urn:oma:xml:xdm:extensions\"><oxe:service enabler=\"") +
+         mcvideo_service.icsi +
+         "\"><oxe:group-media><mcpttgi:mcvideo-video-media xmlns:mcpttgi=\"urn:3gpp:ns:mcpttGroupInfo:1.0\"/>"
+         "</oxe:group-media></oxe:service></oxe:supported-services>";
+}
+
+//------------------------------------------------------------------------------
+// Helper: a group document (TS 24.481 clause 7.2) of the group with its members. An MCVideo group document (TS 24.481
+// clause 7.2.8) has the MCVideo <supported-services> (clause 7.2.2 item e)), and each <entry> "shall include an
+// <mcvideo-mcvideo-id> element" with the member's MCVideo ID in its "uri" attribute (clause 7.2.2); the members are
+// MCVideo IDs then. The MCPTT document stays as it was.
+std::string Client::group_document_xml(const std::string &group, const std::vector<std::string> &members,
+                                       bool mcvideo) {
   std::string out =
       "<?xml version=\"1.0\" encoding=\"UTF-8\"?><group xmlns=\"urn:oma:xml:poc:list-service\"><list-service uri=\"" +
       xml_escape(group) + "\"><list>";
-  for (const auto &member : members) out += "<entry uri=\"" + xml_escape(member) + "\"/>";
-  // TS 24.481 clause 7.2.12.1: the members may read the member list.
+  for (const auto &member : members) {
+    out += "<entry uri=\"" + xml_escape(member) + "\"";
+    if (mcvideo)
+      out += "><mcpttgi:mcvideo-mcvideo-id xmlns:mcpttgi=\"urn:3gpp:ns:mcpttGroupInfo:1.0\" uri=\"" +
+             xml_escape(member) + "\"/></entry>";
+    else
+      out += "/>";
+  }
+  // TS 24.481 clause 7.2.12.1: the members may read the member list. The <ruleset> is the first element after those
+  // of the list-service namespace (OMA-TS-XDM_Group-V1_1_1 clause 5.1.6), the <supported-services> follows it.
   return out +
          "</list><cp:ruleset xmlns:cp=\"urn:ietf:params:xml:ns:common-policy\"><cp:rule "
          "id=\"members\"><cp:conditions>"
          "<is-list-member/></cp:conditions><cp:actions><on-network-allow-getting-member-list "
          "xmlns=\"urn:3gpp:ns:mcpttGroupInfo:1.0\">true</on-network-allow-getting-member-list></cp:actions></cp:rule>"
-         "</cp:ruleset></list-service></group>";
+         "</cp:ruleset>" +
+         (mcvideo ? mcvideo_supported_services() : std::string()) + "</list-service></group>";
 }
 
 //------------------------------------------------------------------------------
 // TS 24.484 clauses 6.3.3.2.2 and 6.3.4.2: the configuration management client retrieves a user's profile document
-// and updates it. "profile-revoke <MCPTT ID> <action> [<profile index>]": an administrator removes an action from a
-// user's profile document, mcptt-user-profile-<index>.xml (clause 8.3.1A; index 1 by default), and replaces it.
+// and updates it.
+//   "profile-revoke <MCPTT ID> <action> [<profile index>]": an administrator removes an action from a user's MCPTT
+//   user profile document, mcptt-user-profile-<index>.xml (clause 8.3.1A; index 1 by default), and replaces it.
+//   "mcvideo-profile-set <MCVideo ID> <action> true|false [<profile index>]": an administrator sets an action of a
+//   user's MCVideo user profile document, mcvideo-user-profile-<index>.xml (clause 9.3.1A), and replaces it.
 void Client::profile_command(const std::string &cmd) {
   std::istringstream words(cmd);
-  std::string verb, id, action;
+  std::string verb, id, action, value = "false";
   unsigned index = 1;
   words >> verb >> id >> action;
+  const bool video = verb == "mcvideo-profile-set";
+  if (video) words >> value;
   if (!(words >> index)) index = 1;
-  if (verb != "profile-revoke" || id.empty() || action.empty() || index < 1 || index > 255)
-    throw std::runtime_error("profile-revoke <MCPTT ID> <action> [<profile index>]");
-  const auto url = cms_xcap_root() + "/org.3gpp.mcptt.user-profile/users/" +
-                   xcap_segment(id) + "/mcptt-user-profile-" + std::to_string(index) + ".xml";
+  if ((verb != "profile-revoke" && !video) || id.empty() || action.empty() || index < 1 || index > 255 ||
+      (value != "true" && value != "false"))
+    throw std::runtime_error(video ? "mcvideo-profile-set <MCVideo ID> <action> true|false [<profile index>]"
+                                   : "profile-revoke <MCPTT ID> <action> [<profile index>]");
+  const std::string service = video ? "mcvideo" : "mcptt";
+  const auto url = cms_xcap_root() + "/org.3gpp." + service + ".user-profile/users/" + xcap_segment(id) + "/" +
+                   service + "-user-profile-" + std::to_string(index) + ".xml";
   const auto current = http_.request("GET", url, {}, {{"Authorization", bearer()}});
   if (current.status != 200) {
     status_["xcap_last"] = {{"method", "GET"},
@@ -79,31 +111,39 @@ void Client::profile_command(const std::string &cmd) {
                             {"status", current.status},
                             {"body", current.body.substr(0, 1000)},
                             {"etag", ""}};
+    event("xcap_request", {{"method", "GET"}, {"status", current.status}});
     return;
   }
-  // TS 24.484 clause 8.3.2.1 item 11: a right is a boolean element of the ruleset
-  // actions; it is revoked by setting it to false.
+  // TS 24.484 clauses 8.3.2.1 and 9.3.2.1 item 11: a right is a boolean element of the ruleset actions; revoking it
+  // sets it to false, granting it to true.
   auto body = current.body;
-  bool revoked = false;
-  for (std::size_t at = 0; !revoked && (at = body.find("<" + action, at)) != std::string::npos; ++at) {
+  const std::string from = value == "true" ? "false" : "true";
+  bool changed = false, already = false;
+  for (std::size_t at = 0; !changed && (at = body.find("<" + action, at)) != std::string::npos; ++at) {
     const auto after = at + 1 + action.size();
     if (after >= body.size() || (body[after] != '>' && body[after] != ' ')) continue;
     const auto open_end = body.find('>', after);
     if (open_end == std::string::npos || body[open_end - 1] == '/') continue;
     const auto close = body.find("</" + action + ">", open_end);
     if (close == std::string::npos) continue;
-    auto value = body.substr(open_end + 1, close - open_end - 1);
-    value.erase(0, value.find_first_not_of(" \t\r\n"));
-    value.erase(value.find_last_not_of(" \t\r\n") + 1);
-    if (value != "true" && value != "1") continue;
-    body.replace(open_end + 1, close - open_end - 1, "false");
-    revoked = true;
+    auto text = body.substr(open_end + 1, close - open_end - 1);
+    text.erase(0, text.find_first_not_of(" \t\r\n"));
+    text.erase(text.find_last_not_of(" \t\r\n") + 1);
+    const auto normal = text == "1" ? std::string("true") : text == "0" ? std::string("false") : text;
+    if (normal == value) already = true;
+    if (normal != from) continue;
+    body.replace(open_end + 1, close - open_end - 1, value);
+    changed = true;
   }
-  if (!revoked) throw std::runtime_error("the profile does not grant " + action);
+  if (!changed && already) {
+    event("xcap_request", {{"method", "none"}, {"status", 200}, {"unchanged", action}});
+    return;
+  }
+  if (!changed) throw std::runtime_error("the profile has no " + action + " to set to " + value);
 
-  // The MIME type of the user profile document (TS 24.484 clause 8.3.2.5).
-  std::map<std::string, std::string> headers{{"Authorization", bearer()},
-                                             {"Content-Type", "application/vnd.3gpp.mcptt-user-profile+xml"}};
+  // The MIME type of the user profile document (TS 24.484 clauses 8.3.2.5 and 9.3.2.5).
+  std::map<std::string, std::string> headers{
+      {"Authorization", bearer()}, {"Content-Type", "application/vnd.3gpp." + service + "-user-profile+xml"}};
   if (current.headers.contains("etag")) headers["If-Match"] = current.headers.at("etag");
   const auto response = http_.request("PUT", url, body, headers);
   status_["xcap_last"] = {{"method", "PUT"},
@@ -117,8 +157,14 @@ void Client::profile_command(const std::string &cmd) {
 //------------------------------------------------------------------------------
 // TS 24.481 clause 6.3.14.2 with clause 7.3.4.3: the GMOP group regroup creation request of a temporary group: its
 // group document lists the constituent groups (comma-separated in groups) in <on-network-temporary>.
+//
+// For MCVideo (an MCVideo group document, TS 24.481 clauses 7.2.2 and 7.2.8): the MCVideo <supported-services>, and the
+// protection flags are the MCVideo ones, <mcvideo-protect-media> and <mcvideo-protect-transmission-control> (clause
+// 7.2.2, "MCVideo group document additionally" items c) and d)), in place of the MCPTT <protect-media> and
+// <protect-floor-control-signalling>. The <on-network-temporary> and <constituent-MCPTT-group-IDs> elements are of
+// every MCS group document (clause 7.2.2 NOTE 2: "mcptt" in a name is historical).
 std::string Client::temporary_group_request_xml(const std::string &group_id, const std::string &groups, bool chat,
-                                                bool protect) {
+                                                bool protect, bool mcvideo) {
   std::string ids;
   for (std::size_t start = 0; start <= groups.size();) {
     const auto end = std::min(groups.find(',', start), groups.size());
@@ -135,15 +181,16 @@ std::string Client::temporary_group_request_xml(const std::string &group_id, con
       "<group xmlns=\"urn:oma:xml:poc:list-service\" xmlns:mcpttgi=\"urn:3gpp:ns:mcpttGroupInfo:1.0\">"
       "<list-service uri=\"" +
       xml_escape(group_id) +
-      "\">"
-      "<mcpttgi:protect-media>" +
-      flag +
-      "</mcpttgi:protect-media>"
-      "<mcpttgi:protect-floor-control-signalling>" +
-      flag +
-      "</mcpttgi:protect-floor-control-signalling>"
-      "<mcpttgi:on-network-temporary><mcpttgi:constituent-MCPTT-group-IDs>" +
-      ids + "</mcpttgi:constituent-MCPTT-group-IDs></mcpttgi:on-network-temporary>";
+      "\">" +
+      (mcvideo ? "<mcpttgi:mcvideo-protect-media>" + flag + "</mcpttgi:mcvideo-protect-media>" +
+                     "<mcpttgi:mcvideo-protect-transmission-control>" + flag +
+                     "</mcpttgi:mcvideo-protect-transmission-control>"
+               : "<mcpttgi:protect-media>" + flag + "</mcpttgi:protect-media>" +
+                     "<mcpttgi:protect-floor-control-signalling>" + flag +
+                     "</mcpttgi:protect-floor-control-signalling>") +
+      "<mcpttgi:on-network-temporary><mcpttgi:constituent-MCPTT-group-IDs>" + ids +
+      "</mcpttgi:constituent-MCPTT-group-IDs></mcpttgi:on-network-temporary>";
+  if (mcvideo) group += mcvideo_supported_services();
   // The group's type, in the project's configuration extension of the document.
   if (chat)
     group += "<configuration xmlns=\"urn:openmcx:ns:groupConfiguration:1.0\">{\"type\":\"chat\"}</configuration>";
@@ -252,11 +299,11 @@ void Client::group_documents_unsubscribe() {
 
 //------------------------------------------------------------------------------
 // TS 24.481 clause 6.3: the group management client procedures, as test commands:
-// group-create <document> <group ID> <member>...   group-delete <document>
+// group-create <document> <group ID> <member>... [mcvideo]   group-delete <document>
 // group-member add|remove <group ID> <member>
 // group-subscribe <group ID>...                    group-unsubscribe
 // group-resubscribe <group ID>...
-// temporary-create ...                             temporary-delete <document>
+// temporary-create ... [mcvideo]                   temporary-delete <document>
 void Client::group_management_command(const std::string &cmd) {
   std::istringstream in(cmd);
   std::string verb;
@@ -264,19 +311,24 @@ void Client::group_management_command(const std::string &cmd) {
   std::vector<std::string> args;
   for (std::string word; in >> word;) args.push_back(word);
   const auto own_tree = groups_xcap() + "/users/" + xcap_segment(user()) + "/";
+  // The word "mcvideo" (never a SIP URI) asks for an MCVideo group document (TS 24.481 clause 7.2.8).
+  const auto video_word = std::find(args.begin(), args.end(), "mcvideo");
+  const bool mcvideo = video_word != args.end();
+  if (mcvideo) args.erase(video_word);
   if (verb == "group-create") { // TS 24.481 clause 6.3.2.2.2
-    if (args.size() < 2) throw std::runtime_error("group-create <document> <group ID> <member>...");
+    // group-create <document> <group ID> <member>... [mcvideo]
+    if (args.size() < 2) throw std::runtime_error("group-create <document> <group ID> <member>... [mcvideo]");
     xcap_request("PUT", own_tree + xcap_segment(args[0]), "application/vnd.oma.poc.groups+xml",
-                 group_document_xml(args[1], {args.begin() + 2, args.end()}));
+                 group_document_xml(args[1], {args.begin() + 2, args.end()}, mcvideo));
   } else if (verb == "temporary-create") { // TS 24.481 clause 6.3.14.2
-    // temporary-create <document> <temporary group ID> <group>,<group>... [chat] [protected]
+    // temporary-create <document> <temporary group ID> <group>,<group>... [chat] [protected] [mcvideo]
     if (args.size() < 3)
       throw std::runtime_error(
-          "temporary-create <document> <temporary group ID> <group>,<group>... [chat] [protected]");
+          "temporary-create <document> <temporary group ID> <group>,<group>... [chat] [protected] [mcvideo]");
     const bool chat = std::find(args.begin() + 3, args.end(), "chat") != args.end();
     const bool protect = std::find(args.begin() + 3, args.end(), "protected") != args.end();
     xcap_request("POST", own_tree + xcap_segment(args[0]), "application/vnd.3gpp.GMOP+xml",
-                 temporary_group_request_xml(args[1], args[2], chat, protect));
+                 temporary_group_request_xml(args[1], args[2], chat, protect, mcvideo));
   } else if (verb == "temporary-delete") { // TS 24.481 clause 6.3.15.2
     if (args.size() != 1) throw std::runtime_error("temporary-delete <document>");
     xcap_request("DELETE", own_tree + xcap_segment(args[0]));
