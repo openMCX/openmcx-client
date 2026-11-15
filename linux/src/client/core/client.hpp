@@ -21,6 +21,7 @@
 #include "handoff.hpp"
 #include "transport_key_config.hpp"
 #include "mcx/floor.hpp"
+#include "mcx/group_dynamic_data.hpp"
 #include "mcx/http.hpp"
 #include "mcx/ice.hpp"
 #include "mcx/ipconn.hpp"
@@ -574,6 +575,8 @@ class Client {
   // <signalling-protection> of each service configuration document read (an absent element is enabled); a service
   // without an entry has not been read, so whether its protection applies is not known.
   std::map<std::string, ServiceProtection> service_protection_;
+  // TS 24.484 clause 9.4.2.1 item c: the ad hoc group call support of each service configuration read.
+  std::map<std::string, ServiceAdhoc> service_adhoc_;
   std::optional<ServiceProtection> protection_of(const std::string &service) const;
   void require_protection_known(const std::string &service, const std::vector<BodyPart> &parts) const;
   // mcptt.documents_on_notify: the sign-in waits for the MCPTT service configuration document of the configuration
@@ -855,6 +858,8 @@ class Client {
 
   static bool mcvideo_xml_part(const std::string &type);
 
+  static const xmlsec::Profile &mcvideo_xml_profile();
+
   std::vector<BodyPart> mcvideo_protect_outgoing(std::vector<BodyPart> parts);
 
   std::vector<BodyPart> protect_outgoing(const SipTransmission &transmission, std::vector<BodyPart> parts);
@@ -882,14 +887,17 @@ class Client {
   void xcap_request(const std::string &method, const std::string &url, const std::string &content_type = {},
                     const std::string &body = {});
 
-  static std::string group_document_xml(const std::string &group, const std::vector<std::string> &members);
+  // TS 24.481 clauses 7.2.2 and 7.2.8: with mcvideo, an MCVideo group document (MCVideo <supported-services>,
+  // <mcvideo-mcvideo-id> in each <entry>).
+  static std::string group_document_xml(const std::string &group, const std::vector<std::string> &members,
+                                        bool mcvideo = false);
 
   void profile_command(const std::string &cmd);
 
   void group_management_command(const std::string &cmd);
 
   static std::string temporary_group_request_xml(const std::string &group_id, const std::string &groups, bool chat,
-                                                 bool protect);
+                                                 bool protect, bool mcvideo = false);
 
   std::string group_documents_subscribe(const std::vector<std::string> &args);
 
@@ -1257,6 +1265,19 @@ private:
   std::string mcvideo_csk_upload_, mcvideo_key_subscription_;
 
   std::optional<keying::KeyMessage> mcvideo_offer_pck(const std::string &target);
+  // TS 24.281 clause 6.2.8.3.9 (on network): the KMS URI associated with an MCVideo ID, and where it came from
+  // ("user-profile" or "initial-configuration").
+  std::pair<std::string, std::string> mcvideo_target_kms(const std::string &target) const;
+  // TS 33.180 clause 5.2.8.2.5: the receiver KMS selected after a KMS Redirect Response, for the next PCK to that
+  // target; the KRRs followed for the current call request, and the call to place again with the selected KMS.
+  std::pair<std::string, std::string> mcvideo_redirect_kms_;
+  unsigned mcvideo_krr_count_ = 0;
+  bool mcvideo_krr_retry_ = false;
+  std::function<void()> mcvideo_private_retry_;
+  Json mcvideo_last_krr_ = nullptr;
+  // TS 33.180 clause 5.2.8.2.5: on a 488 with a KMS Redirect Response to a private call INVITE, the KMS selection; true
+  // when the call is placed again with the selected KMSs.
+  bool mcvideo_kms_redirect(unsigned generation, const SipResponse &response);
 
   void mcvideo_bind_pck(const keying::KeyMessage &key, bool initiator);
 
@@ -1267,6 +1288,29 @@ private:
 
   SipResponse mcvideo_key_notify(const SipMessage &message);
 
+  // TS 33.180 clause 5.7 and TS 24.281 clause 4.7.1: the GMK of every MCVideo group the user may call or be called on
+  // (its affiliated groups, regroups and temporary groups), each through its own GKTP subscription to the MCVideo
+  // server (TS 24.481 clause 6.3.13.2.1); a group call's media use the key of the call's group.
+  std::map<std::string, keying::KeyMessage> mcvideo_group_keys_;              // key group -> latest GMK
+  std::map<std::string, std::string> mcvideo_extra_key_subscriptions_;       // key group -> dialog
+  std::map<std::string, std::int64_t> mcvideo_extra_key_refresh_at_;        // dialog -> refresh time
+  std::set<std::string> mcvideo_wanted_key_groups_;                          // groups called without a key yet
+  std::set<std::string> mcvideo_closing_key_subscriptions_;                  // ended, until their final NOTIFY
+  std::string mcvideo_key_group_of(const std::string &group) const;
+  bool mcvideo_use_group_key(const std::string &group);
+  void mcvideo_update_key_subscriptions();
+  void mcvideo_refresh_extra_key_subscription(const std::string &dialog);
+  bool mcvideo_key_dialog(const std::string &dialog) const;
+  // A group call asked for before its group's GMK is held (a chat group joined with implicit affiliation, a new
+  // temporary group): it is placed once the key arrives, and fails if the key subscription is refused or ended.
+  struct McvideoKeyWait {
+    std::string key_group;
+    std::int64_t deadline_ms = 0;
+    std::function<void()> place;
+  };
+  std::optional<McvideoKeyWait> mcvideo_key_wait_;
+  void mcvideo_key_wait_done(const std::string &key_group, bool installed);
+
   bool mcvideo_authorized_ = false, mcvideo_affiliated_ = false, mcvideo_status_known_ = false;
   bool mcvideo_desired_affiliation_ = true;
   std::string mcvideo_auth_etag_, mcvideo_affiliation_etag_, mcvideo_subscription_;
@@ -1275,6 +1319,9 @@ private:
   // The groups this client asks to be affiliated to besides its configured group;
   // a PUBLISH carries the client's whole set (clause 8.2.1.2).
   std::set<std::string> mcvideo_extra_groups_;
+  // The configured group, when the client left it on exit from its group geographic area (TS 24.281 clause 11.2.1.4
+  // 2b) while other groups stay affiliated: left out of every PUBLISH until the area is entered again.
+  bool mcvideo_left_selected_ = false;
   Json mcvideo_last_result_; // the outcome of the last authorisation or affiliation request
 
   void mcvideo_request(const std::string &event_name, const std::vector<BodyPart> &parts,
@@ -1289,6 +1336,10 @@ private:
   SipResponse mcvideo_affiliation_notify(const SipMessage &message);
 
   void mcvideo_affiliate(bool affiliate, const std::string &group = {});
+  void mcvideo_publish_affiliation(bool affiliate, const std::vector<std::string> &added, const std::string &group);
+  // TS 24.281 clauses 8.2.1.2 and 8.2.1.5 3): affiliate to the groups of `affiliate` not affiliated and de-affiliate
+  // from the groups of `leave` affiliated, the rest of the affiliation kept, in one PUBLISH; false: nothing to change.
+  bool mcvideo_change_affiliation(const std::vector<std::string> &affiliate, const std::vector<std::string> &leave);
 
   void mcvideo_command(const std::string &cmd);
 
@@ -1302,12 +1353,15 @@ private:
   void mcvideo_regroup_request_command(const std::string &argument, std::istringstream &words);
   // "mcvideo-adhoc": ad hoc group call to users or by criteria (TS 24.281 clause 22.2.2.1.1).
   void mcvideo_adhoc_command(const std::string &argument, std::istringstream &words);
+  // TS 24.281 clause 22.2.6.1.1: mcvideo-adhoc-modify add|remove <MCVideo ID>... | criteria <criteria>.
+  void mcvideo_adhoc_modify(const std::string &arguments);
   // "mcvideo-answer", "mcvideo-reject": answer a ringing call (TS 24.281 clause 10.2.2.2.2).
   void mcvideo_answer_command(const std::string &verb);
   // "mcvideo-receive", "mcvideo-stop-receiving": reception control requests (TS 24.581 clause 6.2.5).
   void mcvideo_reception_command(const std::string &verb);
   // "mcvideo-hangup": release the MCVideo call.
   void mcvideo_hangup_command();
+  void mcvideo_adhoc_release_command();
 
   void mcvideo_status();
 
@@ -1342,7 +1396,21 @@ private:
     bool may_release = true;
     unsigned generation = 0;                   // matches a late INVITE response to this call
     std::string priority = "normal";           // emergency, imminent or normal, as the server last said (clause 4.6)
+    // TS 24.281 clauses 6.2.8.3.2 to 6.2.8.3.7: the MCVideo private emergency alert state of a private call ("MVPEA 1:
+    // no-alert" to "MVPEA 4: Emergency-alert-cancel-pending"), and the state before a pending cancellation (clause
+    // 10.2.2.2.4, a refusal without a body reverts it).
+    int alert_state = 1, alert_state_before = 1;
+    // An emergency group call whose INVITE carried this user's emergency alert (<alert-ind> "true", TS 24.281 clause
+    // 6.2.8.1.1 step 2): its final response sets the MCVideo emergency alert state (clauses 6.2.8.1.4, 6.2.8.1.5).
+    bool group_alert = false;
+    bool broadcast = false;                    // a broadcast group call (<broadcast-ind>, TS 24.281 clause 9.2.1.2.1.1)
     std::optional<SipResponse> pending_answer; // a ringing private call (manual commencement)
+    std::string priority_requested;            // an emergency or imminent peril ad hoc call before its 2xx
+    std::string adhoc_criteria;                // the participant criteria an ad hoc call was set up with
+    bool modify_pending = false;               // an ad hoc participants modification awaits its response
+    // TS 24.281 clause 22.2.2.1.2 step 8: the preconfigured group (<preconfigured-group-id>) whose security information
+    // an invited ad hoc group call uses; step 3: the Resource-Priority of the invitation.
+    std::string security_group, resource_priority;
     MediaDescription local;
     std::optional<MediaDescription> remote;
     std::unique_ptr<UdpSocket> audio, video, control;
@@ -1351,7 +1419,27 @@ private:
     // overtake the 200 (OK) the SIP core carries. Held until the answer names its source.
     std::vector<Datagram> early_control;
     bool granted = false, requesting = false;
+    // TS 24.281 clause 12.2.2.2 step 1 (and clause 15.2.1.1 step 13 for the viewed-to client): the callee's request to
+    // transmit, sent as a Transmission Request once the call is active when the offer had no mc_implicit_request to
+    // accept (TS 24.581 clause 14.3.1: an answer has no fmtp parameter the offer had not).
+    bool request_on_active = false;
     std::uint32_t video_ssrc = 0, frame = 0;
+    // TS 24.581 clause 6.2.4.4.6 step 2: the Audio SSRC of the Transmitting User a Transmission Granted gave (this
+    // client sends no audio RTP; kept for the status).
+    std::uint32_t audio_ssrc = 0;
+    // TS 24.581 clause 14.4: the "mc_audio_ssrc" and "mc_video_ssrc" of the SDP answer, the SSRCs to use when the
+    // implicit transmission request is granted (TS 24.281 clause 6.2.1 NOTEs 2 and 3); 0 when the answer gave none.
+    std::uint32_t answer_audio_ssrc = 0, answer_video_ssrc = 0;
+    // TS 24.581 clause 14.2.4: the initial offer carried "mc_granted"; an "mc_granted" in the answer to another offer
+    // is discarded (clause 14.4).
+    bool offered_granted = false;
+    // TS 24.581 clauses 14.3.3, 14.3.6 and 14.4: the negotiated maximum transmission and reception priorities this
+    // client may request (Transmission Priority / Reception Priority fields, clauses 6.2.4.3.2 and 6.2.5.3.3); none
+    // (the default priority, clause 12.1.2.2 NOTEs 1 and 2) when not negotiated. answered_offer: the last SDP
+    // exchange of the call answered the server's offer (this client the answerer), so the media that follow are
+    // that offer.
+    std::optional<std::uint8_t> negotiated_priority, negotiated_reception_priority;
+    bool answered_offer = false;
     std::uint32_t received_ssrc = 0; // the transmitting user's video SSRC being decoded
     // Decoding starts at an IDR picture: at a new stream, on joining late and on
     // resuming reception. Pictures before it are skipped, not undecodable.
@@ -1364,6 +1452,12 @@ private:
     video::Depacketizer depacketizer;
     unsigned sent = 0, received = 0, undecoded = 0, revocations = 0;
     std::optional<unsigned> queue_position; // from Queue Position Info (TS 24.581 clause 9.2.12)
+    unsigned queue_cancellations = 0;       // queued requests the server cancelled (TS 24.581 clause 6.2.4.9.6)
+    // TS 24.581 clauses 11.1.1 and 11.2.1: the transmission participant's timers T100 to T104 and counters C100 to
+    // C104 (mcx::transmission::ParticipantTimers), for a call with transmission control once its media are
+    // negotiated; and the timeouts given to the user (clauses 6.2.4.4.4, 6.2.4.6.3, 6.2.4.9.8, 6.2.5.4.4, 6.2.5.6.3).
+    std::optional<transmission::ParticipantTimers> timers;
+    std::vector<std::string> timeouts;
     // TS 24.281 clause 9.2.3: the session's focus URI and the conference event subscription to it.
     std::string session_uri, conference_subscription;
     std::map<std::string, std::string> participants; // MCVideo ID -> RFC 4575 status
@@ -1371,6 +1465,7 @@ private:
     // Reception control (TS 24.581 clause 4.1.1.2): transmissions announced by Media Transmission Notification
     // (on-network) or Media Reception Notification, and whether this client receives the current one.
     unsigned reception_notifications = 0;
+    unsigned reception_ends = 0; // receptions ended or overridden by the server (TS 24.581 clauses 6.2.5.5.4, 6.2.5.5.5)
     bool receiving = true;
     // The transmitting user's SSRCs from the Media Transmission Notification (TS 24.581 clause 6.2.5.3.2 step 3).
     std::uint32_t transmitter_audio_ssrc = 0, transmitter_video_ssrc = 0;
@@ -1443,14 +1538,68 @@ private:
   // Emergency alerts (TS 24.281 clause 11.2): this user's, and those received by origin.
   bool mcvideo_alerting_ = false;
   Json mcvideo_alerts_ = Json::object(), mcvideo_alert_result_;
+  // The MCVideo emergency alert state of an alert sent with an emergency group call (TS 24.281 annex G.5): 1 "MVEA 1:
+  // no-alert", 2 "MVEA 2: emergency-alert-confirm-pending", 3 "MVEA 3: emergency-alert-initiated".
+  int mcvideo_group_alert_state_ = 1;
+  // The generation of the emergency group call whose INVITE carried that alert: its final response sets the state
+  // even when the failed INVITE's dialog has ended the call first (SipCallState::disconnected comes first).
+  unsigned mcvideo_group_alert_generation_ = 0;
+  void mcvideo_set_group_alert_state(int state);
+  // The MCVideo emergency state (TS 24.281 annex G.1): set by an emergency alert or an emergency group or private
+  // call the user initiates, cleared only by the cancellation of that alert or call (by its initiator, or of the alert
+  // by an authorised user) or by the user clearing it manually; the release of the call does not clear it. While it
+  // is set, every group call the user originates is an emergency group call (clause 6.2.8.1.1, NOTE 1).
+  bool mcvideo_emergency_state_ = false;
+  void mcvideo_set_emergency_state(bool set, const char *cause);
 
   std::vector<SipHeader> mcvideo_priority_headers(const McpttInfo &info) const;
 
   void mcvideo_note_priority(const McpttInfo &info);
+  // TS 24.581 clauses 6.2.4.3.2 step 2b and 6.2.5.3.3 step 1b: the Transmission Indicator of a broadcast, emergency or
+  // imminent peril call (none for a normal call).
+  std::vector<FloorField> mcvideo_indicator_fields() const;
+  // TS 24.581 clauses 6.2.4.3.2 / 6.2.4.4.3 and 6.2.5.3.3 / 6.2.5.4.3: the fields of a Transmission Request and of a
+  // Receive Media Request: the Transmission Indicator and the requested priority, capped by the negotiated one.
+  std::vector<FloorField> mcvideo_request_fields() const;
+  std::vector<FloorField> mcvideo_reception_fields() const;
+  // TS 24.581 clauses 14.2.3 and 14.2.6 with TS 24.484 clause 9.3.2.1 item 8 e) v): the configured priority of the
+  // user (MCVideo user profile <MCVideo-group-call>/<Priority>; 0, the default priority, when absent), and the value
+  // the client offers in "mc_priority" / "mc_reception_priority" (none when it is the default).
+  unsigned mcvideo_configured_priority() const;
+  std::optional<std::uint8_t> mcvideo_offered_priority() const;
 
-  void mcvideo_change_priority(bool emergency, bool enabled);
+  // own_alert: with the user's own emergency alert (an upgrade with an alert, clause 6.2.8.3.2 3); a cancellation of
+  // the alert as well, clause 6.2.8.3.6) in a private call.
+  void mcvideo_change_priority(bool emergency, bool enabled, const std::string &cancel_alert_of = {},
+                               bool own_alert = false);
+  // TS 24.281 clause 6.2.8.3.1.3: whether this is an authorised request for an MCVideo emergency alert to the user.
+  bool mcvideo_private_alert_authorised(const std::string &target);
+  // The MCVideo private emergency alert state of the private call (1 to 4), in the status document.
+  void mcvideo_set_private_alert_state(int state);
+  // TS 24.281 clause 6.2.8.3.7: an INFO of the controlling function in the dialog of a priority private call.
+  void mcvideo_private_alert_info(const McpttInfo &info);
+  // TS 24.281 clauses 6.2.8.3.4, 6.2.8.3.5 (upgrade) and 10.2.2.2.4 (cancellation): the private emergency alert state
+  // after the final response to a re-INVITE of the private call.
+  void mcvideo_private_alert_answer(const SipResponse &response, bool upgrade, bool alert_requested, bool third_party);
 
   void mcvideo_alert(bool enabled);
+
+  // TS 24.281 clause 9.2.5.2 (annex G.7): the MCVideo imminent peril group state of each group with one known
+  // ("MVIG 1: no-imminent-peril", "MVIG 2: in-progress", "MVIG 3: cancel-pending"), from the imminent peril indications
+  // received and this user's cancellations.
+  Json mcvideo_imminent_groups_ = Json::object();
+  void mcvideo_set_imminent_state(const std::string &group, int state);
+  // TS 24.281 annex G.14, G.15, G.17 and G.18: per ad hoc group this client takes part in, the MCVideo emergency
+  // adhoc group state (MVEAG), imminent peril adhoc group state (MVIAG) and the call states MVEAGC and MVIAGC, set by
+  // clause 22.2.2.1.2 steps 4 and 5 (and clauses 6.2.8.1.24, 6.2.8.1.25 for an ongoing call and its release).
+  Json mcvideo_adhoc_groups_ = Json::object();
+  void mcvideo_adhoc_priority(const McpttInfo &info);
+  void mcvideo_adhoc_released(const std::string &group);
+  // TS 24.281 clause 22.2.7.1: the notifications of ad hoc group call redirection received (shown to the user).
+  Json mcvideo_adhoc_redirections_ = Json::array();
+  // TS 24.281 clause 9.2.5.2.1: cancel the in-progress imminent peril state of a group without an ongoing call
+  // (SIP MESSAGE); with this client's call on the group, the re-INVITE of clause 9.2.1.2.1.5 instead.
+  void mcvideo_imminent_cancel(const std::string &group);
 
   SipResponse mcvideo_message(const SipMessage &message);
 
@@ -1459,6 +1608,9 @@ private:
   void mcvideo_invite_answered(unsigned generation, const SipResponse &response);
 
   McvideoCall new_mcvideo_call();
+  // TS 24.581 clauses 14.2.4 and 14.5: the SDP offer of the call's initial INVITE (call.local with "mc_granted" when a
+  // grant in the 200 (OK) is acceptable); sets call.offered_granted.
+  MediaDescription mcvideo_initial_offer(McvideoCall &call) const;
 
   static std::string contact_uri_of(std::string_view contact);
 
@@ -1466,7 +1618,7 @@ private:
 
   void mcvideo_private_call(const std::string &target, std::string mode, bool no_control = false,
                             bool emergency = false, const std::string &session_type = "private", bool to_alias = false,
-                            const std::string &called_alias = {});
+                            const std::string &called_alias = {}, bool implicit = false, bool alert = false);
 
   void mcvideo_server_call(const std::string &session_type, const std::string &url = {});
 
@@ -1489,7 +1641,16 @@ private:
 
   std::string mcvideo_presented_alias() const;
 
-  void mcvideo_functional_alias(const std::string &action, const std::vector<std::string> &aliases);
+  // by_location: the change TS 24.281 clause 20.2.1.4 starts when a location criterion is met (not the user's).
+  void mcvideo_functional_alias(const std::string &action, const std::vector<std::string> &aliases,
+                                bool by_location = false);
+  // TS 24.281 clause 20.2.1.4 with TS 24.484 clause 9.3.2.1 item 10: the functional aliases of the MCVideo user profile
+  // with location criteria, whether the position was inside each criterion's area at the last position (by alias,
+  // criterion and area; none before the first position), and the aliases activated by a location criterion.
+  std::vector<McvideoProfile::FunctionalAlias> mcvideo_alias_rules_;
+  std::map<std::string, bool> mcvideo_alias_area_inside_;
+  std::set<std::string> mcvideo_aliases_by_location_;
+  void mcvideo_alias_location(const location::Point &position);
 
   // TS 24.281 clause 20.2.1.3: status determination subscriptions, by dialog: the alias followed, or
   // empty for this user's own aliases. mcvideo_alias_users holds, per alias, the users
@@ -1510,6 +1671,10 @@ private:
   // alerts received by ad hoc group identity, and the last response.
   int mcvideo_ah_mea_ = 1;
   std::string mcvideo_adhoc_alert_group_;
+  // TS 24.281 clause 12.1A.1.5: the ad hoc group emergency alert's participant criteria as last confirmed.
+  std::string mcvideo_adhoc_alert_criteria_;
+  // TS 24.281 clause 12.1A.1.4: mcvideo-adhoc-alert modify <criteria>.
+  void mcvideo_adhoc_alert_modify(const std::string &criteria);
   Json mcvideo_adhoc_alerts_ = Json::object(), mcvideo_adhoc_alert_result_ = nullptr;
 
   void mcvideo_adhoc_alert(const std::string &arguments);
@@ -1573,7 +1738,9 @@ private:
 
   void mcvideo_regroup_notified(const Regroup &regroup);
 
-  void mcvideo_adhoc_call(const std::vector<std::string> &targets, const std::string &criteria);
+  // [rejoin_uri]: TS 24.281 clause 22.2.5.1.1, the INVITE re-joins the ongoing ad hoc session of that identity.
+  void mcvideo_adhoc_call(const std::vector<std::string> &targets, const std::string &criteria,
+                          const std::string &priority = {}, const std::string &rejoin_uri = {});
 
   void mcvideo_ambient_call(const std::string &target, const std::string &type);
 
@@ -1582,8 +1749,41 @@ private:
   // TS 24.281 clause 13.2.2.4: the <video-push-url> of the server's recording, from its SIP INFO.
   std::string mcvideo_push_url_;
 
+  // TS 24.281 clauses 9.2.1.2.4.1 and 22.2.5.1.1: the last group or ad hoc group session this user left (its session
+  // identity, group and type), for a re-join.
+  std::string mcvideo_rejoin_uri_, mcvideo_rejoin_group_, mcvideo_rejoin_type_, mcvideo_rejoin_target_;
+  // TS 24.281 clauses 7.2.4 and 8.2.1.2 to 8.2.1.5 (mcvideo/settings_affiliation.cpp): the settings subscription, the
+  // subscriptions to other users' affiliation (dialog -> MCVideo ID, or "poc-settings"), their last notified
+  // affiliation, and a received negotiated-mode request awaiting the user.
+  std::string mcvideo_settings_subscription_;
+  // TS 24.281 clause 7.2.4: the cached MCVideo service settings of each MCVideo client of this user (by client ID:
+  // answer mode, active user profile index, multiplex support), from the last poc-settings NOTIFY; and the outcome
+  // of the last settings-only PUBLISH (clause 7.2.3).
+  Json mcvideo_service_settings_ = Json::object();
+  Json mcvideo_settings_result_;
+  std::string mcvideo_poc_settings();
+  void mcvideo_settings_publish(bool remove);
+  SipResponse mcvideo_settings_notify(const SipMessage &message);
+  std::map<std::string, std::string> mcvideo_extra_subscriptions_;
+  std::map<std::string, Affiliation> mcvideo_target_affiliations_;
+  Json mcvideo_affiliation_command_;
+  void mcvideo_settings_command(const std::string &verb, std::istringstream &words);
+  void mcvideo_target_affiliation_command(const std::string &verb, std::istringstream &words);
+  // TS 24.281 clause 8.2.1.6: the subscriptions to group dynamic data, by group (their dialogs are entries
+  // "gdd:<group>" of mcvideo_extra_subscriptions_), and the dynamic data last notified per group:
+  //   mcvideo-gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]
+  //   mcvideo-gdd-resubscribe <group>   mcvideo-gdd-unsubscribe <group>
+  std::map<std::string, std::string> mcvideo_gdd_dialogs_;
+  Json mcvideo_gdd_ = Json::object();
+  void mcvideo_gdd_command(const std::string &verb, std::istringstream &words);
+  SipResponse mcvideo_gdd_notify(const SipMessage &message, const std::string &group);
+  SipResponse mcvideo_extra_notify(const SipMessage &message);
+  SipResponse mcvideo_affiliation_command_message(const SipMessage &message);
+  void mcvideo_affiliation_command_answer(bool accept, const std::set<std::string> &only = {});
+  std::string mcvideo_client_filter();
+  void mcvideo_rejoin_call();
   void mcvideo_group_call(bool implicit = false, const std::string &chat_group = {}, const std::string &priority = {},
-                          const std::string &target_group = {});
+                          const std::string &target_group = {}, bool alert = false);
 
   static bool one_to_one_video(const std::string &session_type);
 
@@ -1602,6 +1802,7 @@ private:
   bool mcvideo_call_state(std::string_view dialog, SipCallState state);
 
   void mcvideo_subscribe_conference();
+  void mcvideo_unsubscribe_conference();
 
   SipResponse mcvideo_conference_notify(const SipMessage &message);
 
@@ -1610,6 +1811,14 @@ private:
   void mcvideo_start_sending(std::uint32_t ssrc);
 
   void mcvideo_send_control(transmission::Type type, std::vector<FloorField> fields = {});
+  // Helper: encode, protect and send one transmission control packet to the server (no timer registration).
+  void mcvideo_send_packet(const transmission::Packet &packet);
+  // TS 24.581 clauses 11.1.1 and 11.2.1: the timer values (mcvideo.transmission_timers, in ms, and counter limits).
+  transmission::ParticipantTimerOptions mcvideo_timer_options() const;
+  // TS 24.581 clauses 6.2.4 and 6.2.5: the timers' resends and give-ups, from mcvideo_tick.
+  void mcvideo_timers_tick(std::uint64_t now);
+  // TS 24.581 clause 6.2.4.9.3: mcvideo-queue-position, the user asks for the queue position.
+  void mcvideo_queue_position_request();
 
   void mcvideo_request_transmission();
 
@@ -2460,6 +2669,14 @@ public:
   void read_mcdata_profile();
 
   bool mcvideo_profile_allows(const std::string &action) const;
+  // TS 24.281 clauses 6.2.8.1.6 to 6.2.8.1.10, 6.2.8.1.22, 6.2.8.1.27 and 6.2.8.3.1: refuses (throws) a user request
+  // whose action the MCVideo user profile does not grant; the procedure is then skipped and the user told
+  // (mcvideo_not_authorised event, status mcvideo_not_authorised).
+  void require_mcvideo_profile(const char *action, const char *what);
+  // TS 24.281 clauses 6.2.8.1.6 2), 6.2.8.1.8 1) a) b) and 6.2.8.3.1.1 1) a) b): refuses (throws) a priority request
+  // whose target the "entry-info" and <uri-entry> of the profile's target entry (entry: emergency_group_initiation,
+  // imminent_group_initiation, group_emergency_alert or emergency_private_recipient) do not allow.
+  void require_mcvideo_target(const char *entry, const std::string &target, const char *what);
 
   // ---- IdMS sign-in and token renewal (core/tokens.cpp) ----
   // Logs in at the IdMS and takes the access token, once its identity matches this client.

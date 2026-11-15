@@ -64,9 +64,38 @@ has it: the lab scenarios run each server feature through this client.
 
 ### MCVideo (TS 24.281, TS 24.581)
 
-- Prearranged and chat group calls with transmission control (queueing, revocation, implicit request) and reception
-  control; ad hoc group calls; private calls with and without transmission control
+- Prearranged and chat group calls with transmission control (queueing with Queue Position Request, revocation,
+  implicit request) and reception control, with the participant timers T100 to T104 and counters C100 to C104
+  (`mcvideo.transmission_timers`); automatic and manual commencement (`Answer-Mode`, `mcvideo.answer_mode`) for
+  group and private calls; private calls with and without transmission control
+- Ad hoc group calls, also emergency and imminent peril (`mcvideo-adhoc emergency|imminent`), with participant list or
+  criteria modification (`mcvideo-adhoc-modify`)
 - Emergency and imminent-peril calls with pre-emptive transmission, emergency alerts, ad hoc group emergency alerts
+  with participant criteria modification (`mcvideo-adhoc-alert modify`); cancelling another user's emergency and
+  emergency alert (`mcvideo-emergency off alert=<MCVideo ID>`); cancelling a group's imminent peril state without a
+  call (`mcvideo-imminent-cancel`); the user profile's `<ruleset>` authorisations and `<MCVideoGroupInitiation>`,
+  `<EmergencyAlert>` and `<MCVideoPrivateRecipient>` target entries checked before each of them
+- Received emergency and imminent peril ad hoc group calls (per-group emergency states, the group's security
+  information); ad hoc call redirection notifications
+- Transmission cancel request notify while queued
+- Emergency private calls with an emergency alert (`mcvideo-private <id> <mode> emergency alert`,
+  `mcvideo-emergency on|off alert`) and the controlling function's SIP INFO on the alert's outcome
+- Media plane control messages with unknown subtypes, names or fields ignored (TS 24.581 9.1.4); `mc_granted` in the
+  initial offer with an implicit request (`mcvideo.offer_granted`) and the SSRCs of the SDP answer
+- XML integrity protection: a body with a failed or unverifiable signature is refused (403, warning 139)
+- XML confidentiality protection of every element and attribute of TS 24.281 clause 4.8; a body that cannot be
+  decrypted is refused (403, warning 140)
+- The KMS of a private call's target from the user profile (`<PrivateCallKMSURI>`), other KMSs' certificates from
+  the KMS CertCache, and KMS redirect (488 with a KRR)
+- Leaving and rejoining an ad hoc group call (`mcvideo-rejoin`)
+- Transmission and reception priority (`mc_priority`, `mc_reception_priority`) offered from the user profile's
+  `<Priority>`, negotiated, and used in Transmission and Receive Media Requests
+- Settings-only PUBLISH (`mcvideo-settings-publish [remove]`) and the settings of each client from the poc-settings
+  NOTIFY; remote affiliation requests accepted per group (`mcvideo-affiliation-accept [<group>...]`),
+  de-affiliation from one group (`mcvideo-deaffiliate <group>`)
+- MCVideo group documents in group management (`group-create ... mcvideo`, `temporary-create ... mcvideo`)
+- Subscription to group dynamic data (`mcvideo-gdd-subscribe`, TS 24.281 clause 8.2.1.6)
+- `<gw-mcvideo-usage>` in the service authorisation when configured (`mcvideo.via_gateway_ue`)
 - Video pull and push, one-to-one and to or from the server with its recording; ambient viewing; remote transmission
 - Functional aliases, regroups, remote group selection, location
 - End-to-end protected video (GMK, PCK), protected transmission control and XML signalling
@@ -75,5 +104,6 @@ has it: the lab scenarios run each server feature through this client.
 
 - Off-network (ProSe) operation
 - Interconnection between MC systems and migration to a partner system: the client works in one MC system
+- MCVideo pre-established sessions (and ambient viewing over them)
 - Whatever the OpenMCX servers do not support either: see their
   [limitations](https://github.com/openMCX/openmcx-server/blob/main/docs/LIMITATIONS.md)

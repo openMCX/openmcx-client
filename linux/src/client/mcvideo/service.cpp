@@ -24,14 +24,44 @@ std::string Client::mcvideo_group() const {
 // TS 24.281 clauses 10.2.2.2.1 step 8 and 15.2.1.1 with TS 33.180 clause 7.4.1: a one-to-one call's media under a
 // PCK the caller generates for the called MCVideo ID, offered in a=key-mgmt; its streams take the MCVideo private call
 // CS-IDs 2 (initiator) and 3 (receiver) of TS 33.180 table E.1.3-1.
+// Step 8 d): "shall encrypt the PCK to a UID associated to the MCVideo client using the MCVideo ID and KMS URI of the
+// invited user as determined by the procedures of clause 6.2.8.3.9": the KMS URI keys the PCK (IDRkmsr, TS 33.180
+// annex E.2) with that KMS's certificate (its own, or an External KMS's from the Home KMS, TS 33.180 clause 5.2.8.3);
+// after a KMS Redirect Response, the receiver KMS selected by TS 33.180 clause 5.2.8.2.5.
 std::optional<keying::KeyMessage> Client::mcvideo_offer_pck(const std::string &target) {
   if (!protected_media()) return std::nullopt;
   auto &call = *mcvideo_call_;
   if (!mcvideo_keys_) throw std::runtime_error("MCVideo key management client unavailable");
-  auto [key, message] = mcvideo_keys_->make_pck(target);
+  auto [kms, source] = mcvideo_redirect_kms_.first == target
+                           ? std::pair{std::exchange(mcvideo_redirect_kms_, {}).second, std::string("kms-redirect")}
+                           : mcvideo_target_kms(target);
+  if (!mcvideo_keys_->knows_kms(kms)) {
+    status_["mcvideo_private_call_kms"] = {{"target", target}, {"kms_uri", kms}, {"source", source}, {"known", false}};
+    throw std::runtime_error("no KMS certificate for the KMS URI of " + target + ": " + kms);
+  }
+  auto [key, message] = mcvideo_keys_->make_pck(target, kms);
   call.local.protected_media = true;
   call.local.key_mgmt = std::move(message);
+  status_["mcvideo_private_call_kms"] = {{"target", target}, {"kms_uri", kms}, {"source", source}, {"known", true}};
+  event("mcvideo_private_call_kms", status_["mcvideo_private_call_kms"]);
   return key;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 6.2.8.3.9, on network operation: "1) shall search for the <entry> element of the <PrivateCallURI>
+// element of the <PrivateCallOnNetwork> element of the <PrivateCallList> element ... of the MCVideo user profile
+// document ... containing the identified MCVideo ID; a) if the identified MCVideo ID is found and if the <entry>
+// element of the <PrivateCallKMSURI> element ... is not empty, shall retrieve the KMS URI contained therein; or b) if
+// the identified MCVideo ID is not found or the <entry> element of the <PrivateCallKMSURI> element is empty, shall
+// retrieve the <kms> element of the <App-Server-Info> element of the <on-network> element of the MCVideo UE initial
+// configuration document": this client's KMS URI (security.kms_id, else security.kms_uri, the KMS it is provisioned
+// by).
+std::pair<std::string, std::string> Client::mcvideo_target_kms(const std::string &target) const {
+  const auto listed = mcvideo_profile_.value("private_call_kms", Json::object());
+  if (const auto found = listed.find(target);
+      found != listed.end() && found->is_string() && !found->get<std::string>().empty())
+    return {found->get<std::string>(), "user-profile"};
+  return {mcvideo_keys_->kms_uri_of(target), "initial-configuration"};
 }
 
 //------------------------------------------------------------------------------
@@ -69,14 +99,16 @@ void Client::mcvideo_subscribe_keys() {
           return;
         }
         mcvideo_key_refresh_at_ = key_refresh_time(response);
+        schedule([this] { mcvideo_update_key_subscriptions(); });
       },
       "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary));
   mcvideo_key_group_ = mcvideo_group();
 }
 
 //------------------------------------------------------------------------------
-// TS 24.481 clause 6.3.13.2.1: the NOTIFY (RFC 5875 xcap-diff) of the GKTP subscription: open the GMK it carries
-// (TS 33.180) and protect the group's media with it.
+// TS 24.481 clause 6.3.13.2.1: the NOTIFY (RFC 5875 xcap-diff) of a GKTP subscription to the MCVideo server (the
+// selected group's or one of mcvideo_update_key_subscriptions): open the GMK it carries (TS 33.180) and keep it for
+// its group; the media use it now if its group is that of the call in progress, or, without a call, the selected one.
 SipResponse Client::mcvideo_key_notify(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
@@ -84,21 +116,212 @@ SipResponse Client::mcvideo_key_notify(const SipMessage &message) {
     response.status_code = 403;
     return response;
   }
+  const bool selected = message.dialog_id == mcvideo_key_subscription_;
+  std::string key_group = selected ? mcvideo_key_group_ : std::string{};
+  if (!selected)
+    for (const auto &[group, dialog] : mcvideo_extra_key_subscriptions_)
+      if (dialog == message.dialog_id) key_group = group;
+  if (key_group.empty()) {
+    // RFC 6665 section 4.1.2.3: the final NOTIFY of a subscription this client ended is accepted
+    if (mcvideo_closing_key_subscriptions_.contains(message.dialog_id)) {
+      if (get_header(message.headers, "Subscription-State").starts_with("terminated"))
+        mcvideo_closing_key_subscriptions_.erase(message.dialog_id);
+      return response;
+    }
+    response.status_code = 481; // RFC 6665 section 4.1.3
+    return response;
+  }
+  const auto in_use = mcvideo_key_group_of(mcvideo_call_ && !mcvideo_call_->group.empty() ? mcvideo_call_->group
+                                                                                          : mcvideo_group());
   if (get_header(message.headers, "Subscription-State").starts_with("terminated")) {
-    mcvideo_protection_.clear_group();
-    mcvideo_key_subscription_.clear();
+    mcvideo_group_keys_.erase(key_group);
+    mcvideo_wanted_key_groups_.erase(key_group); // asked again only when called again
+    if (key_group == in_use) mcvideo_protection_.clear_group();
+    if (selected) {
+      mcvideo_key_subscription_.clear();
+    } else {
+      mcvideo_extra_key_refresh_at_.erase(message.dialog_id);
+      mcvideo_extra_key_subscriptions_.erase(key_group);
+    }
+    event("mcvideo_group_key_subscription_ended", {{"group_id", key_group}});
+    schedule([this, key_group] { mcvideo_key_wait_done(key_group, false); });
     return response;
   }
   if (!mcvideo_keys_ || message.content_type != "application/xcap-diff+xml") {
     response.status_code = 400;
     return response;
   }
-  const auto document = keying::parse_gktp_xcap_diff(message.body, mcvideo_key_group_, xcap_root());
-  const auto key = mcvideo_keys_->open_group(gms_identity(), mcvideo_key_group_, document);
-  mcvideo_protection_.set_group(key);
-  status_["mcvideo_group_key_id"] = key.csb_id;
-  event("mcvideo_group_key_installed", {{"group_id", mcvideo_key_group_}, {"key_id", key.csb_id}});
+  const auto document = keying::parse_gktp_xcap_diff(message.body, key_group, xcap_root());
+  const auto key = mcvideo_keys_->open_group(gms_identity(), key_group, document);
+  mcvideo_group_keys_[key_group] = key;
+  mcvideo_wanted_key_groups_.erase(key_group);
+  if (key_group == in_use) mcvideo_protection_.set_group(key);
+  if (selected) status_["mcvideo_group_key_id"] = key.csb_id;
+  Json held = Json::object();
+  for (const auto &[group, held_key] : mcvideo_group_keys_) held[group] = held_key.csb_id;
+  status_["mcvideo_group_keys"] = held;
+  event("mcvideo_group_key_installed",
+        {{"group_id", key_group}, {"key_id", key.csb_id}, {"selected", key_group == in_use}});
+  schedule([this, key_group] { mcvideo_key_wait_done(key_group, true); });
   return response;
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clause 5.7: the group whose GMK protects a call on [group]: for a regroup using a preconfigured group
+// (TS 24.281 clause 21), that group's (TS 24.281 clause 21.2.1.3: the regroup takes its configuration from it);
+// otherwise the group itself, a temporary group of the GMS included (TS 24.481 clause 6.3.14: the GMS keys it).
+std::string Client::mcvideo_key_group_of(const std::string &group) const {
+  if (mcvideo_regroups_.contains(group))
+    if (const auto preconfigured = mcvideo_regroups_.at(group).value("preconfigured", std::string{});
+        !preconfigured.empty())
+      return preconfigured;
+  return group;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 4.7.1: select the GMK of [group] for the media; false when it is not held (it is then subscribed
+// to, so that a later call finds it).
+bool Client::mcvideo_use_group_key(const std::string &group) {
+  const auto key_group = mcvideo_key_group_of(group);
+  if (const auto found = mcvideo_group_keys_.find(key_group); found != mcvideo_group_keys_.end()) {
+    try {
+      mcvideo_protection_.set_group(found->second);
+      return true;
+    } catch (const std::exception &error) {
+      event("mcvideo_group_key_unusable", {{"group_id", key_group}, {"reason", error.what()}});
+      mcvideo_group_keys_.erase(found);
+    }
+  }
+  if (key_group != mcvideo_key_group_ && !mcvideo_wanted_key_groups_.contains(key_group)) {
+    mcvideo_wanted_key_groups_.insert(key_group);
+    schedule([this] { mcvideo_update_key_subscriptions(); });
+  }
+  return false;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.481 clause 6.3.13.2.1: a GKTP subscription to the MCVideo server for each further group whose GMK the user
+// needs (TS 33.180 clause 5.7): the affiliated groups, the regroups' key groups and the groups called without a key;
+// those no longer needed end (Expires 0).
+void Client::mcvideo_update_key_subscriptions() {
+  if (!protected_media() || !mcvideo_keys_ || !mcvideo_authorized_ || mcvideo_key_subscription_.empty()) return;
+  std::set<std::string> wanted(mcvideo_wanted_key_groups_);
+  for (const auto &group : mcvideo_groups_) wanted.insert(mcvideo_key_group_of(group));
+  for (const auto &group : mcvideo_extra_groups_) wanted.insert(mcvideo_key_group_of(group));
+  for (const auto &[tgi, regroup] : mcvideo_regroups_.items()) wanted.insert(mcvideo_key_group_of(tgi));
+  wanted.erase(mcvideo_key_group_);
+  wanted.erase(std::string{});
+  for (auto it = mcvideo_extra_key_subscriptions_.begin(); it != mcvideo_extra_key_subscriptions_.end();) {
+    if (wanted.contains(it->first)) {
+      ++it;
+      continue;
+    }
+    mcvideo_extra_key_refresh_at_.erase(it->second);
+    try {
+      sip_.request_in_dialog(it->second, "SUBSCRIBE", "", "",
+                             {{"Event", "xcap-diff"}, {"Expires", "0"}, {"P-Preferred-Service", mcvideo_service.icsi}});
+    } catch (const std::exception &error) {
+      event("mcvideo_group_key_subscription_end_failed", {{"group_id", it->first}, {"reason", error.what()}});
+    }
+    mcvideo_group_keys_.erase(it->first);
+    mcvideo_closing_key_subscriptions_.insert(it->second);
+    it = mcvideo_extra_key_subscriptions_.erase(it);
+  }
+  for (const auto &key_group : wanted) {
+    if (mcvideo_extra_key_subscriptions_.contains(key_group)) continue;
+    McpttInfo info;
+    info.access_token = token_;
+    info.client_id = client_id();
+    info.request_uri = key_group;
+    std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
+                                {"application/resource-lists+xml", keying::gktp_resource_list(key_group)}};
+    const auto boundary = "mcx-" + random_id();
+    const auto dialog = sip_.subscribe(
+        mcvideo_service_uri(), "xcap-diff", key_subscription_expires_s(),
+        {{"P-Preferred-Service", mcvideo_service.icsi}},
+        [this, key_group](const SipResponse &response) {
+          if (response.status_code < 200) return;
+          const auto found = mcvideo_extra_key_subscriptions_.find(key_group);
+          if (found == mcvideo_extra_key_subscriptions_.end()) return;
+          if (response.status_code >= 300) {
+            event("mcvideo_group_key_subscription_refused", {{"group_id", key_group}, {"status", response.status_code}});
+            mcvideo_extra_key_refresh_at_.erase(found->second);
+            mcvideo_extra_key_subscriptions_.erase(found);
+            mcvideo_wanted_key_groups_.erase(key_group); // not asked again until called again
+            mcvideo_key_wait_done(key_group, false);
+            return;
+          }
+          mcvideo_extra_key_refresh_at_[found->second] = key_refresh_time(response);
+        },
+        "multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary));
+    mcvideo_extra_key_subscriptions_[key_group] = dialog;
+    event("mcvideo_group_key_subscription", {{"group_id", key_group}});
+  }
+}
+
+//------------------------------------------------------------------------------
+// RFC 6665 section 4.1.2.2: a further MCVideo GKTP subscription refreshed in its dialog; a refused or failed refresh
+// ends it, and mcvideo_update_key_subscriptions subscribes again.
+void Client::mcvideo_refresh_extra_key_subscription(const std::string &dialog) {
+  mcvideo_extra_key_refresh_at_[dialog] = 0;
+  std::string key_group;
+  for (const auto &[group, held] : mcvideo_extra_key_subscriptions_)
+    if (held == dialog) key_group = group;
+  if (key_group.empty()) {
+    mcvideo_extra_key_refresh_at_.erase(dialog);
+    return;
+  }
+  auto resubscribe = [this, key_group, dialog](const std::string &reason) {
+    event("group_key_subscription_refresh_failed", {{"service", "mcvideo"}, {"group_id", key_group}, {"reason", reason}});
+    const auto current = mcvideo_extra_key_subscriptions_.find(key_group);
+    if (current == mcvideo_extra_key_subscriptions_.end() || current->second != dialog) return;
+    mcvideo_extra_key_subscriptions_.erase(current);
+    mcvideo_extra_key_refresh_at_.erase(dialog);
+    schedule([this] { mcvideo_update_key_subscriptions(); });
+  };
+  try {
+    sip_.request_in_dialog(dialog, "SUBSCRIBE", "application/resource-lists+xml", keying::gktp_resource_list(key_group),
+                           {{"Event", "xcap-diff"}, {"Expires", std::to_string(key_subscription_expires_s())}},
+                           [this, dialog, resubscribe](const SipResponse &response) {
+                             if (response.status_code < 200 || !mcvideo_extra_key_refresh_at_.contains(dialog)) return;
+                             if (response.status_code >= 300) {
+                               resubscribe(std::to_string(response.status_code));
+                               return;
+                             }
+                             mcvideo_extra_key_refresh_at_[dialog] = key_refresh_time(response);
+                           });
+  } catch (const std::exception &error) {
+    resubscribe(error.what());
+  }
+}
+
+//------------------------------------------------------------------------------
+// The call waiting for the GMK of [key_group] (mcvideo_group_call): placed when the key is installed; on a refused
+// or ended subscription, or past its deadline (key_group empty, from mcvideo_tick), it fails.
+void Client::mcvideo_key_wait_done(const std::string &key_group, bool installed) {
+  if (!mcvideo_key_wait_) return;
+  if (!key_group.empty() && mcvideo_key_wait_->key_group != key_group) return;
+  if (key_group.empty() && monotonic_ms() < mcvideo_key_wait_->deadline_ms) return;
+  auto waiting = std::move(*mcvideo_key_wait_);
+  mcvideo_key_wait_.reset();
+  if (!installed) {
+    failure("MCVideo group key unavailable for " + waiting.key_group);
+    return;
+  }
+  try {
+    waiting.place();
+  } catch (const std::exception &error) {
+    failure(error.what());
+  }
+}
+
+//------------------------------------------------------------------------------
+// Helper: whether [dialog] is one of the MCVideo GKTP subscriptions.
+bool Client::mcvideo_key_dialog(const std::string &dialog) const {
+  if (dialog.empty()) return false;
+  if (dialog == mcvideo_key_subscription_ || mcvideo_closing_key_subscriptions_.contains(dialog)) return true;
+  return std::any_of(mcvideo_extra_key_subscriptions_.begin(), mcvideo_extra_key_subscriptions_.end(),
+                     [&dialog](const auto &entry) { return entry.second == dialog; });
 }
 
 //------------------------------------------------------------------------------
@@ -135,11 +358,15 @@ void Client::mcvideo_authorize(const std::string &token) {
   McpttInfo info;
   info.access_token = token.empty() ? token_ : token;
   info.client_id = client_id();
+  // TS 24.281 clauses 7.2.1 steps 3 / c) and 7.2.2 steps 4 c) / 5 c): <gw-mcvideo-usage> "true" when this client
+  // reaches the MCVideo system through an MCVideo gateway UE (mcvideo.via_gateway_ue, a deployment setting).
+  if (cfg_.at("mcvideo").value("via_gateway_ue", false)) info.gateway_usage = true;
   std::vector<SipHeader> headers{{"Expires", "4294967295"}};
   const bool refresh = by_register ? mcvideo_authorized_ : !mcvideo_auth_etag_.empty() && token.empty();
   if (refresh && !by_register) headers.push_back({"SIP-If-Match", mcvideo_auth_etag_});
   std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}};
-  if (!by_register) parts.push_back({"application/poc-settings+xml", poc_settings_xml(client_id())});
+  // TS 24.281 clause 7.2.2 6): the current answer mode and the selected user profile's index (clause 7.2.3 4)).
+  if (!by_register) parts.push_back({"application/poc-settings+xml", mcvideo_poc_settings()});
   // TS 33.180 clause 5.4 (TS 24.281 clause 4.7): the CSK in a new authorisation only, a new one after an ended
   // authorisation; a renewal carries none, the server holding it.
   if (!refresh && token.empty() && mcvideo_keys_ && mcvideo_csk_upload_.empty() && mcvideo_csk_) {
@@ -152,7 +379,7 @@ void Client::mcvideo_authorize(const std::string &token) {
   const bool uploading = !refresh && !mcvideo_csk_upload_.empty();
   if (uploading) parts.push_back({"application/mikey", mcvideo_csk_upload_});
   if (token.empty()) ++mcvideo_authorization_retry_.generation;
-  auto answered = [this, probe = !token.empty(), refresh, uploading](const SipResponse &response) {
+  auto answered = [this, probe = !token.empty(), refresh, uploading, by_register](const SipResponse &response) {
     mcvideo_result("authorize", response);
     if (probe) return; // the real authorisation stays as it was
     if (response.status_code != 200) {
@@ -189,6 +416,11 @@ void Client::mcvideo_authorize(const std::string &token) {
     }
     mcvideo_authorized_ = true;
     event("mcvideo_service_authorized");
+    // Authorised by REGISTER (clause 7.2.1), which carries no service settings: the client sets them with the PUBLISH
+    // for the MCVideo service settings only (clause 7.2.3; TS 37.579-1 table 5.3.2.5.1-1 step 1a1).
+    if (by_register) schedule([this] {
+      if (mcvideo_authorized_) mcvideo_settings_publish(false);
+    });
     // TS 24.281 clause 18.3.4.1: the initial log-on trigger, once a configuration is held.
     mcvideo_location_logon_pending_ = !mcvideo_location_.configured();
     mcvideo_location_.signal(location::Event::InitialLogOn, monotonic_ms());
@@ -210,17 +442,33 @@ void Client::mcvideo_authorize(const std::string &token) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.281 clause 8.3.2.2 (RFC 4661): the simple-filter restricting presence notifications to this MCVideo client:
+// the "pidf" and "mcvideoPI10" bindings and one <filter> (an id, no uri) including this client's tuple.
+std::string Client::mcvideo_client_filter() {
+  return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+         "<filter-set xmlns=\"urn:ietf:params:xml:ns:simple-filter\"><ns-bindings>"
+         "<ns-binding prefix=\"pidf\" urn=\"urn:ietf:params:xml:ns:pidf\"/>"
+         "<ns-binding prefix=\"mcvideoPI10\" urn=\"urn:3gpp:ns:mcvideoPresInfo:1.0\"/>"
+         "</ns-bindings><filter id=\"" +
+         random_id().substr(0, 12) +
+         "\"><what><include>//pidf:presence/pidf:tuple[@id=&quot;" + xml_escape(client_id()) +
+         "&quot;]</include></what></filter></filter-set>";
+}
+
+//------------------------------------------------------------------------------
 // TS 24.281 clause 8.2.1.3: the affiliation status determination procedure: SUBSCRIBE to this user's affiliation
 // status at the MCVideo server.
 void Client::mcvideo_subscribe() {
   if (!mcvideo_authorized_ || !mcvideo_subscription_.empty()) return;
   mcvideo_status_known_ = false;
-  // Step 2: the mcvideo-info with <mcvideo-request-uri> set to this user's MCVideo ID.
+  // Step 2: the mcvideo-info with <mcvideo-request-uri> set to this user's MCVideo ID; step 7: the groups of this user
+  // at this client, restricted with a simple-filter body (clause 8.3.2.2).
   McpttInfo info;
   info.request_uri = mcvideo_user();
   info.client_id = client_id();
-  const auto [type, body] =
-      message_body({{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}}, "mcvideo-" + random_id());
+  const auto [type, body] = message_body({{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
+                                          {"application/simple-filter+xml", mcvideo_client_filter()}},
+                                         "mcvideo-" + random_id());
   mcvideo_subscription_ = sip_.subscribe(
       mcvideo_service_uri(), "presence", 4294967295u,
       {{"P-Preferred-Service", mcvideo_service.icsi}, {"Accept", "application/pidf+xml"}},
@@ -286,6 +534,7 @@ SipResponse Client::mcvideo_affiliation_notify(const SipMessage &message) {
     schedule([this, ok = groups.contains(group)] { mcvideo_selection_affiliated(ok); });
   }
   event("mcvideo_affiliation_status", {{"groups", groups}, {"terminated", terminated}});
+  schedule([this] { mcvideo_update_key_subscriptions(); });
   if (terminated) {
     mcvideo_subscription_.clear();
     mcvideo_status_known_ = false;
@@ -305,16 +554,39 @@ SipResponse Client::mcvideo_affiliation_notify(const SipMessage &message) {
 void Client::mcvideo_affiliate(bool affiliate, const std::string &group) {
   if (!mcvideo_authorized_) throw std::runtime_error("MCVideo affiliation requires MCVideo service authorisation");
   if (group.empty()) mcvideo_desired_affiliation_ = affiliate;
-  if (!affiliate) mcvideo_extra_groups_.clear();
+  if (!affiliate) {
+    mcvideo_extra_groups_.clear();
+    mcvideo_left_selected_ = false;
+  }
+  mcvideo_publish_affiliation(affiliate, group.empty() ? std::vector<std::string>{} : std::vector{group}, group);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 8.2.1.2: the PUBLISH itself: the configured group (unless the user left it, or is no longer
+// interested in it), the extra groups and `added`, which join the extra groups once the server accepts them (the
+// configured group among them: the user is interested in it again). Not affiliate: Expires 0, no group. `group` is
+// the one group a caller waits for (a refused one leaves the affiliation as it was).
+void Client::mcvideo_publish_affiliation(bool affiliate, const std::vector<std::string> &added,
+                                         const std::string &group) {
   McpttInfo info;
   info.request_uri = mcvideo_user();
   info.client_id = client_id();
-  auto affiliation = Affiliation{mcvideo_user(), client_id(), random_id(), {mcvideo_group()}, {}};
+  auto affiliation = Affiliation{mcvideo_user(), client_id(), random_id(), {}, {}};
+  const auto listed = [&affiliation](const std::string &each) {
+    return std::find(affiliation.groups.begin(), affiliation.groups.end(), each) != affiliation.groups.end();
+  };
+  // Step 5 c): all the groups the user indicates interest in: the configured group only while wanted (after a
+  // de-affiliation from every group, affiliating another group does not bring it back).
+  const bool selected_wanted =
+      std::find(added.begin(), added.end(), mcvideo_group()) != added.end() || mcvideo_desired_affiliation_;
+  if (!mcvideo_left_selected_ && selected_wanted) affiliation.groups.push_back(mcvideo_group());
   for (const auto &extra : mcvideo_extra_groups_)
-    if (extra != mcvideo_group()) affiliation.groups.push_back(extra);
-  if (!group.empty() &&
-      std::find(affiliation.groups.begin(), affiliation.groups.end(), group) == affiliation.groups.end())
-    affiliation.groups.push_back(group);
+    if (extra != mcvideo_group() && !listed(extra)) affiliation.groups.push_back(extra);
+  for (const auto &each : added)
+    if (!listed(each)) affiliation.groups.push_back(each);
+  // TS 24.281 clause 8.2.1.2 4) and NOTE 2: no group left is Expires zero; the PIDF then names no group (an empty
+  // <status>), not the groups being left.
+  if (!affiliate) affiliation.groups.clear();
   affiliation.mcvideo = true;
   mcvideo_sent_pid_ = affiliation.publication_id;
   std::vector<SipHeader> headers{{"Expires", affiliate ? "4294967295" : "0"}};
@@ -323,22 +595,31 @@ void Client::mcvideo_affiliate(bool affiliate, const std::string &group) {
   mcvideo_request("presence",
                   {{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
                    {"application/pidf+xml", affiliation_xml(affiliation, false)}},
-                  headers, [this, affiliate, group, refresh](const SipResponse &response) {
+                  headers, [this, affiliate, added, group, refresh](const SipResponse &response) {
                     mcvideo_result(affiliate ? "affiliate" : "deaffiliate", response);
                     if (response.status_code != 200) {
                       // A refused extra group leaves the affiliation as it was.
-                      if (group.empty()) failure("MCVideo affiliation: " + std::to_string(response.status_code));
+                      if (added.empty()) failure("MCVideo affiliation: " + std::to_string(response.status_code));
                       // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew.
                       if (refresh && response.status_code == 412) {
                         mcvideo_affiliation_etag_.clear();
-                        schedule([this, affiliate, group] { mcvideo_affiliate(affiliate, group); });
+                        schedule([this, affiliate, added, group] {
+                          if (mcvideo_authorized_) mcvideo_publish_affiliation(affiliate, added, group);
+                        });
                       }
                       if (mcvideo_selection_pending_.is_object() &&
                           mcvideo_selection_pending_.value("group", std::string{}) == group)
                         schedule([this] { mcvideo_selection_affiliated(false); });
                       return;
                     }
-                    if (!group.empty()) mcvideo_extra_groups_.insert(group);
+                    for (const auto &each : added) {
+                      if (each == mcvideo_group()) {
+                        mcvideo_desired_affiliation_ = true;
+                        mcvideo_left_selected_ = false;
+                      } else {
+                        mcvideo_extra_groups_.insert(each);
+                      }
+                    }
                     mcvideo_affiliation_etag_ =
                         affiliate ? std::string(get_header(response.headers, "SIP-ETag")) : std::string{};
                     // The affiliation status itself comes from the NOTIFY (TS 24.281 clause 8.2.1.3).
@@ -348,24 +629,32 @@ void Client::mcvideo_affiliate(bool affiliate, const std::string &group) {
 
 //------------------------------------------------------------------------------
 // Helper: the MCVideo test commands, each dispatched to the procedure it starts:
-//   mcvideo-affiliate [group]   mcvideo-deaffiliate   mcvideo-authorize [token]
-//   mcvideo-call [implicit]   mcvideo-chat <group>   mcvideo-private <MCVideo ID> [auto|manual|force-auto] [no-control]
+//   mcvideo-affiliate [group]   mcvideo-deaffiliate [group]   mcvideo-authorize [token]
+//   mcvideo-settings-publish [remove]   mcvideo-settings-subscribe [fetch]   mcvideo-settings-resubscribe
+//   mcvideo-settings-unsubscribe   mcvideo-affiliation-accept [<group>...]   mcvideo-affiliation-decline
+//   mcvideo-call [implicit] [emergency [alert]|imminent|broadcast] [group=<group>]   mcvideo-chat <group> [implicit]
+//   [emergency|imminent]   mcvideo-private <MCVideo ID> [auto|manual|force-auto] [no-control] [emergency] [alert]
+//   [implicit]
 //   mcvideo-answer   mcvideo-reject   mcvideo-transmit   mcvideo-end (also mcvideo-release)
-//   mcvideo-call emergency|imminent   mcvideo-emergency on|off   mcvideo-imminent on|off   mcvideo-alert on|off
+//   mcvideo-emergency on|off [alert|alert=<MCVideo ID>]   mcvideo-imminent on|off   mcvideo-alert on|off
+//   mcvideo-imminent-cancel [group]   mcvideo-queue-position
+//   mcvideo-gdd-subscribe <group> [fetch] [status|broadcast|regroup|call|affiliated]...
+//   mcvideo-gdd-resubscribe <group>   mcvideo-gdd-unsubscribe <group>
 //   mcvideo-receive   mcvideo-stop-receiving   mcvideo-hangup
 //   mcvideo-push <MCVideo ID> [auto|manual|force-auto]   mcvideo-pull <MCVideo ID> [auto|manual|force-auto]
 //   mcvideo-remote-transmit <MCVideo ID>   mcvideo-remote-cancel <MCVideo ID>
 //   mcvideo-push-server   mcvideo-pull-server <video URL>
 //   mcvideo-ambient <MCVideo ID> remote|local
-//   mcvideo-adhoc <MCVideo ID>...   mcvideo-adhoc criteria <criteria>
-//   mcvideo-call group=<group>   mcvideo-regroup create <TGI> <preconfigured group> groups|users <URI>,...
+//   mcvideo-adhoc [emergency|imminent] <MCVideo ID>...   mcvideo-adhoc [emergency|imminent] criteria <criteria>
+//   mcvideo-adhoc-modify add|remove <MCVideo ID>... | criteria <criteria>   mcvideo-adhoc-release (mcvideo-hangup leaves)
+//   mcvideo-regroup create <TGI> <preconfigured group> groups|users <URI>,...
 //   mcvideo-regroup remove <TGI>
 //   mcvideo-fa activate|takeover|deactivate <alias>...   mcvideo-fa use <alias>|none
 //   mcvideo-private-fa <alias> [auto|manual|force-auto]
 //   mcvideo-fa-subscribe [alias]   mcvideo-fa-fetch [alias]   mcvideo-fa-unsubscribe [alias]
 //   mcvideo-fa-bind <alias> <group>[,<group>...]   mcvideo-fa-unbind <alias> <group>[,<group>...]
 //   mcvideo-select-remote <MCVideo ID> <group>
-//   mcvideo-adhoc-alert <criteria>   mcvideo-adhoc-alert cancel
+//   mcvideo-adhoc-alert <criteria>   mcvideo-adhoc-alert cancel   mcvideo-adhoc-alert modify <criteria>
 //   mcvideo-location request [refresh] [filter <area> in|out] [fa <alias>] [no-list] [<MCVideo ID>...]
 //   mcvideo-location configure <MCVideo ID>[,<MCVideo ID>...] <configuration JSON>
 void Client::mcvideo_command(const std::string &cmd) {
@@ -374,17 +663,57 @@ void Client::mcvideo_command(const std::string &cmd) {
   std::string verb, argument;
   words >> verb >> argument;
   if (verb == "mcvideo-affiliate") return mcvideo_affiliate(true, argument);
-  if (verb == "mcvideo-deaffiliate") return mcvideo_affiliate(false);
+  // TS 24.281 clause 8.2.1.2: no longer interested in any group, or (with a group) in that group only.
+  if (verb == "mcvideo-deaffiliate") {
+    if (argument.empty()) return mcvideo_affiliate(false);
+    if (!mcvideo_change_affiliation({}, {argument})) throw std::runtime_error("not affiliated to " + argument);
+    return;
+  }
   if (verb == "mcvideo-authorize") return mcvideo_authorize(argument);
+  // mcvideo-call [implicit] [emergency|imminent|broadcast] [group=<group>]: TS 24.281 clause 9.2.1.2.1.1 with the
+  // implicit transmission request of clause 6.4, an emergency or imminent peril call (clauses 6.2.8.1.1, 6.2.8.1.9), a
+  // broadcast group call, or a call to another group (e.g. a regroup's temporary group identity), in any order. With
+  // alert, an emergency group call that also sends the user's emergency alert (clause 6.2.8.1.1 step 2).
   if (verb == "mcvideo-call") {
-    if (argument == "emergency" || argument == "imminent") return mcvideo_group_call(false, {}, argument);
-    if (argument.starts_with("group=")) return mcvideo_group_call(false, {}, {}, argument.substr(6));
-    return mcvideo_group_call(argument == "implicit");
+    bool implicit = false, alert = false;
+    std::string priority, group;
+    for (auto word = argument; !word.empty(); word.clear(), words >> word) {
+      if (word == "implicit")
+        implicit = true;
+      else if (word == "emergency" || word == "imminent" || word == "broadcast")
+        priority = word;
+      else if (word == "alert")
+        alert = true;
+      else if (word.starts_with("group="))
+        group = word.substr(6);
+      else
+        throw std::runtime_error("mcvideo-call [implicit] [emergency [alert]|imminent|broadcast] [group=<group>]");
+    }
+    if (alert && priority != "emergency") throw std::runtime_error("mcvideo-call alert goes with emergency");
+    return mcvideo_group_call(implicit, {}, priority, group, alert);
   }
   if (verb == "mcvideo-emergency" || verb == "mcvideo-imminent") {
-    if (argument != "on" && argument != "off") throw std::runtime_error(verb + " on|off");
-    return mcvideo_change_priority(verb == "mcvideo-emergency", argument == "on");
+    if (argument != "on" && argument != "off")
+      throw std::runtime_error(verb + " on|off [alert|alert=<MCVideo ID>]");
+    // mcvideo-emergency off alert=<MCVideo ID>: also cancel that user's emergency alert (TS 24.281 clauses
+    // 6.2.8.1.14 step 3 and 6.2.8.3.8 step 3). In a private call, mcvideo-emergency on alert: the upgrade with the
+    // user's emergency alert (clause 10.2.2.2.5 -> 6.2.8.3.2 step 3); mcvideo-emergency off alert: the user's alert
+    // cancelled with the emergency (clause 10.2.2.2.4 step 2 -> 6.2.8.3.6, third case).
+    std::string alert_of;
+    bool own_alert = false;
+    for (std::string word; words >> word;)
+      if (word.starts_with("alert="))
+        alert_of = word.substr(6);
+      else if (word == "alert" && verb == "mcvideo-emergency")
+        own_alert = true;
+      else
+        throw std::runtime_error(verb + " on|off [alert|alert=<MCVideo ID>]");
+    return mcvideo_change_priority(verb == "mcvideo-emergency", argument == "on", alert_of, own_alert);
   }
+  // TS 24.581 clause 6.2.4.9.3: mcvideo-queue-position.
+  if (verb == "mcvideo-queue-position") return mcvideo_queue_position_request();
+  // TS 24.281 clause 9.2.5.2.1: mcvideo-imminent-cancel [group].
+  if (verb == "mcvideo-imminent-cancel") return mcvideo_imminent_cancel(argument);
   if (verb == "mcvideo-alert") {
     if (argument != "on" && argument != "off") throw std::runtime_error("mcvideo-alert on|off");
     return mcvideo_alert(argument == "on");
@@ -435,6 +764,11 @@ void Client::mcvideo_command(const std::string &cmd) {
 
   // TS 24.281 clause 22.2.2.1.1: an ad hoc group call to MCVideo users or by criteria.
   if (verb == "mcvideo-adhoc") return mcvideo_adhoc_command(argument, words);
+  if (verb == "mcvideo-adhoc-modify") {
+    std::string rest;
+    std::getline(words, rest);
+    return mcvideo_adhoc_modify(argument + rest);
+  }
   // TS 24.281 clause 15.2.1.1: an ambient viewing call, viewing the target (remote) or
   // being viewed by it (local).
   if (verb == "mcvideo-ambient") {
@@ -450,9 +784,21 @@ void Client::mcvideo_command(const std::string &cmd) {
     return mcvideo_server_call("one-from-server video pull", argument);
   }
   if (verb == "mcvideo-answer" || verb == "mcvideo-reject") return mcvideo_answer_command(verb);
+  // mcvideo-chat <chat group> [implicit] [emergency|imminent]: TS 24.281 clause 9.2.2.2.1.1, with the implicit
+  // transmission request (clause 6.4) and the priority of an emergency or imminent peril chat call (clause 6.2.8).
   if (verb == "mcvideo-chat") {
     if (argument.empty()) throw std::runtime_error("mcvideo-chat needs a chat group");
-    return mcvideo_group_call(false, argument);
+    bool implicit = false;
+    std::string priority;
+    for (std::string word; words >> word;) {
+      if (word == "implicit")
+        implicit = true;
+      else if (word == "emergency" || word == "imminent")
+        priority = word;
+      else
+        throw std::runtime_error("mcvideo-chat <chat group> [implicit] [emergency|imminent]");
+    }
+    return mcvideo_group_call(implicit, argument, priority);
   }
   if (verb == "mcvideo-transmit") return mcvideo_request_transmission();
   if (verb == "mcvideo-remote-transmit" || verb == "mcvideo-remote-cancel")
@@ -460,24 +806,59 @@ void Client::mcvideo_command(const std::string &cmd) {
   if (verb == "mcvideo-end" || verb == "mcvideo-release") return mcvideo_end_transmission();
   if (verb == "mcvideo-receive" || verb == "mcvideo-stop-receiving") return mcvideo_reception_command(verb);
   if (verb == "mcvideo-hangup") return mcvideo_hangup_command();
+  if (verb == "mcvideo-adhoc-release") return mcvideo_adhoc_release_command();
+  // TS 24.281 clause 9.2.3.2: the user subscribes to, or unsubscribes from, the call's conference event package.
+  if (verb == "mcvideo-conference-subscribe") {
+    if (!mcvideo_call_ || mcvideo_call_->state != "active") throw std::runtime_error("no active MCVideo call");
+    return mcvideo_subscribe_conference();
+  }
+  if (verb == "mcvideo-conference-unsubscribe") return mcvideo_unsubscribe_conference();
+  if (verb == "mcvideo-rejoin") return mcvideo_rejoin_call();
+  // TS 24.281 clause 6.2.3: the user's answer mode for incoming private calls (mcvideo.answer_mode), changed at run time.
+  if (verb == "mcvideo-answer-mode") {
+    if (argument != "auto" && argument != "manual") throw std::runtime_error("mcvideo-answer-mode auto|manual");
+    cfg_["mcvideo"]["answer_mode"] = argument;
+    status_["mcvideo_answer_mode"] = argument;
+    event("mcvideo_answer_mode", {{"mode", argument}});
+    return;
+  }
+  // TS 24.281 clause 7.2.4 and clauses 8.2.1.2 to 8.2.1.5 (mcvideo/settings_affiliation.cpp).
+  if (verb.starts_with("mcvideo-settings-")) {
+    std::istringstream rest(cmd.substr(verb.size()));
+    return mcvideo_settings_command(verb, rest);
+  }
+  if (verb == "mcvideo-gdd-subscribe" || verb == "mcvideo-gdd-resubscribe" || verb == "mcvideo-gdd-unsubscribe") {
+    std::istringstream rest(cmd.substr(verb.size()));
+    return mcvideo_gdd_command(verb, rest);
+  }
+  if (verb == "mcvideo-affiliation-subscribe" || verb == "mcvideo-affiliation-unsubscribe" ||
+      verb == "mcvideo-affiliate-remote" || verb == "mcvideo-affiliation-accept" || verb == "mcvideo-affiliation-decline") {
+    std::istringstream rest(cmd.substr(verb.size()));
+    return mcvideo_target_affiliation_command(verb, rest);
+  }
   throw std::runtime_error("unknown MCVideo command");
 }
 
 //------------------------------------------------------------------------------
-// TS 24.281 clause 10.2.2.2.1: mcvideo-private <MCVideo ID> [auto|manual|force-auto] [no-control] [emergency].
+// TS 24.281 clause 10.2.2.2.1: mcvideo-private <MCVideo ID> [auto|manual|force-auto] [no-control] [emergency]
+// [implicit] (the implicit transmission request of clause 6.4).
 void Client::mcvideo_private_command(const std::string &argument, std::istringstream &words) {
   std::string mode, extra;
-  bool no_control = false, emergency = false;
+  bool no_control = false, emergency = false, implicit = false, alert = false;
   words >> mode;
   while (words >> extra) {
     if (extra == "no-control")
       no_control = true;
     else if (extra == "emergency")
       emergency = true;
+    else if (extra == "alert") // TS 24.281 clause 6.2.8.3.2 step 3: with the user's emergency alert
+      alert = true;
+    else if (extra == "implicit")
+      implicit = true;
     else
       throw std::runtime_error("unknown mcvideo-private option " + extra);
   }
-  return mcvideo_private_call(argument, mode, no_control, emergency);
+  return mcvideo_private_call(argument, mode, no_control, emergency, "private", false, {}, implicit, alert);
 }
 
 //------------------------------------------------------------------------------
@@ -530,14 +911,83 @@ void Client::mcvideo_regroup_request_command(const std::string &argument, std::i
 // TS 24.281 clause 22.2.2.1.1: an ad hoc group call to MCVideo users or by criteria.
 void Client::mcvideo_adhoc_command(const std::string &argument, std::istringstream &words) {
   std::vector<std::string> targets;
-  std::string criteria;
-  if (argument == "criteria")
+  std::string criteria, priority, first = argument;
+  // mcvideo-adhoc [emergency|imminent] <MCVideo ID>... | criteria <criteria> (TS 24.281 clauses 6.2.8.1.19, 6.2.8.1.23)
+  if (first == "emergency" || first == "imminent") {
+    priority = first;
+    first.clear();
+    words >> first;
+  }
+  if (first == "criteria")
     std::getline(words >> std::ws, criteria);
   else {
-    if (!argument.empty()) targets.push_back(argument);
+    if (!first.empty()) targets.push_back(first);
     for (std::string more; words >> more;) targets.push_back(more);
   }
-  return mcvideo_adhoc_call(targets, criteria);
+  return mcvideo_adhoc_call(targets, criteria, priority);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 22.2.6.1.1: an authorised user modifies the participant list or the participant criteria of the
+// ongoing ad hoc group call (on-demand session) by re-INVITE: the mcvideo-info body as the session was established
+// (step 1); a resource-lists body with the users to invite ("method" INVITE) or to remove ("method" BYE) (step 2), or,
+// for a call set up by criteria, the new <call-participants-criteria> (step 2a); the established media (step 3).
+// Both at once are refused (NOTE). The outcome goes to the status (mcvideo_adhoc_modify_result).
+void Client::mcvideo_adhoc_modify(const std::string &arguments) {
+  if (!mcvideo_call_ || mcvideo_call_->type != "adhoc" || mcvideo_call_->state != "active")
+    throw std::runtime_error("no active MCVideo ad hoc group call");
+  auto &call = *mcvideo_call_;
+  if (call.modify_pending) throw std::runtime_error("an ad hoc call modification is pending");
+  require_mcvideo_profile("allow-to-modify-adhoc-group-call-participants-info", "ad hoc call participants modification");
+  std::vector<std::string> entries;
+  std::string criteria, method;
+  std::istringstream words(arguments);
+  for (std::string word; words >> word;) {
+    if (entries.empty() && method.empty() && word == "criteria") {
+      std::getline(words >> std::ws, criteria);
+      break;
+    }
+    if (word == "add")
+      method = "INVITE";
+    else if (word == "remove")
+      method = "BYE";
+    else if (method.empty())
+      throw std::runtime_error("mcvideo-adhoc-modify add|remove <MCVideo ID>... | criteria <criteria>");
+    else
+      entries.push_back(word + ";method=" + method);
+  }
+  if (entries.empty() == criteria.empty()) throw std::runtime_error("modify either the participant list or the criteria");
+  // Step 2a applies to a session established by criteria only.
+  if (!criteria.empty() && call.adhoc_criteria.empty())
+    throw std::runtime_error("the ad hoc call was not set up by participant criteria");
+  McpttInfo info;
+  info.session_type = "adhoc";
+  info.client_id = client_id();
+  info.functional_alias = mcvideo_presented_alias();
+  info.participant_criteria = criteria.empty() ? call.adhoc_criteria : criteria;
+  if (call.priority == "emergency") info.adhoc_emergency = true;
+  if (call.priority == "imminent") info.imminent_peril = true;
+  std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}};
+  if (!entries.empty()) parts.push_back({resource_lists_mime, resource_list_xml(entries)});
+  call.modify_pending = true;
+  try {
+    sip_.reinvite(
+        call.dialog, call.local, parts,
+        [this, generation = call.generation, criteria](const SipResponse &response) {
+          if (response.status_code < 200) return;
+          status_["mcvideo_adhoc_modify_result"] = {{"status", response.status_code},
+                                                    {"warning", std::string(get_header(response.headers, "Warning"))}};
+          if (!mcvideo_call_ || mcvideo_call_->generation != generation) return;
+          mcvideo_call_->modify_pending = false;
+          if (response.status_code < 300 && !criteria.empty()) mcvideo_call_->adhoc_criteria = criteria;
+          event("mcvideo_adhoc_modified", {{"status", response.status_code}});
+        },
+        mcvideo_call_headers());
+  } catch (...) {
+    call.modify_pending = false;
+    throw;
+  }
+  event("mcvideo_adhoc_modify_requested", {{"entries", entries}, {"criteria", criteria}});
 }
 
 //------------------------------------------------------------------------------
@@ -550,9 +1000,12 @@ void Client::mcvideo_answer_command(const std::string &verb) {
     // TS 24.281 clause 10.2.2.2.2 steps 1 and 2: the invited user declines: a reject code with the warning text of
     // clause 4.4.2 ("110 user declined the call invitation"), or, for a user the MCVideo user profile authorises
     // to restrict the reason for failure (<allow-failure-restriction>, TS 24.484), 480 without a warning text.
+    // A group call declined in manual commencement always carries the warning text (TS 24.281 clause 6.2.3.2.2
+    // step 2).
+    const bool group = mcvideo_call_->type != "private";
     response = SipResponse{};
     response.status_code = 480;
-    if (!mcvideo_profile_allows("allow-failure-restriction"))
+    if (group || !mcvideo_profile_allows("allow-failure-restriction"))
       response.headers = {{"Warning", "399 mcx \"" + warning_text(mcvideo_service, Warning::declined) + "\""}};
     mcvideo_end_call("declined");
   } else {
@@ -565,8 +1018,15 @@ void Client::mcvideo_answer_command(const std::string &verb) {
 // TS 24.581 clause 6.2.5: mcvideo-receive or mcvideo-stop-receiving: transmission control requests about reception.
 void Client::mcvideo_reception_command(const std::string &verb) {
   if (!mcvideo_call_) throw std::runtime_error("no MCVideo call");
-  return mcvideo_send_control(verb == "mcvideo-receive" ? transmission::Type::ReceiveMediaRequest
-                                                        : transmission::Type::ReceptionEndRequest);
+  if (verb == "mcvideo-receive")
+    return mcvideo_send_control(transmission::Type::ReceiveMediaRequest, mcvideo_reception_fields());
+  // TS 24.581 clause 6.2.5.5.3 step 1b: the User ID, Audio SSRC and Video SSRC of the transmitting user.
+  const auto &call = *mcvideo_call_;
+  std::vector<FloorField> fields;
+  if (!call.transmitter.empty()) fields.push_back(transmission::transmitting_user_field(call.transmitter));
+  fields.push_back(audio_ssrc_field(call.transmitter_audio_ssrc));
+  fields.push_back(transmission::video_ssrc_field(call.transmitter_video_ssrc));
+  return mcvideo_send_control(transmission::Type::ReceptionEndRequest, std::move(fields));
 }
 
 //------------------------------------------------------------------------------
@@ -575,9 +1035,24 @@ void Client::mcvideo_hangup_command() {
   if (!mcvideo_call_) throw std::runtime_error("no MCVideo call");
   // TS 24.281 clause 15.2.1.3 step 1: an ambient viewing call is released only with the release capability.
   if (!mcvideo_call_->may_release) throw std::runtime_error("ambient viewing call release not allowed");
+  // TS 24.281 clause 6.2.8.1.17 step 1 c): an emergency group call released while its alert is "MVEA 2: emergency-
+  // alert-confirm-pending" (the call still being established) returns the alert state to "MVEA 1: no-alert".
+  if (mcvideo_call_->group_alert && mcvideo_group_alert_state_ == 2) mcvideo_set_group_alert_state(1);
   const auto dialog = mcvideo_call_->dialog;
   mcvideo_end_call("hangup");
   return sip_.bye(dialog);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 22.2.3.1.1: the user releases the ad hoc group call, for every participant (the controlling function
+// releases the session on this Reason from an authorised user, clause 6.3.3.2.4 3A)): the BYE of clause 6.2.5.1 with a
+// Reason header (RFC 3326) SIP;cause=200;text="User requested release". mcvideo-hangup leaves it (clause 22.2.4.1.1,
+// 6.2.4.1: a BYE without this Reason).
+void Client::mcvideo_adhoc_release_command() {
+  if (!mcvideo_call_ || mcvideo_call_->type != "adhoc") throw std::runtime_error("no MCVideo ad hoc group call");
+  const auto dialog = mcvideo_call_->dialog;
+  mcvideo_end_call("release");
+  return sip_.bye(dialog, {}, {{"Reason", "SIP;cause=200;text=\"User requested release\""}});
 }
 
 //------------------------------------------------------------------------------
@@ -593,6 +1068,8 @@ void Client::mcvideo_status() {
   status_["mcvideo_affiliation_subscribed"] = !mcvideo_subscription_.empty();
   status_["mcvideo_affiliation_p_id"] = {{"sent", mcvideo_sent_pid_}, {"received", mcvideo_received_pid_}};
   status_["mcvideo_last_result"] = mcvideo_last_result_;
+  status_["mcvideo_service_settings"] = mcvideo_service_settings_;
+  status_["mcvideo_settings_publication"] = mcvideo_settings_result_;
   status_["mcvideo_functional_aliases"] = mcvideo_aliases_;
   status_["mcvideo_takeover_possible_aliases"] = mcvideo_takeover_possible_;
   status_["mcvideo_functional_alias_in_use"] = mcvideo_alias_in_use_;

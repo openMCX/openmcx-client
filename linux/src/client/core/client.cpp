@@ -10,6 +10,9 @@
 // TS 33.180 V19.4.0 (Rel-19).
 
 #include "client.hpp"
+#include <cstdlib>
+#include <fstream>
+#include <set>
 
 #include <charconv>
 
@@ -45,6 +48,9 @@ void Client::tick() {
       if (at && std::time(nullptr) >= at) refresh_extra_key_subscription(dialog);
   if (mcvideo_keys_ && mcvideo_key_refresh_at_ && std::time(nullptr) >= mcvideo_key_refresh_at_)
     refresh_key_subscription(true);
+  if (mcvideo_keys_)
+    for (const auto &[dialog, at] : std::map(mcvideo_extra_key_refresh_at_))
+      if (at && std::time(nullptr) >= at) mcvideo_refresh_extra_key_subscription(dialog);
   configuration_subscription_tick();
   status_["protected_media"] = protected_media();
   status_["protected_floor"] = protected_floor();
@@ -168,9 +174,40 @@ void Client::send_speech_frame(const std::array<std::int16_t, 320> &frame, bool 
 }
 
 //------------------------------------------------------------------------------
+// Lab use only, like SSLKEYLOGFILE: with the environment variable MCX_CSK_KEYLOGFILE set, each CSK the client holds
+// (MCPTT, MCVideo, MCData) is appended once to that file as "CSK <MC service user ID> <CSK-ID> <hex key> <hex RAND>",
+// so that a capture of its protected signalling (TS 33.180 clause 9.3) and transmission/floor control (clause 9.4)
+// can be decrypted by a test system. Nothing is written without the variable.
+namespace {
+void keylog_csk(const std::optional<keying::KeyMessage> &csk, const std::string &user) {
+  static std::set<std::pair<std::string, std::uint32_t>> logged;
+  const char *file = std::getenv("MCX_CSK_KEYLOGFILE");
+  if (!file || !*file || !csk || user.empty() || !logged.emplace(user, csk->csb_id).second) return;
+  static const char *digits = "0123456789abcdef";
+  auto hex = [](auto begin, auto end) {
+    std::string out;
+    for (auto it = begin; it != end; ++it) {
+      const auto byte = static_cast<std::uint8_t>(*it);
+      out += digits[byte >> 4];
+      out += digits[byte & 15];
+    }
+    return out;
+  };
+  std::ofstream log(file, std::ios::app);
+  log << "CSK " << user << ' ' << csk->csb_id << ' ' << hex(csk->key.begin(), csk->key.end()) << ' '
+      << hex(csk->random.begin(), csk->random.end()) << '\n';
+}
+} // namespace
+
+//------------------------------------------------------------------------------
 // Helper: the status file (every 200 ms): the floor state, priorities, call, services, registration and
 // authorisation, then the MCData and MCVideo parts; the received audio is saved with it.
 void Client::save_status(std::uint64_t now) {
+  if (std::getenv("MCX_CSK_KEYLOGFILE")) {
+    keylog_csk(csk_, cfg_.contains("mcptt") ? user() : std::string());
+    keylog_csk(mcvideo_csk_, cfg_.contains("mcvideo") ? mcvideo_user() : std::string());
+    keylog_csk(mcdata_csk_, cfg_.contains("mcdata") ? mcdata_user() : std::string());
+  }
   floor_and_priority_status();
   // A listened-to client shows no call (TS 24.379 clause 11.1.6.2.0); the "ambient" entry is
   // test instrumentation, not a user indication.
@@ -401,6 +438,31 @@ void Client::read_mcvideo_profile() {
   mcvideo_profile_ = {{"user_id", profile.user_id}, {"profile_index", profile.profile_index},
                       {"groups", profile.groups},   {"private_call_targets", profile.private_call_targets},
                       {"actions", profile.actions}, {"etag", response.headers.at("etag")}};
+  // TS 24.281 clause 6.2.8.3.9: the <PrivateCallKMSURI> of each <PrivateCallOnNetwork> entry.
+  mcvideo_profile_["private_call_kms"] = profile.private_call_kms;
+  // TS 24.484 clause 9.3.2.1 item 8 e) v): <MCVideo-group-call>/<Priority>, the configured priority of TS 24.581
+  // clauses 14.2.3 and 14.2.6 (mcvideo_configured_priority).
+  mcvideo_profile_["priority"] = profile.group_call_priority;
+  // TS 24.484 clause 9.3.2.1 items 8 d) ii), 8 e) and 9 f): the target entries of the priority requests (TS 24.281
+  // clauses 6.2.8.1.6, 6.2.8.1.8, 6.2.8.3.1.1, 6.2.8.3.1.3); an absent element is not listed.
+  Json targets = Json::object();
+  for (const auto &[name, entry] : {std::pair{"emergency_group_initiation", &profile.emergency_group_initiation},
+                                    std::pair{"imminent_group_initiation", &profile.imminent_group_initiation},
+                                    std::pair{"group_emergency_alert", &profile.group_emergency_alert},
+                                    std::pair{"emergency_private_recipient", &profile.emergency_private_recipient},
+                                    std::pair{"private_emergency_alert", &profile.private_emergency_alert}})
+    if (entry->present) targets[name] = {{"entry_info", entry->entry_info}, {"uri", entry->uri}};
+  mcvideo_profile_["targets"] = targets;
+  // TS 24.281 clause 20.2.1.4: the functional aliases with location criteria, evaluated from the next position.
+  mcvideo_alias_rules_.clear();
+  mcvideo_alias_area_inside_.clear();
+  Json located = Json::array();
+  for (const auto &alias : profile.functional_aliases)
+    if (alias.has_location_criteria()) {
+      mcvideo_alias_rules_.push_back(alias);
+      located.push_back({{"alias", alias.alias}, {"manual_deactivation_locked", alias.manual_deactivation_locked}});
+    }
+  mcvideo_profile_["location_functional_aliases"] = located;
   status_["mcvideo_profile"] = mcvideo_profile_;
   event("document_retrieved", {{"resource", path}, {"bytes", response.body.size()}});
   event("mcvideo_profile_read", {{"groups", profile.groups.size()}, {"actions", profile.actions.size()}});
@@ -628,6 +690,7 @@ void Client::read_service_configurations(std::vector<std::string> services) {
       if (response.status != 200) throw std::runtime_error("HTTP " + std::to_string(response.status));
       service_priorities_[service] = parse_service_resource_priorities(response.body);
       service_protection_[service] = parse_service_protection(response.body);
+      service_adhoc_[service] = parse_service_adhoc(response.body);
       event("document_retrieved", {{"resource", path}, {"bytes", response.body.size()}});
     } catch (const std::exception &error) {
       event("service_configuration_unavailable", {{"service", service}, {"reason", error.what()}});
@@ -637,6 +700,8 @@ void Client::read_service_configurations(std::vector<std::string> services) {
   for (const auto &[service, protection] : service_protection_)
     status_["service_protection"][service] = {{"confidentiality", protection.confidentiality},
                                               {"integrity", protection.integrity}};
+  for (const auto &[service, adhoc] : service_adhoc_)
+    status_["service_adhoc"][service] = {{"supported", adhoc.supported}, {"max_participants", adhoc.max_participants}};
 }
 
 //------------------------------------------------------------------------------

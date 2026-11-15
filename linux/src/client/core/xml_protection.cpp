@@ -155,6 +155,20 @@ bool Client::mcvideo_xml_part(const std::string &type) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.281 clause 4.8, annex F.1.3 1) and annex F.3.3 2): the MCVideo XML elements and URI attributes that are
+// encrypted: the shared MCVideo signalling profile, with the MCVideo-Info elements of F.1.3 1) that carry a
+// functional alias (<functional-alias-URI>) or an MCVideo ID (<partner-mcvideo-id>, <primary-mcvideo-id>), which
+// clause 4.8 classes as sensitive application data.
+const xmlsec::Profile &Client::mcvideo_xml_profile() {
+  static const xmlsec::Profile profile = [] {
+    auto out = xmlsec::signalling_profile("mcvideo");
+    out.elements.insert({"functional-alias-URI", "partner-mcvideo-id", "primary-mcvideo-id"});
+    return out;
+  }();
+  return profile;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.281 clause 6.6.2.3.1 and clause 6.6.3.3.1: the MCVideo client encrypts the XML elements and signs the XML
 // bodies of an outgoing MCVideo request under the MCVideo CSK.
 std::vector<BodyPart> Client::mcvideo_protect_outgoing(std::vector<BodyPart> parts) {
@@ -171,7 +185,7 @@ std::vector<BodyPart> Client::mcvideo_protect_outgoing(std::vector<BodyPart> par
   if (mcvideo_xml_protection())
     for (auto &part : parts)
       if (mcvideo_xml_part(part.content_type) && !xmlsec::is_protected(part.body)) {
-        part.body = xmlsec::encrypt(part.body, mcvideo_xml_key(), xmlsec::signalling_profile("mcvideo"));
+        part.body = xmlsec::encrypt(part.body, mcvideo_xml_key(), mcvideo_xml_profile());
         ++xml_encrypted_;
       }
   if (mcvideo_integrity_protection() &&
@@ -265,7 +279,7 @@ std::vector<BodyPart> Client::protect_outgoing(const SipTransmission &transmissi
 bool Client::unprotected_subscription(const SipTransmission &transmission, const std::vector<BodyPart> &parts) const {
   const auto &dialog = transmission.call_id;
   if (!dialog.empty() &&
-      (dialog == config_subscription_ || dialog == key_subscription_ || dialog == mcvideo_key_subscription_ ||
+      (dialog == config_subscription_ || dialog == key_subscription_ || mcvideo_key_dialog(dialog) ||
        group_doc_subscriptions_.contains(dialog) || key_subscriptions_.contains(dialog) ||
        std::any_of(extra_key_subscriptions_.begin(), extra_key_subscriptions_.end(),
                    [&dialog](const auto &entry) { return entry.second == dialog; })))
@@ -309,8 +323,18 @@ std::vector<BodyPart> Client::protect_incoming(const SipTransmission &transmissi
   // verified, then removed.
   if (const auto signatures = std::find_if(parts.begin(), parts.end(),
                                            [](const BodyPart &part) { return part.content_type == signed_mime; });
-      signatures != parts.end())
-    if (const auto key = signing_key_for(xmlsec::signature_key_id(signatures->body))) {
+      signatures != parts.end()) {
+    // TS 24.281 clause 6.6.3.4.2 step 4 (TS 24.379 likewise): the XPK is obtained with the XPK-ID of the received
+    // body; a signature under an XPK-ID this client does not hold cannot pass signature validation (step 5: 403 with
+    // "139 integrity protection check failed"), nor can a signatures document that does not parse.
+    std::optional<std::uint32_t> id;
+    try {
+      id = xmlsec::signature_key_id(signatures->body);
+    } catch (const std::exception &error) {
+      throw std::runtime_error(std::string("139 ") + error.what());
+    }
+    if (id && !signing_key_for(id)) throw std::runtime_error("139 signed under an unknown XPK-ID");
+    if (const auto key = signing_key_for(id)) {
       std::vector<xmlsec::SignedBody> bodies;
       for (const auto &part : parts)
         if (part.content_type != signed_mime && !part.content_id.empty())
@@ -323,14 +347,40 @@ std::vector<BodyPart> Client::protect_incoming(const SipTransmission &transmissi
       ++xml_verified_;
       parts.erase(signatures);
     }
+  }
+  // MCData content (under the MCData CSK) is opened by the MCData service.
+  const bool mcdata = mcdata_transmission(transmission);
   for (auto &part : parts) {
-    if ((!mcptt_xml_part(part.content_type) && !mcvideo_xml_part(part.content_type)) ||
-        !xmlsec::is_protected(part.body))
-      continue;
-    // Content under the MCData CSK is opened by the MCData service.
-    const auto key = key_for(xmlsec::key_id(part.body));
-    if (!key) continue;
-    part.body = xmlsec::decrypt(part.body, *key);
+    if (!mcptt_xml_part(part.content_type) && !mcvideo_xml_part(part.content_type)) continue;
+    // TS 24.281 clause 6.6.2.4.2 step 1 (TS 24.379 likewise): an element of type "Encrypted" without its
+    // <EncryptedData> cannot be decrypted: 403 with "140 unable to decrypt XML content".
+    if (!mcdata && xml_gate::encrypted_without_data(part.body))
+      throw std::runtime_error("140 an element of type Encrypted without <EncryptedData>");
+    if (!xmlsec::is_protected(part.body)) continue;
+    const auto id = xmlsec::key_id(part.body);
+    if (mcdata || (id && mcdata_csk_ && *id == mcdata_csk_->csb_id)) continue;
+    auto key = key_for(id);
+    // TS 24.281 annex F.1.3 3)b) iii) and NOTE 2: without a <KeyInfo> the XPK is "known to sender and the receiver
+    // by other means": the CSK of the service the message belongs to (clause 6.6.2.2: the XPK is the CSK).
+    if (!id) {
+      if (mcvideo_transmission(transmission) && mcvideo_csk_)
+        key = mcvideo_xml_key();
+      else if (csk_)
+        key = xml_key();
+    }
+    // TS 24.281 clause 6.6.2.4.2 step 3 (TS 24.379 likewise): content under an XPK-ID this client does not hold
+    // cannot be decrypted. A request naming an unknown XPK-ID was refused above (xml_gate::refuse_unknown_keys);
+    // here a request whose content has no <KeyInfo> and no CSK to open it. A response is kept as it is (a 403 cannot
+    // answer a response, see refuse_unknown_keys).
+    if (!key) {
+      if (transmission.response) continue;
+      throw std::runtime_error("140 XML content encrypted under an unknown XPK-ID");
+    }
+    try {
+      part.body = xmlsec::decrypt(part.body, *key);
+    } catch (const std::exception &error) {
+      throw std::runtime_error(std::string("140 ") + error.what());
+    }
     ++xml_decrypted_;
   }
   return parts;

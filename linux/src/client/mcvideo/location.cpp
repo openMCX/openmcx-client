@@ -17,9 +17,13 @@ namespace mcx {
 // the ad hoc group in <mcvideo-request-uri>.
 void Client::mcvideo_adhoc_alert(const std::string &arguments) {
   if (!mcvideo_authorized_) throw std::runtime_error("ad hoc alert requires MCVideo service authorisation");
+  if (arguments.starts_with("modify ")) return mcvideo_adhoc_alert_modify(arguments.substr(7));
   McpttInfo info;
   info.client_id = client_id();
   const bool cancel = arguments == "cancel";
+  // TS 24.281 clause 6.2.8.1.27: the user's authorisation for the ad hoc group emergency alert or its cancellation.
+  require_mcvideo_profile(cancel ? "allow-cancel-adhoc-group-emergency-alert" : "allow-activate-adhoc-group-emergency-alert",
+                          cancel ? "ad hoc group emergency alert cancellation" : "ad hoc group emergency alert");
   if (cancel) {
     if (mcvideo_adhoc_alert_group_.empty()) throw std::runtime_error("no MCVideo ad hoc alert to cancel");
     info.request_uri = mcvideo_adhoc_alert_group_;
@@ -61,6 +65,39 @@ void Client::mcvideo_adhoc_alert(const std::string &arguments) {
                  mcvideo_ah_mea_ = 3;
                });
   event("mcvideo_adhoc_alert_requested", {{"cancel", cancel}, {"criteria", info.participant_criteria}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 12.1A.1.4: a SIP MESSAGE (out of dialog) to the participating MCVideo function modifying the
+// participant criteria of this user's ad hoc group emergency alert: P-Preferred-Service and Accept-Contact with the
+// MCVideo ICSI (steps 1, 2), the mcvideo-info body with the ad hoc group, the client ID, <adhoc-alert-ind> "true",
+// <req-type> "ad-hoc-emergency-alert-participant-criteria-modification" and the functional alias in use (step 4),
+// the new criteria in <call-participants-criteria> (step 4 c) v)), this UE's location when configured (step 5), to the
+// participating function's PSI (steps 7, 8).
+void Client::mcvideo_adhoc_alert_modify(const std::string &criteria) {
+  if (criteria.empty()) throw std::runtime_error("mcvideo-adhoc-alert modify <criteria>");
+  if (mcvideo_adhoc_alert_group_.empty() || mcvideo_ah_mea_ != 3)
+    throw std::runtime_error("no initiated MCVideo ad hoc group emergency alert to modify");
+  McpttInfo info;
+  info.request_uri = mcvideo_adhoc_alert_group_;       // step 4 a)
+  info.client_id = client_id();                        // step 4 b)
+  info.adhoc_alert = true;                             // step 4 c) i)
+  info.service["req-type"] = "ad-hoc-emergency-alert-participant-criteria-modification"; // step 4 c) ii)
+  info.functional_alias = mcvideo_presented_alias();   // step 4 c) iii)
+  info.participant_criteria = criteria;                // step 4 c) v)
+  std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}};
+  if (cfg_.at("mcptt").contains("emergency_location")) // step 5
+    parts.push_back(
+        {mcvideo_service.location_mime, service_location_xml(configured_emergency_location(), mcvideo_service)});
+  const auto [type, body] = message_body(parts, "mcx-" + random_id());
+  sip_.request("MESSAGE", mcvideo_service_uri(), type, body, mcvideo_call_headers(),
+               [this, criteria](const SipResponse &response) {
+                 if (response.status_code < 200) return;
+                 mcvideo_adhoc_alert_result_ = {{"modify", criteria},
+                                                {"status", response.status_code},
+                                                {"warning", std::string(get_header(response.headers, "Warning"))}};
+               });
+  event("mcvideo_adhoc_alert_modify_requested", {{"group", mcvideo_adhoc_alert_group_}, {"criteria", criteria}});
 }
 
 //------------------------------------------------------------------------------
@@ -171,15 +208,21 @@ std::optional<SipResponse> Client::mcvideo_location_incoming(const SipMessage &m
 void Client::mcvideo_area_affiliation(const std::string &group, bool entered) {
   if (group.empty()) throw std::runtime_error("the notice names no group");
   if (group == mcvideo_group()) {
-    // The selected group is in every affiliation request this client sends (mcvideo_affiliate): it can leave
-    // only with the extra groups.
-    if (!entered && !mcvideo_extra_groups_.empty())
-      throw std::runtime_error("the selected MCVideo group stays affiliated with the other groups");
-    return mcvideo_affiliate(entered);
+    // TS 24.281 clause 11.2.1.4 2): the configured group is affiliated to or de-affiliated from like any other; while
+    // other groups stay affiliated, leaving it re-publishes the remaining set without it (clause 8.2.1.2 5c).
+    if (entered) {
+      mcvideo_left_selected_ = false;
+      return mcvideo_affiliate(true);
+    }
+    if (mcvideo_extra_groups_.empty()) return mcvideo_affiliate(false);
+    mcvideo_left_selected_ = true;
+    return mcvideo_affiliate(true);
   }
   if (entered) return mcvideo_affiliate(true, group);
   if (mcvideo_extra_groups_.erase(group) == 0) throw std::runtime_error("not affiliated to the group");
-  // The remaining set again, without the group (TS 24.281 clause 8.2.1.2: the whole set in each request).
+  // The remaining set again, without the group (TS 24.281 clause 8.2.1.2: the whole set in each request); nothing
+  // left is a de-affiliation.
+  if (mcvideo_left_selected_ && mcvideo_extra_groups_.empty()) return mcvideo_affiliate(false);
   mcvideo_affiliate(true);
 }
 
