@@ -57,6 +57,7 @@ SipResponse Client::mcdata_incoming(const SipMessage &message) {
   case mcdata::MessageType::FdNotification: return mcdata_fd_notifications_received(signalling_parts, info);
   case mcdata::MessageType::FdHttpTermination: return mcdata_fd_termination_received(message, *signalling, info);
   case mcdata::MessageType::FdNetworkNotification: return mcdata_fd_unavailable_received(*signalling, info);
+  case mcdata::MessageType::DeferredListResponse: return mcdata_deferred_list_received(*signalling, info);
   default: break;
   }
   if (service != mcdata::sds_icsi) {
@@ -560,6 +561,21 @@ void Client::mcdata_command(const std::string &cmd) {
     words >> word;
     return mcdata_discover_content_server(word.starts_with("group=") ? word.substr(6) : std::string{});
   }
+  if (verb == "fd-media-answer") {
+    // fd-media-answer accept|decline|defer   (TS 24.282 clause 10.2.5.2.4 7))
+    std::string word;
+    words >> word;
+    if (word != "accept" && word != "decline" && word != "defer")
+      throw std::runtime_error("usage: fd-media-answer accept|decline|defer");
+    return mcdata_media_file_answer(word);
+  }
+  if (verb == "fd-deferred") {
+    // fd-deferred list   (TS 24.282 clause 11.3.2.1)
+    std::string word;
+    words >> word;
+    if (word != "list") throw std::runtime_error("usage: fd-deferred list");
+    return mcdata_request_deferred_list();
+  }
   if (verb == "fd-release-intent") return mcdata_fd_release_intent_command(words);
   if (verb == "fd-extension-response") return mcdata_fd_extension_response_command(words);
   if (verb == "fd-cancel" || verb == "fd-release" || verb == "fd-extend") return mcdata_fd_cancel_command(verb, words);
@@ -604,6 +620,9 @@ void Client::mcdata_fd_send_command(std::istringstream &words) {
     // ref=<object ID>: a file of the user's message store, uploaded by reference (TS 24.282 clause 10.2.2.1).
     else if (word.starts_with("ref="))
       request.store_object = word.substr(4);
+    // metadata=<text>: the Application metadata container (TS 24.282 clause 6.2.2.2 12)).
+    else if (word.starts_with("metadata="))
+      request.application_metadata = word.substr(9);
     else
       break;
   }
@@ -679,8 +698,11 @@ void Client::mcdata_sds_session_command(std::istringstream &words) {
 void Client::mcdata_fd_media_command(std::istringstream &words) {
   std::string word, target, path;
   bool mandatory = false, completion = false;
+  std::optional<std::string> application_metadata;
   while (words >> word) {
-    if (word == "mandatory" && target.empty())
+    if (word.starts_with("metadata=") && target.empty())
+      application_metadata = word.substr(9); // TS 24.282 clause 6.2.2.3 10)
+    else if (word == "mandatory" && target.empty())
       mandatory = true;
     else if (word == "completed" && target.empty())
       completion = true;
@@ -694,7 +716,8 @@ void Client::mcdata_fd_media_command(std::istringstream &words) {
   if (target.empty() || path.empty())
     throw std::runtime_error("usage: fd-media [mandatory] [completed] <MCData ID|group=<id>> <path>");
   const bool group = target.starts_with("group=");
-  return mcdata_send_file_media(group ? target.substr(6) : target, group, path, mandatory, completion);
+  return mcdata_send_file_media(group ? target.substr(6) : target, group, path, mandatory, completion,
+                                application_metadata);
 }
 
 //------------------------------------------------------------------------------
@@ -1097,6 +1120,7 @@ void Client::mcdata_status() {
   status_["mcdata_discovery_result"] = mcdata_discovery_result_;
   status_["mcdata_fd_last_result"] = mcdata_fd_last_result_;
   status_["mcdata_file_notifications"] = mcdata_file_notifications_;
+  status_["mcdata_deferred_list"] = mcdata_deferred_list_;
   Json files = Json::array();
   for (const auto &id : mcdata_files_order_)
     if (const auto found = mcdata_files_.find(id); found != mcdata_files_.end()) files.push_back(found->second);

@@ -429,7 +429,7 @@ void Client::mcdata_session_send(const std::string &text, mcdata::DispositionReq
 // TS 24.282 clauses 10.2.5.2.1 and 10.2.5.2.3 with TS 24.582 clause 7.1.2: offer the file on an MSRP
 // stream, with its metadata in the SDP file attributes of RFC 5547.
 void Client::mcdata_send_file_media(const std::string &target, bool group, const std::string &path, bool mandatory,
-                                    bool completion) {
+                                    bool completion, const std::optional<std::string> &application_metadata) {
   if (!mcdata_authorized_) throw std::runtime_error("file distribution requires MCData service authorisation");
   require_mcdata_profile({"allow-transmit-data"}); // TS 24.282 clause 11.1 step 1
   if (mcdata_media_) throw std::runtime_error("an MCData media plane session is already open");
@@ -438,6 +438,7 @@ void Client::mcdata_send_file_media(const std::string &target, bool group, const
   std::string contents((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
   const auto name = std::filesystem::path(path).filename().string();
   const bool adhoc = target.starts_with("adhoc="); // TS 24.282 clause 24.2.2.1.1 step 6
+  if (group && !adhoc) mcdata_group_fd_allowed(target, contents.size()); // TS 24.282 clause 10.2.5.2.3 9)a), a1)
   MsrpMedia protection;
   mcdata_media_protect(protection, target, group, adhoc);
   const auto plain_bytes = contents.size();
@@ -451,6 +452,9 @@ void Client::mcdata_send_file_media(const std::string &target, bool group, const
   info.request_type = adhoc ? "adhoc-group-fd-session" : group ? "group-fd" : "one-to-one-fd";
   info.client_id = client_id();
   if (group) info.request_uri = target;
+  // TS 24.282 clause 10.2.5.2.3 8)b)ii)B) / 9)b)iv): the functional alias in use, while it is active for the user.
+  if (!mcdata_alias_in_use_.empty() && mcdata_aliases_active_.contains(mcdata_alias_in_use_))
+    info.functional_alias = mcdata_alias_in_use_;
   const auto participants = adhoc ? mcdata_adhoc_target(target.substr(6), info) : std::vector<std::string>{};
   mcdata::FdSignalling signalling; // TS 24.282 clause 6.2.2.3: no Payload IE, no metadata IE
   signalling.date_time = static_cast<std::uint64_t>(std::time(nullptr));
@@ -458,6 +462,7 @@ void Client::mcdata_send_file_media(const std::string &target, bool group, const
   signalling.message = mcdata::random_uuid();
   signalling.mandatory_download = mandatory;
   signalling.completion_requested = completion;
+  signalling.application_metadata = application_metadata; // TS 24.282 clause 6.2.2.3 10)
   auto offer = mcdata_media_offer();
   offer.key_mgmt = protection.key_mgmt;
   offer.accept_types = {mcdata::signalling_mime}; // TS 24.282 clause 10.2.5.2.1 step 1e
@@ -465,6 +470,7 @@ void Client::mcdata_send_file_media(const std::string &target, bool group, const
       metadata.substr(std::strlen("file-selector:"), metadata.find("\r\n") - std::strlen("file-selector:"));
   offer.file_date = "creation:\"" + mcdata::date_time_5322(static_cast<std::uint64_t>(std::time(nullptr))) + "\"";
   offer.file_description = name;
+  offer.file_transfer_id = random_id(); // RFC 5547 clause 8.2.1: a new transfer in every offer
   mcdata_media_file_ = contents;
   mcdata_media_message_id_ = mcdata::uuid_text(signalling.message);
   std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};

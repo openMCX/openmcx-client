@@ -1973,6 +1973,7 @@ private:
   // TS 24.282 clause 11.1 2), 5), 10), 9.2.2.2.1 3)a), 9.2.3.2.3, 9.2.4.2.3 8)a1): a group SDS the group document
   // does not allow is refused before anything is sent.
   void mcdata_group_sds_allowed(const std::string &group, std::size_t size, bool media_plane, bool session);
+  void mcdata_group_fd_allowed(const std::string &group, std::uint64_t size);
   // TS 24.282 clause 9.2.2.2.1 3)b)iii) (C8): the temporary groups a constituent group's document names
   // (<on-network-regrouped>), whose GMK is subscribed to (TS 33.180 clause 5.7), and the constituent group named in
   // <associated-group-id> for an SDS to a temporary group.
@@ -2025,6 +2026,7 @@ private:
   // File distribution: files this client offered and received, and timer TDU2
   // (FD non-mandatory download timer, annex F.2.3) per Message ID.
   Json mcdata_files_sent_ = Json::array(), mcdata_fd_last_result_ = nullptr, mcdata_file_notifications_ = Json::array();
+  Json mcdata_deferred_list_ = nullptr; // TS 24.282 clause 11.3.2.2: the last list of deferred communications
   // The media storage function URI learned by discovery (clause 10.2.1.3) and the outcome.
   std::string mcdata_discovered_content_server_;
   Json mcdata_discovery_result_ = nullptr;
@@ -2194,6 +2196,10 @@ private:
   Json mcdata_media_files_ = Json::array();         // files received over the media plane
   Json mcdata_group_notifications_ = Json::array(); // in-progress state notifications (clause 6.3.7.1.2)
   Json mcdata_media_offered_ = nullptr;             // the file being offered to this client
+  // TS 24.282 clause 10.2.5.2.4 7)a): an FD INVITE (non-mandatory download) waiting for the user's decision, and the
+  // decision taken (accept) while the invitation is answered
+  std::optional<SipMessage> mcdata_media_pending_invite_;
+  bool mcdata_media_user_accepted_ = false;
   mcdata::Uuid mcdata_media_conversation_{};
   std::string mcdata_media_answer_; // repeated when a re-INVITE arrives
   Json mcdata_media_sent_ = Json::array();
@@ -2223,7 +2229,7 @@ private:
   void mcdata_session_send(const std::string &text, mcdata::DispositionRequest disposition);
 
   void mcdata_send_file_media(const std::string &target, bool group, const std::string &path, bool mandatory,
-                              bool completion);
+                              bool completion, const std::optional<std::string> &application_metadata = {});
 
   void mcdata_send_media_sds(const std::string &target, const std::string &text, bool group = false,
                              std::optional<unsigned> priority = std::nullopt,
@@ -2280,6 +2286,7 @@ private:
 
   // ---- MCData media plane, terminating side and MSRP transfer (mcdata/media_session.cpp) ----
   SipResponse mcdata_media_invite(const SipMessage &invite);
+  void mcdata_media_file_answer(const std::string &decision);
 
   // re-INVITE in the media plane session's dialog: priority state (TS 24.282 clause 6.2.8.4.2, 9.2.4.2.4).
   SipResponse mcdata_media_reinvite(const mcdata::Info &info);
@@ -2312,6 +2319,8 @@ private:
   std::string mcdata_content_server() const;
 
   void mcdata_discover_content_server(const std::string &group);
+  void mcdata_request_deferred_list();
+  SipResponse mcdata_deferred_list_received(const BodyPart &signalling, const mcdata::Info &info);
 
   std::string mcdata_upload(const std::string &path, const std::string &group, std::string &name, std::uint64_t &size,
                             std::string &digest, const keying::KeyMessage *key = nullptr);
@@ -2330,6 +2339,7 @@ private:
     std::optional<std::uint8_t> application;
     std::optional<mcdata::Uuid> conversation;
     std::uint64_t available_for = 0; // seconds; 0 leaves the availability to the server
+    std::optional<std::string> application_metadata; // TS 24.282 clause 6.2.2.2 12), 15.2.28
   };
 
   void mcdata_send_file(const FdRequest &request);

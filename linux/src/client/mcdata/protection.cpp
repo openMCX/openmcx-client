@@ -363,6 +363,37 @@ void Client::mcdata_group_sds_allowed(const std::string &group, std::size_t size
 }
 
 //------------------------------------------------------------------------------
+// TS 24.282 clauses 10.2.2.1 and 10.2.4.2.1 (the group pre-check: <preconfigured-group-use-only> "true" - the user is
+// told and the procedure skipped), 10.2.4.2.1 3)a) / 10.2.5.2.3 9)a), a1) (AllowedFD, the group document's
+// <mcdata-allow-file-distribution>, clause 10.1), and clause 11.1 2), 6) (the transmit right, the group's
+// <mcdata-on-network-max-data-size-for-FD>): a group FD the group document does not allow is refused before anything
+// is sent.
+void Client::mcdata_group_fd_allowed(const std::string &group, std::uint64_t size) {
+  const auto response = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(group), {},
+                                      {{"Authorization", bearer()}});
+  event("mcdata_group_document_checked", {{"group", group}, {"status", response.status}, {"fd", true}});
+  if (response.status != 200) return; // no document: the server decides (clause 11.1 for the server)
+  std::string reason;
+  try {
+    const auto rules = parse_mcdata_group_sds(response.body);
+    if (rules.preconfigured_use_only)
+      reason = "preconfigured-group-use-only";
+    else if (!group_document_allows(response.body, "mcdata-allow-transmit-data-in-this-group", {mcdata_user(), user()}))
+      reason = "mcdata-allow-transmit-data-in-this-group";
+    else if (!rules.allow_fd)
+      reason = "mcdata-allow-file-distribution";
+    else if (rules.max_fd_bytes && size > *rules.max_fd_bytes)
+      reason = "mcdata-on-network-max-data-size-for-FD";
+  } catch (const std::exception &error) {
+    reason = std::string("unreadable group document: ") + error.what();
+  }
+  if (reason.empty()) return;
+  status_["mcdata_fd_not_allowed"] = {{"group", group}, {"reason", reason}};
+  event("mcdata_fd_not_allowed", {{"group", group}, {"reason", reason}});
+  throw std::runtime_error("group FD not allowed on " + group + " (" + reason + ", TS 24.282 clauses 10.2.4.2.1, 11.1)");
+}
+
+//------------------------------------------------------------------------------
 // TS 24.282 clause 9.2.2.2.1 3)b)iii): "if the group identity identifies a temporary group ..., the <anyExt> element
 // with the <associated-group-id> element set to the MCData group ID of a constituent group the MCData client is member
 // of": the constituents of the group's <on-network-temporary> (TS 24.481 clause 7.2.4.2); the user's configured MCData
@@ -550,7 +581,8 @@ std::string Client::mcdata_seal_file(const std::string &contents, const keying::
 // TS 33.180 clauses 8.5.1 and 8.5.4: the clear file from the protected binary data representing it.
 std::string Client::mcdata_open_file(const std::string &data, const mcdata::Info &info) {
   const std::span bytes(reinterpret_cast<const std::uint8_t *>(data.data()), data.size());
-  const auto plain = keying::open_series(bytes, protected_file_type,
+  // TS 33.180 assigns a protected file no message type (TS 37.579-1 table 5.5.3.10-1/-2: '01??????'B): any one type.
+  const auto plain = keying::open_series(bytes, 0,
                                          mcdata_dppk(keying::payload_key_id(bytes), info).key, payload_profile());
   ++mcdata_protected_received_;
   return {plain.begin(), plain.end()};

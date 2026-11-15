@@ -95,12 +95,12 @@ SipResponse Client::mcdata_media_invite(const SipMessage &invite) {
   mcdata_media_select_key(info, adhoc);
   mcdata_media_offered_ = offered;
   mcdata_media_answer_offer(response, invite, offer, address, file_transfer, adhoc_session);
-  if (!file_transfer) {
-    // TS 24.282 clause 9.2.3.2.4 steps 5, 7 and 8 (9.2.4.2.4 steps 6, 8 and 9 for a session): "timer" in Require, the
-    // g.3gpp.mcdata.sds media feature tag and the SDS ICSI in the Contact of the 200 (OK)
-    response.headers.push_back({"Require", "timer"});
-    response.contact_tags = ";+g.3gpp.mcdata.sds;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcdata.sds\"";
-  }
+  // TS 24.282 clause 9.2.3.2.4 steps 5, 7 and 8 (9.2.4.2.4 steps 6, 8 and 9 for a session; 10.2.5.2.4 6)b), d), e)
+  // for a file): "timer" in Require, the service's media feature tag and ICSI in the Contact of the 200 (OK)
+  response.headers.push_back({"Require", "timer"});
+  response.contact_tags =
+      file_transfer ? ";+g.3gpp.mcdata.fd;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcdata.fd\""
+                    : ";+g.3gpp.mcdata.sds;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcdata.sds\"";
   event(file_transfer ? "mcdata_media_file_offered" : "mcdata_media_sds_offered",
         {{"from", info.calling_user}, {"group", info.calling_group}});
   return response;
@@ -192,10 +192,27 @@ std::optional<SipResponse> Client::mcdata_media_file_offer(const SipMessage &inv
              {"sha256", mcdata::metadata_sha256(metadata)},
              {"mandatory", request.mandatory_download},
              {"completion_requested", request.completion_requested},
-             {"application_id", request.application_id ? Json(*request.application_id) : Json(nullptr)}};
+             {"application_id", request.application_id ? Json(*request.application_id) : Json(nullptr)},
+             // TS 24.282 clause 10.2.5.2.4: "may process the Application metadata container"
+             {"application_metadata",
+              request.application_metadata ? Json(*request.application_metadata) : Json(nullptr)}};
   // TS 24.282 clause 11.2 auto-receive, or an explicit mandatory download; otherwise the
   // invitation is declined, since these clients have no interactive user.
-  const auto automatic = cfg_.at("mcdata").value("fd", Json::object()).value("auto_receive_bytes", 0u);
+  const auto fd_cfg = cfg_.at("mcdata").value("fd", Json::object());
+  const auto automatic = fd_cfg.value("auto_receive_bytes", 0u);
+  if (!request.mandatory_download && !(automatic && size && size <= automatic) && mcdata_media_user_accepted_)
+    return std::nullopt; // TS 24.282 clause 10.2.5.2.4 7)d): the user accepted
+  if (!request.mandatory_download && !(automatic && size && size <= automatic) && fd_cfg.value("ask_user", false)) {
+    // TS 24.282 clause 10.2.5.2.4 7)a): "shall notify the user ... and wait for the user to accept, decline or
+    // defer"; the INVITE is answered 180 (Ringing) meanwhile and completed by mcdata_media_file_answer.
+    response.status_code = 180;
+    response.deferred = true; // SipEngine: the INVITE stays open for the final answer (SipEngine::answer)
+    mcdata_media_pending_invite_ = invite;
+    offered["state"] = "offered";
+    bounded_push(mcdata_media_files_, offered);
+    event("mcdata_media_file_offered_to_user", {{"from", info.calling_user}, {"bytes", size}});
+    return response;
+  }
   if (!request.mandatory_download && !(automatic && size && size <= automatic)) {
     response.status_code = 480;
     response.headers = {{"Warning", "399 mcdata \"110 user declined the call invitation\""}};
@@ -205,6 +222,36 @@ std::optional<SipResponse> Client::mcdata_media_file_offer(const SipMessage &inv
     return response;
   }
   return std::nullopt;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 10.2.5.2.4 7)b)-d): the user's decision on the pending FD invitation: declined, 480 with the Warning
+// "110 user declined the call invitation"; deferred, 480 with "231 user deferred the call invitation"; accepted, the
+// 200 (OK) of steps 7)d)i)-vii).
+void Client::mcdata_media_file_answer(const std::string &decision) {
+  if (!mcdata_media_pending_invite_) throw std::runtime_error("no FD invitation waits for the user");
+  const auto invite = *mcdata_media_pending_invite_;
+  mcdata_media_pending_invite_.reset();
+  SipResponse response;
+  if (decision == "accept") {
+    mcdata_media_user_accepted_ = true;
+    try {
+      response = mcdata_media_invite(invite);
+    } catch (...) {
+      mcdata_media_user_accepted_ = false;
+      throw;
+    }
+    mcdata_media_user_accepted_ = false;
+  } else {
+    response.status_code = 480;
+    response.headers = {{"Warning", decision == "defer" ? "399 mcdata \"231 user deferred the call invitation\""
+                                                        : "399 mcdata \"110 user declined the call invitation\""}};
+  }
+  if (!mcdata_media_files_.empty() && mcdata_media_files_.back().value("state", "") == "offered")
+    mcdata_media_files_.back()["state"] = decision == "accept" ? "accepted" : decision == "defer" ? "deferred"
+                                                                                                  : "declined";
+  sip_.answer(invite.dialog_id, response);
+  event("mcdata_media_file_answered", {{"decision", decision}, {"status", response.status_code}});
 }
 
 //------------------------------------------------------------------------------
@@ -273,6 +320,7 @@ void Client::mcdata_media_answer_offer(SipResponse &response, const SipMessage &
     // TS 24.282 clause 10.2.5.2.2: the answer names the signalling type and repeats the file selector.
     answer.accept_types = {mcdata::signalling_mime};
     answer.file_selector = offer.file_selector;
+    answer.file_transfer_id = offer.file_transfer_id; // RFC 5547 clause 8.2.2
   }
   mcdata_media_answer_ = msrp_sdp(answer, 1);
   response.local_sdp = mcdata_media_answer_;
