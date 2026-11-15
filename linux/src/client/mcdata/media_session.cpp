@@ -95,6 +95,12 @@ SipResponse Client::mcdata_media_invite(const SipMessage &invite) {
   mcdata_media_select_key(info, adhoc);
   mcdata_media_offered_ = offered;
   mcdata_media_answer_offer(response, invite, offer, address, file_transfer, adhoc_session);
+  if (!file_transfer) {
+    // TS 24.282 clause 9.2.3.2.4 steps 5, 7 and 8 (9.2.4.2.4 steps 6, 8 and 9 for a session): "timer" in Require, the
+    // g.3gpp.mcdata.sds media feature tag and the SDS ICSI in the Contact of the 200 (OK)
+    response.headers.push_back({"Require", "timer"});
+    response.contact_tags = ";+g.3gpp.mcdata.sds;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcdata.sds\"";
+  }
   event(file_transfer ? "mcdata_media_file_offered" : "mcdata_media_sds_offered",
         {{"from", info.calling_user}, {"group", info.calling_group}});
   return response;
@@ -259,8 +265,9 @@ void Client::mcdata_media_answer_offer(SipResponse &response, const SipMessage &
   answer.port = 9; // RFC 4145: the active endpoint does not listen
   answer.path = msrp::Uri{address, msrp::random_ident(), "tcp", 9, false}.text();
   answer.setup = "active";
-  answer.direction =
-      adhoc_session ? "sendrecv" : "recvonly"; // TS 24.282 clause 9.2.4.2.2 step 1c for an ad hoc session
+  // TS 24.282 clause 9.2.4.2.2 step 1c: "a=sendrecv" for an SDS session (one-to-one, group, ad hoc); clause
+  // 9.2.3.2.2 step 1d: "a=recvonly" for a standalone SDS or a file
+  answer.direction = mcdata_media_session_ || adhoc_session ? "sendrecv" : "recvonly";
   answer.accept_types = {mcdata::signalling_mime, mcdata::payload_mime};
   if (file_transfer) {
     // TS 24.282 clause 10.2.5.2.2: the answer names the signalling type and repeats the file selector.
@@ -293,6 +300,7 @@ void Client::mcdata_media_close(const std::vector<SipHeader> &bye_headers) {
     schedule([this, dialog, bye_headers] { sip_.bye(dialog, {}, bye_headers); });
   }
   mcdata_media_.reset();
+  ++mcdata_media_serial_; // the notifications of its messages now go by SIP MESSAGE (TS 24.282 clause 9.2.4.2.4)
   mcdata_media_pending_.clear();
   mcdata_media_role_.clear();
   mcdata_media_session_ = false;
@@ -385,30 +393,42 @@ void Client::mcdata_media_incoming(const msrp::Message &message) {
       }
     } else
       received["protected"] = false;
-    if (!data_body.empty())
-      for (const auto &part : mcdata::decode_data_payload(data_body).payloads)
-        received["payloads"].push_back(
-            {{"content_type", static_cast<int>(part.type)},
-             {"text", part.type == mcdata::ContentType::Text ? Json(part.data) : Json(nullptr)},
-             {"bytes", part.data.size()}});
+    const auto payload = data_body.empty() ? mcdata::DataPayload{} : mcdata::decode_data_payload(data_body);
+    for (const auto &part : payload.payloads)
+      received["payloads"].push_back(
+          {{"content_type", static_cast<int>(part.type)},
+           {"text", part.type == mcdata::ContentType::Text ? Json(part.data) : Json(nullptr)},
+           {"bytes", part.data.size()}});
     if (sds.sender) received["from"] = *sds.sender; // any participant of a session may send
     received["disposition"] = static_cast<int>(sds.disposition);
     bounded_push(mcdata_media_received_, received);
     event("mcdata_media_sds_received",
           {{"message_id", received.at("message_id")}, {"bytes", message.body.size()}, {"from", received.at("from")}});
-    // TS 24.582 clause 6.1.2.5.1: the disposition notification travels in the same session.
-    if (mcdata_media_session_ && sds.disposition != mcdata::DispositionRequest::None) {
-      mcdata::SdsNotification notice;
-      notice.type = sds.disposition == mcdata::DispositionRequest::Read ? mcdata::DispositionNotification::Read
-                                                                        : mcdata::DispositionNotification::Delivered;
-      notice.date_time = static_cast<std::uint64_t>(std::time(nullptr));
-      notice.conversation = sds.conversation;
-      notice.message = sds.message;
-      notice.sender = mcdata_user();
-      mcdata_media_->send_parts(mcdata_seal_msrp({{std::string(mcdata::signalling_mime), mcdata::encode(notice)}}));
-      event("mcdata_session_notification_sent",
-            {{"message_id", received.at("message_id")}, {"type", static_cast<int>(notice.type)}});
-    }
+    // TS 24.582 clauses 6.1.1.3.2 and 6.1.2.6: the message is handled as one of the signalling plane (TS 24.282
+    // clause 9.2.1.2), its disposition request by clause 9.2.1.3 (TDU1, the display indication); mcdata_notify sends
+    // the notification in this session while it lasts (TS 24.582 clause 6.1.2.5), else by SIP MESSAGE (12.2.1.1).
+    const auto id = mcdata::uuid_text(sds.message);
+    if (mcdata_received_.contains(id)) return;
+    Json kept = {{"message_id", id},
+                 {"conversation_id", received.at("conversation_id")},
+                 {"in_reply_to", sds.in_reply_to ? Json(mcdata::uuid_text(*sds.in_reply_to)) : Json(nullptr)},
+                 {"from", received.at("from")},
+                 {"group", mcdata_media_group_},
+                 {"request_type", mcdata_media_session_ ? "sds-session" : "sds-media"},
+                 {"application_id", sds.application_id ? Json(*sds.application_id) : Json(nullptr)},
+                 {"disposition", static_cast<int>(sds.disposition)},
+                 {"displayed", false},
+                 {"notified", Json::array()},
+                 {"date_time", sds.date_time},
+                 {"protected", received.value("protected", false)},
+                 {"dppk_id", received.value("dppk_id", Json(nullptr))},
+                 {"authenticated", received.value("authenticated", false)},
+                 {"plane", "media"},
+                 {"session_serial", mcdata_media_session_ ? Json(mcdata_media_serial_) : Json(nullptr)}};
+    mcdata::Info info;
+    info.calling_user = received.at("from").get<std::string>();
+    info.calling_group = mcdata_media_group_;
+    mcdata_deliver_sds(kept, sds, payload, id, info);
   } catch (const std::exception &error) {
     event("mcdata_media_sds_discarded", {{"reason", error.what()}});
   }
@@ -491,8 +511,14 @@ void Client::mcdata_media_tick() {
     // TS 24.582 clause 6.1.1.2.1: a standalone transfer ends once its SEND is answered; an SDS
     // session stays open until the user closes it (TS 24.282 clause 9.2.4).
     if (!mcdata_media_session_) {
+      const bool file = mcdata_media_result_.is_object() && mcdata_media_result_.value("file", false);
       mcdata_media_result_["state"] = "delivered";
-      mcdata_media_close();
+      // TS 24.282 clause 9.2.3.2.3, on the media plane's "successfully transferred" indication: a BYE with the
+      // Reason SIP, cause 200, text "transmission succeeded" (RFC 3326)
+      if (file)
+        mcdata_media_close();
+      else
+        mcdata_media_close({{"Reason", "SIP;cause=200;text=\"transmission succeeded\""}});
     }
   }
 }

@@ -577,6 +577,9 @@ class Client {
   std::map<std::string, ServiceProtection> service_protection_;
   // TS 24.484 clause 9.4.2.1 item c: the ad hoc group call support of each service configuration read.
   std::map<std::string, ServiceAdhoc> service_adhoc_;
+  // TS 24.484 clause 10.4.2.1 item 2: the <tx-and-rx-control> limits of the MCData service configuration (TS 24.282
+  // clause 9.2.1.1 2): the plane of a standalone SDS by <max-payload-size-sds-cplane-bytes>).
+  McDataTxRxLimits mcdata_tx_limits_;
   std::optional<ServiceProtection> protection_of(const std::string &service) const;
   void require_protection_known(const std::string &service, const std::vector<BodyPart> &parts) const;
   // mcptt.documents_on_notify: the sign-in waits for the MCPTT service configuration document of the configuration
@@ -2117,6 +2120,9 @@ private:
   std::vector<std::pair<std::string, std::string>> mcdata_media_pending_;
   std::string mcdata_media_message_id_;
   bool mcdata_media_acknowledged_ = false, mcdata_media_session_ = false;
+  // The media plane communications closed so far: a received message of the open SDS session carries the current
+  // value, so that its disposition notification goes in that session (TS 24.582 clause 6.1.2.5).
+  std::uint64_t mcdata_media_serial_ = 0;
   // MCData emergency private communication state (TS 24.282 annex G.4.11) of the open session, and
   // whether this client asked for the emergency condition.
   int mdepc_ = 1;

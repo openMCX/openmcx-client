@@ -289,6 +289,18 @@ void Client::mcdata_notify(Json &received, mcdata::DispositionNotification type)
   notice.sender = mcdata_user(); // Sender MCData user ID IE: identifies this notifier in an aggregate
   if (!received.at("application_id").is_null())
     notice.application_id = received.at("application_id").get<std::uint8_t>();
+  // TS 24.582 clauses 6.1.2.6 1.a and 6.1.2.5: a message of the SDS session still open is answered in it (an MSRP
+  // SEND of the SDS NOTIFICATION, 6.1.2.5.3); otherwise, standalone or after the release, by SIP MESSAGE (TS 24.282
+  // clauses 9.2.1.3, 9.2.4.2.4, 12.2.1.1).
+  const auto serial = received.value("session_serial", Json(nullptr));
+  if (serial.is_number() && serial.get<std::uint64_t>() == mcdata_media_serial_ && mcdata_media_ &&
+      mcdata_media_session_) {
+    mcdata_media_->send_parts(mcdata_seal_msrp({{std::string(mcdata::signalling_mime), mcdata::encode(notice)}}));
+    event("mcdata_session_notification_sent",
+          {{"message_id", received.at("message_id")}, {"type", static_cast<int>(type)}});
+    received["notified"].push_back(static_cast<int>(type));
+    return;
+  }
   mcdata_request(
       "",
       {{mcdata::info_mime, mcdata::info_xml(info)},

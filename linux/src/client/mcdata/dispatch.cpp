@@ -350,7 +350,8 @@ SipResponse Client::mcdata_sds_received(const std::vector<BodyPart> &parts, cons
 
 //------------------------------------------------------------------------------
 // TS 24.282 clause 9.2.2.2.2 step 3 and clause 6.6.3.2: accept the PCK sent with the message, verify a signed
-// DATA PAYLOAD and decrypt a protected one end to end; the failure response, or empty when the payload is open.
+// DATA PAYLOAD and decrypt a protected one end to end; the response that ends the handling (606 for a MIKEY-SAKKE
+// failure, 200 for a payload that is not opened: accepted, not delivered), or empty when the payload is open.
 std::optional<SipResponse> Client::mcdata_open_sds_payload(const std::vector<BodyPart> &parts, const mcdata::Info &info,
                                                            std::string &data_body, std::optional<std::uint32_t> &dppk,
                                                            bool &authenticated) {
@@ -375,7 +376,8 @@ std::optional<SipResponse> Client::mcdata_open_sds_payload(const std::vector<Bod
     } catch (const std::exception &error) {
       ++mcdata_signature_failures_;
       event("mcdata_signature_rejected", {{"from", info.calling_user}, {"reason", error.what()}});
-      response.status_code = 606;
+      // TS 24.282 clause 9.2.2.2.2: only a MIKEY-SAKKE failure (step 3d, 606) or a lack of resources (step 2, 480)
+      // refuses the request; the message is accepted (steps 4-5) and, unverified, not delivered (TS 33.180 8.5.5)
       return response;
     }
   }
@@ -388,7 +390,7 @@ std::optional<SipResponse> Client::mcdata_open_sds_payload(const std::vector<Bod
       ++mcdata_protection_failures_;
       event("mcdata_payload_undecryptable",
             {{"from", info.calling_user}, {"group", info.calling_group}, {"reason", error.what()}});
-      response.status_code = 606;
+      // as above: 200 (OK), and the message, without plaintext (TS 33.180 8.5.4.2, RFC 5116 2.2), not delivered
       return response;
     }
   }
@@ -610,7 +612,7 @@ void Client::mcdata_fd_send_command(std::istringstream &words) {
 
 //------------------------------------------------------------------------------
 // TS 24.282 clause 9.2.4.2.3 (SDS session) and clause 13.2.2.2 (release over the media plane):
-// sds-session <MCData ID|group=<id>|adhoc=<ad hoc group>> | send [delivery|read] <text> | close
+// sds-session <MCData ID|group=<id>|adhoc=<ad hoc group>> | send [delivery|read|both] <text> | close
 void Client::mcdata_sds_session_command(std::istringstream &words) {
   std::string word;
   words >> word;
@@ -622,12 +624,14 @@ void Client::mcdata_sds_session_command(std::istringstream &words) {
       disposition = mcdata::DispositionRequest::Delivery;
     else if (next == "read")
       disposition = mcdata::DispositionRequest::Read;
+    else if (next == "both")
+      disposition = mcdata::DispositionRequest::DeliveryAndRead;
     if (disposition == mcdata::DispositionRequest::None) text = next;
     std::string rest;
     std::getline(words, rest);
     if (!rest.empty() && rest.front() == ' ') rest.erase(0, 1);
     if (!rest.empty()) text = text.empty() ? rest : text + " " + rest;
-    if (text.empty()) throw std::runtime_error("usage: sds-session send [delivery|read] <text>");
+    if (text.empty()) throw std::runtime_error("usage: sds-session send [delivery|read|both] <text>");
     return mcdata_session_send(text, disposition);
   }
   if (word == "close") {
@@ -960,6 +964,15 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
   if (target.empty() || text.empty())
     throw std::runtime_error("usage: " + verb +
                              " [delivery|read|both] [app=<n>] [priority=<n>] [escaped] <target> <text>");
+  // TS 24.282 clause 9.2.1.1 2): a one-to-one or pre-arranged group standalone SDS whose payload is larger than the
+  // <max-payload-size-sds-cplane-bytes> of the MCData service configuration goes over the media plane (clause
+  // 9.2.3.2.3); the payload size is the Payload IE's contents less its content type octet (clause 9.2.2.3.1 NOTE 4).
+  if ((verb == "sds" || verb == "sds-group") && !application && !tamper && !tamper_signature &&
+      mcdata_tx_limits_.max_payload_size_sds_cplane && text.size() > *mcdata_tx_limits_.max_payload_size_sds_cplane) {
+    event("mcdata_sds_plane", {{"plane", "media"}, {"size", text.size()},
+                               {"limit", *mcdata_tx_limits_.max_payload_size_sds_cplane}});
+    return mcdata_send_media_sds(target, text, verb == "sds-group", priority, disposition);
+  }
   SdsRequest request;
   request.type = verb == "sds-group" ? "group-sds" : verb == "sds-adhoc" ? "ad-hoc-group-sds" : "one-to-one-sds";
   request.target = target;

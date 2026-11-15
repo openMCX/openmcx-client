@@ -121,7 +121,7 @@ void Client::mcdata_open_session(const std::string &target, bool group, const st
   const auto participants = adhoc ? mcdata_adhoc_target(target.substr(6), info) : std::vector<std::string>{};
   mcdata_session_priority_state(info, target, group, emergency, imminent, with_alert);
   auto offer = mcdata_media_offer();
-  offer.direction = adhoc ? "sendrecv" : offer.direction; // TS 24.282 clause 9.2.4.2.1 step 1c
+  offer.direction = "sendrecv"; // TS 24.282 clause 9.2.4.2.1 step 1c: an SDS session, one-to-one, group or ad hoc
   mcdata_media_protect(offer, target, group, adhoc);
   std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
   if (adhoc) {
@@ -507,6 +507,9 @@ void Client::mcdata_send_media_sds(const std::string &target, const std::string 
   info.request_type = adhoc ? "adhoc-group-sds-session" : group ? "group-sds" : "one-to-one-sds";
   info.client_id = client_id();
   if (group) info.request_uri = target; // TS 24.282 clause 9.2.3.2.3: the group, with no resource-lists
+  // TS 24.282 clause 9.2.3.2.3 7)b)ii)B) / 8)b)iv)A): the functional alias in use, while it is active for the user.
+  if (!mcdata_alias_in_use_.empty() && mcdata_aliases_active_.contains(mcdata_alias_in_use_))
+    info.functional_alias = mcdata_alias_in_use_;
   // TS 24.282 clause 9.2.3.2.1: the application priority requested.
   info.user_requested_priority = priority;
   const auto participants = adhoc ? mcdata_adhoc_target(target.substr(6), info) : std::vector<std::string>{};
