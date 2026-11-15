@@ -498,7 +498,7 @@ void Client::mcdata_send_file_media(const std::string &target, bool group, const
 // TS 24.282 clause 9.2.3.2.3 with TS 24.582 clause 6.1.1.2: a standalone SDS message whose payload travels over the
 // media plane; the payload is sent once the MSRP connection is bound.
 void Client::mcdata_send_media_sds(const std::string &target, const std::string &text, bool group,
-                                   std::optional<unsigned> priority) {
+                                   std::optional<unsigned> priority, mcdata::DispositionRequest disposition) {
   if (!mcdata_authorized_) throw std::runtime_error("SDS requires MCData service authorisation");
   require_mcdata_profile({"allow-transmit-data"});
   if (mcdata_media_) throw std::runtime_error("an MCData media plane session is already open");
@@ -514,6 +514,7 @@ void Client::mcdata_send_media_sds(const std::string &target, const std::string 
   signalling.date_time = static_cast<std::uint64_t>(std::time(nullptr));
   signalling.conversation = mcdata::random_uuid();
   signalling.message = mcdata::random_uuid();
+  signalling.disposition = disposition;
   mcdata::DataPayload payload{{{mcdata::ContentType::Text, text}}};
   mcdata_media_message_id_ = mcdata::uuid_text(signalling.message);
   mcdata_media_pending_ = {{std::string(mcdata::signalling_mime), mcdata::encode(signalling)},

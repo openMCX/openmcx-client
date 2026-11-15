@@ -2199,7 +2199,8 @@ private:
                               bool completion);
 
   void mcdata_send_media_sds(const std::string &target, const std::string &text, bool group = false,
-                             std::optional<unsigned> priority = std::nullopt);
+                             std::optional<unsigned> priority = std::nullopt,
+                             mcdata::DispositionRequest disposition = mcdata::DispositionRequest::None);
 
   // ---- MCData communication release (mcdata/release.cpp) ----
   // TS 24.282 clause 13 over the media plane: what this client learned about the release of

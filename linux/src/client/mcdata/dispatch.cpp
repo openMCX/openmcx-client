@@ -735,16 +735,27 @@ void Client::mcdata_ipcon_ping_command(std::istringstream &words) {
 void Client::mcdata_sds_media_command(std::istringstream &words) {
   std::string target, text;
   std::optional<unsigned> priority;
-  words >> target;
-  if (target.starts_with("priority=")) {
-    priority = static_cast<unsigned>(std::stoul(target.substr(9)));
-    words >> target;
+  auto disposition = mcdata::DispositionRequest::None;
+  // sds-media [delivery|read|both] [priority=<n>] <MCData ID|group=<id>> <text>: the SDS disposition request of the
+  // SDS SIGNALLING PAYLOAD (TS 24.282 clause 6.2.2.1 step 4, table 15.2.3-1)
+  for (words >> target;; words >> target) {
+    if (target == "delivery")
+      disposition = mcdata::DispositionRequest::Delivery;
+    else if (target == "read")
+      disposition = mcdata::DispositionRequest::Read;
+    else if (target == "both")
+      disposition = mcdata::DispositionRequest::DeliveryAndRead;
+    else if (target.starts_with("priority="))
+      priority = static_cast<unsigned>(std::stoul(target.substr(9)));
+    else
+      break;
   }
   std::getline(words, text);
   if (!text.empty() && text.front() == ' ') text.erase(0, 1);
-  if (target.empty() || text.empty()) throw std::runtime_error("usage: sds-media <MCData ID|group=<id>> <text>");
+  if (target.empty() || text.empty())
+    throw std::runtime_error("usage: sds-media [delivery|read|both] [priority=<n>] <MCData ID|group=<id>> <text>");
   const bool group = target.starts_with("group=");
-  return mcdata_send_media_sds(group ? target.substr(6) : target, text, group, priority);
+  return mcdata_send_media_sds(group ? target.substr(6) : target, text, group, priority, disposition);
 }
 
 //------------------------------------------------------------------------------
