@@ -103,6 +103,7 @@ void Client::mcdata_media_connect(const MsrpMedia &answer) {
 void Client::mcdata_open_session(const std::string &target, bool group, const std::string &priority, bool with_alert) {
   if (!mcdata_authorized_) throw std::runtime_error("an SDS session requires MCData service authorisation");
   if (mcdata_media_) throw std::runtime_error("an MCData media plane session is already open");
+  if (group) mcdata_group_sds_allowed(target, 0, true, true); // TS 24.282 clause 9.2.4.2.3 8)a), a1); 11.1
   mcdata_media_retry_ = [this, target, group, priority, with_alert] {
     mcdata_open_session(target, group, priority, with_alert);
   };

@@ -1970,6 +1970,9 @@ private:
   std::function<void()> mcdata_media_retry_;
   unsigned mcdata_krr_count_ = 0;
   std::pair<std::string, std::string> mcdata_target_kms(const std::string &target) const;
+  // TS 24.282 clause 11.1 2), 5), 10), 9.2.2.2.1 3)a), 9.2.3.2.3, 9.2.4.2.3 8)a1): a group SDS the group document
+  // does not allow is refused before anything is sent.
+  void mcdata_group_sds_allowed(const std::string &group, std::size_t size, bool media_plane, bool session);
   bool mcdata_kms_redirect(const SipResponse &response);
 
   std::map<std::uint32_t, DataKey> mcdata_pcks_;

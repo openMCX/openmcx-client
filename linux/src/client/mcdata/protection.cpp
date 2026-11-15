@@ -326,6 +326,43 @@ std::pair<keying::KeyMessage, std::string> Client::mcdata_pck_for(const std::str
 }
 
 //------------------------------------------------------------------------------
+// TS 24.282 clause 11.1 and the SDS procedures, from the group document of the group (TS 24.481, read when needed):
+//   2)  <mcdata-allow-transmit-data-in-this-group> not granted to the user: "not allowed to send group MCData
+//       communications on this group identity";
+//   9.2.2.2.1 3)a) (and 9.2.3.2.3 8)a), 9.2.4.2.3 8)a)): <AllowedSDS> "false" refuses the SDS; that leaf is of the
+//       group configuration MO (TS 24.483), whose group document element is <mcdata-allow-short-data-service>; 11.1
+//       10) refuses an SDS session when that element is absent or "false";
+//   5)  a payload larger than <mcdata-on-network-max-data-size-for-SDS>;
+//   9.2.3.2.3 (pre-check) and 9.2.4.2.3 8)a1): <preconfigured-group-use-only> "true": no standalone SDS over the
+//       media plane and no SDS session on the group.
+void Client::mcdata_group_sds_allowed(const std::string &group, std::size_t size, bool media_plane, bool session) {
+  const auto response = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(group), {},
+                                      {{"Authorization", bearer()}});
+  event("mcdata_group_document_checked", {{"group", group}, {"status", response.status}});
+  if (response.status != 200) return; // no document: the server decides (TS 24.282 clause 11.1 for the server)
+  std::string reason;
+  try {
+    const auto sds = parse_mcdata_group_sds(response.body);
+    // the user is a list member by the "uri" of its <entry> (TS 24.481 clause 7.2.2: here the MC user's MCPTT ID) or by
+    // its <mcdata-mcdata-id>
+    if (!group_document_allows(response.body, "mcdata-allow-transmit-data-in-this-group", {mcdata_user(), user()}))
+      reason = "mcdata-allow-transmit-data-in-this-group";
+    else if (!sds.allow_sds)
+      reason = "mcdata-allow-short-data-service";
+    else if (sds.max_sds_bytes && size > *sds.max_sds_bytes)
+      reason = "mcdata-on-network-max-data-size-for-SDS";
+    else if (sds.preconfigured_use_only && (media_plane || session))
+      reason = "preconfigured-group-use-only";
+  } catch (const std::exception &error) {
+    reason = std::string("unreadable group document: ") + error.what();
+  }
+  if (reason.empty()) return;
+  status_["mcdata_sds_not_allowed"] = {{"group", group}, {"reason", reason}};
+  event("mcdata_sds_not_allowed", {{"group", group}, {"reason", reason}});
+  throw std::runtime_error("group SDS not allowed on " + group + " (" + reason + ", TS 24.282 clause 11.1)");
+}
+
+//------------------------------------------------------------------------------
 // TS 24.282 clause 6.2.8.3.9, on network: "1) shall search for the <One-to-One-CommunicationListEntry> ... a) if
 // ... found and contains in the <anyExt> element a non-empty <MCData-ID-KMSURI> element, shall retrieve the KMS URI
 // contained therein; or b) if ... not found or the <MCData-ID-KMSURI> element is empty, shall retrieve the <kms>

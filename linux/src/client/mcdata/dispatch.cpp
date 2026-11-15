@@ -993,6 +993,11 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
                                      {"limit", *mcdata_tx_limits_.max_data_size_sds}});
     throw std::runtime_error("SDS larger than <max-data-size-sds-bytes> (TS 24.282 clause 11.1 step 3)");
   }
+  if (verb == "sds-group") {
+    const bool media = mcdata_tx_limits_.max_payload_size_sds_cplane &&
+                       text.size() > *mcdata_tx_limits_.max_payload_size_sds_cplane;
+    mcdata_group_sds_allowed(target, text.size(), media, false);
+  }
   // TS 24.282 clause 9.2.1.1 2): a one-to-one or pre-arranged group standalone SDS whose payload is larger than the
   // <max-payload-size-sds-cplane-bytes> of the MCData service configuration goes over the media plane (clause
   // 9.2.3.2.3); the payload size is the Payload IE's contents less its content type octet (clause 9.2.2.3.1 NOTE 4).
