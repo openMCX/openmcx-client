@@ -1973,6 +1973,11 @@ private:
   // TS 24.282 clause 11.1 2), 5), 10), 9.2.2.2.1 3)a), 9.2.3.2.3, 9.2.4.2.3 8)a1): a group SDS the group document
   // does not allow is refused before anything is sent.
   void mcdata_group_sds_allowed(const std::string &group, std::size_t size, bool media_plane, bool session);
+  // TS 24.282 clause 9.2.2.2.1 3)b)iii) (C8): the temporary groups a constituent group's document names
+  // (<on-network-regrouped>), whose GMK is subscribed to (TS 33.180 clause 5.7), and the constituent group named in
+  // <associated-group-id> for an SDS to a temporary group.
+  std::set<std::string> mcdata_temporary_groups_;
+  std::string mcdata_associated_group(const std::string &group);
   bool mcdata_kms_redirect(const SipResponse &response);
 
   std::map<std::uint32_t, DataKey> mcdata_pcks_;

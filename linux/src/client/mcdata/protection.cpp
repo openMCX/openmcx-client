@@ -363,6 +363,29 @@ void Client::mcdata_group_sds_allowed(const std::string &group, std::size_t size
 }
 
 //------------------------------------------------------------------------------
+// TS 24.282 clause 9.2.2.2.1 3)b)iii): "if the group identity identifies a temporary group ..., the <anyExt> element
+// with the <associated-group-id> element set to the MCData group ID of a constituent group the MCData client is member
+// of": the constituents of the group's <on-network-temporary> (TS 24.481 clause 7.2.4.2); the user's configured MCData
+// group or one it is affiliated to first, else the first listed (the GMS forms the group of the user's groups).
+std::string Client::mcdata_associated_group(const std::string &group) {
+  const auto response = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(group), {},
+                                      {{"Authorization", bearer()}});
+  if (response.status != 200) return {};
+  std::vector<std::string> constituents;
+  try {
+    constituents = group_temporary_constituents(response.body);
+  } catch (const std::exception &) {
+    return {};
+  }
+  if (constituents.empty()) return {};
+  for (const auto &id : constituents)
+    if (id == mcdata_group()) return id;
+  for (const auto &id : constituents)
+    if (mcdata_groups_.contains(id)) return id;
+  return constituents.front();
+}
+
+//------------------------------------------------------------------------------
 // TS 24.282 clause 6.2.8.3.9, on network: "1) shall search for the <One-to-One-CommunicationListEntry> ... a) if
 // ... found and contains in the <anyExt> element a non-empty <MCData-ID-KMSURI> element, shall retrieve the KMS URI
 // contained therein; or b) if ... not found or the <MCData-ID-KMSURI> element is empty, shall retrieve the <kms>

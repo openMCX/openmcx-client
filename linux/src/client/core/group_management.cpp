@@ -207,6 +207,20 @@ std::string Client::temporary_group_request_xml(const std::string &group_id, con
       "<mcpttgi:on-network-temporary><mcpttgi:constituent-MCPTT-group-IDs>" + ids +
       "</mcpttgi:constituent-MCPTT-group-IDs></mcpttgi:on-network-temporary>";
   if (mcvideo) group += mcvideo_supported_services();
+  // TS 24.282 clause 11.1 2), 10) and 9.2.2.2.1 3)a): an MCData temporary group in which the members may send SDS:
+  // <mcdata-allow-short-data-service> and the <mcdata-allow-transmit-data-in-this-group> action for every member
+  // (TS 24.481 clause 7.2.2 with RFC 4745 <is-list-member>); the GMS forms the group of this document (clause
+  // 6.3.14.3.1).
+  // (the <ruleset> first in <list-service>, TS 24.481 clause 7.2.7)
+  if (mcdata) {
+    const auto open = group.find("<list-service");
+    const auto at = group.find('>', open) + 1;
+    group.insert(at, "<cp:ruleset xmlns:cp=\"urn:ietf:params:xml:ns:common-policy\"><cp:rule id=\"members\">"
+                     "<cp:conditions><is-list-member/></cp:conditions><cp:actions>"
+                     "<mcpttgi:mcdata-allow-transmit-data-in-this-group>true"
+                     "</mcpttgi:mcdata-allow-transmit-data-in-this-group></cp:actions></cp:rule></cp:ruleset>");
+    group += "<mcpttgi:mcdata-allow-short-data-service>true</mcpttgi:mcdata-allow-short-data-service>";
+  }
   if (mcdata) group += mcdata_supported_services();
   // The group's type, in the project's configuration extension of the document.
   if (chat)
@@ -612,6 +626,21 @@ std::optional<SipResponse> Client::group_document_notify(const SipMessage &messa
             members.push_back(response.body.substr(uri + 5, response.body.find('"', uri + 5) - uri - 5));
         }
         document["members"] = members;
+        // TS 24.481 clause 6.3.14.3 and TS 33.180 clause 5.7: a temporary group formed from this group
+        // (<on-network-regrouped>): its GMK is needed for MCData group communications on it
+        if (response.status == 200 && mcdata_enabled()) {
+          try {
+            bool added = false;
+            for (const auto &tgi : group_regrouped_tgis(response.body))
+              added |= mcdata_temporary_groups_.insert(tgi).second;
+            if (added) {
+              status_["mcdata_temporary_groups"] = mcdata_temporary_groups_;
+              update_key_subscriptions();
+            }
+          } catch (const std::exception &error) {
+            event("group_document_unreadable", {{"group", group}, {"reason", error.what()}});
+          }
+        }
       });
     }
   }

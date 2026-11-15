@@ -314,6 +314,7 @@ void Client::mcdata_send_sds(const SdsRequest &request) {
   if (request.type == "group-sds") {
     info.request_uri = request.target;
     info.client_id = client_id();
+    info.associated_group = mcdata_associated_group(request.target); // TS 24.282 clause 9.2.2.2.1 3)b)iii)
   } else if (request.type == "ad-hoc-group-sds") {
     info.client_id = client_id();
     participants = mcdata_adhoc_target(request.target, info);
