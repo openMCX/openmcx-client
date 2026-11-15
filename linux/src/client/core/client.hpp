@@ -1960,7 +1960,17 @@ private:
     keying::KeyMessage key;
     std::string peer;
     std::uint64_t expires = 0;
+    std::string kms; // the KMS URI the PCK is keyed to (IDRkmsr, TS 24.282 clause 6.2.8.3.9)
   };
+  // TS 24.282 clause 6.2.8.3.9: the <MCData-ID-KMSURI> of each <One-to-One-CommunicationListEntry> of the MCData
+  // user profile; TS 33.180 clause 5.2.8.2.5: the receiver KMS a KMS Redirect Response selected for a target, the
+  // media plane request to send again with it, and the responses taken so far.
+  std::map<std::string, std::string> mcdata_profile_kms_;
+  std::pair<std::string, std::string> mcdata_redirect_kms_;
+  std::function<void()> mcdata_media_retry_;
+  unsigned mcdata_krr_count_ = 0;
+  std::pair<std::string, std::string> mcdata_target_kms(const std::string &target) const;
+  bool mcdata_kms_redirect(const SipResponse &response);
 
   std::map<std::uint32_t, DataKey> mcdata_pcks_;
   std::map<std::uint32_t, keying::KeyMessage> group_keys_;

@@ -103,6 +103,9 @@ void Client::mcdata_media_connect(const MsrpMedia &answer) {
 void Client::mcdata_open_session(const std::string &target, bool group, const std::string &priority, bool with_alert) {
   if (!mcdata_authorized_) throw std::runtime_error("an SDS session requires MCData service authorisation");
   if (mcdata_media_) throw std::runtime_error("an MCData media plane session is already open");
+  mcdata_media_retry_ = [this, target, group, priority, with_alert] {
+    mcdata_open_session(target, group, priority, with_alert);
+  };
   const bool emergency = priority == "emergency", imminent = priority == "imminent";
 
   // TS 24.282 clause 24.2.2.1.1: target "adhoc=<ad hoc group>" opens an ad hoc group SDS session.
@@ -197,12 +200,14 @@ void Client::mcdata_media_answered(const SipResponse &raw, const char *what) {
   if (response.status_code < 200) return;
   mcdata_media_result_["status"] = response.status_code;
   mcdata_media_result_["warning"] = std::string(get_header(response.headers, "Warning"));
+  if (response.status_code == 488 && mcdata_kms_redirect(response)) return;
   if (response.status_code >= 300) {
     mcdata_media_result_["state"] = "rejected";
     mcdata_media_close();
     failure(std::string("media plane ") + what + ": " + std::to_string(response.status_code));
     return;
   }
+  mcdata_krr_count_ = 0;
   try {
     for (const auto &part : response.parts)
       if (part.content_type.starts_with("application/sdp")) {
@@ -225,6 +230,7 @@ void Client::mcdata_session_answered(const SipResponse &raw) {
   if (response.status_code < 200) return;
   mcdata_media_result_["status"] = response.status_code;
   mcdata_media_result_["warning"] = std::string(get_header(response.headers, "Warning"));
+  if (response.status_code == 488 && mcdata_kms_redirect(response)) return;
   if (response.status_code >= 300) {
     mcdata_media_result_["state"] = "rejected";
     mcdata_priority_response(response);
@@ -502,6 +508,9 @@ void Client::mcdata_send_media_sds(const std::string &target, const std::string 
   if (!mcdata_authorized_) throw std::runtime_error("SDS requires MCData service authorisation");
   require_mcdata_profile({"allow-transmit-data"});
   if (mcdata_media_) throw std::runtime_error("an MCData media plane session is already open");
+  mcdata_media_retry_ = [this, target, text, group, priority, disposition] {
+    mcdata_send_media_sds(target, text, group, priority, disposition);
+  };
   const bool adhoc = target.starts_with("adhoc="); // TS 24.282 clause 24.2.2.1.1 step 5
   mcdata::Info info;
   info.request_type = adhoc ? "adhoc-group-sds-session" : group ? "group-sds" : "one-to-one-sds";

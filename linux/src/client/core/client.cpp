@@ -483,6 +483,7 @@ void Client::read_mcdata_profile() {
   if (profile.user_id != mcdata_user() || profile.profile_index != index)
     throw std::runtime_error("MCData user profile of another user or index");
   mcdata_profile_actions_ = profile.actions;
+  mcdata_profile_kms_ = profile.one_to_one_kms;
   mcdata_profile_loaded_ = true;
   status_["mcdata_profile"] = {{"user_id", profile.user_id},
                                {"profile_index", profile.profile_index},

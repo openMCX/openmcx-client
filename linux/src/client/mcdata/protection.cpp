@@ -302,13 +302,101 @@ std::uint64_t Client::data_pck_end(const keying::KeyMessage &key) const {
 // whose I_MESSAGE the request carries in an application/mikey body.
 std::pair<keying::KeyMessage, std::string> Client::mcdata_pck_for(const std::string &peer) {
   expire_data_keys();
-  for (const auto &[id, context] : mcdata_pcks_)
-    if (context.peer == peer) return {context.key, {}};
   if (!mcdata_keys_) throw std::runtime_error("MCData key management client unavailable");
-  auto [key, message] = mcdata_keys_->make_pck(peer);
+  // TS 24.282 clauses 9.2.2.2.1 2)c)iv) and 9.2.3.2.3 7)c): the PCK is encrypted "using the MCData ID of the invited
+  // user" and its KMS URI (clause 6.2.8.3.9; after a KMS Redirect Response the receiver KMS it selected, TS 33.180
+  // clause 5.2.8.2.5). A security context with the peer under that KMS is kept; one under another KMS is replaced.
+  auto [kms, source] = mcdata_redirect_kms_.first == peer
+                           ? std::pair{std::exchange(mcdata_redirect_kms_, {}).second, std::string("kms-redirect")}
+                           : mcdata_target_kms(peer);
+  for (const auto &[id, context] : mcdata_pcks_)
+    if (context.peer == peer && (context.kms.empty() || context.kms == kms) && source != "kms-redirect")
+      return {context.key, {}};
+  std::erase_if(mcdata_pcks_, [&peer](const auto &entry) { return entry.second.peer == peer; });
+  if (!mcdata_keys_->knows_kms(kms)) {
+    status_["mcdata_pck_kms"] = {{"target", peer}, {"kms_uri", kms}, {"source", source}, {"known", false}};
+    throw std::runtime_error("no KMS certificate for the KMS URI of " + peer + ": " + kms);
+  }
+  auto [key, message] = mcdata_keys_->make_pck(peer, kms);
   if (mcdata_pcks_.size() >= 256) throw std::runtime_error("MCData PCK context capacity reached");
-  mcdata_pcks_[key.csb_id] = {key, peer, data_pck_end(key)};
+  mcdata_pcks_[key.csb_id] = {key, peer, data_pck_end(key), kms};
+  status_["mcdata_pck_kms"] = {{"target", peer}, {"kms_uri", kms}, {"source", source}, {"known", true}};
+  event("mcdata_pck_kms", status_["mcdata_pck_kms"]);
   return {key, message};
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 6.2.8.3.9, on network: "1) shall search for the <One-to-One-CommunicationListEntry> ... a) if
+// ... found and contains in the <anyExt> element a non-empty <MCData-ID-KMSURI> element, shall retrieve the KMS URI
+// contained therein; or b) if ... not found or the <MCData-ID-KMSURI> element is empty, shall retrieve the <kms>
+// element of the <App-Server-Info> ... of the UE initial configuration document": this client's own KMS.
+std::pair<std::string, std::string> Client::mcdata_target_kms(const std::string &target) const {
+  if (const auto found = mcdata_profile_kms_.find(target); found != mcdata_profile_kms_.end() && !found->second.empty())
+    return {found->second, "user-profile"};
+  return {mcdata_keys_->kms_uri_of(target), "initial-configuration"};
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clause 5.2.8.2.5 ("Upon receipt of a KRR due to a previous attempt to distribute a key"), for the PCK of
+// a one-to-one MCData communication over the media plane (a 488 to its INVITE, TS 24.282 clauses 9.2.3.2.4 3)d),
+// 9.2.4.2.4 3)): the initiator KMS must be listed (1.), the receiver KMS is chosen among the listed ones this client
+// holds a certificate of (2.); then "a new MIKEY message using the selected KMSs", else the communication fails.
+bool Client::mcdata_kms_redirect(const SipResponse &response) {
+  const auto body = krr_body(response);
+  const auto target = mcdata_media_peer_;
+  if (!body || target.empty() || !mcdata_keys_ || !mcdata_media_retry_) return false;
+  Json record{{"target", target}};
+  std::string chosen;
+  try {
+    const auto krr = keying::parse_krr(*body);
+    record.update({{"creator", krr.creator},
+                   {"initiator_kms", krr.initiator_kms},
+                   {"receiver_kms", krr.receiver_kms},
+                   {"initiator_list", krr.initiator_any ? Json("ANY") : Json(krr.initiator_list)},
+                   {"receiver_list", krr.receiver_any ? Json("ANY") : Json(krr.receiver_list)}});
+    if (krr.initiator != mcdata_user() || krr.receiver != target)
+      throw std::runtime_error("a KMS Redirect Response for another MIKEY message");
+    if (mcdata_krr_count_ >= 3) throw std::runtime_error("too many KMS Redirect Responses");
+    const auto known = mcdata_keys_->known_kms();
+    if (known.empty()) throw std::runtime_error("KMS identity not provisioned");
+    const auto &home = known.front();
+    const auto listed = [](const std::vector<std::string> &list, const std::string &uri) {
+      return std::find(list.begin(), list.end(), uri) != list.end();
+    };
+    if (!krr.initiator_any && !listed(krr.initiator_list, home))
+      throw std::runtime_error("no acceptable initiator KMS");
+    std::vector<std::string> receivers;
+    if (krr.receiver_any)
+      receivers = known;
+    else
+      for (const auto &uri : krr.receiver_list)
+        if (listed(known, uri)) receivers.push_back(uri);
+    if (receivers.empty()) throw std::runtime_error("no acceptable receiver KMS");
+    chosen = listed(receivers, home) ? home : receivers.front();
+    if (chosen == krr.receiver_kms && home == krr.initiator_kms)
+      throw std::runtime_error("the KMS Redirect Response selects the KMSs already used");
+    record["selected_receiver_kms"] = chosen;
+    record["result"] = "new MIKEY message";
+  } catch (const std::exception &error) {
+    record["result"] = std::string("communication fails: ") + error.what();
+    status_["mcdata_last_krr"] = record;
+    event("mcdata_kms_redirect", record);
+    return false;
+  }
+  ++mcdata_krr_count_;
+  status_["mcdata_last_krr"] = record;
+  event("mcdata_kms_redirect", record);
+  mcdata_redirect_kms_ = {target, chosen};
+  mcdata_media_result_["state"] = "kms-redirect";
+  mcdata_media_close();
+  schedule([this, retry = mcdata_media_retry_] {
+    try {
+      retry();
+    } catch (const std::exception &error) {
+      failure(std::string("MCData media plane request after a KMS Redirect Response: ") + error.what());
+    }
+  });
+  return true;
 }
 
 //------------------------------------------------------------------------------
