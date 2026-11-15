@@ -391,6 +391,10 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
   if (mcdata_enabled() && !message.dialog_id.empty() &&
       (message.dialog_id == mcdata_subscription_ || message.dialog_id == mcdata_fetch_))
     return mcdata_affiliation_notify(message);
+  // TS 24.282 clauses 7.2.4, 8.2.3 and 8.2.7: the settings subscription, those to other users' affiliation and to
+  // group dynamic data.
+  if (mcdata_enabled() && !message.dialog_id.empty() && mcdata_extra_subscriptions_.contains(message.dialog_id))
+    return mcdata_extra_notify(message);
   if (mcvideo_enabled() && !message.dialog_id.empty() && message.dialog_id == mcvideo_subscription_)
     return mcvideo_affiliation_notify(message);
   // TS 24.281 clauses 7.2.4 and 8.2.1.3: the settings subscription and those to other users' affiliation.

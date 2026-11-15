@@ -54,20 +54,30 @@ static std::string mcvideo_supported_services() {
 }
 
 //------------------------------------------------------------------------------
+// Helper: TS 24.481 clause 7.2.2: the <supported-services> of an MCData group document: a <service> with the
+// "enabler" attribute the MCData ICSI (TS 24.282).
+static std::string mcdata_supported_services() {
+  return std::string("<oxe:supported-services xmlns:oxe=\"urn:oma:xml:xdm:extensions\"><oxe:service enabler=\"") +
+         mcdata::icsi + "\"/></oxe:supported-services>";
+}
+
+//------------------------------------------------------------------------------
 // Helper: a group document (TS 24.481 clause 7.2) of the group with its members. An MCVideo group document (TS 24.481
 // clause 7.2.8) has the MCVideo <supported-services> (clause 7.2.2 item e)), and each <entry> "shall include an
 // <mcvideo-mcvideo-id> element" with the member's MCVideo ID in its "uri" attribute (clause 7.2.2); the members are
-// MCVideo IDs then. The MCPTT document stays as it was.
+// MCVideo IDs then. In an MCData group document each <entry> "shall include an <mcdata-mcdata-id> element" (clause
+// 7.2.2, the members MCData IDs). The MCPTT document stays as it was.
 std::string Client::group_document_xml(const std::string &group, const std::vector<std::string> &members,
-                                       bool mcvideo) {
+                                       GroupDocService service) {
+  const bool mcvideo = service == GroupDocService::Mcvideo, mcdata = service == GroupDocService::Mcdata;
   std::string out =
       "<?xml version=\"1.0\" encoding=\"UTF-8\"?><group xmlns=\"urn:oma:xml:poc:list-service\"><list-service uri=\"" +
       xml_escape(group) + "\"><list>";
   for (const auto &member : members) {
     out += "<entry uri=\"" + xml_escape(member) + "\"";
-    if (mcvideo)
-      out += "><mcpttgi:mcvideo-mcvideo-id xmlns:mcpttgi=\"urn:3gpp:ns:mcpttGroupInfo:1.0\" uri=\"" +
-             xml_escape(member) + "\"/></entry>";
+    if (mcvideo || mcdata)
+      out += std::string("><mcpttgi:") + (mcvideo ? "mcvideo-mcvideo-id" : "mcdata-mcdata-id") +
+             " xmlns:mcpttgi=\"urn:3gpp:ns:mcpttGroupInfo:1.0\" uri=\"" + xml_escape(member) + "\"/></entry>";
     else
       out += "/>";
   }
@@ -79,7 +89,8 @@ std::string Client::group_document_xml(const std::string &group, const std::vect
          "<is-list-member/></cp:conditions><cp:actions><on-network-allow-getting-member-list "
          "xmlns=\"urn:3gpp:ns:mcpttGroupInfo:1.0\">true</on-network-allow-getting-member-list></cp:actions></cp:rule>"
          "</cp:ruleset>" +
-         (mcvideo ? mcvideo_supported_services() : std::string()) + "</list-service></group>";
+         (mcvideo ? mcvideo_supported_services() : mcdata ? mcdata_supported_services() : std::string()) +
+         "</list-service></group>";
 }
 
 //------------------------------------------------------------------------------
@@ -164,7 +175,10 @@ void Client::profile_command(const std::string &cmd) {
 // <protect-floor-control-signalling>. The <on-network-temporary> and <constituent-MCPTT-group-IDs> elements are of
 // every MCS group document (clause 7.2.2 NOTE 2: "mcptt" in a name is historical).
 std::string Client::temporary_group_request_xml(const std::string &group_id, const std::string &groups, bool chat,
-                                                bool protect, bool mcvideo) {
+                                                bool protect, GroupDocService service) {
+  // MCData (TS 24.481 clause 7.2.2, "MCData group document additionally" items a) and b)): <mcdata-protect-media> and
+  // <mcdata-protect-transmission-control>, and the MCData <supported-services>.
+  const bool mcvideo = service == GroupDocService::Mcvideo, mcdata = service == GroupDocService::Mcdata;
   std::string ids;
   for (std::size_t start = 0; start <= groups.size();) {
     const auto end = std::min(groups.find(',', start), groups.size());
@@ -182,15 +196,18 @@ std::string Client::temporary_group_request_xml(const std::string &group_id, con
       "<list-service uri=\"" +
       xml_escape(group_id) +
       "\">" +
-      (mcvideo ? "<mcpttgi:mcvideo-protect-media>" + flag + "</mcpttgi:mcvideo-protect-media>" +
-                     "<mcpttgi:mcvideo-protect-transmission-control>" + flag +
-                     "</mcpttgi:mcvideo-protect-transmission-control>"
+      (mcvideo || mcdata
+           ? std::string("<mcpttgi:") + (mcvideo ? "mcvideo" : "mcdata") + "-protect-media>" + flag + "</mcpttgi:" +
+                 (mcvideo ? "mcvideo" : "mcdata") + "-protect-media><mcpttgi:" + (mcvideo ? "mcvideo" : "mcdata") +
+                 "-protect-transmission-control>" + flag + "</mcpttgi:" + (mcvideo ? "mcvideo" : "mcdata") +
+                 "-protect-transmission-control>"
                : "<mcpttgi:protect-media>" + flag + "</mcpttgi:protect-media>" +
                      "<mcpttgi:protect-floor-control-signalling>" + flag +
                      "</mcpttgi:protect-floor-control-signalling>") +
       "<mcpttgi:on-network-temporary><mcpttgi:constituent-MCPTT-group-IDs>" + ids +
       "</mcpttgi:constituent-MCPTT-group-IDs></mcpttgi:on-network-temporary>";
   if (mcvideo) group += mcvideo_supported_services();
+  if (mcdata) group += mcdata_supported_services();
   // The group's type, in the project's configuration extension of the document.
   if (chat)
     group += "<configuration xmlns=\"urn:openmcx:ns:groupConfiguration:1.0\">{\"type\":\"chat\"}</configuration>";
@@ -299,11 +316,11 @@ void Client::group_documents_unsubscribe() {
 
 //------------------------------------------------------------------------------
 // TS 24.481 clause 6.3: the group management client procedures, as test commands:
-// group-create <document> <group ID> <member>... [mcvideo]   group-delete <document>
+// group-create <document> <group ID> <member>... [mcvideo|mcdata]   group-delete <document>
 // group-member add|remove <group ID> <member>
 // group-subscribe <group ID>...                    group-unsubscribe
 // group-resubscribe <group ID>...
-// temporary-create ... [mcvideo]                   temporary-delete <document>
+// temporary-create ... [mcvideo|mcdata]           temporary-delete <document>
 void Client::group_management_command(const std::string &cmd) {
   std::istringstream in(cmd);
   std::string verb;
@@ -311,15 +328,19 @@ void Client::group_management_command(const std::string &cmd) {
   std::vector<std::string> args;
   for (std::string word; in >> word;) args.push_back(word);
   const auto own_tree = groups_xcap() + "/users/" + xcap_segment(user()) + "/";
-  // The word "mcvideo" (never a SIP URI) asks for an MCVideo group document (TS 24.481 clause 7.2.8).
-  const auto video_word = std::find(args.begin(), args.end(), "mcvideo");
-  const bool mcvideo = video_word != args.end();
-  if (mcvideo) args.erase(video_word);
+  // The word "mcvideo" or "mcdata" (never a SIP URI) asks for an MCVideo group document (TS 24.481 clause 7.2.8) or an
+  // MCData one (clause 7.2.2).
+  auto service = GroupDocService::Mcptt;
+  for (const auto &[word, kind] : {std::pair{"mcvideo", GroupDocService::Mcvideo}, {"mcdata", GroupDocService::Mcdata}})
+    if (const auto found = std::find(args.begin(), args.end(), word); found != args.end()) {
+      service = kind;
+      args.erase(found);
+    }
   if (verb == "group-create") { // TS 24.481 clause 6.3.2.2.2
     // group-create <document> <group ID> <member>... [mcvideo]
     if (args.size() < 2) throw std::runtime_error("group-create <document> <group ID> <member>... [mcvideo]");
     xcap_request("PUT", own_tree + xcap_segment(args[0]), "application/vnd.oma.poc.groups+xml",
-                 group_document_xml(args[1], {args.begin() + 2, args.end()}, mcvideo));
+                 group_document_xml(args[1], {args.begin() + 2, args.end()}, service));
   } else if (verb == "temporary-create") { // TS 24.481 clause 6.3.14.2
     // temporary-create <document> <temporary group ID> <group>,<group>... [chat] [protected] [mcvideo]
     if (args.size() < 3)
@@ -328,7 +349,7 @@ void Client::group_management_command(const std::string &cmd) {
     const bool chat = std::find(args.begin() + 3, args.end(), "chat") != args.end();
     const bool protect = std::find(args.begin() + 3, args.end(), "protected") != args.end();
     xcap_request("POST", own_tree + xcap_segment(args[0]), "application/vnd.3gpp.GMOP+xml",
-                 temporary_group_request_xml(args[1], args[2], chat, protect, mcvideo));
+                 temporary_group_request_xml(args[1], args[2], chat, protect, service));
   } else if (verb == "temporary-delete") { // TS 24.481 clause 6.3.15.2
     if (args.size() != 1) throw std::runtime_error("temporary-delete <document>");
     xcap_request("DELETE", own_tree + xcap_segment(args[0]));

@@ -69,7 +69,8 @@ add_executable(mcx-client
     src/client/mcdata/priority.cpp
     src/client/mcdata/protection.cpp
     src/client/mcdata/release.cpp
-    src/client/mcdata/service.cpp)
+    src/client/mcdata/service.cpp
+    src/client/mcdata/settings_affiliation.cpp)
 target_include_directories(mcx-client PRIVATE src/client/core)
 target_compile_options(mcx-client PRIVATE -Wall -Wextra -Wpedantic)
 # Link-time optimisation: the split into files must not cost the inlining the single file had.

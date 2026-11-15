@@ -52,11 +52,15 @@ void Client::mcdata_authorize() {
   mcdata::Info info;
   info.access_token = token_;
   info.client_id = client_id();
+  // TS 24.282 clauses 7.2.1 3) / 2)c) / 3)c) and 7.2.2 4)c) / 5)c): <gw-mcdata-usage> true when the client reaches the
+  // MCData system through an MCData gateway UE (mcdata.via_gateway_ue, a deployment setting).
+  info.gateway_usage = cfg_.at("mcdata").value("via_gateway_ue", false);
   std::vector<SipHeader> headers{{"Expires", "4294967295"}};
   const bool refresh = !mcdata_auth_etag_.empty();
   if (refresh) headers.push_back({"SIP-If-Match", mcdata_auth_etag_});
   std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
-  if (!by_register) parts.push_back({"application/poc-settings+xml", poc_settings_xml(client_id())});
+  // TS 24.282 clause 7.2.2 6): the selected MCData user profile (no answer mode in MCData).
+  if (!by_register) parts.push_back({"application/poc-settings+xml", mcdata_poc_settings()});
   // TS 24.282 clause 7.2.2 step 3: the CSK, once, in the first service authorisation.
   const bool uploading = !mcdata_csk_accepted_ && !mcdata_csk_upload_.empty();
   if (uploading) {
@@ -210,45 +214,22 @@ SipResponse Client::mcdata_affiliation_notify(const SipMessage &request) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.282 clause 8.2.2: affiliation status change: the configured MCData group together with the
-// groups the server reports as affiliated (for example implicit affiliations).
+// TS 24.282 clause 8.2.2: affiliation status change of this user at this client: affiliate: the groups the user is
+// interested in (the configured MCData group, the groups the server reports as affiliated, e.g. implicit affiliations,
+// and those joined with mcdata-affiliate <group>: mcdata_interest); not affiliate: no longer interested in any group
+// (Expires 0, no PIDF, steps 4 and NOTE 1). The PUBLISH: mcdata/settings_affiliation.cpp.
 void Client::mcdata_affiliate(bool affiliate) {
   if (!mcdata_authorized_) throw std::runtime_error("MCData affiliation requires MCData service authorisation");
   mcdata_desired_affiliation_ = affiliate;
-  mcdata::Info info;
-  info.request_uri = mcdata_user();
-  info.client_id = client_id();
-
-  // A user may belong to no MCData group (an account activated without one): an empty configured group is not
-  // affiliated (TS 24.282 clause 8.2.2: every <affiliation> names a group), and with no group at all nothing is
-  // published.
-  Affiliation affiliation{mcdata_user(), client_id(), random_id(), {}, {}, true};
-  if (!mcdata_group().empty()) affiliation.groups.push_back(mcdata_group());
-  for (const auto &group : mcdata_groups_)
-    if (!group.empty() && group != mcdata_group()) affiliation.groups.push_back(group);
-  if (affiliate && affiliation.groups.empty()) return;
-  mcdata_sent_pid_ = affiliation.publication_id;
-  std::vector<SipHeader> headers{{"Expires", affiliate ? "4294967295" : "0"}};
-  const bool refresh = !mcdata_affiliation_etag_.empty();
-  if (refresh) headers.push_back({"SIP-If-Match", mcdata_affiliation_etag_});
-
-  // TS 24.282 clause 8.2.2 steps 4 and 5: de-affiliation from every group is Expires 0 without a PIDF body.
-  std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
-  if (affiliate) parts.push_back({"application/pidf+xml", affiliation_xml(affiliation, false)});
-  mcdata_request("presence", parts, headers, [this, affiliate, refresh](const SipResponse &response) {
-    if (response.status_code != 200) {
-      failure("MCData affiliation: " + std::to_string(response.status_code));
-      // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew.
-      if (refresh && response.status_code == 412) {
-        mcdata_affiliation_etag_.clear();
-        schedule([this, affiliate] { mcdata_affiliate(affiliate); });
-      }
-      return;
-    }
-    mcdata_affiliation_etag_ = affiliate ? std::string(get_header(response.headers, "SIP-ETag")) : std::string{};
-    // The affiliation status itself comes from the NOTIFY (TS 24.282 clause 8.2.3).
-    event(affiliate ? "mcdata_affiliation_requested" : "mcdata_deaffiliation_requested", {{"group", mcdata_group()}});
-  });
+  if (!affiliate) {
+    mcdata_extra_groups_.clear();
+    mcdata_left_groups_.clear();
+    mcdata_publish_affiliation({}, true);
+    return;
+  }
+  // A user may belong to no MCData group (an account activated without one): nothing to publish.
+  if (mcdata_interest({}).empty()) return;
+  mcdata_publish_affiliation({});
 }
 
 //------------------------------------------------------------------------------

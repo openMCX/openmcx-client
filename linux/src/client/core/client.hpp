@@ -887,17 +887,20 @@ class Client {
   void xcap_request(const std::string &method, const std::string &url, const std::string &content_type = {},
                     const std::string &body = {});
 
-  // TS 24.481 clauses 7.2.2 and 7.2.8: with mcvideo, an MCVideo group document (MCVideo <supported-services>,
-  // <mcvideo-mcvideo-id> in each <entry>).
+  // TS 24.481 clause 7.2.2: the MC service of a group document the client writes: MCPTT, an MCVideo group document
+  // (clause 7.2.8: MCVideo <supported-services>, <mcvideo-mcvideo-id> in each <entry>) or an MCData one
+  // (<mcdata-mcdata-id> in each <entry>, the MCData ICSI in <supported-services>).
+  enum class GroupDocService { Mcptt, Mcvideo, Mcdata };
+
   static std::string group_document_xml(const std::string &group, const std::vector<std::string> &members,
-                                        bool mcvideo = false);
+                                        GroupDocService service = GroupDocService::Mcptt);
 
   void profile_command(const std::string &cmd);
 
   void group_management_command(const std::string &cmd);
 
   static std::string temporary_group_request_xml(const std::string &group_id, const std::string &groups, bool chat,
-                                                 bool protect, bool mcvideo = false);
+                                                 bool protect, GroupDocService service = GroupDocService::Mcptt);
 
   std::string group_documents_subscribe(const std::vector<std::string> &args);
 
@@ -2028,6 +2031,42 @@ private:
   SipResponse mcdata_affiliation_notify(const SipMessage &request);
 
   void mcdata_affiliate(bool affiliate);
+
+  // ---- MCData service settings and affiliation procedures, mcdata/settings_affiliation.cpp (TS 24.282 clauses 7.2.3,
+  // 7.2.4, 8.2.2-8.2.5, 8.2.7).
+  // The groups the user joined (clause 8.2.2) besides the configured one, and those it left (kept out of every
+  // PUBLISH until joined again).
+  std::set<std::string> mcdata_extra_groups_, mcdata_left_groups_;
+  // The selected MCData user profile (mcdata-profile; the configuration's profile_index otherwise), the service
+  // settings subscription, the settings cached per client (clause 7.2.4) and the result of the last settings PUBLISH.
+  std::optional<unsigned> mcdata_profile_index_;
+  std::string mcdata_settings_subscription_;
+  Json mcdata_service_settings_ = Json::object();
+  Json mcdata_settings_result_ = nullptr;
+  // Subscriptions besides the client's own affiliation status: dialog -> "poc-settings", "gdd:<group>" or the targeted
+  // MCData ID; the targeted users' affiliations (client ID, groups) for a mandatory-mode change; a received
+  // negotiated-mode request (clause 8.2.5) awaiting the user's answer.
+  std::map<std::string, std::string> mcdata_extra_subscriptions_;
+  std::map<std::string, Affiliation> mcdata_target_affiliations_;
+  Json mcdata_affiliation_command_;
+  // Group dynamic data (clause 8.2.7): the subscription dialog per group and what was notified.
+  std::map<std::string, std::string> mcdata_gdd_dialogs_;
+  Json mcdata_gdd_ = Json::object();
+
+  std::string mcdata_poc_settings() const;
+  std::string mcdata_client_filter() const;
+  void mcdata_settings_publish(bool remove);
+  SipResponse mcdata_settings_notify(const SipMessage &message);
+  void mcdata_settings_command(const std::string &verb, std::istringstream &words);
+  void mcdata_target_affiliation_command(const std::string &verb, std::istringstream &words);
+  void mcdata_gdd_command(const std::string &verb, std::istringstream &words);
+  SipResponse mcdata_extra_notify(const SipMessage &message);
+  std::optional<SipResponse> mcdata_affiliation_command_message(const SipMessage &message,
+                                                                const std::vector<BodyPart> &parts);
+  void mcdata_affiliation_command_answer(bool accept, const std::set<std::string> &only = {});
+  std::vector<std::string> mcdata_interest(const std::vector<std::string> &added) const;
+  bool mcdata_change_affiliation(const std::vector<std::string> &affiliate, const std::vector<std::string> &leave);
+  void mcdata_publish_affiliation(const std::vector<std::string> &added, bool none = false);
 
   //------------------------------------------------------------------------------
   // TS 24.282 clause 9.2.2.2.1 with clause 6.2.2.1: a standalone SDS message over the signalling control plane.

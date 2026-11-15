@@ -24,6 +24,8 @@ SipResponse Client::mcdata_incoming(const SipMessage &message) {
     return response;
   }
   const auto parts = message.parts.empty() ? parse_body_parts(message.content_type, message.body) : message.parts;
+  // TS 24.282 clause 8.2.5: a negotiated-mode affiliation status change request from an authorised user.
+  if (auto handled = mcdata_affiliation_command_message(message, parts)) return *handled;
   if (auto handled = mcdata_group_state_received(parts)) return *handled;
   if (service == mcdata::icsi) {
     response.status_code = 403;
@@ -494,7 +496,14 @@ void Client::mcdata_tick() {
 //   mcdata-fa activate|takeover|deactivate <alias>...   mcdata-fa use <alias>|none
 //   sds-reply [delivery|read|both] [escaped] <message ID> <text>     (same conversation, InReplyTo)
 //   sds-display <message ID>          (display indication, TS 24.282 clause 9.2.1.3)
-//   mcdata-affiliate | mcdata-deaffiliate
+//   mcdata-affiliate [<group>...] | mcdata-deaffiliate [<group>...]   (clause 8.2.2: without a group, the configured
+//                                     one and every group of interest / every group)
+//   mcdata-affiliation-subscribe <MCData ID> [fetch] | mcdata-affiliation-unsubscribe <MCData ID>   (clause 8.2.3)
+//   mcdata-affiliate-remote <MCData ID> <group> affiliate|deaffiliate mandatory|negotiated   (clauses 8.2.2, 8.2.4)
+//   mcdata-affiliation-accept [<group>...] | mcdata-affiliation-decline   (clause 8.2.5)
+//   mcdata-settings-publish [remove] | mcdata-settings-subscribe [fetch] | mcdata-settings-resubscribe |
+//   mcdata-settings-unsubscribe | mcdata-profile <index>   (clauses 7.2.3, 7.2.4)
+//   mcdata-gdd-subscribe <group> [...] | mcdata-gdd-resubscribe <group> | mcdata-gdd-unsubscribe <group> (8.2.7)
 //   mcdata-storage full|unlimited|<n>   (received messages the client can hold)
 //   mcdata-location request|configure ...  (TS 24.282 clauses 17.3.2.2 and 17.3.3.2)
 //   mcdata-msgstore <operation> ...        (TS 24.282 clause 21.2)
@@ -504,7 +513,21 @@ void Client::mcdata_command(const std::string &cmd) {
   std::istringstream words(cmd);
   std::string verb;
   words >> verb;
-  if (verb == "mcdata-affiliate" || verb == "mcdata-deaffiliate") return mcdata_affiliate(verb == "mcdata-affiliate");
+  if (verb == "mcdata-affiliate" || verb == "mcdata-deaffiliate") {
+    std::vector<std::string> groups;
+    for (std::string group; words >> group;) groups.push_back(group);
+    if (groups.empty()) return mcdata_affiliate(verb == "mcdata-affiliate");
+    if (verb == "mcdata-affiliate")
+      mcdata_change_affiliation(groups, {});
+    else
+      mcdata_change_affiliation({}, groups);
+    return;
+  }
+  if (verb.starts_with("mcdata-settings-") || verb == "mcdata-profile") return mcdata_settings_command(verb, words);
+  if (verb == "mcdata-affiliation-subscribe" || verb == "mcdata-affiliation-unsubscribe" ||
+      verb == "mcdata-affiliate-remote" || verb == "mcdata-affiliation-accept" || verb == "mcdata-affiliation-decline")
+    return mcdata_target_affiliation_command(verb, words);
+  if (verb.starts_with("mcdata-gdd-")) return mcdata_gdd_command(verb, words);
   if (verb == "mcdata-location") return mcdata_location_command(cmd);
   if (verb == "mcdata-msgstore") return msgstore_command(words);
   if (verb == "mcdata-msgstore-ctrl") return msgstore_control_command(words);
@@ -862,13 +885,28 @@ void Client::mcdata_fa_command(std::istringstream &words) {
   words >> action;
   std::vector<std::string> aliases;
   while (words >> alias) aliases.push_back(alias);
+  // TS 24.282 clause 22.2.1.3: the functional alias status determination, on demand (subscribe), and its end (the
+  // SUBSCRIBE in the dialog with Expires 0, RFC 6665 4.1.2.3).
+  if (action == "subscribe") {
+    if (!mcdata_alias_dialog_.empty()) throw std::runtime_error("already subscribed to the functional alias status");
+    return mcdata_alias_subscribe();
+  }
+  if (action == "unsubscribe") {
+    if (mcdata_alias_dialog_.empty()) throw std::runtime_error("no functional alias status subscription");
+    sip_.request_in_dialog(mcdata_alias_dialog_, "SUBSCRIBE", "", "",
+                           {{"Event", "presence"}, {"Accept", "application/pidf+xml"}, {"Expires", "0"}},
+                           [this](const SipResponse &response) {
+                             event("mcdata_functional_alias_unsubscribed", {{"status", response.status_code}});
+                           });
+    return;
+  }
   if (action == "use") {
     if (aliases.size() != 1) throw std::runtime_error("usage: mcdata-fa use <alias>|none");
     mcdata_alias_in_use_ = aliases.front() == "none" ? std::string{} : aliases.front();
     return;
   }
   if ((action != "activate" && action != "takeover" && action != "deactivate") || aliases.empty())
-    throw std::runtime_error("usage: mcdata-fa activate|takeover|deactivate <alias>...");
+    throw std::runtime_error("usage: mcdata-fa activate|takeover|deactivate <alias>... | subscribe | unsubscribe");
   return mcdata_functional_alias(action, aliases);
 }
 
@@ -990,6 +1028,14 @@ void Client::mcdata_status() {
     if (const auto found = mcdata_files_.find(id); found != mcdata_files_.end()) files.push_back(found->second);
   status_["mcdata_files"] = files;
   status_["mcdata_affiliations"] = mcdata_groups_;
+  status_["mcdata_service_settings"] = mcdata_service_settings_;
+  status_["mcdata_settings_publication"] = mcdata_settings_result_;
+  status_["mcdata_affiliation_command"] = mcdata_affiliation_command_;
+  status_["mcdata_group_dynamic_data"] = mcdata_gdd_;
+  Json targets = Json::object();
+  for (const auto &[target, affiliation] : mcdata_target_affiliations_)
+    targets[target] = {{"client_id", affiliation.client_id}, {"groups", affiliation.groups}};
+  status_["mcdata_target_affiliations"] = targets;
   status_["mcdata_affiliation_subscribed"] = !mcdata_subscription_.empty() && mcdata_status_known_;
   status_["mcdata_affiliation_p_id"] = {{"sent", mcdata_sent_pid_}, {"received", mcdata_received_pid_}};
   status_["mcdata_affiliation_fetch"] = mcdata_fetch_result_;
