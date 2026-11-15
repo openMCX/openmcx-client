@@ -2085,6 +2085,9 @@ private:
     bool to_alias = false;                                   // <call-to-functional-alias-ind>
     std::string called_alias;                                // <called-functional-alias-URI> after a 300 redirect
     mcdata::ContentType content = mcdata::ContentType::Text; // ENHANCED STATUS for clause 14.2.1.1
+    // TS 24.282 clause 6.2.2.1 (SDS SIGNALLING PAYLOAD) steps 7b and 12: the Extended application ID and the
+    // Application metadata container; the Payload data of a non-text payload (clause 15.2.13) is in text as given.
+    std::optional<std::string> extended_application, metadata;
     bool tamper_key = false;                                 // test aid: send an altered I_MESSAGE with a new PCK
     bool tamper_signature = false;                           // test aid: send a payload whose signature is altered
   };

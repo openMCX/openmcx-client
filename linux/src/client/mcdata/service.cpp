@@ -332,6 +332,8 @@ void Client::mcdata_send_sds(const SdsRequest &request) {
   signalling.message = mcdata::random_uuid();
   signalling.in_reply_to = request.in_reply_to;
   signalling.application_id = request.application;
+  signalling.extended_application_id = request.extended_application; // TS 24.282 clause 6.2.2.1 step 7b
+  signalling.application_metadata = request.metadata;                 // TS 24.282 clause 6.2.2.1 step 12
   signalling.disposition = request.disposition;
   mcdata::DataPayload payload{{{request.content, request.text}}};
   std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};

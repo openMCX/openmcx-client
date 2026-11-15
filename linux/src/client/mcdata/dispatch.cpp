@@ -312,6 +312,9 @@ SipResponse Client::mcdata_sds_received(const std::vector<BodyPart> &parts, cons
       {"group", info.calling_group},
       {"request_type", info.request_type},
       {"application_id", sds.application_id ? Json(*sds.application_id) : Json(nullptr)},
+      {"extended_application_id",
+       sds.extended_application_id ? Json(*sds.extended_application_id) : Json(nullptr)},
+      {"application_metadata", sds.application_metadata ? Json(*sds.application_metadata) : Json(nullptr)},
       {"disposition", static_cast<int>(sds.disposition)},
       {"displayed", false},
       {"notified", Json::array()},
@@ -334,6 +337,14 @@ SipResponse Client::mcdata_sds_received(const std::vector<BodyPart> &parts, cons
       std::find(applications.begin(), applications.end(), *sds.application_id) == applications.end()) {
     ++mcdata_discarded_;
     event("mcdata_sds_discarded", {{"message_id", id}, {"application_id", *sds.application_id}});
+    return response;
+  }
+  // TS 24.282 clause 9.2.1.2 step 8: the same for an Extended application ID (mcdata.extended_applications).
+  const auto extended = cfg_.at("mcdata").value("extended_applications", std::vector<std::string>{});
+  if (sds.extended_application_id &&
+      std::find(extended.begin(), extended.end(), *sds.extended_application_id) == extended.end()) {
+    ++mcdata_discarded_;
+    event("mcdata_sds_discarded", {{"message_id", id}, {"extended_application_id", *sds.extended_application_id}});
     return response;
   }
   if (mcdata_storage_limit_ && mcdata_received_.size() >= *mcdata_storage_limit_) {
@@ -433,11 +444,12 @@ bool Client::mcdata_render_enhanced_status(const mcdata::DataPayload &payload, c
 // request.
 void Client::mcdata_deliver_sds(Json &received, const mcdata::SdsSignalling &sds, const mcdata::DataPayload &payload,
                                 const std::string &id, const mcdata::Info &info) {
-  received["delivered_to"] = sds.application_id ? "application" : "user";
+  received["delivered_to"] = sds.application_id || sds.extended_application_id ? "application" : "user";
   Json contents = Json::array();
   for (const auto &part : payload.payloads)
     contents.push_back({{"content_type", static_cast<int>(part.type)},
                         {"text", part.type == mcdata::ContentType::Text ? Json(part.data) : Json(nullptr)},
+                        {"hex", client_rules::hex_text(part.data)},
                         {"bytes", part.data.size()}});
   received["payloads"] = contents;
   mcdata_received_[id] = received;
@@ -934,6 +946,8 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
     throw std::runtime_error("unknown MCData command");
   auto disposition = mcdata::DispositionRequest::None;
   std::optional<std::uint8_t> application;
+  std::optional<std::string> extended_application, metadata;
+  std::string content = "text";
   std::optional<unsigned> priority;
   bool tamper = false, tamper_signature = false, escaped = false;
   std::string word, target, text;
@@ -946,6 +960,12 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
       disposition = mcdata::DispositionRequest::DeliveryAndRead;
     else if (word.starts_with("app="))
       application = static_cast<std::uint8_t>(std::stoul(word.substr(4)));
+    else if (word.starts_with("ext-app="))
+      extended_application = word.substr(8);
+    else if (word.starts_with("metadata="))
+      metadata = word.substr(9);
+    else if (word.starts_with("content="))
+      content = word.substr(8);
     else if (word.starts_with("priority="))
       priority = static_cast<unsigned>(std::stoul(word.substr(9)));
     else if (word == "tamper-key")
@@ -963,11 +983,13 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
   if (escaped) text = client_rules::control_unescape(text);
   if (target.empty() || text.empty())
     throw std::runtime_error("usage: " + verb +
-                             " [delivery|read|both] [app=<n>] [priority=<n>] [escaped] <target> <text>");
+                             " [delivery|read|both] [app=<n>] [ext-app=<id>] [metadata=<text>] "
+                             "[content=text|binary|hyperlinks|location] [priority=<n>] [escaped] <target> <text>");
   // TS 24.282 clause 9.2.1.1 2): a one-to-one or pre-arranged group standalone SDS whose payload is larger than the
   // <max-payload-size-sds-cplane-bytes> of the MCData service configuration goes over the media plane (clause
   // 9.2.3.2.3); the payload size is the Payload IE's contents less its content type octet (clause 9.2.2.3.1 NOTE 4).
-  if ((verb == "sds" || verb == "sds-group") && !application && !tamper && !tamper_signature &&
+  if ((verb == "sds" || verb == "sds-group") && !application && !extended_application && !metadata &&
+      content == "text" && !tamper && !tamper_signature &&
       mcdata_tx_limits_.max_payload_size_sds_cplane && text.size() > *mcdata_tx_limits_.max_payload_size_sds_cplane) {
     event("mcdata_sds_plane", {{"plane", "media"}, {"size", text.size()},
                                {"limit", *mcdata_tx_limits_.max_payload_size_sds_cplane}});
@@ -979,6 +1001,21 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
   request.text = text;
   request.disposition = disposition;
   request.application = application;
+  request.extended_application = extended_application;
+  request.metadata = metadata;
+  // TS 24.282 clause 6.2.2.1 (DATA PAYLOAD) step 3 b)-d), clause 15.2.13: binary data given in hex, hyperlinks as
+  // they are, a location "<latitude>,<longitude>" in degrees coded as in TS 23.032 clause 6.1 (6 octets)
+  if (content == "binary") {
+    request.content = mcdata::ContentType::Binary;
+    request.text = client_rules::hex_bytes(text);
+  } else if (content == "hyperlinks") {
+    request.content = mcdata::ContentType::Hyperlinks;
+  } else if (content == "location") {
+    request.content = mcdata::ContentType::Location;
+    request.text = client_rules::location_payload(text);
+  } else if (content != "text") {
+    throw std::runtime_error("content= is text, binary, hyperlinks or location");
+  }
   request.priority = priority;
   request.to_alias = verb == "sds-fa"; // one-to-one SDS to a functional alias
   request.tamper_key = tamper;

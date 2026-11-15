@@ -289,6 +289,9 @@ void Client::mcdata_notify(Json &received, mcdata::DispositionNotification type)
   notice.sender = mcdata_user(); // Sender MCData user ID IE: identifies this notifier in an aggregate
   if (!received.at("application_id").is_null())
     notice.application_id = received.at("application_id").get<std::uint8_t>();
+  // TS 24.282 clause 6.2.3.1 step 9b: the Extended application ID of the message
+  if (received.contains("extended_application_id") && received.at("extended_application_id").is_string())
+    notice.extended_application_id = received.at("extended_application_id").get<std::string>();
   // TS 24.582 clauses 6.1.2.6 1.a and 6.1.2.5: a message of the SDS session still open is answered in it (an MSRP
   // SEND of the SDS NOTIFICATION, 6.1.2.5.3); otherwise, standalone or after the release, by SIP MESSAGE (TS 24.282
   // clauses 9.2.1.3, 9.2.4.2.4, 12.2.1.1).
