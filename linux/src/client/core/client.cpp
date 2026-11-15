@@ -438,6 +438,21 @@ void Client::read_mcvideo_profile() {
   mcvideo_profile_ = {{"user_id", profile.user_id}, {"profile_index", profile.profile_index},
                       {"groups", profile.groups},   {"private_call_targets", profile.private_call_targets},
                       {"actions", profile.actions}, {"etag", response.headers.at("etag")}};
+  // TS 24.281 clause 6.2.8.3.9: the <PrivateCallKMSURI> of each <PrivateCallOnNetwork> entry.
+  mcvideo_profile_["private_call_kms"] = profile.private_call_kms;
+  // TS 24.484 clause 9.3.2.1 item 8 e) v): <MCVideo-group-call>/<Priority>, the configured priority of TS 24.581
+  // clauses 14.2.3 and 14.2.6 (mcvideo_configured_priority).
+  mcvideo_profile_["priority"] = profile.group_call_priority;
+  // TS 24.484 clause 9.3.2.1 items 8 d) ii), 8 e) and 9 f): the target entries of the priority requests (TS 24.281
+  // clauses 6.2.8.1.6, 6.2.8.1.8, 6.2.8.3.1.1, 6.2.8.3.1.3); an absent element is not listed.
+  Json targets = Json::object();
+  for (const auto &[name, entry] : {std::pair{"emergency_group_initiation", &profile.emergency_group_initiation},
+                                    std::pair{"imminent_group_initiation", &profile.imminent_group_initiation},
+                                    std::pair{"group_emergency_alert", &profile.group_emergency_alert},
+                                    std::pair{"emergency_private_recipient", &profile.emergency_private_recipient},
+                                    std::pair{"private_emergency_alert", &profile.private_emergency_alert}})
+    if (entry->present) targets[name] = {{"entry_info", entry->entry_info}, {"uri", entry->uri}};
+  mcvideo_profile_["targets"] = targets;
   // TS 24.281 clause 20.2.1.4: the functional aliases with location criteria, evaluated from the next position.
   mcvideo_alias_rules_.clear();
   mcvideo_alias_area_inside_.clear();

@@ -439,4 +439,36 @@ inline std::string contact_address(std::string_view uri) {
   return value.substr(0, value.find_first_of(";>?"));
 }
 
+//------------------------------------------------------------------------------
+// TS 24.581 clauses 14.2.3 and 14.2.6: the "mc_priority" / "mc_reception_priority" value offered for a configured
+// priority (TS 24.484 clause 9.3.2.1 item 8 e) v), 0 to 255): none for the default priority 0; the SDP syntax has at
+// most two digits (clause 12.1.2.3), so a higher value asks for 99.
+inline std::optional<std::uint8_t> offered_mc_priority(unsigned configured) {
+  if (configured == 0) return std::nullopt;
+  return static_cast<std::uint8_t>(std::min(configured, 99u));
+}
+
+//------------------------------------------------------------------------------
+// TS 24.581 clauses 14.3.3, 14.3.6, 14.4 and 12.1.2.2: the negotiated maximum priority of a media plane control
+// channel parameter. As answerer the client returned the offered value (clause 14.3.3: "shall return the value
+// included in the SDP offer"; theirs is that offer's). As offerer: a parameter of the answer that the offer did not
+// have is discarded (clause 14.4), and the answered value is at most the offered one (clause 12.1.2.2); none means the
+// default priority (clause 12.1.2.2 NOTEs 1 and 2).
+inline std::optional<std::uint8_t> negotiated_mc_priority(bool answerer, std::optional<std::uint8_t> ours,
+                                                          std::optional<std::uint8_t> theirs) {
+  if (answerer) return theirs;
+  if (!ours || !theirs) return std::nullopt;
+  return std::min(*ours, *theirs);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.581 clauses 6.2.4.3.2 step 2a and 6.2.5.3.3 step 1a: the Transmission Priority / Reception Priority value of a
+// request, "if a different priority than the normal priority is required ... not higher than negotiated": the
+// requested (configured) priority capped by the negotiated one; none (the field left out, the default priority of
+// clauses 9.2.3.2 and 9.2.3.19) when the default is requested or nothing above it was negotiated.
+inline std::optional<std::uint8_t> request_priority(unsigned requested, std::optional<std::uint8_t> negotiated) {
+  if (requested == 0 || !negotiated || *negotiated == 0) return std::nullopt;
+  return static_cast<std::uint8_t>(std::min<unsigned>(requested, *negotiated));
+}
+
 } // namespace mcx::client_rules

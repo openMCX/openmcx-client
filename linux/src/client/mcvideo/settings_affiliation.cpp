@@ -2,7 +2,8 @@
 // OpenMCX Licence Information : AGPL-3.0-or-later
 //
 
-// MCVideo service settings determination (TS 24.281 clause 7.2.4) and the affiliation procedures towards other users:
+// MCVideo service settings: the settings-only PUBLISH (TS 24.281 clause 7.2.3) and their determination (clause 7.2.4);
+// the affiliation procedures towards other users:
 // the status determination of another user (clause 8.2.1.3), an affiliation status change for another user in
 // mandatory mode (clause 8.2.1.2), and the negotiated mode, sending (clause 8.2.1.4) and receiving (clause 8.2.1.5).
 //
@@ -54,10 +55,121 @@ std::vector<std::string> command_groups(const std::string &xml, const std::strin
 } // namespace
 
 //------------------------------------------------------------------------------
+// TS 24.281 clauses 7.2.2 6) and 7.2.3 4): the application/poc-settings+xml of this client: a) the current answer mode
+// (mcvideo.answer_mode, RFC 4354 "automatic" or "manual"), b) the "user-profile-index" of the selected MCVideo user
+// profile (TS 24.484), c) <multiplex-support> (clause 7.4.1.2.2).
+std::string Client::mcvideo_poc_settings() {
+  unsigned index = profile_index_;
+  if (const auto found = mcvideo_profile_.find("profile_index");
+      found != mcvideo_profile_.end() && found->is_number_unsigned())
+    index = found->get<unsigned>();
+  const bool manual = cfg_.at("mcvideo").value("answer_mode", std::string("auto")) == "manual";
+  return poc_settings_xml(client_id(), index, manual);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 7.2.3: mcvideo-settings-publish [remove]: the SIP PUBLISH for the MCVideo service settings only, to
+// set, update or refresh them (or, with remove, to remove them):
+//   1) clause 7.2.1A: Request-URI the participating function's PSI, P-Preferred-Service, Event poc-settings, Expires
+//      4294967295 (0 to remove the settings, which logs the client off the MCVideo service, NOTE 3);
+//   2), 3) the mcvideo-info body with <mcvideo-request-uri> (this user's MCVideo ID, the targeted one) and
+//      <mcvideo-client-id> (their confidentiality protection, when enabled, is that of the client's MCVideo bodies);
+//   4) the application/poc-settings+xml body (mcvideo_poc_settings).
+// RFC 3903: the publication of the service settings is modified with the entity-tag of the last one (that of the
+// service authorisation PUBLISH of clause 7.2.2, which carries the settings too), refreshed with the new one.
+void Client::mcvideo_settings_publish(bool remove) {
+  McpttInfo info;
+  info.request_uri = mcvideo_user();
+  info.client_id = client_id();
+  std::vector<SipHeader> headers{{"Expires", remove ? "0" : forever}};
+  const bool modify = !mcvideo_auth_etag_.empty();
+  if (modify) headers.push_back({"SIP-If-Match", mcvideo_auth_etag_});
+  mcvideo_request("poc-settings",
+                  {{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
+                   {"application/poc-settings+xml", mcvideo_poc_settings()}},
+                  headers, [this, remove, modify](const SipResponse &response) {
+                    mcvideo_settings_result_ = {{"action", remove ? "remove" : "publish"},
+                                                {"status", response.status_code},
+                                                {"warning", std::string(get_header(response.headers, "Warning"))}};
+                    status_["mcvideo_settings_publication"] = mcvideo_settings_result_;
+                    if (response.status_code != 200) {
+                      // RFC 3903 section 5: after a 412 to a modification, discard the entity-tag and publish anew.
+                      if (modify && response.status_code == 412 && !remove) {
+                        mcvideo_auth_etag_.clear();
+                        schedule([this] {
+                          if (mcvideo_authorized_) mcvideo_settings_publish(false);
+                        });
+                      }
+                      event("mcvideo_settings_publication_refused", {{"status", response.status_code}});
+                      return;
+                    }
+                    if (remove) {
+                      // TS 24.281 clause 7.2.1A NOTE 3 (clause 7.3.5 at the server): the removal of the settings logs
+                      // the client off the MCVideo service, its group affiliations removed with them.
+                      mcvideo_auth_etag_.clear();
+                      mcvideo_affiliation_etag_.clear();
+                      mcvideo_authorized_ = mcvideo_affiliated_ = false;
+                      mcvideo_groups_.clear();
+                      event("mcvideo_settings_removed");
+                      return;
+                    }
+                    if (const auto etag = get_header(response.headers, "SIP-ETag"); !etag.empty())
+                      mcvideo_auth_etag_ = etag;
+                    // On the 200 (OK) the user may be told the settings reached the MCVideo server.
+                    event("mcvideo_settings_published");
+                  });
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 7.2.4: a NOTIFY of the poc-settings subscription with an application/poc-settings+xml body: for
+// each MCVideo client the body names by the "id" of its <entity> (RFC 4354), the client caches 1) its <am-settings>
+// as the current Answer-mode indication of that client and 2) its <selected-user-profile-index> as the active
+// MCVideo user profile of that client. A NOTIFY without the body (e.g. the final one) changes nothing.
+SipResponse Client::mcvideo_settings_notify(const SipMessage &message) {
+  SipResponse response;
+  response.status_code = 200;
+  std::string body;
+  if (message.parts.empty()) {
+    if (message.content_type.starts_with("application/poc-settings+xml")) body = message.body;
+  } else {
+    for (const auto &part : message.parts)
+      if (part.content_type.starts_with("application/poc-settings+xml")) body = part.body;
+  }
+  if (body.empty()) {
+    event("mcvideo_settings_notified", {{"body", false}});
+    return response;
+  }
+  try {
+    const auto entities = parse_poc_settings(body);
+    for (const auto &entity : entities) {
+      auto &cached = mcvideo_service_settings_[entity.id];
+      if (!cached.is_object()) cached = Json::object();
+      // RFC 4354: <answer-mode> "automatic" or "manual"; kept as notified.
+      if (!entity.answer_mode.empty()) cached["answer_mode"] = entity.answer_mode;
+      if (entity.profile_index) cached["profile_index"] = *entity.profile_index;
+      if (entity.multiplex_support) cached["multiplex_support"] = *entity.multiplex_support;
+      cached["own"] = entity.id == client_id();
+    }
+    status_["mcvideo_service_settings"] = mcvideo_service_settings_;
+    event("mcvideo_settings_notified", {{"body", true}, {"clients", entities.size()}});
+  } catch (const std::exception &error) {
+    // An unreadable document leaves the cache as it was (RFC 6665: the NOTIFY is still answered).
+    event("mcvideo_settings_unread", {{"reason", error.what()}});
+  }
+  return response;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.281 clause 7.2.4: mcvideo-settings-subscribe [fetch], mcvideo-settings-resubscribe,
 // mcvideo-settings-unsubscribe: the SUBSCRIBE to this user's MCVideo service settings (event package poc-settings).
 void Client::mcvideo_settings_command(const std::string &verb, std::istringstream &words) {
   if (!mcvideo_authorized_) throw std::runtime_error("MCVideo service settings require authorisation");
+  if (verb == "mcvideo-settings-publish") {
+    std::string option;
+    words >> option;
+    if (!option.empty() && option != "remove") throw std::runtime_error("mcvideo-settings-publish [remove]");
+    return mcvideo_settings_publish(option == "remove");
+  }
   if (verb == "mcvideo-settings-subscribe") {
     std::string option;
     words >> option;
@@ -97,12 +209,16 @@ void Client::mcvideo_settings_command(const std::string &verb, std::istringstrea
 // subscription of its own beside the client's):
 //   mcvideo-affiliation-subscribe <MCVideo ID> [fetch]   mcvideo-affiliation-unsubscribe <MCVideo ID>
 //   mcvideo-affiliate-remote <MCVideo ID> <group> affiliate|deaffiliate mandatory|negotiated
-//   mcvideo-affiliation-accept   mcvideo-affiliation-decline   (a received negotiated-mode request, clause 8.2.1.5)
+//   mcvideo-affiliation-accept [<group>...]   mcvideo-affiliation-decline   (a received negotiated-mode request,
+//   clause 8.2.1.5)
 void Client::mcvideo_target_affiliation_command(const std::string &verb, std::istringstream &words) {
   if (!mcvideo_authorized_) throw std::runtime_error("MCVideo affiliation requires authorisation");
   std::string target;
-  if (verb == "mcvideo-affiliation-accept" || verb == "mcvideo-affiliation-decline")
-    return mcvideo_affiliation_command_answer(verb == "mcvideo-affiliation-accept");
+  if (verb == "mcvideo-affiliation-accept" || verb == "mcvideo-affiliation-decline") {
+    std::set<std::string> only;
+    for (std::string group; words >> group;) only.insert(group);
+    return mcvideo_affiliation_command_answer(verb == "mcvideo-affiliation-accept", only);
+  }
   words >> target;
   if (target.empty()) throw std::runtime_error(verb + " needs an MCVideo ID");
   if (verb == "mcvideo-affiliation-subscribe") {
@@ -302,10 +418,7 @@ SipResponse Client::mcvideo_extra_notify(const SipMessage &message) {
   const auto subject = found->second;
   if (get_header(message.headers, "Subscription-State").starts_with("terminated"))
     mcvideo_extra_subscriptions_.erase(found);
-  if (subject == "poc-settings") {
-    event("mcvideo_settings_notified", {{"body", !message.body.empty() || !message.parts.empty()}});
-    return response;
-  }
+  if (subject == "poc-settings") return mcvideo_settings_notify(message);
   if (subject.starts_with("gdd:")) {
     const auto group = subject.substr(4);
     if (get_header(message.headers, "Subscription-State").starts_with("terminated")) mcvideo_gdd_dialogs_.erase(group);
@@ -315,6 +428,14 @@ SipResponse Client::mcvideo_extra_notify(const SipMessage &message) {
   if (body.empty()) return response;
   try {
     auto affiliation = parse_affiliation(body);
+    // TS 24.281 clause 8.2.1.2 5) c): a later mandatory-mode request carries the groups the targeted user is
+    // interested in at its client: those notified "deaffiliating" or "deaffiliated" (clause 8.3.1) are not.
+    std::vector<std::string> groups;
+    for (std::size_t index = 0; index < affiliation.groups.size(); ++index)
+      if (client_rules::counts_as_affiliated(index < affiliation.statuses.size() ? affiliation.statuses[index] : ""))
+        groups.push_back(affiliation.groups[index]);
+    affiliation.groups = groups;
+    affiliation.statuses.clear();
     mcvideo_target_affiliations_[subject] = affiliation;
     event("mcvideo_target_affiliation", {{"target", subject}, {"groups", affiliation.groups}});
   } catch (const std::exception &error) {
@@ -342,15 +463,58 @@ SipResponse Client::mcvideo_affiliation_command_message(const SipMessage &messag
 }
 
 //------------------------------------------------------------------------------
-// TS 24.281 clause 8.2.1.5 step 3: the user accepts (affiliation and de-affiliation as in clause 8.2.1.2) or declines.
-void Client::mcvideo_affiliation_command_answer(bool accept) {
+// TS 24.281 clauses 8.2.1.2 and 8.2.1.5 3): one PUBLISH with the affiliation changed: a) the groups of `affiliate`
+// the client is not affiliated to join it, b) the groups of `leave` it is affiliated to leave it; the other groups
+// stay (step 5 c): the request names all the groups the user is interested in). Affiliated: in the client's own set
+// (the configured group while wanted, the extra groups) or notified affiliated (clause 8.2.1.3). No group left: the
+// de-affiliation of step 4 (Expires 0).
+bool Client::mcvideo_change_affiliation(const std::vector<std::string> &affiliate, const std::vector<std::string> &leave) {
+  if (!mcvideo_authorized_) throw std::runtime_error("MCVideo affiliation requires MCVideo service authorisation");
+  std::set<std::string> current(mcvideo_extra_groups_.begin(), mcvideo_extra_groups_.end());
+  if (mcvideo_desired_affiliation_ && !mcvideo_left_selected_) current.insert(mcvideo_group());
+  const auto affiliated = [&](const std::string &group) {
+    return current.contains(group) || mcvideo_groups_.contains(group);
+  };
+  std::vector<std::string> added, removed;
+  for (const auto &group : affiliate)
+    if (!affiliated(group) && std::find(added.begin(), added.end(), group) == added.end()) added.push_back(group);
+  for (const auto &group : leave)
+    if (affiliated(group) && std::find(removed.begin(), removed.end(), group) == removed.end())
+      removed.push_back(group);
+  event("mcvideo_affiliation_change", {{"affiliate", added}, {"de-affiliate", removed}});
+  if (added.empty() && removed.empty()) return false;
+  for (const auto &group : removed) {
+    current.erase(group);
+    if (group == mcvideo_group())
+      mcvideo_left_selected_ = true; // left out of every PUBLISH until affiliated again
+    else
+      mcvideo_extra_groups_.erase(group);
+  }
+  if (current.empty() && added.empty()) {
+    mcvideo_affiliate(false);
+    return true;
+  }
+  mcvideo_publish_affiliation(true, added, added.size() == 1 ? added.front() : std::string{});
+  return true;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 8.2.1.5 steps 2 and 3: the user's confirmation: mcvideo-affiliation-accept [<group>...] accepts
+// the request (only the groups named, when some are: the accepted lists), mcvideo-affiliation-decline declines it.
+// Accepted: a) affiliation to each group of the accepted affiliation list not affiliated and b) de-affiliation from
+// each group of the accepted de-affiliation list affiliated, as in clause 8.2.1.2; no other group changes.
+void Client::mcvideo_affiliation_command_answer(bool accept, const std::set<std::string> &only) {
   if (!mcvideo_affiliation_command_.is_object()) throw std::runtime_error("no MCVideo affiliation request");
   const auto command = std::exchange(mcvideo_affiliation_command_, Json());
   status_["mcvideo_affiliation_command"] = nullptr;
   event(accept ? "mcvideo_affiliation_command_accepted" : "mcvideo_affiliation_command_declined");
   if (!accept) return;
-  for (const auto &group : command.value("affiliate", std::vector<std::string>{})) mcvideo_affiliate(true, group);
-  if (!command.value("de-affiliate", std::vector<std::string>{}).empty()) mcvideo_affiliate(false);
+  const auto accepted = [&only](std::vector<std::string> groups) {
+    if (!only.empty()) std::erase_if(groups, [&only](const std::string &group) { return !only.contains(group); });
+    return groups;
+  };
+  mcvideo_change_affiliation(accepted(command.value("affiliate", std::vector<std::string>{})),
+                             accepted(command.value("de-affiliate", std::vector<std::string>{})));
 }
 
 } // namespace mcx

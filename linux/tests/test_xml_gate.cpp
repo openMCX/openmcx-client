@@ -85,6 +85,22 @@ int main() {
   check(!mcx::xml_gate::subscription_procedure(list("sip:alice@mcx.test")), "a resource list of users: none");
   check(!mcx::xml_gate::subscription_procedure(publish), "no resource list: none");
 
+  // TS 24.281 clause 6.6.2.4.2 step 1: an element of type "Encrypted" without its <EncryptedData>.
+  const auto info = [](const std::string &inner) {
+    return "<mcvideoinfo><mcvideo-Params>" + inner + "</mcvideo-Params></mcvideoinfo>";
+  };
+  check(!mcx::xml_gate::encrypted_without_data(info("<alert-ind type=\"Normal\"><mcvideoBoolean>true"
+                                                    "</mcvideoBoolean></alert-ind>")),
+        "clear content: nothing missing");
+  check(!mcx::xml_gate::encrypted_without_data(
+            info("<alert-ind type=\"Encrypted\"> <xenc:EncryptedData xmlns:xenc=\"x\"/></alert-ind>")),
+        "type Encrypted with <EncryptedData>");
+  check(mcx::xml_gate::encrypted_without_data(info("<alert-ind type=\"Encrypted\"><mcvideoBoolean>true"
+                                                   "</mcvideoBoolean></alert-ind>")),
+        "type Encrypted with clear content");
+  check(mcx::xml_gate::encrypted_without_data(info("<alert-ind type=\"Encrypted\"/>")), "type Encrypted, empty");
+  check(!mcx::xml_gate::encrypted_without_data(info("<x>type=\"Encrypted\"</x>")), "the text is not an attribute");
+
   if (failures) return 1;
   std::puts("xml gate: ok");
   return 0;

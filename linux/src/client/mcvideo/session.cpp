@@ -83,10 +83,13 @@ void Client::mcvideo_regroup_notified(const Regroup &regroup) {
 // <mcvideo-calling-group-id> (2xx step 4). With priority "emergency" or "imminent": an MCVideo emergency (TS 24.281
 // clause 6.2.8.1.19) or imminent peril (clause 6.2.8.1.23) ad hoc group call, authorised by clause 6.2.8.1.22.
 void Client::mcvideo_adhoc_call(const std::vector<std::string> &targets, const std::string &criteria,
-                                const std::string &priority) {
+                                const std::string &priority, const std::string &rejoin_uri) {
   if (!mcvideo_authorized_) throw std::runtime_error("MCVideo call requires authorisation");
   if (mcvideo_call_) throw std::runtime_error("an MCVideo call is in progress");
-  if (targets.empty() && criteria.empty()) throw std::runtime_error("an ad hoc call needs MCVideo IDs or criteria");
+  // A re-join (TS 24.281 clause 22.2.5.1.1) names the session, not its participants: steps 11) and 12) apply only to
+  // a user's list or criteria.
+  if (targets.empty() && criteria.empty() && rejoin_uri.empty())
+    throw std::runtime_error("an ad hoc call needs MCVideo IDs or criteria");
   if (!priority.empty() && priority != "emergency" && priority != "imminent")
     throw std::runtime_error("an ad hoc call's priority is emergency or imminent");
   // TS 24.281 clause 6.2.8.1.22: <allow-emergency-adhoc-group-call> / <allow-imminent-peril-adhoc-group-call>.
@@ -111,6 +114,11 @@ void Client::mcvideo_adhoc_call(const std::vector<std::string> &targets, const s
   McpttInfo info;
   info.session_type = "adhoc";          // step 10a
   info.client_id = client_id();         // step 10c
+  // Step 10b): the identity of the ad hoc group, when the client has one: on a re-join, the group of the session.
+  if (!rejoin_uri.empty() && !mcvideo_rejoin_group_.empty()) {
+    info.request_uri = mcvideo_rejoin_group_;
+    call.group = mcvideo_rejoin_group_;
+  }
   info.participant_criteria = criteria; // step 12
   call.adhoc_criteria = criteria;
   info.functional_alias = mcvideo_presented_alias();
@@ -136,13 +144,16 @@ void Client::mcvideo_adhoc_call(const std::vector<std::string> &targets, const s
   }
   std::vector<BodyPart> parts{{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}};
   if (!targets.empty()) parts.push_back({resource_lists_mime, resource_list_xml(targets)}); // step 11
+  // Step 1): the participating function's PSI; TS 24.281 clause 22.2.5.1.1: on a re-join, the MCVideo session
+  // identity to re-join.
   call.dialog = sip_.invite(
-      mcvideo_service_uri(), call.local, parts,
+      rejoin_uri.empty() ? mcvideo_service_uri() : rejoin_uri, mcvideo_initial_offer(call), parts,
       [this, generation = call.generation](const SipResponse &response) {
         mcvideo_invite_answered(generation, response);
       },
       headers);
-  event("mcvideo_adhoc_call_requested", {{"targets", targets}, {"criteria", criteria}, {"priority", priority}});
+  event("mcvideo_adhoc_call_requested",
+        {{"targets", targets}, {"criteria", criteria}, {"priority", priority}, {"rejoin", rejoin_uri}});
 }
 
 //------------------------------------------------------------------------------
@@ -180,7 +191,7 @@ void Client::mcvideo_ambient_call(const std::string &target, const std::string &
   info.client_id = client_id();
   const auto pck = mcvideo_offer_pck(target); // step 10
   call.dialog = sip_.invite(
-      mcvideo_service_uri(), call.local,
+      mcvideo_service_uri(), mcvideo_initial_offer(call),
       {{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)},
        {resource_lists_mime, private_call_resource_list(target)}}, // step 9
       [this, generation = call.generation](const SipResponse &response) {
@@ -211,6 +222,12 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
   // TS 24.281 clause 6.2.8.1.8: an emergency or imminent peril group call needs its <ruleset> element.
   if (priority == "emergency") require_mcvideo_profile("allow-emergency-group-call", "emergency group call");
   if (priority == "imminent") require_mcvideo_profile("allow-imminent-peril-call", "imminent peril group call");
+  // Clause 6.2.8.1.8 1) a) b): the <MCVideoGroupInitiation> entry of the profile and the targeted group.
+  {
+    const auto targeted = !chat_group.empty() ? chat_group : !target_group.empty() ? target_group : mcvideo_group();
+    if (priority == "emergency") require_mcvideo_target("emergency_group_initiation", targeted, "emergency group call");
+    if (priority == "imminent") require_mcvideo_target("imminent_group_initiation", targeted, "imminent peril group call");
+  }
   // TS 24.281 clause 9.2.1.2.1.1: the group document of the called group (served to members only): a group with
   // <preconfigured-group-use-only> "true" is not called (steps 1 and 2: tell the user, skip the procedure), and a
   // temporary group's <on-network-temporary> names its constituent groups for <associated-group-id> (step 14 d) i)).
@@ -299,7 +316,7 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
   // TS 24.281 clause 9.2.1.2.4.1: a re-join sends this INVITE to the MCVideo session identity instead of the PSI.
   const auto request_uri = std::exchange(mcvideo_rejoin_target_, std::string());
   call.dialog = sip_.invite(
-      request_uri.empty() ? mcvideo_service_uri() : request_uri, call.local,
+      request_uri.empty() ? mcvideo_service_uri() : request_uri, mcvideo_initial_offer(call),
       {{mcvideo_service.info_mime, service_info_xml(info, mcvideo_service)}},
       [this, generation = call.generation](const SipResponse &response) {
         mcvideo_invite_answered(generation, response);
@@ -311,8 +328,12 @@ void Client::mcvideo_group_call(bool implicit, const std::string &chat_group, co
 //------------------------------------------------------------------------------
 // TS 24.281 clause 9.2.1.2.4.1: re-join the last group session this user left: the group call INVITE of clause
 // 9.2.1.2.1.1 with the session identity as its Request-URI, without an implicit transmission request.
+//
+// TS 24.281 clause 22.2.5.1.1: re-join the ad hoc group session this user left: the INVITE of clause 22.2.2.1.1 with
+// the MCVideo session identity to re-join as its Request-URI.
 void Client::mcvideo_rejoin_call() {
   if (mcvideo_rejoin_uri_.empty()) throw std::runtime_error("no MCVideo group session to re-join");
+  if (mcvideo_rejoin_type_ == "adhoc") return mcvideo_adhoc_call({}, {}, {}, mcvideo_rejoin_uri_);
   mcvideo_rejoin_target_ = mcvideo_rejoin_uri_;
   try {
     if (mcvideo_rejoin_type_ == "chat")
@@ -366,8 +387,9 @@ SipResponse Client::mcvideo_invite(const SipMessage &message) {
 // TS 24.281 clauses 9.2.1.2.1.2 and 10.2.2.2.2 (continued): the answer to the INVITE of the call in mcvideo_call_.
 SipResponse Client::mcvideo_answer_invite(const SipMessage &message, const McpttInfo &info) {
   SipResponse response;
-  // TS 24.581 clauses 14.3.2 and 14.3.3: the answer carries only parameters of the offer: the offered
-  // mc_priority (at most), and queueing only if both sides queue.
+  // TS 24.581 clauses 14.3.1 to 14.3.3 and 14.3.6: the answer carries only parameters of the offer: the offered
+  // mc_priority returned as offered ("the MCVideo client ... shall return the value included in the SDP offer in the
+  // SDP answer"), and queueing only if both sides queue.
   if (!message.remote_media || message.remote_media->control == MediaControl::floor || !message.remote_media->video ||
       (message.remote_media->control == MediaControl::none && !one_to_one_video(info.session_type))) {
     response.status_code = 488;
@@ -391,6 +413,9 @@ SipResponse Client::mcvideo_answer_invite(const SipMessage &message, const Mcptt
   if (message.remote_media->control == MediaControl::none)
     answer.control = MediaControl::none; // TS 24.281 clause 10.2.3.1
   answer.floor_priority = message.remote_media->floor_priority;
+  // TS 24.581 clause 14.3.6 gives the controlling function's answer only; the client, as for mc_priority (clause
+  // 14.3.3), returns an offered mc_reception_priority unchanged, and has none in its answer otherwise (clause 14.3.1).
+  answer.reception_priority = message.remote_media->reception_priority;
   answer.queueing = message.remote_media->queueing && mcvideo_call_->local.queueing;
 
   // RFC 3264 section 6.1: a sendonly offer is answered recvonly and a recvonly one sendonly
@@ -416,6 +441,11 @@ SipResponse Client::mcvideo_answer_invite(const SipMessage &message, const Mcptt
   mcvideo_call_->request_on_active = callee_requests && !message.remote_media->implicit_request;
   answer.video->payload_type = message.remote_media->video->payload_type;
   mcvideo_call_->local = answer;
+  // TS 24.581 clause 14.5: this client's later offers follow clause 14.2 again (the configured priorities), not the
+  // values it returned in this answer.
+  if (mcvideo_call_->local.control != MediaControl::none)
+    mcvideo_call_->local.floor_priority = mcvideo_call_->local.reception_priority = mcvideo_offered_priority();
+  mcvideo_call_->answered_offer = true;
   response.status_code = 200;
   response.local_media = answer;
   // TS 24.281 clauses 6.2.3.1.1 step 2 and 6.2.3.1.2 (automatic commencement, private and group calls) and
@@ -477,7 +507,21 @@ void Client::mcvideo_adopt_invited_call(const SipMessage &message, const McpttIn
   mcvideo_call_->called_alias = info.called_functional_alias;
 
   // TS 24.281 clause 22.2.2.1.2: an invitation to an ad hoc group call names its group in <mcvideo-calling-group-id>.
-  if (info.session_type == "adhoc") mcvideo_call_->type = "adhoc";
+  if (info.session_type == "adhoc") {
+    auto &call = *mcvideo_call_;
+    call.type = "adhoc";
+    // Step 3: the Resource-Priority header field, if included, is checked (kept with the call).
+    call.resource_priority = std::string(get_header(message.headers, "Resource-Priority"));
+    // Step 8: with a <preconfigured-group-id>, the security related information of that group's configuration (its
+    // GMK, TS 33.180 clause 5.7) protects the call.
+    call.security_group = info.preconfigured_group_id;
+    // Steps 6, 7 and 9: the inviting user's MCVideo ID, functional alias and the ad hoc group identity are shown.
+    event("mcvideo_adhoc_invitation", {{"group", call.group},
+                                       {"from", info.calling_user},
+                                       {"functional_alias", info.functional_alias},
+                                       {"resource_priority", call.resource_priority},
+                                       {"preconfigured_group", call.security_group}});
+  }
   if (one_to_one_video(info.session_type)) {
     mcvideo_call_->type = "private";
     mcvideo_call_->group.clear();
@@ -522,9 +566,12 @@ std::optional<SipResponse> Client::mcvideo_accept_protection(const SipMessage &m
       }
       mcvideo_bind_pck(*key, false);
     }
-  } else if (!mcvideo_use_group_key(mcvideo_call_->group) || !mcvideo_protection_.group_ready()) {
-    // TS 24.281 clause 4.7.1: the media of the call's group need that group's GMK.
-    event("mcvideo_group_key_missing", {{"group_id", mcvideo_call_->group}});
+  } else if (const auto &key_group =
+                 mcvideo_call_->security_group.empty() ? mcvideo_call_->group : mcvideo_call_->security_group;
+             !mcvideo_use_group_key(key_group) || !mcvideo_protection_.group_ready()) {
+    // TS 24.281 clause 4.7.1: the media of the call's group need that group's GMK (for an ad hoc group call with a
+    // <preconfigured-group-id>, that preconfigured group's: TS 24.281 clause 22.2.2.1.2 step 8).
+    event("mcvideo_group_key_missing", {{"group_id", key_group}});
     response.status_code = 488;
     return response;
   }
@@ -551,6 +598,27 @@ bool Client::mcvideo_media(std::string_view dialog, const MediaDescription &medi
                           protected_floor() ? &mcvideo_protection_ : nullptr)))
     throw std::runtime_error("directional transmission control SSRC collision");
   mcvideo_call_->remote = media;
+  // TS 24.581 clauses 14.3.3, 14.3.6 and 14.4: the negotiated maximum priorities. As answerer this client returned
+  // the offered values (media is that offer). As offerer: an answer parameter the offer did not have is discarded
+  // (clause 14.4), and the answer's value is at most the offered one (clause 12.1.2.2: "The value must be equal or
+  // less than the value provided in the associated SDP offer"); absent, the default priority applies (NOTEs 1, 2).
+  {
+    auto &call = *mcvideo_call_;
+    const bool answerer = std::exchange(call.answered_offer, false);
+    const auto agreed = [answerer](std::optional<std::uint8_t> ours, std::optional<std::uint8_t> theirs) {
+      return client_rules::negotiated_mc_priority(answerer, ours, theirs);
+    };
+    if (media.control == MediaControl::none) {
+      call.negotiated_priority = call.negotiated_reception_priority = std::nullopt;
+    } else {
+      call.negotiated_priority = agreed(call.local.floor_priority, media.floor_priority);
+      call.negotiated_reception_priority = agreed(call.local.reception_priority, media.reception_priority);
+    }
+    const auto json = [](const std::optional<std::uint8_t> &value) { return value ? Json(*value) : Json(nullptr); };
+    event("mcvideo_priorities_negotiated", {{"transmission", json(call.negotiated_priority)},
+                                            {"reception", json(call.negotiated_reception_priority)},
+                                            {"answerer", answerer}});
+  }
   // TS 24.581 clauses 11.1.1 and 11.2.1: the participant's timers, for a session with transmission control.
   if (media.control != MediaControl::none && !mcvideo_call_->timers) {
     mcvideo_call_->timers.emplace(mcvideo_timer_options());
@@ -561,7 +629,33 @@ bool Client::mcvideo_media(std::string_view dialog, const MediaDescription &medi
     if (mcvideo_call_->local.implicit_request && media.implicit_request && mcvideo_call_->requesting &&
         mcvideo_call_->ambient_type != "remote-init")
       mcvideo_call_->timers->expect_implicit_request(
-          {transmission::Type::Request, false, media.floor_ssrc, mcvideo_indicator_fields()}, monotonic_ms());
+          {transmission::Type::Request, false, media.floor_ssrc, mcvideo_request_fields()}, monotonic_ms());
+  }
+  // TS 24.581 clause 14.4: "the offerer shall use the returned values from the "mc_audio_ssrc" and "mc_video_ssrc"
+  // fmtp attribute of SDP answer even if [they] were not present in the associated offer": the SSRCs of the RTP
+  // media once the implicit transmission request is granted (TS 24.281 clause 6.2.1 NOTEs 2 and 3; clause 12.1.2.2:
+  // returned only when the answerer accepts the implicit request).
+  if (media.control != MediaControl::none && mcvideo_call_->local.implicit_request && media.implicit_request) {
+    if (media.granted_audio_ssrc) mcvideo_call_->answer_audio_ssrc = media.granted_audio_ssrc;
+    if (media.granted_video_ssrc) mcvideo_call_->answer_video_ssrc = media.granted_video_ssrc;
+  }
+  // TS 24.581 clause 12.1.2.2 (with NOTEs 3 and 4): "mc_granted" in the answer grants the offerer the permission to
+  // transmit: 'U: has permission to transmit' (T100 of the implicit request stopped, as by a Transmission Granted,
+  // clause 6.2.4.4.6 steps 3 to 5), the RTP media sent with the SSRCs of the answer. Clause 14.4: "mc_granted" in an
+  // answer to an offer without it (or to a later offer, clause 14.5) is discarded.
+  if (std::exchange(mcvideo_call_->offered_granted, false) && media.granted && media.implicit_request &&
+      mcvideo_call_->timers && !mcvideo_call_->granted) {
+    auto &call = *mcvideo_call_;
+    if (call.timers->state() == transmission::ParticipantState::NoPermission)
+      call.timers->expect_implicit_request(
+          {transmission::Type::Request, false, media.floor_ssrc, mcvideo_request_fields()}, monotonic_ms());
+    call.timers->receive({transmission::Type::Granted, false, call.local.floor_ssrc, {}}, monotonic_ms());
+    call.requesting = false;
+    call.queue_position.reset();
+    call.transmitter = mcvideo_user();
+    call.audio_ssrc = call.answer_audio_ssrc;
+    mcvideo_start_sending(call.answer_video_ssrc ? call.answer_video_ssrc : call.local.video->ssrc);
+    event("mcvideo_transmission_granted", {{"video_ssrc", call.video_ssrc}, {"by", "sdp"}});
   }
   if (!mcvideo_call_->early_control.empty())
     schedule([this, generation = mcvideo_call_->generation] {
@@ -728,6 +822,18 @@ void Client::mcvideo_end_call(const std::string &reason, bool dialog_ended) {
     mcvideo_rejoin_group_ = call.group;
     mcvideo_rejoin_type_ = call.type;
   }
+  // TS 24.281 clause 22.2.5.1.1: an ad hoc group session goes on for the others when this user leaves it (clause
+  // 22.2.4.1.1, "hangup") or is removed from it (clause 22.2.4.1.2, "disconnected"), and can be re-joined; one the
+  // user released for every participant (clause 22.2.3.1.1, "release") has ended.
+  if (call.type == "adhoc") {
+    if ((reason == "hangup" || reason == "disconnected") && !call.session_uri.empty()) {
+      mcvideo_rejoin_uri_ = call.session_uri;
+      mcvideo_rejoin_group_ = call.group;
+      mcvideo_rejoin_type_ = call.type;
+    } else if (mcvideo_rejoin_type_ == "adhoc" && mcvideo_rejoin_uri_ == call.session_uri) {
+      mcvideo_rejoin_uri_.clear();
+    }
+  }
   mcvideo_last_call_ = {{"group", call.group},
                         {"type", call.type},
                         {"video_mode", call.video_mode},
@@ -746,6 +852,8 @@ void Client::mcvideo_end_call(const std::string &reason, bool dialog_ended) {
                         {"timeouts", call.timeouts}};
   // TS 24.581 clauses 6.2.4.7.2 and 6.2.5.3.5: the call's release stops every transmission participant timer.
   if (call.timers) call.timers->release();
+  // TS 24.281 clause 6.2.8.1.25: the ad hoc group's priority states end with the call.
+  if (call.type == "adhoc") mcvideo_adhoc_released(call.group);
   event("mcvideo_call_ended", {{"reason", reason}});
   if (call.pck_id) mcvideo_protection_.end_private(call.pck_id);
   if (!call.conference_subscription.empty()) mcvideo_retired_subscriptions_.insert(call.conference_subscription);
@@ -870,7 +978,7 @@ void Client::mcvideo_queue_position_request() {
 void Client::mcvideo_request_transmission() {
   if (!mcvideo_call_ || mcvideo_call_->state != "active") throw std::runtime_error("no active MCVideo call");
   mcvideo_call_->requesting = true;
-  mcvideo_send_control(transmission::Type::Request, mcvideo_indicator_fields());
+  mcvideo_send_control(transmission::Type::Request, mcvideo_request_fields());
   event("mcvideo_transmission_requested");
 }
 
@@ -928,6 +1036,9 @@ void Client::mcvideo_control_message(const transmission::Packet &packet) {
   auto &call = *mcvideo_call_;
   using transmission::Field;
   // TS 24.581 clauses 6.2.4 and 6.2.5: a response stops its timer (e.g. 6.2.4.4.6, 6.2.4.6.4, 6.2.5.4.2, 6.2.5.4.5).
+  // The state before the message decides the procedures that need it (clause 6.2.4.9.6: 'U: queued transmission').
+  const bool was_queued = call.timers ? call.timers->state() == transmission::ParticipantState::Queued
+                                      : call.requesting && call.queue_position.has_value();
   if (call.timers) call.timers->receive(packet, monotonic_ms());
   // TS 24.581 clause 6.2 (e.g. 6.2.4.4.6, 6.2.4.6.4, 6.2.4.9.2, 6.2.5.4.5, 6.2.5.5.5), step 1 for every message the
   // server sends with the x bit set (clause 9.2.2.1): a Transmission control Ack (clause 9.2.31) with the Source field
@@ -958,8 +1069,14 @@ void Client::mcvideo_control_message(const transmission::Packet &packet) {
     call.requesting = false;
     call.queue_position.reset();
     call.transmitter = mcvideo_user();
-    std::uint32_t ssrc = call.video_ssrc;
+    // Without a (valid, clause 9.1.4 step 3) Video SSRC field: the SSRC already in use, else that of the SDP
+    // answer (clause 14.4), else the one this client offered (TS 24.281 clause 6.2.1 step 3 e)).
+    std::uint32_t ssrc = call.video_ssrc ? call.video_ssrc
+                         : call.answer_video_ssrc ? call.answer_video_ssrc
+                                                  : (call.local.video ? call.local.video->ssrc : 0);
     if (const auto *field = transmission::find(packet, Field::VideoSsrc)) ssrc = transmission::read_video_ssrc(*field);
+    if (const auto *field = transmission::find(packet, Field::AudioSsrc)) call.audio_ssrc = read_audio_ssrc(*field);
+    else if (!call.audio_ssrc) call.audio_ssrc = call.answer_audio_ssrc;
     mcvideo_start_sending(ssrc);
     event("mcvideo_transmission_granted", {{"video_ssrc", call.video_ssrc}});
     break;
@@ -1067,7 +1184,7 @@ void Client::mcvideo_control_message(const transmission::Packet &packet) {
     event("mcvideo_transmission_taken", {{"by", call.transmitter}}); // step 2: notify the user
     event("mcvideo_reception_notified", {{"by", call.transmitter}, {"automatic", automatic}});
     if (!automatic && cfg_.at("mcvideo").value("auto_receive", true))
-      mcvideo_send_control(transmission::Type::ReceiveMediaRequest, mcvideo_indicator_fields());
+      mcvideo_send_control(transmission::Type::ReceiveMediaRequest, mcvideo_reception_fields());
     break;
   }
   case transmission::Type::MediaReceptionNotification:
@@ -1077,7 +1194,7 @@ void Client::mcvideo_control_message(const transmission::Packet &packet) {
     if (const auto *field = transmission::find(packet, Field::UserId)) call.transmitter = read_user_id(*field);
     event("mcvideo_reception_notified", {{"by", call.transmitter}});
     if (cfg_.at("mcvideo").value("auto_receive", true))
-      mcvideo_send_control(transmission::Type::ReceiveMediaRequest, mcvideo_indicator_fields());
+      mcvideo_send_control(transmission::Type::ReceiveMediaRequest, mcvideo_reception_fields());
     break;
   case transmission::Type::ReceiveMediaResponse:
     // TS 24.581 clauses 6.2.5.4.5 and 9.2.15: without a Reject Cause the reception is accepted.
@@ -1099,6 +1216,18 @@ void Client::mcvideo_control_message(const transmission::Packet &packet) {
     if (const auto *field = transmission::find(packet, Field::QueueInfo))
       call.queue_position = read_queue_info(*field).position;
     event("mcvideo_transmission_queued", {{"position", call.queue_position.value_or(0)}});
+    break;
+  case transmission::Type::CancelRequestNotify:
+    // TS 24.581 clause 6.2.4.9.6: in 'U: queued transmission' the server removed this participant's request from the
+    // queue. Step 1, the Transmission control Ack with Message Type '10' and Source '0' when the subtype asks for one,
+    // is sent above; step 2: 'U: has no permission to transmit' (the timers stop T102 and change state): the request
+    // is no longer pending or queued. In any other state the state diagram (clause 6.2.4.1) has no transition for it:
+    // it changes nothing.
+    if (!was_queued) break;
+    call.requesting = false;
+    call.queue_position.reset();
+    ++call.queue_cancellations;
+    event("mcvideo_transmission_request_cancelled", {{"by", "server"}});
     break;
   case transmission::Type::Idle:
   case transmission::Type::ArbitrationRelease:
@@ -1227,6 +1356,7 @@ void Client::mcvideo_call_status() {
                             "mcvideo_received_frames",
                             "mcvideo_undecoded",
                             "mcvideo_queue_position",
+                            "mcvideo_queue_cancellations",
                             "mcvideo_revocations",
                             "mcvideo_reject_cause",
                             "mcvideo_session_uri",
@@ -1235,6 +1365,7 @@ void Client::mcvideo_call_status() {
                             "mcvideo_reception_notifications",
                             "mcvideo_reception_ends",
                             "mcvideo_transmitter_ssrcs",
+                            "mcvideo_transmit_ssrcs",
                             "mcvideo_reception_reject_cause",
                             "mcvideo_skipped_before_key",
                             "mcvideo_call_type",
@@ -1276,12 +1407,15 @@ void Client::mcvideo_call_status() {
     status_["mcvideo_undecoded"] = call.undecoded;
     status_["mcvideo_skipped_before_key"] = call.skipped_before_key;
     status_["mcvideo_queue_position"] = call.queue_position ? Json(*call.queue_position) : Json();
+    status_["mcvideo_queue_cancellations"] = call.queue_cancellations;
     status_["mcvideo_revocations"] = call.revocations;
     status_["mcvideo_reject_cause"] = call.revoke_cause;
     status_["mcvideo_session_uri"] = call.session_uri;
     status_["mcvideo_receiving"] = call.receiving;
     status_["mcvideo_reception_notifications"] = call.reception_notifications;
     status_["mcvideo_reception_ends"] = call.reception_ends;
+    // The SSRCs this client transmits with (TS 24.581 clauses 6.2.4.4.6 step 2 and 14.4).
+    status_["mcvideo_transmit_ssrcs"] = {{"audio", call.audio_ssrc}, {"video", call.video_ssrc}};
     status_["mcvideo_transmitter_ssrcs"] = {{"audio", call.transmitter_audio_ssrc},
                                             {"video", call.transmitter_video_ssrc}};
     status_["mcvideo_reception_reject_cause"] = call.reception_reject_cause;
@@ -1305,6 +1439,9 @@ void Client::mcvideo_call_status() {
     }
   }
   status_["mcvideo_last_call"] = mcvideo_last_call_;
+  // TS 24.281 annex G.14 to G.18: the ad hoc groups' priority states; clause 22.2.7.1: the redirections notified.
+  status_["mcvideo_adhoc_groups"] = mcvideo_adhoc_groups_;
+  status_["mcvideo_adhoc_redirections"] = mcvideo_adhoc_redirections_;
   if (live_video_fd_ >= 0) {
     const auto options = mcvideo_encoder_options();
     status_["mcvideo_live"] = {{"width", options.width},

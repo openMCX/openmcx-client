@@ -294,6 +294,12 @@ SipResponse Client::mcvideo_call_info(const SipMessage &message) {
     event("mcvideo_push_url", {{"url", mcvideo_push_url_}});
     return response;
   }
+  // TS 24.281 clause 10.2.2.2.1 (and 10.2.2.2.4, 10.2.2.2.5): an INFO in a private call's dialog with the
+  // g.3gpp.mcvideo-info package and one or more of <alert-ind>, <imminentperil-ind> and <emergency-ind> follows clause
+  // 6.2.8.3.7; it is answered 200 (OK) (TS 24.229, RFC 6086 section 4.2.2).
+  if (mcvideo_call_->type == "private" && get_header(message.headers, "Info-Package") == "g.3gpp.mcvideo-info" &&
+      (info.alert || info.emergency || info.imminent_peril))
+    mcvideo_private_alert_info(info);
   mcvideo_note_priority(info);
   return response;
 }
