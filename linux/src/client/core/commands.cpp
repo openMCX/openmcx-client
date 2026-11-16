@@ -633,10 +633,11 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
     status_["call_state"] = "calling";
     return;
   }
+  const bool emergency_request = info.emergency == true, imminent_request = info.imminent_peril == true;
   invite_with_implicit(implicit.requested, true, [&] {
     dialog_ = sip_.invite(
         cmd == "rejoin" ? session_uri_ : service(), local_, with_talking_location(parts, implicit.requested),
-        [this](const SipResponse &response) {
+        [this, emergency_request, imminent_request](const SipResponse &response) {
           // TS 24.379 clauses 6.2.8.1.4 and 6.2.8.1.5: the alert sent with the call is initiated ("MEA 3") on a 2xx,
           // and back to "MEA 1: no-alert" on a refusal.
           if (response.status_code >= 200 && alert_pending_ == "call") {
@@ -645,6 +646,21 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
           }
           if (response.status_code >= 200 && response.status_code < 300) {
             remember_session(response.headers);
+            // TS 24.379 clause 6.2.8.1.4: a 2xx to the request for an emergency group call ("MEGC 2") sets 1)a) the
+            // group's emergency state "MEG 2: in-progress" and 1)d) no imminent peril; to an imminent peril group call
+            // without warning 149, 2)b) "MIG 2: in-progress". Whatever the response's mcptt-info says, which follows
+            // (priority_response).
+            if (emergency_request || (imminent_request && get_header(response.headers, "Warning").find("\"149 ") ==
+                                                              std::string_view::npos)) {
+              McpttInfo granted;
+              if (emergency_request)
+                granted.emergency = true;
+              else
+                granted.imminent_peril = true;
+              update_priority(granted, std::nullopt);
+              imminent_group_states_[active_group()] =
+                  emergency_request ? "MIG 1: no-imminent-peril" : "MIG 2: in-progress";
+            }
             priority_response(response);
           } else if (response.status_code >= 300) {
             status_["last_call_failure"] = {{"status", response.status_code},
