@@ -76,6 +76,13 @@ inline SipConfig client_sip_config(const Json &cfg, bool disable_tls) {
   auto config = sip_config(cfg, disable_tls);
   // TS 24.379 clause 6.2.3.1.1 step 5: the 200 (OK) to an incoming INVITE says refresher=uas.
   config.uas_refresher = true;
+  // TS 24.379 clause 6.2.3.1.1 step 2 (automatic commencement; clause 6.2.3.1.2 for group calls, clauses 6.2.3.2.1
+  // and 6.2.3.2.2 for the 200 (OK) in manual commencement) and clause 6.2.3.2.1 step 2 (the 180 (Ringing)): the
+  // option tag "timer" in a Require header field of the answers to an initial INVITE. Steps 3 and 4 (the
+  // g.3gpp.mcptt tag and the MCPTT ICSI in Contact) are the engine's service tags; step 5 (Session-Expires,
+  // refresher=uas) its session timer with uas_refresher.
+  config.invite_provisional_headers.push_back({"Require", "timer"});
+  config.invite_success_headers.push_back({"Require", "timer"});
   // TS 24.379 clause 7.2.1AA and TS 24.282 clause 7.2.1AA: the REGISTER Contact names each service the
   // client uses, MCData with its SDS, FD and IPCONN services, and their ICSIs. registration_features, when set,
   // is the whole REGISTER Contact (SipEngine::register_account): other_services below then only adds MCVideo to the
