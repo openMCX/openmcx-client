@@ -522,4 +522,37 @@ std::optional<SipResponse> Client::mcdata_regroup_received(const std::vector<Bod
   return response;
 }
 
+//------------------------------------------------------------------------------
+// TS 24.282 clauses 22.4.2.1.2 and 22.4.2.1.3: bind (unbind) a functional alias to (from) MCData groups: without
+// <allow-functional-alias-binding-with-group> in the user profile, or (binding) for an alias not activated, the user is
+// told and nothing is sent; otherwise a SIP MESSAGE with the MCData-Info (<request-type> "fa-group-binding-req",
+// <binding-ind>, <binding-fa-uri> / <unbinding-fa-uri>, <mcdata-client-id>) and the groups in a resource-lists body.
+void Client::mcdata_fa_binding(bool bind, const std::string &alias, const std::vector<std::string> &groups) {
+  if (!mcdata_authorized_) throw std::runtime_error("functional alias binding requires MCData service authorisation");
+  require_mcdata_profile({"allow-functional-alias-binding-with-group"});
+  if (bind && !mcdata_aliases_active_.contains(alias))
+    throw std::runtime_error("functional alias " + alias + " is not activated (TS 24.282 clause 22.4.2.1.2)");
+  mcdata::Info info;
+  info.request_type = "fa-group-binding-req";
+  info.binding = bind;
+  (bind ? info.binding_fa_uri : info.unbinding_fa_uri) = alias;
+  info.client_id = client_id();
+  if (!mcdata_alias_in_use_.empty() && mcdata_aliases_active_.contains(mcdata_alias_in_use_))
+    info.functional_alias = mcdata_alias_in_use_;
+  const std::string icsi = mcdata::icsi;
+  const std::vector<SipHeader> headers{{"Accept-Contact", "*;+g.3gpp.mcdata;require;explicit"},
+                                       {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(icsi) + "\";require;explicit"},
+                                       {"P-Preferred-Service", icsi}};
+  mcdata_fa_binding_result_ = {{"bind", bind}, {"alias", alias}, {"groups", groups}, {"status", 0}};
+  mcdata_request(
+      "", {{mcdata::info_mime, mcdata::info_xml(info)}, {resource_lists_mime, resource_list_xml(groups)}}, headers,
+      [this, bind, alias](const SipResponse &response) {
+        mcdata_fa_binding_result_["status"] = response.status_code;
+        mcdata_fa_binding_result_["warning"] = std::string(get_header(response.headers, "Warning"));
+        event("mcdata_fa_binding_result", {{"bind", bind}, {"alias", alias}, {"status", response.status_code}});
+      },
+      "MESSAGE");
+  event("mcdata_fa_binding_requested", {{"bind", bind}, {"alias", alias}, {"groups", groups}});
+}
+
 } // namespace mcx

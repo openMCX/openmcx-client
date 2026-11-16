@@ -967,6 +967,11 @@ void Client::mcdata_fa_command(std::istringstream &words) {
     mcdata_alias_in_use_ = aliases.front() == "none" ? std::string{} : aliases.front();
     return;
   }
+  if (action == "bind" || action == "unbind") {
+    if (aliases.size() < 2) throw std::runtime_error("usage: mcdata-fa bind|unbind <alias> <group>...");
+    return mcdata_fa_binding(action == "bind", aliases.front(),
+                             std::vector<std::string>(aliases.begin() + 1, aliases.end()));
+  }
   if ((action != "activate" && action != "takeover" && action != "deactivate") || aliases.empty())
     throw std::runtime_error("usage: mcdata-fa activate|takeover|deactivate <alias>... | subscribe | unsubscribe");
   return mcdata_functional_alias(action, aliases);
@@ -1156,6 +1161,7 @@ void Client::mcdata_status() {
   status_["mcdata_functional_aliases"] = mcdata_aliases_active_;
   status_["mcdata_functional_alias_in_use"] = mcdata_alias_in_use_;
   status_["mcdata_fa_last_result"] = mcdata_fa_last_result_;
+  status_["mcdata_fa_binding_result"] = mcdata_fa_binding_result_;
   status_["mcdata_functional_alias_subscription_result"] = mcdata_alias_subscription_result_;
   status_["mcdata_functional_aliases_take_over_possible"] = mcdata_takeover_possible_;
   status_["mcdata_alert_state"] = mdea_name(mdea_);

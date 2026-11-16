@@ -1977,6 +1977,8 @@ private:
   void mcdata_group_fd_allowed(const std::string &group, std::uint64_t size);
   void mcdata_alert_authorised(const std::string &group);
   void mcdata_regroup_command(std::istringstream &words);
+  void mcdata_fa_binding(bool bind, const std::string &alias, const std::vector<std::string> &groups);
+  Json mcdata_fa_binding_result_ = nullptr; // TS 24.282 clause 22.4.2.1: the outcome of the last binding request
   std::optional<SipResponse> mcdata_regroup_received(const std::vector<BodyPart> &parts);
   // TS 24.282 clause 9.2.2.2.1 3)b)iii) (C8): the temporary groups a constituent group's document names
   // (<on-network-regrouped>), whose GMK is subscribed to (TS 33.180 clause 5.7), and the constituent group named in
