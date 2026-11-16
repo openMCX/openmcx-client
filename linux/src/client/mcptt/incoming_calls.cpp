@@ -406,6 +406,10 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
     return extra_notify(mcvideo_service, message);
   if (mcvideo_enabled() && !message.dialog_id.empty() && mcvideo_alias_dialogs_.contains(message.dialog_id))
     return mcvideo_alias_notify(message);
+  // TS 24.379 clauses 7.2.4, 9.2.1.3 and 9.2.1.6: the MCPTT settings subscription, those to other users' affiliation
+  // and to group dynamic data (core/settings_affiliation.cpp).
+  if (!message.dialog_id.empty() && mcptt_procedures_.extra_subscriptions.contains(message.dialog_id))
+    return extra_notify(mcptt_service, message);
   return affiliation_notify(message);
 }
 

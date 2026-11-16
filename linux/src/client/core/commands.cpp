@@ -15,7 +15,8 @@ namespace mcx {
 
 namespace {
 // The MCPTT commands of the procedures shared with MCVideo (core/settings_affiliation.cpp, procedures_command).
-const std::set<std::string> mcptt_procedure_verbs{"settings-publish"};
+const std::set<std::string> mcptt_procedure_verbs{"settings-publish", "settings-subscribe", "settings-resubscribe",
+                                                   "settings-unsubscribe"};
 } // namespace
 
 //------------------------------------------------------------------------------
@@ -77,6 +78,7 @@ void Client::command(const std::string &command_line) {
 //   hangup: release the call (clause 10.1.1.2.3.1, clause 11.1.3.1.1.1, ambient clause 11.1.6.2.1.3);
 //   affiliate, deaffiliate: affiliation status change (clause 9.2.1.2);
 //   settings-publish [remove]: the PUBLISH for the MCPTT service settings only (clause 7.2.3);
+//   settings-subscribe [fetch], settings-resubscribe, settings-unsubscribe: the MCPTT service settings (clause 7.2.4);
 //   options <SIP URI>: reachability probe (RFC 3261 section 11);
 //   log-off, log-on: log off every MC service (clause 7.2.1A step 4 and NOTE 3) and de-register, then back;
 //   quit; the other words go to the private call service, ad hoc, functional alias, MCData, MCVideo, SEAL, location,
