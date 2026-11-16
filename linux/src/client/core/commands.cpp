@@ -100,6 +100,13 @@ void Client::run_command(const std::string &cmd) {
   } else if (cmd == "emergency on alert" || cmd == "emergency off alert") {
     if (call_type_ != "private") throw std::runtime_error("use 'alert on|off' for group emergency alerts");
     change_private_priority(cmd.starts_with("emergency on"), true);
+  } else if (cmd == "emergency cancel-other" || cmd.starts_with("emergency cancel-other ")) {
+    // TS 24.379 clauses 6.2.8.1.14, 6.2.8.3.8: emergency cancel-other [alert [<originator>]].
+    std::istringstream words(cmd.substr(22));
+    std::string word, originator;
+    words >> word >> originator;
+    if (!word.empty() && word != "alert") throw std::runtime_error("usage: emergency cancel-other [alert [<user>]]");
+    third_party_cancel(word == "alert", originator);
   } else if (cmd == "emergency on" || cmd == "emergency off") {
     change_priority(true, cmd.ends_with("on"));
   } else if (cmd == "imminent on" || cmd == "imminent off") {

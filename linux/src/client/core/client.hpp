@@ -714,9 +714,16 @@ class Client {
 
   std::vector<SipHeader> priority_headers(const McpttInfo &info) const;
 
-  void change_private_priority(bool enable, bool with_alert);
+  void change_private_priority(bool enable, bool with_alert, const std::string &other_alert = {});
 
-  void change_priority(bool emergency, bool enabled);
+  // TS 24.379 clauses 6.2.8.1.14 and 6.2.8.3.8: "emergency cancel-other [alert [<originator>]]", the cancel of
+  // another user's emergency in the call (and of that user's alert).
+  void third_party_cancel(bool with_alert, std::string originator);
+
+  // The private call in progress was offered as an emergency private call (TS 24.379 clause 6.2.8.3.8 applies).
+  bool private_emergency_offered_ = false;
+
+  void change_priority(bool emergency, bool enabled, const std::string &other_alert = {}, bool third_party = false);
 
   void require_priority_right(const std::string &request, const std::string &target) const;
 

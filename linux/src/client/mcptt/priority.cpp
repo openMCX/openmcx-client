@@ -290,12 +290,13 @@ std::vector<SipHeader> Client::priority_headers(const McpttInfo &info) const {
 // TS 24.379 clause 11.1.1.2.1.5 and clause 11.1.1.2.1.4: upgrade to or cancel an emergency private call in the
 // established dialog (re-INVITE of clause 6.2.8.3.2 or clause 6.2.8.3.6, responses per clause 6.2.8.3.4 and
 // clause 6.2.8.3.5); with_alert also starts or cancels the alert (MPEA, annex G.12).
-void Client::change_private_priority(bool enable, bool with_alert) {
+void Client::change_private_priority(bool enable, bool with_alert, const std::string &other_alert) {
+  const bool third_party = !enable && (!other_alert.empty() || (mepp_ != 2 && private_emergency_offered_));
   if (dialog_.empty() || !remote_ || status_.value("call_state", "") != "active")
     throw std::runtime_error("emergency private call change requires an active private call");
   if (priority_pending_) throw std::runtime_error("priority update already pending");
   if (enable && mepp_ == 2) throw std::runtime_error("private call is already an emergency call");
-  if (!enable && mepp_ != 2) throw std::runtime_error("private call is not an emergency call");
+  if (!enable && mepp_ != 2 && !third_party) throw std::runtime_error("private call is not an emergency call");
   // TS 24.379 clauses 6.2.8.3.1.1 to 6.2.8.3.1.3 (clause 11.1.1.2.1.5 1), clause 11.1.1.2.1.4 1)): the user's rights.
   require_priority_right(enable ? "emergency-private" : "emergency-private-cancel", private_peer_);
   if (with_alert) require_priority_right(enable ? "private-alert" : "private-alert-cancel", private_peer_);
@@ -307,6 +308,8 @@ void Client::change_private_priority(bool enable, bool with_alert) {
     info.alert = with_alert;
   else if (with_alert)
     info.alert = false;
+  // TS 24.379 clause 6.2.8.3.8 3) b): the cancel of another user's alert names that user.
+  if (!enable && with_alert && !other_alert.empty()) info.originated_by = other_alert;
   auto parts = info_parts(info);
   if (enable && with_alert)
     parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
@@ -314,14 +317,14 @@ void Client::change_private_priority(bool enable, bool with_alert) {
   // TS 24.379 clause 11.1.1.2.1.5 4) and clause 6.4: the upgrade may be an implicit floor request.
   const bool implicit = enable && upgrade_implicit_begin();
   const int previous_mpea = mpea_;
-  emergency_state_ = enable; // TS 24.379 annex G.1 (clauses 6.2.8.3.2, 6.2.8.3.6)
+  if (!third_party) emergency_state_ = enable; // TS 24.379 annex G.1 (clauses 6.2.8.3.2, 6.2.8.3.6)
   if (enable) {
     mepc_ = 2;
     mepp_ = 4;
     if (with_alert) mpea_ = 2;
   } else {
-    mepp_ = 3;
-    if (with_alert && mpea_ == 3) mpea_ = 4;
+    mepp_ = 3; // clause 6.2.8.3.6 2), clause 6.2.8.3.8 2): "MEPP 3: cancel-pending"
+    if (with_alert && mpea_ == 3 && other_alert.empty()) mpea_ = 4;
   }
   priority_pending_ = true;
   try {
@@ -376,7 +379,7 @@ void Client::change_private_priority(bool enable, bool with_alert) {
 // (chat): upgrade the active group call to emergency or imminent peril, or cancel it (re-INVITE); outside a call,
 // cancel the in-progress emergency group state by SIP MESSAGE (clause 12.1.1.5). A private call goes to
 // change_private_priority().
-void Client::change_priority(bool emergency, bool enabled) {
+void Client::change_priority(bool emergency, bool enabled, const std::string &other_alert, bool third_party) {
   if (call_type_ == "private") {
     if (!emergency) throw std::runtime_error("imminent peril does not apply to private calls");
     return change_private_priority(enabled, false);
@@ -403,7 +406,15 @@ void Client::change_priority(bool emergency, bool enabled) {
   if (emergency) {
     info.emergency = enabled;
     if (enabled) info.alert = false;
-    emergency_state_ = enabled; // TS 24.379 clause 6.2.8.1.1 1) (set), clause 6.2.8.1.3 2) (cleared)
+    // TS 24.379 clause 6.2.8.1.1 1) (set), clause 6.2.8.1.3 2) (cleared); a third party's cancel (clause 6.2.8.1.14)
+    // leaves this user's own state.
+    if (!third_party) emergency_state_ = enabled;
+    // TS 24.379 clause 6.2.8.1.14 3): with the cancel of another user's alert, <alert-ind> false and <originated-by>.
+    if (!enabled && !other_alert.empty()) {
+      require_priority_right("alert-cancel", target_group);
+      info.alert = false;
+      info.originated_by = other_alert;
+    }
   } else
     info.imminent_peril = enabled;
   auto headers = priority_headers(info);
@@ -458,6 +469,32 @@ void Client::change_priority(bool emergency, bool enabled) {
     priority_pending_ = false;
     throw;
   }
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 10.1.1.2.1.4 3) with clause 6.2.8.1.14 (group call) and clause 11.1.1.2.1.4 with clause 6.2.8.3.8
+// (private call): "emergency cancel-other [alert [<originator>]]" cancels, in the call, the emergency another user
+// started: a re-INVITE with <emergency-ind> false (MEG 3 / MEPP 3 cancel-pending) and, with alert, <alert-ind> false
+// and <originated-by> the user whose alert is cancelled (by default the one other user with an alert). The emergency
+// group state cancel is local policy (clause 6.2.8.1.7); the alert cancel needs <allow-cancel-emergency-alert>.
+void Client::third_party_cancel(bool with_alert, std::string originator) {
+  if (dialog_.empty() || !remote_ || status_.value("call_state", "") != "active")
+    throw std::runtime_error("a third-party emergency cancel needs a call in progress");
+  if (with_alert && originator.empty()) {
+    const auto &alerts = call_type_ == "private" ? private_alerts_ : alerts_;
+    for (const auto &origin : alerts)
+      if (origin != user()) {
+        if (!originator.empty()) throw std::runtime_error("several alerts: name the originator");
+        originator = origin;
+      }
+    if (originator.empty()) originator = call_type_ == "private" ? private_peer_ : std::string{};
+    if (originator.empty()) throw std::runtime_error("no other user's emergency alert to cancel");
+  }
+  if (call_type_ == "private") {
+    if (mepp_ != 2 && !private_emergency_offered_) throw std::runtime_error("private call is not an emergency call");
+    return change_private_priority(false, with_alert, with_alert ? originator : private_peer_);
+  }
+  change_priority(true, false, with_alert ? originator : std::string{}, true);
 }
 
 //------------------------------------------------------------------------------

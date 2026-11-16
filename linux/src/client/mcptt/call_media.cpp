@@ -264,6 +264,7 @@ void Client::call_state(std::string_view id, SipCallState state, int code) {
 // received audio.
 void Client::clear_call_state() {
   next_floor_priority_.reset();
+  private_emergency_offered_ = false;
   end_speech("call ended");
   awaiting_answer_key_ = false;
   dialog_.clear();

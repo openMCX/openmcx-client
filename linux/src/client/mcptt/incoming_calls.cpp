@@ -981,6 +981,7 @@ void Client::adopt_incoming_private(const SipMessage &message, const McpttInfo &
   fta_not_selected_ = false;
   status_.erase("private_priority_restored");
   if (first_to_answer && info.emergency == true) saved_mepp_ = mepp_;
+  private_emergency_offered_ = info.emergency == true;
   update_private_priority(info); // an emergency private call is in progress (MEPP 2)
   status_["calling_functional_alias"] = info.functional_alias;
   status_["called_functional_alias"] = info.called_functional_alias;
