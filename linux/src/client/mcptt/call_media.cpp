@@ -149,6 +149,8 @@ void Client::call_state(std::string_view id, SipCallState state, int code) {
     }
     return;
   }
+  // TS 24.282 clause 6.2.8.4.1: an FD invitation waiting for the user, cancelled before it was answered.
+  if (state == SipCallState::disconnected && mcdata_media_pending_ended(id, code)) return;
   // The MCData media plane holds its own dialog (TS 24.282 clause 9.2.3); it is not an MCPTT call.
   if (!mcdata_media_dialog_.empty() && id == mcdata_media_dialog_) {
     if (state == SipCallState::disconnected) {

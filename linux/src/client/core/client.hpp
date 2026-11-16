@@ -2241,6 +2241,13 @@ private:
   // decision taken (accept) while the invitation is answered
   std::optional<SipMessage> mcdata_media_pending_invite_;
   bool mcdata_media_user_accepted_ = false;
+  // TS 24.282 clause 6.2.8.4.1 2): the priority states as they were before the pending FD invitation changed them
+  // (clause 10.2.5.2.4 steps 5A to 5C), restored when the invitation is cancelled before it is answered.
+  struct McdataPriorityStates {
+    int mdegc, mdeg, mdigc, mdig, mdepp;
+    std::string group, alert_originator;
+  };
+  std::optional<McdataPriorityStates> mcdata_media_pending_states_;
   mcdata::Uuid mcdata_media_conversation_{};
   std::string mcdata_media_answer_; // repeated when a re-INVITE arrives
   Json mcdata_media_sent_ = Json::array();
@@ -2329,6 +2336,7 @@ private:
   // ---- MCData media plane, terminating side and MSRP transfer (mcdata/media_session.cpp) ----
   SipResponse mcdata_media_invite(const SipMessage &invite);
   void mcdata_media_file_answer(const std::string &decision);
+  bool mcdata_media_pending_ended(std::string_view id, int code);
 
   // re-INVITE in the media plane session's dialog: priority state (TS 24.282 clause 6.2.8.4.2, 9.2.4.2.4).
   SipResponse mcdata_media_reinvite(const mcdata::Info &info);

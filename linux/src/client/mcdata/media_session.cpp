@@ -237,6 +237,14 @@ std::optional<SipResponse> Client::mcdata_media_file_offer(const SipMessage &inv
     response.status_code = 180;
     response.deferred = true; // SipEngine: the INVITE stays open for the final answer (SipEngine::answer)
     mcdata_media_pending_invite_ = invite;
+    // TS 24.282 clause 10.2.5.2.4 steps 5A to 5C come before the wait of step 7: the in-progress emergency or imminent
+    // peril state of the group, or MDEPP 2 for an emergency private FD; kept to be restored on a CANCEL (6.2.8.4.1 2)).
+    mcdata_media_pending_states_ = McdataPriorityStates{mdegc_, mdeg_, mdigc_, mdig_, mdepp_, mcdata_priority_group_,
+                                                        mcdata_group_alert_originator_};
+    if (!info.calling_group.empty() && (info.emergency == true || info.imminent_peril == true))
+      mcdata_group_priority_received(info);
+    else if (info.calling_group.empty() && info.emergency == true)
+      mdepp_ = 2;
     offered["state"] = "offered";
     bounded_push(mcdata_media_files_, offered);
     event("mcdata_media_file_offered_to_user", {{"from", info.calling_user}, {"bytes", size}});
@@ -261,6 +269,7 @@ void Client::mcdata_media_file_answer(const std::string &decision) {
   if (!mcdata_media_pending_invite_) throw std::runtime_error("no FD invitation waits for the user");
   const auto invite = *mcdata_media_pending_invite_;
   mcdata_media_pending_invite_.reset();
+  mcdata_media_pending_states_.reset(); // answered: the states stay as the invitation set them (10.2.5.2.4 NOTE 2)
   SipResponse response;
   if (decision == "accept") {
     mcdata_media_user_accepted_ = true;
@@ -281,6 +290,30 @@ void Client::mcdata_media_file_answer(const std::string &decision) {
                                                                                                   : "declined";
   sip_.answer(invite.dialog_id, response);
   event("mcdata_media_file_answered", {{"decision", decision}, {"status", response.status_code}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 6.2.8.4.1: the pending FD invitation was cancelled before this client answered it (the SIP engine
+// sent the 200 (OK) to the CANCEL and the 487 (Request Terminated) to the INVITE): the priority states it changed are
+// restored (step 2)) and the user's decision is no longer asked for.
+bool Client::mcdata_media_pending_ended(std::string_view id, int code) {
+  if (!mcdata_media_pending_invite_ || mcdata_media_pending_invite_->dialog_id != id) return false;
+  mcdata_media_pending_invite_.reset();
+  if (mcdata_media_pending_states_) {
+    const auto &before = *mcdata_media_pending_states_;
+    mdegc_ = before.mdegc;
+    mdeg_ = before.mdeg;
+    mdigc_ = before.mdigc;
+    mdig_ = before.mdig;
+    mdepp_ = before.mdepp;
+    mcdata_priority_group_ = before.group;
+    mcdata_group_alert_originator_ = before.alert_originator;
+    mcdata_media_pending_states_.reset();
+  }
+  if (!mcdata_media_files_.empty() && mcdata_media_files_.back().value("state", "") == "offered")
+    mcdata_media_files_.back()["state"] = "cancelled";
+  event("mcdata_media_file_cancelled", {{"dialog", std::string(id)}, {"status", code}});
+  return true;
 }
 
 //------------------------------------------------------------------------------
