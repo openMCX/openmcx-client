@@ -1097,11 +1097,13 @@ SipResponse Client::incoming_adhoc(const SipMessage &message, const McpttInfo &i
   status_["adhoc_broadcast"] = adhoc_broadcast_;
   status_["calling_functional_alias"] = info.functional_alias;
   status_["called_functional_alias"] = info.called_functional_alias;
-  if (protected_media() || protected_floor()) {
+  // TS 24.379 clause 17.2.2.1.2 step 7: with a <preconfigured-group-id>, the security related information of that
+  // group's configuration (its GMK) protects the call; a protected call without it cannot be keyed (488).
+  call_group_ = info.calling_group;
+  if (protected_media() && !use_adhoc_security(info.preconfigured_group_id)) {
+    call_group_.clear();
+    restore_group_key();
     response.status_code = 488;
-    response.headers = {
-        {"Warning",
-         "399 mcx \"100 function not allowed due to end-to-end security for adhoc group call not implemented\""}};
     return response;
   }
   // RFC 5373 section 2: an answer-mode value other than Auto and Manual is ignored.

@@ -180,6 +180,29 @@ bool Client::select_call_key(const std::string &call_group) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 17.2.2.1.1 (on the 2xx, step 3) and clause 17.2.2.1.2 step 7: "if the <preconfigured-group-id>
+// element received [...], shall use the security related information from the group configuration associated with the
+// received preconfigured group identity": the ad hoc call's media is keyed with that group's GMK (TS 33.180 clause
+// 5.7). False when this client does not hold it; the group's GMK is then subscribed to for later calls.
+bool Client::use_adhoc_security(const std::string &preconfigured) {
+  adhoc_security_group_ = preconfigured;
+  if (preconfigured.empty()) {
+    event("adhoc_security_unavailable", {{"reason", "no preconfigured-group-id"}});
+    return false;
+  }
+  if (adhoc_security_groups_.insert(preconfigured).second) update_key_subscriptions();
+  try {
+    protection_.set_group(gmk_for(preconfigured));
+  } catch (const std::exception &error) {
+    event("group_call_key_unavailable",
+          {{"group_id", call_group_}, {"key_group", preconfigured}, {"reason", error.what()}});
+    return false;
+  }
+  event("adhoc_security", {{"group_id", call_group_}, {"key_group", preconfigured}});
+  return true;
+}
+
+//------------------------------------------------------------------------------
 // Helper: after a call keyed with another group's GMK, the selected group's GMK (if held) is selected again; the
 // other epochs keep their replay state (ProtectedCall).
 void Client::restore_group_key() {
@@ -208,6 +231,10 @@ void Client::update_key_subscriptions() {
   for (const auto &[tgi, regroup] : mcdata_regroups_.items())
     if (const auto preconfigured = regroup.value("preconfigured", std::string{}); !preconfigured.empty())
       wanted.insert(preconfigured);
+  // TS 24.379 clause 17.1: the preconfigured groups providing the security of ad hoc group calls.
+  for (const auto &configured : cfg_.at("mcptt").value("adhoc_security_groups", std::vector<std::string>{}))
+    wanted.insert(configured);
+  wanted.insert(adhoc_security_groups_.begin(), adhoc_security_groups_.end());
   wanted.erase(key_group_of(group()));
   for (auto it = extra_key_subscriptions_.begin(); it != extra_key_subscriptions_.end();) {
     if (wanted.contains(it->first)) {

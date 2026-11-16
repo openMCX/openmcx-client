@@ -16,9 +16,6 @@ namespace mcx {
 // alert (step 10 NOTE 1), optionally broadcast (step 9), emergency (step 15) or imminent peril (step 16).
 void Client::adhoc_call(const std::string &arguments) {
   if (!authorized_ || !dialog_.empty()) throw std::runtime_error("ad hoc call requires authorized idle state");
-  if (protected_media() || protected_floor())
-    throw std::runtime_error(
-        "end-to-end security for ad hoc group calls is not implemented; use a clear-media profile");
   // adhoc [broadcast] [emergency|imminent] <MCPTT ID or functional alias>...
   //   or adhoc [emergency|imminent] criteria <criteria>
   bool info_broadcast = false, alert_group = false;
@@ -78,6 +75,10 @@ void Client::adhoc_call(const std::string &arguments) {
   adhoc_priority_ = priority;
   adhoc_criteria_ = criteria;
   info.participant_criteria = criteria; // TS 24.379 clause 17.2.2.1.1 step 12
+  // TS 24.379 clause 17.2.2.1.1 step 10 c) iii): with protected media, end-to-end security is requested; the 2xx names
+  // the preconfigured group whose security related information keys the call (clause 17.4.2.2 11)).
+  if (protected_media()) info.end_to_end_security = true;
+  adhoc_security_group_.clear();
   auto parts = info_parts(info);
   if (!targets.empty()) parts.push_back({resource_lists_mime, resource_list_xml(targets)});
   // TS 24.379 clause 17.2.2.1.1 step 14: "if an implicit floor request is required".
@@ -97,9 +98,22 @@ void Client::adhoc_call(const std::string &arguments) {
         [this](const SipResponse &response) {
           if (response.status_code >= 200 && response.status_code < 300) {
             // The server returns the generated ad hoc group identity (TS 24.379 clause 17.2.2.1.1, 2xx step 4).
+            std::string preconfigured;
             for (const auto &part : response.parts)
-              if (part.content_type == mcptt_mime) call_group_ = parse_mcptt_info(part.body).calling_group;
+              if (part.content_type == mcptt_mime) {
+                const auto answer = parse_mcptt_info(part.body);
+                call_group_ = answer.calling_group;
+                preconfigured = answer.preconfigured_group_id;
+              }
             remember_session(response.headers);
+            // 2xx step 3: the security related information of the <preconfigured-group-id>; without it (or its GMK)
+            // the protected call cannot be keyed and ends.
+            if (protected_media() && !use_adhoc_security(preconfigured)) {
+              call_failure(preconfigured.empty() ? "no preconfigured group for the end-to-end security of the ad hoc call"
+                                                 : "no GMK of the ad hoc call's preconfigured group " + preconfigured,
+                           {{"group", call_group_}, {"command", "adhoc"}});
+              stop_protected_call("ad hoc group call without its group key");
+            }
           } else if (response.status_code >= 300) {
             status_["last_call_failure"] = {{"status", response.status_code},
                                             {"warning", std::string(get_header(response.headers, "Warning"))}};

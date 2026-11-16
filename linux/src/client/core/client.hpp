@@ -404,6 +404,15 @@ class Client {
   bool fta_not_selected_ = false;
   // Ad hoc group call priority learned at setup: "normal", "emergency" or "imminent".
   std::string adhoc_priority_ = "normal";
+  // TS 24.379 clauses 17.1, 17.2.2.1.1 (2xx step 3) and 17.2.2.1.2 step 7: the preconfigured groups whose security
+  // related information (GMK, TS 33.180 clause 5.7) protects ad hoc group calls: those configured
+  // (mcptt.adhoc_security_groups) and those named by a <preconfigured-group-id>; their GMKs are subscribed to
+  // (update_key_subscriptions). adhoc_security_group_: the one of the ad hoc call in progress.
+  std::set<std::string> adhoc_security_groups_;
+  std::string adhoc_security_group_;
+
+  bool use_adhoc_security(const std::string &preconfigured);
+
   // TS 24.379 clause 17.2.7.1: the ad hoc group call redirections notified ({group, partner_id, primary_id, in_call}).
   Json adhoc_redirections_ = Json::array();
   // TS 24.379 clause 17.2.6.1.1 step 1: the participant criteria of the ad hoc call this client originated (or last
