@@ -160,6 +160,16 @@ std::vector<BodyPart> Client::private_call_parts(const std::string &target, bool
   if (followup_ && !followup_->reported && followup_->kind == "remote" && followup_->target == target)
     info.remotely_initiated_call_request = true;
   info.service = std::exchange(next_call_service_, {});
+  const bool service_call = followup_ && !followup_->reported && followup_->target == target;
+  if (info.service.contains("call-forwarding-ind")) {
+    // TS 24.379 clause 11.1.1.2.1.1 14C) a2): a forwarded call names an MCPTT ID, not a functional alias.
+    info.call_to_functional_alias = false;
+  } else if (!service_call) {
+    // TS 24.379 clause 11.1.1.2.1.1 14B) a): a private call on the user's own request is not forwarded (yet).
+    info.service["forwarding-sequence-number"] = "0";
+  }
+  if (const auto sequence = info.service.find("forwarding-sequence-number"); sequence != info.service.end())
+    private_forwarding_sequence_ = static_cast<unsigned>(std::stoul(sequence->second));
   if (emergency) {
     // TS 24.379 clause 6.2.8.3.2: emergency-ind true, alert-ind true or false, Resource-Priority.
     info.emergency = true;

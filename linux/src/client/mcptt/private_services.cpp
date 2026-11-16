@@ -168,7 +168,11 @@ void Client::private_call_service_request(const McpttInfo &info, const std::stri
   next_call_replaces_ = type == "transfer-private-call-request" && info.service.contains("replaces-header-value")
                             ? info.service.at("replaces-header-value")
                             : "";
-  if (forward) next_call_service_["call-forwarding-ind"] = "true";
+  if (forward) {
+    next_call_service_["call-forwarding-ind"] = "true";
+    // TS 24.379 clause 11.1.1.2.1.1 14C) a1): "shall increment <forwarding-sequence-number>" of the forwarded call.
+    next_call_service_["forwarding-sequence-number"] = std::to_string(private_forwarding_sequence_ + 1);
+  }
   // TS 24.379 clause 11.1.1.2.1.1 14A) a), 14C) a): Priv-Answer-Mode with the answer mode of the call transferred
   // (the transferred user's current call) or forwarded (this user's call to the forwarding user).
   next_priv_answer_mode_ = type == "remotely-initiated-private-call-request" ? "" : private_answer_mode_;

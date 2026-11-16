@@ -587,10 +587,11 @@ class Client {
   // held_ is the transferred user's call with the requester, kept during a transfer (TS 24.379 clause 11.1.8.2.2).
   bool transfer_kept_ = false;
   std::string announced_target_, announced_replaces_, next_call_replaces_;
-  // TS 24.379 clause 11.1.1.2.1.1 14A) a), 14C) a): the answer mode ("Auto" or "Manual") of the latest private call,
-  // which a transfer or forwarding of it carries on in its Priv-Answer-Mode; next_priv_answer_mode_ is that
-  // Priv-Answer-Mode for the call being placed.
+  // TS 24.379 clause 11.1.1.2.1.1 14A) a), 14C) a), a1): the answer mode ("Auto" or "Manual") and the
+  // <forwarding-sequence-number> of the latest private call, which a transfer or forwarding of it carries on in its
+  // Priv-Answer-Mode and increments; next_priv_answer_mode_ is that Priv-Answer-Mode for the call being placed.
   std::string private_answer_mode_ = "Auto", next_priv_answer_mode_;
+  unsigned private_forwarding_sequence_ = 0;
   bool replacing_call_ = false;
   // RFC 3891 (TS 24.379 clauses 6.3.2.2.5.3 step 1 and 6.3.2.2.6.3 step 1): the dialog of an incoming call whose
   // Replaces names the pre-established session; once it is confirmed the session is ended with a BYE.
