@@ -227,7 +227,12 @@ SipResponse Client::mcdata_fd_termination_received(const SipMessage &message, co
   default: break;
   }
   for (auto &entry : mcdata_files_sent_)
-    if (entry.at("message_id") == id && !state.empty()) entry["state"] = state;
+    if (entry.at("message_id") == id) {
+      if (!state.empty()) entry["state"] = state;
+      // TS 24.282 clause 13.2.4.5.2.1: the controlling function's PSI, for the extension request (13.2.4.5.2.2 3)a));
+      // the clause reads it from the mcdata-signalling body, but the server puts it in the MCData-Info (13.2.4.5.4.1)
+      if (!info.controller_psi.empty()) entry["controller_psi"] = info.controller_psi;
+    }
   bounded_push(mcdata_file_notifications_,
                {{"from", mcdata_service()},
                 {"group", info.calling_group},
