@@ -2885,6 +2885,7 @@ private:
   void ptt_command(const std::string &cmd);
   // "hangup": release the call.
   void hangup_command();
+  void adhoc_release();
   // "deaffiliate": end the call and withdraw the affiliation (TS 24.379 clause 9.2.1.2).
   void deaffiliate_command();
   // "options <SIP URI>": reachability probe (RFC 3261 section 11).

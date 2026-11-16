@@ -181,6 +181,8 @@ void Client::run_command(const std::string &cmd) {
     mcdata_command(cmd);
   } else if (cmd.starts_with("adhoc-alert ")) {
     adhoc_alert(cmd.substr(12));
+  } else if (cmd == "adhoc-release") {
+    adhoc_release();
   } else if (cmd.starts_with("adhoc-modify ")) {
     adhoc_modify(cmd.substr(13));
   } else if (cmd.starts_with("adhoc ")) {

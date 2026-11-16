@@ -128,6 +128,21 @@ void Client::adhoc_call(const std::string &arguments) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 17.2.3.1.1: the user releases the ad hoc group call (on-demand session) for all, as against
+// leaving it ("hangup"): the BYE of clause 6.2.5.1 carries "a Reason SIP header according to IETF RFC 3326 [...] with
+// the protocol set to SIP, the cause value set to 200 and the reason-text set to "User requested release"" (step 1);
+// the priority conditions of clause 6.2.8.1.27 follow the call's end (end_call). Command: adhoc-release
+void Client::adhoc_release() {
+  if (call_type_ != "adhoc" || dialog_.empty()) throw std::runtime_error("no ad hoc group call to release");
+  if (call_over_pre_session())
+    throw std::runtime_error("the release of an ad hoc group call over a pre-established session is not supported");
+  const auto dialog = dialog_;
+  release();
+  sip_.bye(dialog, {}, {{"Reason", "SIP;cause=200;text=\"User requested release\""}});
+  event("adhoc_release_requested", {{"group", call_group_}});
+}
+
+//------------------------------------------------------------------------------
 // TS 24.379 clause 12.1A.1.1 and clause 12.1A.1.2: the MCPTT client originates or cancels an ad hoc group
 // emergency alert (SIP MESSAGE) and tracks the ad hoc emergency alert state (AH-MEA). Command:
 //   adhoc-alert <criteria>   or   adhoc-alert cancel
