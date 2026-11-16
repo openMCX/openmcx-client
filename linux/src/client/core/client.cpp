@@ -484,6 +484,8 @@ void Client::read_mcdata_profile() {
     throw std::runtime_error("MCData user profile of another user or index");
   mcdata_profile_actions_ = profile.actions;
   mcdata_profile_kms_ = profile.one_to_one_kms;
+  mcdata_alert_entry_info_ = profile.group_alert_entry_info;
+  mcdata_alert_entry_uri_ = profile.group_alert_uri;
   mcdata_profile_loaded_ = true;
   status_["mcdata_profile"] = {{"user_id", profile.user_id},
                                {"profile_index", profile.profile_index},

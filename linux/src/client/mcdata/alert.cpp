@@ -25,9 +25,14 @@ const char *Client::mdea_name(int state) {
 // send the SIP MESSAGE request of an MCData emergency alert and follow the MDEA state on its response.
 void Client::mcdata_alert(bool activate, std::string group, const std::string &originator) {
   if (!mcdata_authorized_) throw std::runtime_error("emergency alert requires MCData service authorisation");
+  // TS 24.282 clause 16.2.1.1: without a group from the user, the <uri-entry> of <GroupEmergencyAlert>, else the
+  // group last used (here the configured MCData group).
+  if (group.empty() && activate && !mcdata_alert_entry_uri_.empty()) group = mcdata_alert_entry_uri_;
   if (group.empty()) group = activate || mcdata_alert_group_.empty() ? mcdata_group() : mcdata_alert_group_;
-  if (activate)
-    require_mcdata_profile({"allow-activate-emergency-alert"}); // TS 24.282 clause 6.2.8.1.6
+  if (activate) {
+    require_mcdata_profile({"allow-activate-emergency-alert"}); // TS 24.282 clause 6.2.8.1.6 1)
+    mcdata_alert_authorised(group);                              // TS 24.282 clause 6.2.8.1.6 2), 3)
+  }
   else
     require_mcdata_profile({originator.empty() || originator == mcdata_user()
                                 ? "allow-cancel-emergency-alert"
@@ -79,6 +84,35 @@ void Client::mcdata_alert(bool activate, std::string group, const std::string &o
       "MESSAGE");
   event("mcdata_emergency_alert_requested",
         {{"activate", activate}, {"group", group}, {"originated_by", info.originated_by}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 6.2.8.1.6: an emergency alert to `group` is authorised only if the group document has no
+// <preconfigured-group-use-only> "true" and the <entry> of <GroupEmergencyAlert> is a) "DedicatedGroup" with
+// <uri-entry> the group, or b) "UseCurrentlySelectedGroup" and the group document grants this user
+// <mcdata-allow-emergency-alert> (TS 24.481 clause 7.2.2); "in all other cases" it is not.
+void Client::mcdata_alert_authorised(const std::string &group) {
+  const auto document = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(group), {},
+                                      {{"Authorization", bearer()}});
+  std::string reason;
+  try {
+    if (document.status == 200 && parse_mcdata_group_sds(document.body).preconfigured_use_only)
+      reason = "preconfigured-group-use-only";
+    else if (mcdata_alert_entry_info_ == "DedicatedGroup") {
+      if (mcdata_alert_entry_uri_ != group) reason = "GroupEmergencyAlert DedicatedGroup names another group";
+    } else if (mcdata_alert_entry_info_ == "UseCurrentlySelectedGroup") {
+      if (document.status != 200 ||
+          !group_document_allows(document.body, "mcdata-allow-emergency-alert", {mcdata_user(), user()}))
+        reason = "mcdata-allow-emergency-alert";
+    } else
+      reason = "no GroupEmergencyAlert entry";
+  } catch (const std::exception &error) {
+    reason = std::string("unreadable group document: ") + error.what();
+  }
+  if (reason.empty()) return;
+  status_["mcdata_alert_not_allowed"] = {{"group", group}, {"reason", reason}};
+  event("mcdata_alert_not_allowed", {{"group", group}, {"reason", reason}});
+  throw std::runtime_error("emergency alert not allowed on " + group + " (" + reason + ", TS 24.282 clause 6.2.8.1.6)");
 }
 
 //------------------------------------------------------------------------------

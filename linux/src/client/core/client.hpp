@@ -1966,6 +1966,7 @@ private:
   // user profile; TS 33.180 clause 5.2.8.2.5: the receiver KMS a KMS Redirect Response selected for a target, the
   // media plane request to send again with it, and the responses taken so far.
   std::map<std::string, std::string> mcdata_profile_kms_;
+  std::string mcdata_alert_entry_info_, mcdata_alert_entry_uri_; // <GroupEmergencyAlert> (TS 24.282 6.2.8.1.6)
   std::pair<std::string, std::string> mcdata_redirect_kms_;
   std::function<void()> mcdata_media_retry_;
   unsigned mcdata_krr_count_ = 0;
@@ -1974,6 +1975,7 @@ private:
   // does not allow is refused before anything is sent.
   void mcdata_group_sds_allowed(const std::string &group, std::size_t size, bool media_plane, bool session);
   void mcdata_group_fd_allowed(const std::string &group, std::uint64_t size);
+  void mcdata_alert_authorised(const std::string &group);
   // TS 24.282 clause 9.2.2.2.1 3)b)iii) (C8): the temporary groups a constituent group's document names
   // (<on-network-regrouped>), whose GMK is subscribed to (TS 33.180 clause 5.7), and the constituent group named in
   // <associated-group-id> for an SDS to a temporary group.
@@ -2119,7 +2121,8 @@ private:
 
   const EnhancedStatusValues &mcdata_group_status_values(const std::string &group, bool refresh);
 
-  void mcdata_send_enhanced_status(const std::string &group, const std::string &id, bool force = false);
+  void mcdata_send_enhanced_status(const std::string &group, const std::string &id, bool force = false,
+                                   mcdata::DispositionRequest disposition = mcdata::DispositionRequest::None);
 
   std::vector<std::string> mcdata_adhoc_target(const std::string &spec, mcdata::Info &info) const;
 

@@ -721,12 +721,22 @@ void Client::mcdata_fd_media_command(std::istringstream &words) {
 }
 
 //------------------------------------------------------------------------------
-// sds-status <group> <operational value id> [force]   (enhanced status, TS 24.282 clause 14.2.1.1)
+// sds-status [delivery|read|both] <group> <operational value id> [force]   (enhanced status, TS 24.282 clause 14.2.1.1;
+// the disposition request of the group standalone SDS, clause 6.2.2.1 steps 8-10)
 void Client::mcdata_sds_status_command(std::istringstream &words) {
   std::string group, id, force;
-  words >> group >> id >> force;
-  if (group.empty() || id.empty()) throw std::runtime_error("usage: sds-status <group> <operational value id> [force]");
-  return mcdata_send_enhanced_status(group, id, force == "force");
+  auto disposition = mcdata::DispositionRequest::None;
+  words >> group;
+  if (group == "delivery" || group == "read" || group == "both") {
+    disposition = group == "delivery" ? mcdata::DispositionRequest::Delivery
+                  : group == "read"   ? mcdata::DispositionRequest::Read
+                                      : mcdata::DispositionRequest::DeliveryAndRead;
+    words >> group;
+  }
+  words >> id >> force;
+  if (group.empty() || id.empty())
+    throw std::runtime_error("usage: sds-status [delivery|read|both] <group> <operational value id> [force]");
+  return mcdata_send_enhanced_status(group, id, force == "force", disposition);
 }
 
 //------------------------------------------------------------------------------

@@ -251,7 +251,8 @@ const EnhancedStatusValues &Client::mcdata_group_status_values(const std::string
 // TS 24.282 clause 14.2.1.1: the selected operational value's "id" goes to the group as a
 // standalone SDS whose payload content type is ENHANCED STATUS.
 // "force" skips the checks, so that a test can send an id the group does not know.
-void Client::mcdata_send_enhanced_status(const std::string &group, const std::string &id, bool force) {
+void Client::mcdata_send_enhanced_status(const std::string &group, const std::string &id, bool force,
+                                         mcdata::DispositionRequest disposition) {
   const auto &values = mcdata_group_status_values(group, true);
   if (!force && !values.allowed) throw std::runtime_error("enhanced status is not allowed on this group");
   if (!force &&
@@ -262,6 +263,7 @@ void Client::mcdata_send_enhanced_status(const std::string &group, const std::st
   request.target = group;
   request.text = id;
   request.content = mcdata::ContentType::EnhancedStatus;
+  request.disposition = disposition;
   mcdata_send_sds(request);
 }
 
