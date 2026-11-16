@@ -939,6 +939,8 @@ SipResponse Client::incoming_private(const SipMessage &message, const McpttInfo 
     }
   }
   adopt_incoming_private(message, info, key, first_to_answer);
+  // TS 24.379 clause 11.1.1.2.1.1 14A) a), 14C) a): the answer mode of this call, for a transfer or forwarding of it.
+  private_answer_mode_ = !priv.empty() ? priv : !mode.empty() ? mode : "Auto";
   response.local_media = local_;
   name_transfer_dialog(response, message, info);
   remember_session(message.headers);

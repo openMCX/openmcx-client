@@ -71,6 +71,10 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
     headers = {{"Priv-Answer-Mode", "Auto"}};
   else
     throw std::runtime_error("private call mode must be auto, manual or force-auto");
+  // TS 24.379 clause 11.1.1.2.1.1 14A) a) (transfer) and 14C) a) (forwarding): "a Priv-Answer-Mode header field with
+  // the same value as in the MCPTT call to be transferred" (or forwarded), in place of the mode above.
+  if (auto priv = std::exchange(next_priv_answer_mode_, {}); !priv.empty()) headers = {{"Priv-Answer-Mode", priv}};
+  private_answer_mode_ = headers.front().value;
   // Set only once the request is accepted, so that a refused command leaves no override for the next call.
   if (!kms.empty()) forwarded_kms_ = {target, kms};
   auto parts = private_call_parts(target, to_alias, emergency, alert, headers);
