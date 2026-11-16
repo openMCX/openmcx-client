@@ -565,8 +565,23 @@ class Client {
   // The Resource-Priority a remotely initiated call request asked the next call to carry
   // (<ric-app-level-priority>, TS 24.379 clause 10.1.5.2.2 step 2b, clause 11.1.7.2.2 step 3b).
   std::string next_call_priority_;
-  // The forwarding target of a forward request and its <PrivateCallKMSURI>.
+  // The KMS URI given for the next PCK to a target: the <PrivateCallKMSURI> of a forwarding request, the receiver KMS
+  // selected after a KMS Redirect Response (TS 33.180 clause 5.2.8.2.5) or the private call command's kms= test aid;
+  // forwarded_kms_source_ says which ("forwarding-request", "kms-redirect" or "command").
   std::pair<std::string, std::string> forwarded_kms_;
+  std::string forwarded_kms_source_;
+  // TS 24.484 clause 8.3.2.1 item 8 d) i) and clause 8.3.2.7: the <PrivateCallKMSURI> of each private call target of
+  // the MCPTT user profile (parse_profile_private_call_kms; empty: none given), for TS 24.379 clause 6.2.8.3.9.
+  std::map<std::string, std::string> private_call_kms_;
+  // TS 24.379 clause 6.2.8.3.9 (on network): the KMS URI associated with an MCPTT ID, and where it came from
+  // ("user-profile" or "initial-configuration").
+  std::pair<std::string, std::string> private_call_target_kms(const std::string &target) const;
+  // Clause 6.2.8.3.9 of TS 24.379, TS 24.281 and TS 24.282 (on network), shared by the MCPTT, MCVideo and MCData
+  // clients: the KMS URI the user profile lists for the target (listed: by MC service ID) when not empty, else the
+  // <kms> of the initial configuration, the KMS that serves this client's keys; with "user-profile" or
+  // "initial-configuration".
+  static std::pair<std::string, std::string> profile_target_kms(const std::map<std::string, std::string> &listed,
+                                                                const KeyClient &keys, const std::string &target);
   // KMS Redirect Responses followed for the current private call (at most one), and
   // the KRR a response carries (TS 33.180 annex D.4).
   int krr_retries_ = 0;

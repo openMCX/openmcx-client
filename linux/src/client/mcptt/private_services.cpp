@@ -184,6 +184,7 @@ void Client::private_call_service_request(const McpttInfo &info, const std::stri
         {"reason", info.service.contains("forwarding-reason") ? info.service.at("forwarding-reason") : ""},
         {"kms_uri", info.private_call_kms_uri}};
     forwarded_kms_ = {target, info.private_call_kms_uri};
+    forwarded_kms_source_ = "forwarding-request";
   }
   // TS 24.379 clause 11.1.8.2.2: the transferred user keeps its call with the requester while it calls the target.
   // The requester ends that call once the transfer succeeds (clause 11.1.8.2.1), and on failure it goes on.

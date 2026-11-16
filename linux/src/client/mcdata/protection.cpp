@@ -422,9 +422,7 @@ std::string Client::mcdata_associated_group(const std::string &group) {
 // contained therein; or b) if ... not found or the <MCData-ID-KMSURI> element is empty, shall retrieve the <kms>
 // element of the <App-Server-Info> ... of the UE initial configuration document": this client's own KMS.
 std::pair<std::string, std::string> Client::mcdata_target_kms(const std::string &target) const {
-  if (const auto found = mcdata_profile_kms_.find(target); found != mcdata_profile_kms_.end() && !found->second.empty())
-    return {found->second, "user-profile"};
-  return {mcdata_keys_->kms_uri_of(target), "initial-configuration"};
+  return profile_target_kms(mcdata_profile_kms_, *mcdata_keys_, target);
 }
 
 //------------------------------------------------------------------------------

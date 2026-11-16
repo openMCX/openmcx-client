@@ -76,7 +76,10 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
   if (auto priv = std::exchange(next_priv_answer_mode_, {}); !priv.empty()) headers = {{"Priv-Answer-Mode", priv}};
   private_answer_mode_ = headers.front().value;
   // Set only once the request is accepted, so that a refused command leaves no override for the next call.
-  if (!kms.empty()) forwarded_kms_ = {target, kms};
+  if (!kms.empty()) {
+    forwarded_kms_ = {target, kms};
+    forwarded_kms_source_ = "command";
+  }
   auto parts = private_call_parts(target, to_alias, emergency, alert, headers);
   if (emergency) {
     mepc_ = 2;
@@ -309,6 +312,7 @@ void Client::private_call_kms_redirect(const std::string &target, const SipRespo
     schedule([this, target, kms = *chosen, mode = mode_for_redirect_] {
       if (!dialog_.empty()) return;
       forwarded_kms_ = {target, kms};
+      forwarded_kms_source_ = "kms-redirect";
       try {
         next_implicit_ = redirect_implicit_;
         private_call(target + " " + mode);

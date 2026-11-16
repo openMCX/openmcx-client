@@ -57,11 +57,9 @@ std::optional<keying::KeyMessage> Client::mcvideo_offer_pck(const std::string &t
 // configuration document": this client's KMS URI (security.kms_id, else security.kms_uri, the KMS it is provisioned
 // by).
 std::pair<std::string, std::string> Client::mcvideo_target_kms(const std::string &target) const {
-  const auto listed = mcvideo_profile_.value("private_call_kms", Json::object());
-  if (const auto found = listed.find(target);
-      found != listed.end() && found->is_string() && !found->get<std::string>().empty())
-    return {found->get<std::string>(), "user-profile"};
-  return {mcvideo_keys_->kms_uri_of(target), "initial-configuration"};
+  return profile_target_kms(
+      mcvideo_profile_.value("private_call_kms", Json::object()).get<std::map<std::string, std::string>>(),
+      *mcvideo_keys_, target);
 }
 
 //------------------------------------------------------------------------------
