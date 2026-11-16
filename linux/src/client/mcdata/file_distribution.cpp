@@ -245,6 +245,18 @@ std::vector<SipHeader> Client::mcdata_fd_headers() const {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.282 clause 11.1 4): a one-to-one FD larger than <max-data-size-fd-bytes> of the MCData service configuration
+// (TS 24.484 clause 10.4.2.1 2c)) is not allowed: the client stops before it uploads or offers anything.
+void Client::mcdata_one_to_one_fd_allowed(std::uint64_t size) {
+  if (!mcdata_tx_limits_.max_data_size_fd || size <= *mcdata_tx_limits_.max_data_size_fd) return;
+  status_["mcdata_fd_not_allowed"] = {{"reason", "max-data-size-fd-bytes"}, {"size", size},
+                                      {"limit", *mcdata_tx_limits_.max_data_size_fd}};
+  event("mcdata_fd_not_allowed", {{"reason", "max-data-size-fd-bytes"}, {"size", size},
+                                  {"limit", *mcdata_tx_limits_.max_data_size_fd}});
+  throw std::runtime_error("FD larger than <max-data-size-fd-bytes> (TS 24.282 clause 11.1 step 4)");
+}
+
+//------------------------------------------------------------------------------
 // TS 24.282 clauses 10.2.4.1 and 10.2.4.2.1: upload the file, then send the FD request naming its URL; a SIP 300
 // (Multiple Choices) response to a functional alias target sends it again to the selected MCData ID.
 void Client::mcdata_send_file(const FdRequest &request) {
@@ -254,6 +266,8 @@ void Client::mcdata_send_file(const FdRequest &request) {
     mcdata_group_fd_allowed(request.target, std::filesystem::exists(request.path)
                                                 ? static_cast<std::uint64_t>(std::filesystem::file_size(request.path))
                                                 : 0);
+  if (!request.group && !request.path.empty() && request.url_override.empty() && std::filesystem::exists(request.path))
+    mcdata_one_to_one_fd_allowed(static_cast<std::uint64_t>(std::filesystem::file_size(request.path))); // 11.1 4)
   std::string name, digest;
   std::uint64_t size = 0;
   std::string url = request.url_override;

@@ -2337,6 +2337,7 @@ private:
   SipResponse mcdata_media_invite(const SipMessage &invite);
   void mcdata_media_file_answer(const std::string &decision);
   bool mcdata_media_pending_ended(std::string_view id, int code);
+  void mcdata_one_to_one_fd_allowed(std::uint64_t size);
 
   // re-INVITE in the media plane session's dialog: priority state (TS 24.282 clause 6.2.8.4.2, 9.2.4.2.4).
   SipResponse mcdata_media_reinvite(const mcdata::Info &info);

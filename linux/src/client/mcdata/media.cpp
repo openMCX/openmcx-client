@@ -508,6 +508,7 @@ void Client::mcdata_send_file_media(const std::string &target, bool group, const
   const auto name = std::filesystem::path(path).filename().string();
   const bool adhoc = target.starts_with("adhoc="); // TS 24.282 clause 24.2.2.1.1 step 6
   if (group && !adhoc) mcdata_group_fd_allowed(target, contents.size()); // TS 24.282 clause 10.2.5.2.3 9)a), a1)
+  if (!group) mcdata_one_to_one_fd_allowed(contents.size());             // TS 24.282 clause 11.1 4)
   MsrpMedia protection;
   mcdata_media_protect(protection, target, group, adhoc);
   const auto plain_bytes = contents.size();
