@@ -349,10 +349,7 @@ void Client::mcdata_gdd_command(const std::string &verb, std::istringstream &wor
       else if (item == "affiliated") filter.affiliated = true;
       else throw std::runtime_error("mcdata-gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]");
     }
-    auto filter_xml = group_dynamic_data_filter_xml(filter);
-    for (const auto &[from, to] : {std::pair<std::string, std::string>{"mcvideoPresInfo", "mcdataPresInfo"},
-                                   {"mcvideoPI10", "mcdataPI10"}})
-      for (std::size_t at; (at = filter_xml.find(from)) != std::string::npos;) filter_xml.replace(at, from.size(), to);
+    const auto filter_xml = group_dynamic_data_filter_xml(filter, Service::mcdata);
     mcdata::Info info;
     info.request_uri = group; // step 2
     info.client_id = client_id();
