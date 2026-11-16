@@ -998,8 +998,9 @@ void Client::name_transfer_dialog(SipResponse &response, const SipMessage &messa
     response.parts.clear();
     response.dialog_parts = [call_id = message.call_id](std::string_view local, std::string_view remote) {
       McpttInfo named;
-      named.service["replaces-header-value"] =
-          call_id + ";to-tag=" + std::string(local) + ";from-tag=" + std::string(remote);
+      // TS 24.379 annex F.1.3 ad): "the Call-ID [...], the from-tag, and the to-tag [...] The delimiter [...] is the
+      // semicolon (;)".
+      named.service["replaces-header-value"] = call_id + ";" + std::string(remote) + ";" + std::string(local);
       return info_parts(named);
     };
   }

@@ -9,6 +9,8 @@
 
 #include "client.hpp"
 
+#include "mcx/refer.hpp"
+
 namespace mcx {
 
 //------------------------------------------------------------------------------
@@ -163,9 +165,11 @@ std::vector<BodyPart> Client::private_call_parts(const std::string &target, bool
     headers.push_back({"Resource-Priority", priority});
     event("ric_priority_applied", {{"target", target}, {"resource_priority", priority}});
   }
-  // TS 24.379 clause 11.1.1.2.1.1 step 14b1: a transfer call replaces the requester's call with the target.
+  // TS 24.379 clause 11.1.1.2.1.1 step 14b1: a transfer call replaces the requester's call with the target. The
+  // <replaces-header-value> ("Call-ID;from-tag;to-tag", annex F.1.3 ad), or the RFC 3891 form) becomes an RFC 3891
+  // Replaces value whose to-tag is the target's (RFC 3891 section 3).
   if (auto replaces = std::exchange(next_call_replaces_, {}); !replaces.empty())
-    headers.push_back({"Replaces", replaces});
+    headers.push_back({"Replaces", replaces_value(parse_replaces_header_value(replaces))});
   auto parts = info_parts(info);
   parts.push_back({resource_lists_mime, private_call_resource_list(target)});
   if (alert) parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
