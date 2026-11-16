@@ -232,13 +232,20 @@ SipResponse Client::adhoc_alert_message(const SipMessage &message, const McpttIn
 SipResponse Client::priority_notice(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
-  if (message.from_uri != service() || asserted_identity(message) != service() ||
-      (message.method == "INFO" &&
-       (message.dialog_id != dialog_ || get_header(message.headers, "Info-Package") != "g.3gpp.mcptt-info"))) {
+  // TS 24.379 clause 6.2.8.1.13: an INFO in the group call's dialog (From: the dialog's remote party) with the
+  // mcptt-info of clause 6.3.3.1.18 3) (only the priority indications, no <mcptt-request-uri> nor group) is about the
+  // call's group; a MESSAGE comes from the participating function's PSI.
+  const bool in_call_info = message.method == "INFO";
+  if (in_call_info ? (message.dialog_id != dialog_ || get_header(message.headers, "Info-Package") != "g.3gpp.mcptt-info")
+                   : (message.from_uri != service() || asserted_identity(message) != service())) {
     response.status_code = 403;
     return response;
   }
-  const auto info = message_info(message);
+  auto info = message_info(message);
+  if (in_call_info) {
+    if (info.calling_group.empty()) info.calling_group = selected_priority_ ? call_group_ : group();
+    if (info.request_uri.empty()) info.request_uri = user();
+  }
   // The selected group's notices update the live state, or, during a call on a monitored group, that call's; the
   // selected group's then waits in selected_priority_, and other monitored groups keep their own.
   const bool monitored_call = selected_priority_.has_value();
@@ -348,16 +355,14 @@ SipResponse Client::mcvideo_call_info(const SipMessage &message) {
 SipResponse Client::private_priority_info(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
-  if (message.from_uri != service() || asserted_identity(message) != service() || message.dialog_id != dialog_ ||
-      get_header(message.headers, "Info-Package") != "g.3gpp.mcptt-info") {
+  // The INFO comes in the call's dialog (from the trusted core, incoming_clear); its From is the dialog's remote party,
+  // not necessarily the server's PSI. TS 24.379 clause 6.3.3.1.18 3): its mcptt-info carries only <emergency-ind>,
+  // <alert-ind> and <imminentperil-ind> (no <mcptt-request-uri>); RFC 6086 section 4.2.2: answered 200 (OK).
+  if (message.dialog_id != dialog_ || get_header(message.headers, "Info-Package") != "g.3gpp.mcptt-info") {
     response.status_code = 403;
     return response;
   }
   const auto info = message_info(message);
-  if (info.request_uri != user() || !info.calling_group.empty()) {
-    response.status_code = 403;
-    return response;
-  }
   if (info.alert && (mpea_ == 2 || mpea_ == 4)) {
     mpea_ = *info.alert ? 3 : 1;
     if (*info.alert)
