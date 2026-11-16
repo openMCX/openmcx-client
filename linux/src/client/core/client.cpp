@@ -314,7 +314,8 @@ void Client::floor_and_priority_status() {
       remote_ && remote_->floor_priority ? Json(*remote_->floor_priority) : Json(nullptr);
   status_["answer_mode"] = cfg_.at("mcptt").value("answer_mode", "auto");
   status_["group_id"] = group();
-  status_["group"] = group(); // the selected group (TS 24.379 clauses 9.2.1.2, 10.1.4.2.2 step 2)
+  status_["group"] = group();
+  status_["imminent_group_state"] = imminent_group_states_; // group -> MIG state (TS 24.379 clause 10.1.6.2) // the selected group (TS 24.379 clauses 9.2.1.2, 10.1.4.2.2 step 2)
   // TS 24.379 clause 10.1.4.2: "sent", this user's last remote group selection request and its outcome
   // ({target, group, status, warning, outcome, request[, from]}); "received", the last request received
   // ({from, group, affiliation_required, outcome}).

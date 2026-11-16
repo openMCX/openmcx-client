@@ -233,6 +233,16 @@ SipResponse Client::priority_notice(const SipMessage &message) {
     response.status_code = 403;
     return response;
   }
+  // TS 24.379 clause 10.1.6.2.2: a cancellation of the group's in-progress imminent peril state (a MESSAGE with
+  // <imminentperil-ind> "false"): a) shown to the user with the group and the cancelling user (event and status
+  // imminent_cancel_notification), b) the state "MIG 1: no-imminent-peril"; the 200 (OK) answers it.
+  if (message.method == "MESSAGE" && info.imminent_peril == false && info.emergency != true) {
+    imminent_group_states_[info.calling_group] = "MIG 1: no-imminent-peril";
+    status_["imminent_cancel_notification"] = {{"group", info.calling_group}, {"from", info.calling_user}};
+    event("imminent_cancel_notification", status_["imminent_cancel_notification"]);
+  } else if (info.imminent_peril == true && info.emergency != true) {
+    imminent_group_states_[info.calling_group] = "MIG 2: in-progress";
+  }
   // TS 24.379 clause 12.1.1.2: the receipt completes the pending alert request of its group, whichever state the
   // group's notices update.
   if (info.alert_received == true && info.alert && info.calling_group == alert_pending_group_) alert_pending_.clear();

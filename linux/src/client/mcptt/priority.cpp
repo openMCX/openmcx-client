@@ -315,6 +315,8 @@ void Client::change_priority(bool emergency, bool enabled) {
   if (call_type_ == "ambient" && !ambient_hidden())
     throw std::runtime_error("priority changes do not apply to ambient listening calls");
   const bool active = !dialog_.empty() && remote_ && status_.value("call_state", "") == "active";
+  // TS 24.379 clause 10.1.6.2.1: the in-progress imminent peril state of the group cancelled with no call ongoing.
+  if (!active && !emergency && !enabled) return imminent_state_cancel(group());
   if (!active && !(emergency && !enabled && authorized_ && affiliated_))
     throw std::runtime_error("priority change requires active call or affiliated emergency cancellation");
   if (priority_pending_) throw std::runtime_error("priority update already pending");
@@ -350,6 +352,65 @@ void Client::change_priority(bool emergency, bool enabled) {
     priority_pending_ = false;
     throw;
   }
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 10.1.6.2.1: "imminent off [<group>]" with no call ongoing on the group: a SIP MESSAGE (out of
+// dialog) to the participating function cancelling the group's in-progress imminent peril state:
+//   1) the user's authorisation (clause 6.2.8.1.10, <allow-cancel-imminent-peril>); unauthorised, the user is told
+//      (the command fails) and nothing is sent;
+//   2), 3) P-Preferred-Service and Accept-Contact with the MCPTT ICSI;
+//   5) the mcptt-info body with a) the group, b) <imminentperil-ind> "false", c) the client ID and d) the functional
+//      alias in use;
+//   6) to the PSI of the participating function; 7) the state "MIG 3: cancel-pending".
+// A 2xx sets "MIG 1: no-imminent-peril", a 4xx, 5xx or 6xx "MIG 2: in-progress".
+void Client::imminent_state_cancel(const std::string &target) {
+  if (!authorized_) throw std::runtime_error("imminent peril state cancellation requires MCPTT service authorisation");
+  const auto group = target.empty() ? this->group() : target;
+  if (!dialog_.empty() && status_.value("call_state", "") == "active" && active_group() == group)
+    throw std::runtime_error("a call is ongoing on the group: its imminent peril is cancelled in the call");
+  require_profile({"allow-cancel-imminent-peril"}); // step 1
+  if (priority_pending_) throw std::runtime_error("priority update already pending");
+  McpttInfo info;
+  info.request_uri = group;                   // step 5 a)
+  info.imminent_peril = false;                // step 5 b)
+  info.client_id = client_id();               // step 5 c)
+  info.functional_alias = functional_alias_;  // step 5 d)
+  auto headers = priority_headers(info);      // clause 6.2.8.1.12: Resource-Priority, when provisioned
+  for (auto &header : service_message_headers(mcptt_service)) headers.push_back(std::move(header)); // steps 2, 3
+  imminent_group_states_[group] = "MIG 3: cancel-pending"; // step 7
+  priority_pending_ = true;
+  try {
+    sip_.request("MESSAGE", service(), mcptt_mime, mcptt_info_xml(info), headers, // steps 6, 8
+                 [this, group](const SipResponse &response) {
+                   if (response.status_code < 200) return;
+                   priority_pending_ = false;
+                   const bool ok = response.status_code < 300;
+                   imminent_group_states_[group] = ok ? "MIG 1: no-imminent-peril" : "MIG 2: in-progress";
+                   if (ok) {
+                     // The group's priority state follows: no imminent peril (the live state or a monitored group's).
+                     McpttInfo cancelled;
+                     cancelled.imminent_peril = false;
+                     if (group == this->group() && !selected_priority_)
+                       update_priority(cancelled, std::nullopt);
+                     else if (monitoring(group))
+                       priority_into(monitored_state_[group], cancelled, std::nullopt);
+                   } else {
+                     failure("imminent peril state cancel: " + std::to_string(response.status_code));
+                   }
+                   status_["imminent_cancel_result"] = {
+                       {"group", group},
+                       {"status", response.status_code},
+                       {"warning", std::string(get_header(response.headers, "Warning"))},
+                       {"state", imminent_group_states_[group]}};
+                   event("imminent_cancel_result", status_["imminent_cancel_result"]);
+                 });
+  } catch (...) {
+    priority_pending_ = false;
+    imminent_group_states_[group] = "MIG 2: in-progress";
+    throw;
+  }
+  event("imminent_cancel_requested", {{"group", group}});
 }
 
 //------------------------------------------------------------------------------

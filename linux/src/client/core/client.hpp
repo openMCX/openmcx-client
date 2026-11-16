@@ -690,6 +690,13 @@ class Client {
 
   void change_priority(bool emergency, bool enabled);
 
+  // TS 24.379 clause 10.1.6.2: the MCPTT imminent peril group state of each group whose in-progress imminent peril
+  // state was cancelled outside a call, by this user (10.1.6.2.1) or notified (10.1.6.2.2): "MIG 1: no-imminent-peril",
+  // "MIG 2: in-progress" or "MIG 3: cancel-pending" (annex G).
+  Json imminent_group_states_ = Json::object();
+
+  void imminent_state_cancel(const std::string &group);
+
   void change_alert(bool enabled, const std::string &origin = {}, const std::string &shown_group = {});
 
   // ---- MCPTT service authorisation, affiliation and helpers (mcptt/service.cpp) ----

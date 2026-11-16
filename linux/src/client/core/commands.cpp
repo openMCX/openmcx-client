@@ -61,7 +61,7 @@ void Client::command(const std::string &command_line) {
 
 //------------------------------------------------------------------------------
 // Command: run one control command:
-//   emergency|imminent on|off, emergency on|off alert, alert on|off [<user>]: priority changes and emergency alerts
+//   emergency|imminent on|off, imminent off <group>, emergency on|off alert, alert on|off [<user>]: priority changes and emergency alerts
 //     (TS 24.379 clause 10.1.1.2.1.3 to clause 10.1.1.2.1.5, clause 11.1.1.2.1.4, clause 11.1.1.2.1.5, clause 12.1.1.1,
 //     clause 12.1.1.2);
 //   regroup create|users|remove: regroup using a preconfigured group (clause 16.2.1.1, clause 16.3.1.1,
@@ -104,6 +104,8 @@ void Client::run_command(const std::string &cmd) {
     change_priority(true, cmd.ends_with("on"));
   } else if (cmd == "imminent on" || cmd == "imminent off") {
     change_priority(false, cmd.ends_with("on"));
+  } else if (cmd.starts_with("imminent off ")) {
+    imminent_state_cancel(cmd.substr(13)); // TS 24.379 clause 10.1.6.2.1, a named group with no call ongoing
   } else if (cmd == "alert on" || cmd == "alert off" || cmd.starts_with("alert off ")) {
     // alert off [<user> [<group>]]: the group the alert was shown for (the selected group or a monitored one).
     std::istringstream words(cmd.size() > 10 ? cmd.substr(10) : std::string{});
