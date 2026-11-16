@@ -2484,6 +2484,8 @@ private:
   bool mcdata_render_enhanced_status(const mcdata::DataPayload &payload, const std::string &id,
                                      const mcdata::Info &info);
   // Keep a received SDS and answer its disposition request (TS 24.282 clause 9.2.1.3).
+  bool mcdata_sds_accepted(Json &received, const mcdata::SdsSignalling &sds, const std::string &id,
+                           const mcdata::Info &info);
   void mcdata_deliver_sds(Json &received, const mcdata::SdsSignalling &sds, const mcdata::DataPayload &payload,
                           const std::string &id, const mcdata::Info &info);
 

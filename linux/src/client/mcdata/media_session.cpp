@@ -538,6 +538,7 @@ void Client::mcdata_media_incoming(const msrp::Message &message) {
     mcdata::Info info;
     info.calling_user = received.at("from").get<std::string>();
     info.calling_group = mcdata_media_group_;
+    if (!mcdata_sds_accepted(kept, sds, id, info)) return; // as on the signalling plane (TS 24.582 clause 6.1.2.6)
     mcdata_deliver_sds(kept, sds, payload, id, info);
   } catch (const std::exception &error) {
     event("mcdata_media_sds_discarded", {{"reason", error.what()}});

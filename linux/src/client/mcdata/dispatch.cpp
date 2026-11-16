@@ -343,30 +343,7 @@ SipResponse Client::mcdata_sds_received(const std::vector<BodyPart> &parts, cons
       {"protected", dppk.has_value()},
       {"dppk_id", dppk ? Json(*dppk) : Json(nullptr)},
       {"authenticated", authenticated}};
-  // TS 24.282 clause 9.2.1.2 steps 6 and 7: user content is rendered; application content goes to a
-  // known application and is discarded otherwise.
-  const auto applications = cfg_.at("mcdata").value("applications", std::vector<unsigned>{});
-  if (sds.application_id &&
-      std::find(applications.begin(), applications.end(), *sds.application_id) == applications.end()) {
-    ++mcdata_discarded_;
-    event("mcdata_sds_discarded", {{"message_id", id}, {"application_id", *sds.application_id}});
-    return response;
-  }
-  // TS 24.282 clause 9.2.1.2 step 8: the same for an Extended application ID (mcdata.extended_applications).
-  const auto extended = cfg_.at("mcdata").value("extended_applications", std::vector<std::string>{});
-  if (sds.extended_application_id &&
-      std::find(extended.begin(), extended.end(), *sds.extended_application_id) == extended.end()) {
-    ++mcdata_discarded_;
-    event("mcdata_sds_discarded", {{"message_id", id}, {"extended_application_id", *sds.extended_application_id}});
-    return response;
-  }
-  if (mcdata_storage_limit_ && mcdata_received_.size() >= *mcdata_storage_limit_) {
-    // TS 24.282 clause 12.2.1.1: tell the participating function, which can store it for re-delivery.
-    mcdata_notify(received, mcdata::DispositionNotification::Undelivered);
-    bounded_push(mcdata_undelivered_, {{"message_id", id}, {"from", info.calling_user}, {"group", info.calling_group}});
-    event("mcdata_sds_undelivered", {{"message_id", id}, {"from", info.calling_user}});
-    return response;
-  }
+  if (!mcdata_sds_accepted(received, sds, id, info)) return response;
   if (!mcdata_render_enhanced_status(payload, id, info)) return response;
   mcdata_deliver_sds(received, sds, payload, id, info);
   return response;
@@ -455,6 +432,38 @@ bool Client::mcdata_render_enhanced_status(const mcdata::DataPayload &payload, c
 //------------------------------------------------------------------------------
 // TS 24.282 clause 9.2.1.2 and clause 9.2.1.3: keep the received message (the last 50) and answer its disposition
 // request.
+//------------------------------------------------------------------------------
+// TS 24.282 clause 9.2.1.2 (TS 24.582 clauses 6.1.1.3.2 and 6.1.2.6 for an SDS over the media plane): whether a received
+// SDS goes on to be delivered. Application content goes to a known application and is discarded otherwise (steps 6 to
+// 8: an Application ID or Extended application ID this client does not serve); with no room left the SDS is not
+// delivered and its disposition notification is UNDELIVERED (TS 24.282 clause 6.2.3.1 4), 12.2.1.1; TS 24.582 clause
+// 6.1.2.5.2 4): in the session for an SDS of the session).
+bool Client::mcdata_sds_accepted(Json &received, const mcdata::SdsSignalling &sds, const std::string &id,
+                                 const mcdata::Info &info) {
+  const auto applications = cfg_.at("mcdata").value("applications", std::vector<unsigned>{});
+  if (sds.application_id &&
+      std::find(applications.begin(), applications.end(), *sds.application_id) == applications.end()) {
+    ++mcdata_discarded_;
+    event("mcdata_sds_discarded", {{"message_id", id}, {"application_id", *sds.application_id}});
+    return false;
+  }
+  const auto extended = cfg_.at("mcdata").value("extended_applications", std::vector<std::string>{});
+  if (sds.extended_application_id &&
+      std::find(extended.begin(), extended.end(), *sds.extended_application_id) == extended.end()) {
+    ++mcdata_discarded_;
+    event("mcdata_sds_discarded", {{"message_id", id}, {"extended_application_id", *sds.extended_application_id}});
+    return false;
+  }
+  if (mcdata_storage_limit_ && mcdata_received_.size() >= *mcdata_storage_limit_) {
+    // TS 24.282 clause 12.2.1.1: tell the participating function, which can store it for re-delivery.
+    mcdata_notify(received, mcdata::DispositionNotification::Undelivered);
+    bounded_push(mcdata_undelivered_, {{"message_id", id}, {"from", info.calling_user}, {"group", info.calling_group}});
+    event("mcdata_sds_undelivered", {{"message_id", id}, {"from", info.calling_user}});
+    return false;
+  }
+  return true;
+}
+
 void Client::mcdata_deliver_sds(Json &received, const mcdata::SdsSignalling &sds, const mcdata::DataPayload &payload,
                                 const std::string &id, const mcdata::Info &info) {
   received["delivered_to"] = sds.application_id || sds.extended_application_id ? "application" : "user";
