@@ -118,8 +118,13 @@ void Client::floor_participant_tick(std::uint64_t now) {
       status_["last_floor_loss"] = loss;
       event("floor_lost", loss);
     }
+    // The talk burst staged for an implicit floor request still waiting for its answer (upgrade_implicit_begin: an
+    // upgrade's re-INVITE with "mc_implicit_request") is kept: the participant stays in 'U: has no permission' until
+    // the answer (TS 24.380 clause 6.2.4.2.2 step 4) and, once granted, sends it in 'U: has permission' until the
+    // user releases (clauses 6.2.4.5.2, 6.2.4.5.3). Dropping it here made the grant end at once with Floor Release.
+    const bool staged = implicit_offered_ && !talking_ && !requesting_;
     talking_ = requesting_ = false;
-    transmit_.clear();
+    if (!staged) transmit_.clear();
   }
 }
 
