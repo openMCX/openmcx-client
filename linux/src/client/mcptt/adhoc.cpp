@@ -155,9 +155,10 @@ void Client::adhoc_release() {
 //------------------------------------------------------------------------------
 // TS 24.379 clause 12.1A.1.1 and clause 12.1A.1.2: the MCPTT client originates or cancels an ad hoc group
 // emergency alert (SIP MESSAGE) and tracks the ad hoc emergency alert state (AH-MEA). Command:
-//   adhoc-alert <criteria>   or   adhoc-alert cancel
+//   adhoc-alert <criteria>   or   adhoc-alert cancel   or   adhoc-alert modify <criteria> (adhoc_alert_modify)
 void Client::adhoc_alert(const std::string &arguments) {
   if (!authorized_) throw std::runtime_error("ad hoc alert requires service authorization");
+  if (arguments.starts_with("modify ") || arguments == "modify") return adhoc_alert_modify(arguments.substr(6));
   McpttInfo info;
   info.client_id = client_id();
   const bool cancel = arguments == "cancel";
@@ -204,6 +205,45 @@ void Client::adhoc_alert(const std::string &arguments) {
         ah_mea_ = 3;
       });
   event("adhoc_alert_requested", {{"cancel", cancel}, {"criteria", info.participant_criteria}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 12.1A.1.5: a "SIP MESSAGE request to modify participant criteria for ad hoc group emergency alert
+// to participating MCPTT function" (out of dialog) for this user's initiated alert: P-Preferred-Service and
+// Accept-Contact with the MCPTT ICSI (steps 1, 2), the mcptt-info with a) the ad hoc group, b) the client ID, c) i)
+// <adhoc-alert-ind> "true", ii) <req-type> "ad-hoc-emergency-alert-participant-criteria-modification", iii) the
+// functional alias in use, v) the new criteria in <call-participants-criterias>; the location when configured (step
+// 5); to the participating function's PSI (steps 7, 8). The response arrives as a MESSAGE (clause 12.1A.1.6).
+void Client::adhoc_alert_modify(const std::string &arguments) {
+  std::string criteria = arguments;
+  criteria.erase(0, criteria.find_first_not_of(' '));
+  if (criteria.empty()) throw std::runtime_error("usage: adhoc-alert modify <criteria>");
+  if (own_alert_group_.empty() || ah_mea_ != 3)
+    throw std::runtime_error("no initiated ad hoc group emergency alert to modify");
+  McpttInfo info;
+  info.request_uri = own_alert_group_;  // step 4 a)
+  info.client_id = client_id();         // step 4 b)
+  info.adhoc_alert = true;              // step 4 c) i)
+  info.service["req-type"] = "ad-hoc-emergency-alert-participant-criteria-modification"; // step 4 c) ii)
+  info.functional_alias = functional_alias_; // step 4 c) iii)
+  info.participant_criteria = criteria;      // step 4 c) v)
+  auto parts = info_parts(info);
+  if (cfg_.at("mcptt").contains("emergency_location")) // step 5
+    parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
+  const auto [type, body] = message_body(parts, "mcx-" + random_id());
+  sip_.request(
+      "MESSAGE", service(), type, body,
+      {{"P-Preferred-Service", mcptt_icsi},
+       {"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"},
+       {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt\";require;explicit"}},
+      [this, criteria](const SipResponse &response) {
+        if (response.status_code < 200) return;
+        status_["last_adhoc_alert_modify_result"] = {
+            {"criteria", criteria},
+            {"status", response.status_code},
+            {"warning", std::string(get_header(response.headers, "Warning"))}};
+      });
+  event("adhoc_alert_modify_requested", {{"group", own_alert_group_}, {"criteria", criteria}});
 }
 
 //------------------------------------------------------------------------------

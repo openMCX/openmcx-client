@@ -121,6 +121,18 @@ SipResponse Client::incoming_clear_message(const SipMessage &message) {
   }
   if (info.service.contains("request-type") || info.service.contains("response-type"))
     return private_service_received(message, info);
+  // TS 24.379 clause 12.1A.1.6: the "SIP MESSAGE request for participant criteria modification response for ad hoc
+  // group emergency alert": 1) the ad hoc group identity (<mcptt-calling-group-id>) and the criteria are stored, 2)
+  // shown (status adhoc_alert_criteria, event), 3) answered 200 (OK).
+  if (const auto resp = info.service.find("resp-type");
+      resp != info.service.end() && resp->second == "ad-hoc-emergency-alert-participant-criteria-modification") {
+    SipResponse response;
+    response.status_code = 200;
+    if (!info.calling_group.empty()) own_alert_group_ = info.calling_group;
+    status_["adhoc_alert_criteria"] = {{"group", info.calling_group}, {"criteria", info.participant_criteria}};
+    event("adhoc_alert_criteria_modified", status_["adhoc_alert_criteria"]);
+    return response;
+  }
   // TS 24.379 clause 12.1A.1.3: alert notification (or the receipt of our own alert).
   if (info.adhoc_alert) return adhoc_alert_message(message, info);
   return priority_notice(message);
