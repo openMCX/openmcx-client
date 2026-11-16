@@ -1285,7 +1285,9 @@ private:
                           const std::set<std::string> &listed, const std::string &expires, bool take_over);
   std::vector<std::string> settle_alias_outcomes(Json &last, const std::map<std::string, std::string> &statuses,
                                                  bool handled, std::set<std::string> &wanted);
-  void alias_status_subscribe();
+  void alias_status_subscribe(bool fetch = false);
+
+  void alias_status_command(const std::string &action, const std::vector<std::string> &arguments);
   SipResponse alias_status_notify(const SipMessage &message);
 
   void send_service_message(const std::string &target, McpttInfo info,
