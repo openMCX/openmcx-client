@@ -71,7 +71,7 @@ void Client::command(const std::string &command_line) {
 //   floor-confirm, queue-status, ptt <wav>, release: floor control (TS 24.380 clause 6.2.4.9.12, clause 6.2.4.9.9,
 //     clause 6.2.4.3.5, clause 6.2.4.5.3);
 //   answer, reject: answer a call in manual commencement mode (TS 24.379 clause 6.2.3.2);
-//   call [broadcast] [emergency|imminent], chat [emergency|imminent], rejoin, call force: prearranged group call
+//   call [broadcast] [emergency [alert]|imminent], chat [emergency [alert]|imminent], rejoin, call force: group call
 //     (clause 10.1.1.2.1.1), chat group call (clause 10.1.2.2.1.1), rejoin by session identity; a call command may
 //     end in implicit[=<WAV>] or no-implicit (take_implicit_choice);
 //   pre-establish [implicit], pre-session-modify [implicit|explicit] [update], pre-session-release: the
@@ -152,7 +152,8 @@ void Client::run_command(const std::string &cmd) {
     answer_command(cmd);
   } else if (cmd == "call" || cmd == "rejoin" || cmd == "call emergency" || cmd == "call imminent" ||
              cmd == "call broadcast" || cmd == "call broadcast emergency" || cmd == "call broadcast imminent" ||
-             cmd == "chat" || cmd == "chat emergency" || cmd == "chat imminent" || cmd == "call force") {
+             cmd == "chat" || cmd == "chat emergency" || cmd == "chat imminent" || cmd == "call force" ||
+             cmd == "call emergency alert" || cmd == "call broadcast emergency alert" || cmd == "chat emergency alert") {
     group_call_command(cmd);
   } else if (cmd == "pre-establish" || cmd.starts_with("pre-establish ")) {
     pre_establish_command(cmd);
@@ -460,9 +461,10 @@ void Client::answer_command(const std::string &cmd) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.379 clause 10.1.1.2.1.1 and clause 10.1.2.2.1.1: "call [broadcast] [emergency|imminent]", "chat
-// [emergency|imminent]", "rejoin" or "call force": build the MCPTT information and priority headers of a
-// prearranged or chat group call, then invite.
+// TS 24.379 clause 10.1.1.2.1.1 and clause 10.1.2.2.1.1: "call [broadcast] [emergency [alert]|imminent]", "chat
+// [emergency [alert]|imminent]", "rejoin" or "call force": build the MCPTT information and priority headers of a
+// prearranged or chat group call, then invite. "emergency alert" also requests the emergency alert (clause 6.2.8.1.1
+// 3)).
 void Client::group_call_command(const std::string &cmd) {
   const bool chat = cmd.starts_with("chat");
   // Test aid: "call force" sends a normal call even while unaffiliated, to
@@ -472,7 +474,8 @@ void Client::group_call_command(const std::string &cmd) {
   // Chat joins and emergency or imminent peril calls may affiliate implicitly
   // (TS 24.379 clause 9.2.2.3.6); the server decides eligibility and rejects others with 120.
   const bool broadcast = cmd.starts_with("call broadcast");
-  const bool emergency = cmd.ends_with(" emergency"), imminent = cmd.ends_with(" imminent");
+  const bool with_alert = cmd.ends_with(" emergency alert");
+  const bool emergency = cmd.ends_with(" emergency") || with_alert, imminent = cmd.ends_with(" imminent");
   // TS 24.379 clause 10.1.1.2.1.1 (6.2.8.1.1, 6.2.8.1.9 with clause 6.2.8.1.8): the priority call rights.
   if (emergency) require_priority_right("emergency-group", group());
   if (imminent) require_priority_right("imminent-group", group());
@@ -512,6 +515,21 @@ void Client::group_call_command(const std::string &cmd) {
     emergency_state_ = true; // TS 24.379 clause 6.2.8.1.1 1): the MCPTT emergency state
   }
   if (imminent && !info.emergency) info.imminent_peril = true;
+  // TS 24.379 clause 6.2.8.1.1 3): the emergency alert requested with the call, when authorised (clause 6.2.8.1.6) and
+  // with no alert of this user's outstanding ("MEA 1: no-alert"): <alert-ind> true, "MEA 2:
+  // emergency-alert-confirm-pending" (alert_pending_ "call") and the location of clause 6.2.9.1 (invite_group_call).
+  // An unauthorised alert is left out and the call goes on (step 4: <alert-ind> false).
+  if (with_alert) {
+    try {
+      require_priority_right("alert", group());
+      if (alerts_.contains(user()) || !alert_pending_.empty())
+        throw std::runtime_error("an emergency alert of this user is already outstanding");
+      info.alert = true;
+    } catch (const std::runtime_error &error) {
+      status_["emergency_alert_not_sent"] = error.what();
+      event("emergency_alert_not_sent", {{"group", group()}, {"reason", error.what()}});
+    }
+  }
 
   // TS 24.379 clause 6.2.8.2: <broadcast-ind> true on an on-demand prearranged call,
   // optionally an emergency or imminent-peril one (local policy).
@@ -600,11 +618,15 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
   floor_timers_ = participant_timers();
   call_type_ = adhoc_rejoin ? "adhoc" : chat ? "chat" : info.broadcast == true ? "broadcast" : "prearranged";
   call_group_ = adhoc_rejoin ? last_call_group_ : std::string{};
+  auto parts = info_parts(info);
+  // TS 24.379 clause 6.2.8.1.1 3) b): an emergency alert with the call carries the location of clause 6.2.9.1.
+  const bool with_alert = info.alert == true;
+  if (with_alert) parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
   // TS 24.379 clauses 10.1.1.2.2.1 and 10.1.2.2.2.1: with an established pre-established session not in use (and
   // mcptt.calls_over_pre_established, by default true), the call is set up over it with a REFER.
   if (cmd != "rejoin" && !adhoc_rejoin && pre_session_usable()) {
     invite_with_implicit(implicit.requested, true, [&] {
-      dialog_ = pre_session_refer_call({info.request_uri}, with_talking_location(info_parts(info), implicit.requested),
+      dialog_ = pre_session_refer_call({info.request_uri}, with_talking_location(parts, implicit.requested),
                                        refer_accept_contacts(), headers, local_.implicit_request);
     });
     status_["last_call_failure"] = nullptr;
@@ -613,8 +635,14 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
   }
   invite_with_implicit(implicit.requested, true, [&] {
     dialog_ = sip_.invite(
-        cmd == "rejoin" ? session_uri_ : service(), local_, with_talking_location(info_parts(info), implicit.requested),
+        cmd == "rejoin" ? session_uri_ : service(), local_, with_talking_location(parts, implicit.requested),
         [this](const SipResponse &response) {
+          // TS 24.379 clauses 6.2.8.1.4 and 6.2.8.1.5: the alert sent with the call is initiated ("MEA 3") on a 2xx,
+          // and back to "MEA 1: no-alert" on a refusal.
+          if (response.status_code >= 200 && alert_pending_ == "call") {
+            alert_pending_.clear();
+            if (response.status_code < 300) alerts_.insert(user());
+          }
           if (response.status_code >= 200 && response.status_code < 300) {
             remember_session(response.headers);
             priority_response(response);
@@ -629,6 +657,10 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
         },
         headers);
   });
+  if (with_alert) {
+    alert_pending_ = "call";
+    alert_pending_group_ = info.request_uri;
+  }
   status_["last_call_failure"] = nullptr;
   status_["call_state"] = "calling";
 }
