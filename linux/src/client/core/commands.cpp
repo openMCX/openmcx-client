@@ -490,6 +490,10 @@ void Client::group_call_command(const std::string &cmd) {
   // function in <mcptt-calling-group-id>.
   if (regroups_.contains(group())) info.associated_group = calling_constituent_;
   info.functional_alias = functional_alias_;
+  // TS 24.379 clause 10.1.1.2.1.1 14) g): a call placed for a remotely initiated group call request (clause
+  // 10.1.5.2.2).
+  if (followup_ && !followup_->reported && followup_->kind == "remote-group" && followup_->target == group())
+    info.remotely_initiated_call_request = true;
   // TS 24.379 clause 10.1.2.2.1.1: a chat join may carry emergency or imminent peril.
   if (emergency || (!chat && alerts_.contains(user()))) {
     info.emergency = true;

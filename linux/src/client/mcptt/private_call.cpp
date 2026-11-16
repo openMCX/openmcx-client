@@ -148,6 +148,9 @@ std::vector<BodyPart> Client::private_call_parts(const std::string &target, bool
   info.functional_alias = functional_alias_;
   if (to_alias) info.call_to_functional_alias = true; // TS 24.379 clause 11.1.1.2.1.1 step 14c-ii-A
   info.called_functional_alias = std::exchange(pending_called_alias_, std::string{});
+  // TS 24.379 clause 11.1.1.2.1.1 14A) D): a call placed for a remotely initiated private call request.
+  if (followup_ && !followup_->reported && followup_->kind == "remote" && followup_->target == target)
+    info.remotely_initiated_call_request = true;
   info.service = std::exchange(next_call_service_, {});
   if (emergency) {
     // TS 24.379 clause 6.2.8.3.2: emergency-ind true, alert-ind true or false, Resource-Priority.
