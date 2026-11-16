@@ -804,6 +804,8 @@ class Client {
   // TS 24.379 clause 7.2.1: the service authorisation in a REGISTER instead of the PUBLISH of clause 7.2.2, when
   // mcptt.authorise_by_register is set; the SIP core passes it to the server in a third-party REGISTER.
   [[nodiscard]] bool authorise_by_register() const;
+  // TS 24.379 clauses 5.6, 7.2.1 and 7.2.2: <gw-mcptt-usage> of the service authorisation (mcptt.via_gateway_ue).
+  [[nodiscard]] std::optional<bool> mcptt_gateway_usage() const;
   [[nodiscard]] std::pair<std::string, std::string> register_body();
   void register_authorization(std::function<void(const SipResponse &)> handler);
   // TS 24.282 and TS 24.281 clause 7.2.1: each MC service authorises in a REGISTER of its own on the one registration,

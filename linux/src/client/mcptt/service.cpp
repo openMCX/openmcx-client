@@ -108,6 +108,10 @@ std::pair<std::string, std::string> Client::publish_body(bool affiliation) {
     Affiliation request{user(), client_id(), random_id(), groups, {}};
     parts.push_back({"application/pidf+xml", affiliation_xml(request, false)});
   } else {
+    // TS 24.379 clause 7.2.2 4)c) / 5)c): <gw-mcptt-usage> "true" when this client reaches the MCPTT system through an
+    // MCPTT gateway UE (mcptt_gateway_usage).
+    info.gateway_usage = mcptt_gateway_usage();
+    parts = info_parts(info);
     // TS 24.379 clause 7.2.2 6): the current answer mode and the selected user profile's index (mcptt_poc_settings).
     parts.push_back({"application/poc-settings+xml", mcptt_poc_settings()});
     if (!csk_upload_.empty()) parts.push_back({"application/mikey", csk_upload_});
@@ -230,6 +234,16 @@ void Client::service_authorized() {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 5.6 (5.6.3: "the MCPTT client shall additionally inform the MCPTT system that the MCPTT client uses
+// a MCPTT gateway UE"): mcptt.via_gateway_ue, a deployment setting (as mcvideo.via_gateway_ue and
+// mcdata.via_gateway_ue), is true when this client reaches the MCPTT system through an MCPTT gateway UE; the service
+// authorisation then carries <gw-mcptt-usage> "true" (clauses 7.2.1 and 7.2.2). Unset otherwise (no element).
+std::optional<bool> Client::mcptt_gateway_usage() const {
+  if (cfg_.at("mcptt").value("via_gateway_ue", false)) return true;
+  return std::nullopt;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.379 clause 7.2.1: whether this client authorises in its REGISTER (mcptt.authorise_by_register).
 bool Client::authorise_by_register() const { return cfg_.at("mcptt").value("authorise_by_register", false); }
 
@@ -240,6 +254,8 @@ std::pair<std::string, std::string> Client::register_body() {
   McpttInfo info;
   info.client_id = client_id();
   info.access_token = token_;
+  // Clause 7.2.1 3) (and 2)c), 3)c) with protection): <gw-mcptt-usage> "true" through an MCPTT gateway UE.
+  info.gateway_usage = mcptt_gateway_usage();
   std::vector<BodyPart> parts = info_parts(info);
   if (!csk_upload_.empty()) parts.push_back({"application/mikey", csk_upload_});
   auto boundary = "mcx-" + random_id();
