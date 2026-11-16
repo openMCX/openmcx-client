@@ -615,6 +615,7 @@ std::optional<SipResponse> Client::group_document_notify(const SipMessage &messa
                                             {{"Authorization", bearer()}});
         auto &document = group_documents_[group];
         document["fetch_status"] = response.status;
+        if (response.status == 200) note_group_document(group, response.body); // TS 24.379 clause 10.1.1.2.1.1
         if (response.status == 200)
           event("document_retrieved",
                 {{"resource", "/org.openmobilealliance.groups/global/byGroupID/" + xcap_segment(group)},

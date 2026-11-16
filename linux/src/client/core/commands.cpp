@@ -384,6 +384,7 @@ void Client::select_group(const std::string &cmd) {
                     groups_xcap() + "/global/byGroupID/" + xcap_segment(authorising),
                     {}, {{"Authorization", bearer()}});
   if (document.status != 200) throw std::runtime_error("group authorization retrieval failed");
+  if (!regroup) note_group_document(selected, document.body);
   cfg_["mcptt"]["group_id"] = selected;
   // A monitored group selected is affiliated as the selected group from now on.
   std::erase(monitored_groups_, selected);
@@ -462,6 +463,13 @@ void Client::group_call_command(const std::string &cmd) {
       (!affiliated_ && !may_affiliate_implicitly && !force && !(cmd == "rejoin" && last_call_type_ == "adhoc")) ||
       !dialog_.empty())
     throw std::runtime_error("call requires affiliation and idle state");
+  // TS 24.379 clause 10.1.1.2.1.1 (prearranged; clause 10.1.1.2.2.1 over a pre-established session) and clause
+  // 10.1.2.2.1.1 (chat): on a group whose document says <preconfigured-group-use-only> "true", 1) the user is told
+  // that calls are not allowed (last_call_failure) and 2) nothing is sent. An ad hoc rejoin names no group document.
+  if (!(cmd == "rejoin" && last_call_type_ == "adhoc") && !calls_allowed_on(group())) {
+    call_failure("calls are not allowed on the preconfigured group", {{"group", group()}, {"command", cmd}});
+    throw std::runtime_error("calls are not allowed on the preconfigured group " + group());
+  }
   McpttInfo info;
 
   // TS 24.379 clause 10.1.2.2.1.1: initiating and joining a chat group call use the
@@ -497,6 +505,44 @@ void Client::group_call_command(const std::string &cmd) {
   // a regroup); without one, the answer is refused as before (check_remote).
   if (protected_media()) select_call_key(group());
   invite_group_call(cmd, chat, info, headers);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.481 clause 7.2.4.2: keep <preconfigured-group-use-only> of a group document read (TS 24.379 clauses
+// 10.1.1.2.1.1, 10.1.2.2.1.1).
+void Client::note_group_document(const std::string &group, const std::string &document) {
+  try {
+    preconfigured_use_only_[group] = group_preconfigured_use_only(document);
+  } catch (const std::exception &) {
+    preconfigured_use_only_.erase(group);
+  }
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clauses 10.1.1.2.1.1 and 10.1.2.2.1.1: "the MCPTT client shall determine whether the group document
+// contains a <list-service> element that contains a <preconfigured-group-use-only> element" set to "true": from the
+// document last read, else read now. A regroup (TS 24.379 clause 16.1) has no document of its own; a document this
+// user cannot read leaves the decision to the server (warning 167).
+bool Client::calls_allowed_on(const std::string &group) {
+  if (group.empty() || regroups_.contains(group)) return true;
+  if (!preconfigured_use_only_.contains(group)) {
+    const auto document = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(group), {},
+                                        {{"Authorization", bearer()}});
+    if (document.status != 200) return true;
+    note_group_document(group, document.body);
+  }
+  return !preconfigured_use_only_.contains(group) || !preconfigured_use_only_.at(group);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 (e.g. clause 10.1.1.2.1.1 1) "should indicate to the MCPTT user"): a call of this user's that the client
+// did not place, with the reason: status and event last_call_failure {reason, ...details, time_ms}.
+void Client::call_failure(const std::string &reason, const Json &details) {
+  Json failure = details.is_object() ? details : Json::object();
+  failure["reason"] = reason;
+  failure["time_ms"] = monotonic_ms();
+  status_["last_call_failure"] = failure;
+  event("last_call_failure", failure);
 }
 
 //------------------------------------------------------------------------------

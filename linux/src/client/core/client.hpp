@@ -697,6 +697,16 @@ class Client {
 
   void change_priority(bool emergency, bool enabled);
 
+  // TS 24.379 clauses 10.1.1.2.1.1, 10.1.1.2.2.1 and 10.1.2.2.1.1: <preconfigured-group-use-only> of each group
+  // document read (TS 24.481 clause 7.2.4.2), true for a group on which this user may not call.
+  std::map<std::string, bool> preconfigured_use_only_;
+
+  void note_group_document(const std::string &group, const std::string &document);
+
+  bool calls_allowed_on(const std::string &group);
+
+  void call_failure(const std::string &reason, const Json &details);
+
   // TS 24.379 clause 10.1.6.2: the MCPTT imminent peril group state of each group whose in-progress imminent peril
   // state was cancelled outside a call, by this user (10.1.6.2.1) or notified (10.1.6.2.2): "MIG 1: no-imminent-peril",
   // "MIG 2: in-progress" or "MIG 3: cancel-pending" (annex G).

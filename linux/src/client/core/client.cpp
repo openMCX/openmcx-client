@@ -771,7 +771,9 @@ void Client::load_user_documents() {
   // A user may belong to no group (an account activated without one): then there
   // is no group document to read and nothing to affiliate to.
   if (!group().empty())
-    retrieve(gms_xcap_root(), "/org.openmobilealliance.groups/global/byGroupID/" + xcap_segment(group()));
+    note_group_document(group(), retrieve(gms_xcap_root(), "/org.openmobilealliance.groups/global/byGroupID/" +
+                                                              xcap_segment(group()))
+                                     .body);
 }
 
 //------------------------------------------------------------------------------
