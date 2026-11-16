@@ -28,6 +28,7 @@ add_executable(mcx-client
     src/client/core/main.cpp
     src/client/core/protected_call.cpp
     src/client/core/seal_location.cpp
+    src/client/core/settings_affiliation.cpp
     src/client/core/sip_dispatch.cpp
     src/client/core/tokens.cpp
     src/client/core/transport_key_config.cpp

@@ -747,6 +747,50 @@ class Client {
 
   std::pair<std::string, std::string> affiliation_subscribe_body();
 
+  // ---- Service settings and the affiliation procedures towards other users, one implementation for MCPTT and MCVideo
+  // (core/settings_affiliation.cpp): the settings-only PUBLISH and the settings subscription (TS 24.379 clauses 7.2.3
+  // and 7.2.4, TS 24.281 clauses 7.2.3 and 7.2.4), the affiliation status determination of another user (TS 24.379
+  // clause 9.2.1.3, TS 24.281 clause 8.2.1.3), the change for another user in mandatory mode (clauses 9.2.1.2 /
+  // 8.2.1.2) and in negotiated mode (sending: clauses 9.2.1.4 / 8.2.1.4, receiving: 9.2.1.5 / 8.2.1.5), and the
+  // subscription to group dynamic data (clauses 9.2.1.6 / 8.2.1.6). The state of one service:
+  struct ServiceProcedures {
+    std::string settings_subscription;                      // the poc-settings subscription's dialog (clause 7.2.4)
+    Json service_settings = Json::object();                 // client ID -> settings last notified (clause 7.2.4)
+    Json settings_result = nullptr;                         // the outcome of the last settings-only PUBLISH (7.2.3)
+    std::map<std::string, std::string> extra_subscriptions; // dialog -> "poc-settings", "gdd:<group>" or a user's ID
+    std::map<std::string, Affiliation> target_affiliations; // user's ID -> its client and groups last notified
+    Json affiliation_command = nullptr;                     // a negotiated-mode request awaiting the user (9.2.1.5)
+    std::map<std::string, std::string> gdd_dialogs;         // group -> its dynamic data subscription (9.2.1.6)
+    Json gdd = Json::object();                              // group -> dynamic data last notified
+  };
+  ServiceProcedures mcptt_procedures_, mcvideo_procedures_;
+  ServiceProcedures &procedures(const ServiceProfile &service);
+  std::string service_key(const ServiceProfile &service, const std::string &name) const;
+  std::string service_verb(const ServiceProfile &service, const std::string &verb) const;
+  std::string service_user(const ServiceProfile &service) const;
+  std::string service_psi(const ServiceProfile &service) const;
+  bool service_authorized(const ServiceProfile &service) const;
+  std::string service_poc_settings(const ServiceProfile &service);
+  std::string &settings_etag(const ServiceProfile &service);
+  bool change_affiliation(const ServiceProfile &service, const std::vector<std::string> &affiliate,
+                          const std::vector<std::string> &leave);
+  std::string client_filter_xml(const ServiceProfile &service) const;
+  void service_publish(const ServiceProfile &service, const std::string &event_name, const std::vector<BodyPart> &parts,
+                       std::vector<SipHeader> headers, std::function<void(const SipResponse &)> done);
+  void settings_publish(const ServiceProfile &service, bool remove);
+  SipResponse settings_notify(const ServiceProfile &service, const SipMessage &message);
+  void settings_command(const ServiceProfile &service, const std::string &verb, std::istringstream &words);
+  void target_affiliation_command(const ServiceProfile &service, const std::string &verb, std::istringstream &words);
+  void gdd_command(const ServiceProfile &service, const std::string &verb, std::istringstream &words);
+  SipResponse gdd_notify(const ServiceProfile &service, const SipMessage &message, const std::string &group);
+  SipResponse extra_notify(const ServiceProfile &service, const SipMessage &message);
+  SipResponse affiliation_command_message(const ServiceProfile &service, const SipMessage &message);
+  void affiliation_command_answer(const ServiceProfile &service, bool accept, const std::set<std::string> &only = {});
+  // The commands of these procedures by verb without the service's prefix ("settings-publish", "gdd-subscribe", ...);
+  // false for another verb.
+  bool procedures_command(const ServiceProfile &service, const std::string &verb, std::istringstream &words);
+  void procedures_status(const ServiceProfile &service);
+
   void authorize();
   // TS 24.379 clause 7.2.1: the service authorisation in a REGISTER instead of the PUBLISH of clause 7.2.2, when
   // mcptt.authorise_by_register is set; the SIP core passes it to the server in a third-party REGISTER.
@@ -1758,34 +1802,9 @@ private:
   // TS 24.281 clauses 9.2.1.2.4.1 and 22.2.5.1.1: the last group or ad hoc group session this user left (its session
   // identity, group and type), for a re-join.
   std::string mcvideo_rejoin_uri_, mcvideo_rejoin_group_, mcvideo_rejoin_type_, mcvideo_rejoin_target_;
-  // TS 24.281 clauses 7.2.4 and 8.2.1.2 to 8.2.1.5 (mcvideo/settings_affiliation.cpp): the settings subscription, the
-  // subscriptions to other users' affiliation (dialog -> MCVideo ID, or "poc-settings"), their last notified
-  // affiliation, and a received negotiated-mode request awaiting the user.
-  std::string mcvideo_settings_subscription_;
-  // TS 24.281 clause 7.2.4: the cached MCVideo service settings of each MCVideo client of this user (by client ID:
-  // answer mode, active user profile index, multiplex support), from the last poc-settings NOTIFY; and the outcome
-  // of the last settings-only PUBLISH (clause 7.2.3).
-  Json mcvideo_service_settings_ = Json::object();
-  Json mcvideo_settings_result_;
+  // TS 24.281 clauses 7.2.2 6) and 7.2.3 4) (mcvideo/settings_affiliation.cpp): the poc-settings of this MCVideo
+  // client. The settings and other-user affiliation procedures are mcvideo_procedures_ (core/settings_affiliation.cpp).
   std::string mcvideo_poc_settings();
-  void mcvideo_settings_publish(bool remove);
-  SipResponse mcvideo_settings_notify(const SipMessage &message);
-  std::map<std::string, std::string> mcvideo_extra_subscriptions_;
-  std::map<std::string, Affiliation> mcvideo_target_affiliations_;
-  Json mcvideo_affiliation_command_;
-  void mcvideo_settings_command(const std::string &verb, std::istringstream &words);
-  void mcvideo_target_affiliation_command(const std::string &verb, std::istringstream &words);
-  // TS 24.281 clause 8.2.1.6: the subscriptions to group dynamic data, by group (their dialogs are entries
-  // "gdd:<group>" of mcvideo_extra_subscriptions_), and the dynamic data last notified per group:
-  //   mcvideo-gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]
-  //   mcvideo-gdd-resubscribe <group>   mcvideo-gdd-unsubscribe <group>
-  std::map<std::string, std::string> mcvideo_gdd_dialogs_;
-  Json mcvideo_gdd_ = Json::object();
-  void mcvideo_gdd_command(const std::string &verb, std::istringstream &words);
-  SipResponse mcvideo_gdd_notify(const SipMessage &message, const std::string &group);
-  SipResponse mcvideo_extra_notify(const SipMessage &message);
-  SipResponse mcvideo_affiliation_command_message(const SipMessage &message);
-  void mcvideo_affiliation_command_answer(bool accept, const std::set<std::string> &only = {});
   std::string mcvideo_client_filter();
   void mcvideo_rejoin_call();
   void mcvideo_group_call(bool implicit = false, const std::string &chat_group = {}, const std::string &priority = {},

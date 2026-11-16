@@ -560,7 +560,7 @@ SipResponse Client::mcvideo_message(const SipMessage &message) {
                        std::any_of(message.parts.begin(), message.parts.end(), [](const auto &part) {
                          return part.content_type == "application/vnd.3gpp.mcvideo-affiliation-command+xml";
                        });
-  if (command) return mcvideo_affiliation_command_message(message);
+  if (command) return affiliation_command_message(mcvideo_service, message);
 
   // TS 24.281 clause 12.1A.1.5: the controlling function's response to this user's participant criteria
   // modification (<resp-type> "ad-hoc-emergency-alert-participant-criteria-modification"): the ad hoc group identity

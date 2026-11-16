@@ -401,8 +401,9 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
   if (mcvideo_enabled() && !message.dialog_id.empty() && message.dialog_id == mcvideo_subscription_)
     return mcvideo_affiliation_notify(message);
   // TS 24.281 clauses 7.2.4 and 8.2.1.3: the settings subscription and those to other users' affiliation.
-  if (mcvideo_enabled() && !message.dialog_id.empty() && mcvideo_extra_subscriptions_.contains(message.dialog_id))
-    return mcvideo_extra_notify(message);
+  if (mcvideo_enabled() && !message.dialog_id.empty() &&
+      mcvideo_procedures_.extra_subscriptions.contains(message.dialog_id))
+    return extra_notify(mcvideo_service, message);
   if (mcvideo_enabled() && !message.dialog_id.empty() && mcvideo_alias_dialogs_.contains(message.dialog_id))
     return mcvideo_alias_notify(message);
   return affiliation_notify(message);
