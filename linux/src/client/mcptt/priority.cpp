@@ -345,10 +345,25 @@ void Client::change_priority(bool emergency, bool enabled) {
       {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt\";require;explicit"});
   priority_pending_ = true;
   try {
-    auto completed = [this](const SipResponse &response) {
+    auto completed = [this, active, emergency, enabled](const SipResponse &response) {
       if (response.status_code < 200) return;
       priority_pending_ = false;
       status_["priority_updates_completed"] = status_.value("priority_updates_completed", 0u) + 1;
+      // TS 24.379 clause 6.2.8.1.4: a 2xx to the upgrade of the call: 1) the emergency group state "MEG 2:
+      // in-progress" (and no imminent peril), or 2) without warning 149 the imminent peril group state "MIG 2:
+      // in-progress"; the call is then an emergency or imminent peril call, which its Floor Requests say (TS 24.380
+      // clause 6.2.4.3.5 1.b, the Floor Indicator). The mcptt-info of the response, if any, follows
+      // (priority_response).
+      if (active && enabled && response.status_code < 300 &&
+          (emergency || get_header(response.headers, "Warning").find("\"149 ") == std::string_view::npos)) {
+        McpttInfo upgraded;
+        if (emergency)
+          upgraded.emergency = true;
+        else
+          upgraded.imminent_peril = true;
+        update_priority(upgraded, std::nullopt);
+        if (!emergency) imminent_group_states_[active_group()] = "MIG 2: in-progress";
+      }
       priority_response(response);
       if (response.status_code >= 300) failure("priority update: " + std::to_string(response.status_code));
     };
