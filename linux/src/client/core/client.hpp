@@ -1976,10 +1976,15 @@ private:
   void mcdata_group_sds_allowed(const std::string &group, std::size_t size, bool media_plane, bool session);
   void mcdata_group_fd_allowed(const std::string &group, std::uint64_t size);
   void mcdata_alert_authorised(const std::string &group);
+  void mcdata_regroup_command(std::istringstream &words);
+  std::optional<SipResponse> mcdata_regroup_received(const std::vector<BodyPart> &parts);
   // TS 24.282 clause 9.2.2.2.1 3)b)iii) (C8): the temporary groups a constituent group's document names
   // (<on-network-regrouped>), whose GMK is subscribed to (TS 33.180 clause 5.7), and the constituent group named in
   // <associated-group-id> for an SDS to a temporary group.
   std::set<std::string> mcdata_temporary_groups_;
+  // TS 24.282 clause 23: the regroups using a preconfigured group this client knows (temporary group identity ->
+  // {preconfigured, groups, users}) and the result of its last regroup request
+  Json mcdata_regroups_ = Json::object(), mcdata_regroup_result_ = nullptr;
   std::string mcdata_associated_group(const std::string &group);
   bool mcdata_kms_redirect(const SipResponse &response);
 

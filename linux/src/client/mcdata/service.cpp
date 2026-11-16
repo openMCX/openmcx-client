@@ -439,4 +439,87 @@ void Client::mcdata_sds_response(const std::string &id, const SdsRequest &retry,
   if (response.status_code >= 300) failure("SDS: " + std::to_string(response.status_code));
 }
 
+//------------------------------------------------------------------------------
+// TS 24.282 clauses 23.2.1.1 (group regroup), 23.3.1.1 (user regroup) and 23.2.1.2 (removal):
+//   mcdata-regroup create <temporary group identity> <preconfigured group> groups=<id>,... | users=<id>,...
+//   mcdata-regroup remove <temporary group identity>
+// a SIP MESSAGE to the participating MCData function with the mcdata-info (<mcdata-client-id>, the functional alias in
+// use) and the mcdata-regroup body (annex D.6).
+void Client::mcdata_regroup_command(std::istringstream &words) {
+  if (!mcdata_authorized_) throw std::runtime_error("an MCData regroup requires MCData service authorisation");
+  std::string action, tgi, preconfigured, list;
+  words >> action >> tgi;
+  if ((action != "create" && action != "remove") || tgi.empty())
+    throw std::runtime_error("usage: mcdata-regroup create <tgi> <preconfigured group> groups=<id>,...|users=<id>,... "
+                             "| mcdata-regroup remove <tgi>");
+  Regroup regroup;
+  regroup.action = action;
+  regroup.regroup_uri = tgi;
+  if (action == "create") {
+    words >> preconfigured >> list;
+    if (preconfigured.empty() || (!list.starts_with("groups=") && !list.starts_with("users=")))
+      throw std::runtime_error("usage: mcdata-regroup create <tgi> <preconfigured group> groups=<id>,...|users=<id>,...");
+    regroup.preconfigured_group = preconfigured;
+    std::istringstream ids(list.substr(list.find('=') + 1));
+    for (std::string id; std::getline(ids, id, ',');)
+      if (!id.empty()) (list.starts_with("groups=") ? regroup.groups : regroup.users).push_back(id);
+  }
+  mcdata::Info info;
+  info.client_id = client_id(); // TS 24.282 clause 23.2.1.1 step 6
+  if (!mcdata_alias_in_use_.empty() && mcdata_aliases_active_.contains(mcdata_alias_in_use_))
+    info.functional_alias = mcdata_alias_in_use_;
+  const std::string icsi = mcdata::icsi;
+  // TS 24.282 clause 23.2.1.1 steps 1, 2 and 5 (the ICSI in P-Preferred-Service, RFC 6050)
+  const std::vector<SipHeader> headers{{"Accept-Contact", "*;+g.3gpp.mcdata;require;explicit"},
+                                       {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(icsi) + "\";require;explicit"},
+                                       {"P-Preferred-Service", icsi}};
+  mcdata_regroup_result_ = {{"action", action}, {"regroup", tgi}, {"status", 0}};
+  mcdata_request(
+      "",
+      {{mcdata::info_mime, mcdata::info_xml(info)},
+       {regroup_mime_of(mcx::mcdata_service), regroup_xml(regroup, mcx::mcdata_service)}},
+      headers,
+      [this, action, tgi](const SipResponse &response) {
+        mcdata_regroup_result_ = {{"action", action},
+                                  {"regroup", tgi},
+                                  {"status", response.status_code},
+                                  {"warning", std::string(get_header(response.headers, "Warning"))}};
+        event("mcdata_regroup_result", mcdata_regroup_result_);
+      },
+      "MESSAGE");
+  event("mcdata_regroup_requested", {{"action", action}, {"regroup", tgi}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clauses 23.2.1.3 and 23.2.1.4 (classified by clause 6.2.1.1): a request to the client for the creation or
+// removal of a regroup: 200 (OK); the temporary group identity stored with its preconfigured group, its groups or
+// users (3)); the client affiliated with the regroup (4)) and then targeting it (5)); on removal, de-affiliated.
+std::optional<SipResponse> Client::mcdata_regroup_received(const std::vector<BodyPart> &parts) {
+  const auto mime = regroup_mime_of(mcx::mcdata_service);
+  const auto found = std::find_if(parts.begin(), parts.end(), [&](const BodyPart &part) { return part.content_type == mime; });
+  if (found == parts.end()) return std::nullopt;
+  SipResponse response;
+  response.status_code = 200;
+  Regroup regroup;
+  try {
+    regroup = parse_regroup(found->body, mcx::mcdata_service);
+  } catch (const std::exception &error) {
+    event("mcdata_regroup_unreadable", {{"reason", error.what()}});
+    response.status_code = 400;
+    return response;
+  }
+  if (regroup.action == "create") {
+    mcdata_regroups_[regroup.regroup_uri] = {{"preconfigured", regroup.preconfigured_group},
+                                             {"groups", regroup.groups},
+                                             {"users", regroup.users},
+                                             {"kind", regroup.users.empty() ? "group" : "user"}};
+  } else {
+    mcdata_regroups_.erase(regroup.regroup_uri);
+  }
+  event("mcdata_regroup_notification", {{"regroup", regroup.regroup_uri}, {"action", regroup.action}});
+  // TS 33.180 clause 5.7: the GMK of the preconfigured group, before a communication on the regroup.
+  schedule([this] { update_key_subscriptions(); });
+  return response;
+}
+
 } // namespace mcx

@@ -492,7 +492,14 @@ bool Client::mcdata_kms_redirect(const SipResponse &response) {
 
 //------------------------------------------------------------------------------
 // TS 33.180 clause 8.4 with TS 24.282 clause 6.6.3.2: the current GMK whose MC group IDs include the group.
-keying::KeyMessage Client::mcdata_gmk_for(const std::string &group) const { return gmk_for(group); }
+// TS 24.282 clause 23.1: a regroup using a preconfigured group takes the security keys of that group (its GMK).
+keying::KeyMessage Client::mcdata_gmk_for(const std::string &group) const {
+  if (mcdata_regroups_.contains(group)) {
+    const auto preconfigured = mcdata_regroups_.at(group).value("preconfigured", std::string{});
+    if (!preconfigured.empty()) return gmk_for(preconfigured);
+  }
+  return gmk_for(group);
+}
 
 //------------------------------------------------------------------------------
 // TS 33.180 clause 8.5.1: the Protected Payload message of an MCData message under a key (a DPPK or the CSK); it

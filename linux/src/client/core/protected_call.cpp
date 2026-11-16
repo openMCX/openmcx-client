@@ -204,6 +204,10 @@ void Client::update_key_subscriptions() {
     if (const auto preconfigured = regroup.value("preconfigured", std::string{}); !preconfigured.empty())
       wanted.insert(preconfigured);
   wanted.insert(mcdata_temporary_groups_.begin(), mcdata_temporary_groups_.end());
+  // TS 24.282 clause 23.1: an MCData regroup takes the security keys of its preconfigured group.
+  for (const auto &[tgi, regroup] : mcdata_regroups_.items())
+    if (const auto preconfigured = regroup.value("preconfigured", std::string{}); !preconfigured.empty())
+      wanted.insert(preconfigured);
   wanted.erase(key_group_of(group()));
   for (auto it = extra_key_subscriptions_.begin(); it != extra_key_subscriptions_.end();) {
     if (wanted.contains(it->first)) {

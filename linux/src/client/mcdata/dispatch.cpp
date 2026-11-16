@@ -27,6 +27,7 @@ SipResponse Client::mcdata_incoming(const SipMessage &message) {
   // TS 24.282 clause 8.2.5: a negotiated-mode affiliation status change request from an authorised user.
   if (auto handled = mcdata_affiliation_command_message(message, parts)) return *handled;
   if (auto handled = mcdata_group_state_received(parts)) return *handled;
+  if (auto handled = mcdata_regroup_received(parts)) return *handled; // TS 24.282 clauses 23.2.1.3, 23.2.1.4
   if (service == mcdata::icsi) {
     response.status_code = 403;
     return response;
@@ -569,6 +570,7 @@ void Client::mcdata_command(const std::string &cmd) {
       throw std::runtime_error("usage: fd-media-answer accept|decline|defer");
     return mcdata_media_file_answer(word);
   }
+  if (verb == "mcdata-regroup") return mcdata_regroup_command(words);
   if (verb == "fd-deferred") {
     // fd-deferred list   (TS 24.282 clause 11.3.2.1)
     std::string word;
@@ -1131,6 +1133,8 @@ void Client::mcdata_status() {
   status_["mcdata_fd_last_result"] = mcdata_fd_last_result_;
   status_["mcdata_file_notifications"] = mcdata_file_notifications_;
   status_["mcdata_deferred_list"] = mcdata_deferred_list_;
+  status_["mcdata_regroups"] = mcdata_regroups_;
+  status_["mcdata_regroup_result"] = mcdata_regroup_result_;
   Json files = Json::array();
   for (const auto &id : mcdata_files_order_)
     if (const auto found = mcdata_files_.find(id); found != mcdata_files_.end()) files.push_back(found->second);
