@@ -462,6 +462,9 @@ void Client::group_call_command(const std::string &cmd) {
   // (TS 24.379 clause 9.2.2.3.6); the server decides eligibility and rejects others with 120.
   const bool broadcast = cmd.starts_with("call broadcast");
   const bool emergency = cmd.ends_with(" emergency"), imminent = cmd.ends_with(" imminent");
+  // TS 24.379 clause 10.1.1.2.1.1 (6.2.8.1.1, 6.2.8.1.9 with clause 6.2.8.1.8): the priority call rights.
+  if (emergency) require_priority_right("emergency-group", group());
+  if (imminent) require_priority_right("imminent-group", group());
   const bool may_affiliate_implicitly = chat || emergency || imminent;
   if (!authorized_ ||
       (!affiliated_ && !may_affiliate_implicitly && !force && !(cmd == "rejoin" && last_call_type_ == "adhoc")) ||

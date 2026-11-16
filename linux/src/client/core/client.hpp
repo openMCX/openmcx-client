@@ -718,6 +718,8 @@ class Client {
 
   void change_priority(bool emergency, bool enabled);
 
+  void require_priority_right(const std::string &request, const std::string &target) const;
+
   bool upgrade_implicit_begin();
 
   void upgrade_implicit_answered(int status_code);
@@ -1056,6 +1058,9 @@ class Client {
   // TS 24.484 clause 8.3.2 (TS 24.379 clause 10.1.4.2.1 step 1): the users whose selected group this user may change,
   // the <uri-entry> values of <RemoteGroupSelectionURIList> of the user profile.
   std::vector<std::string> remote_selection_targets_;
+  // The MCPTT user profile document last read (TS 24.484 clause 8.3.2), for the priority rights of TS 24.379 clause
+  // 6.2.8 (require_priority_right).
+  std::string profile_body_;
 
   void take_profile_groups(const std::string &profile);
 

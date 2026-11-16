@@ -170,6 +170,28 @@ void test_profile_groups() {
   check(mcx::client_rules::parse_profile_uri_entries(remote, "RemoteGroupSelectionURIList") == Groups{"sip:u1@x"},
         "the remote group selection list");
   check(parse_profile_groups(remote) == Groups{"sip:g@x"}, "the groups without the remote selection list");
+  // TS 24.379 clauses 6.2.8.1.8 and 6.2.8.3.1.1: the entries of the priority call rights.
+  using mcx::client_rules::profile_entry;
+  using mcx::client_rules::profile_entry_allows;
+  const std::string rights =
+      "<p:OnNetwork><p:MCPTT-group-call><p:EmergencyCall><p:MCPTTGroupInitiation><p:entry entry-info=\"DedicatedGroup\">"
+      "<p:uri-entry>sip:g1@x</p:uri-entry></p:entry></p:MCPTTGroupInitiation></p:EmergencyCall>"
+      "<p:EmergencyAlert><p:entry entry-info=\"UseCurrentlySelectedGroup\"/></p:EmergencyAlert></p:MCPTT-group-call>"
+      "<p:PrivateCall><p:EmergencyCall><p:MCPTTPrivateRecipient><p:entry entry-info=\"LocallyDetermined\"/>"
+      "</p:MCPTTPrivateRecipient></p:EmergencyCall></p:PrivateCall></p:OnNetwork>";
+  const auto group_call = profile_entry(rights, {"MCPTT-group-call", "EmergencyCall", "MCPTTGroupInitiation"});
+  check(group_call.present && group_call.entry_info == "DedicatedGroup" && group_call.uris == Groups{"sip:g1@x"},
+        "the emergency group call entry");
+  check(profile_entry_allows(group_call, "DedicatedGroup", "UseCurrentlySelectedGroup", "sip:g1@x") &&
+            !profile_entry_allows(group_call, "DedicatedGroup", "UseCurrentlySelectedGroup", "sip:g2@x"),
+        "a dedicated group allows that group only");
+  check(profile_entry_allows(profile_entry(rights, {"MCPTT-group-call", "EmergencyAlert"}), "DedicatedGroup",
+                             "UseCurrentlySelectedGroup", "sip:any@x"),
+        "the currently selected group");
+  check(profile_entry_allows(profile_entry(rights, {"PrivateCall", "EmergencyCall", "MCPTTPrivateRecipient"}),
+                             "UsePreConfigured", "LocallyDetermined", "sip:u@x"),
+        "a locally determined recipient");
+  check(!profile_entry(rights, {"ImminentPerilCall", "MCPTTGroupInitiation"}).present, "an absent entry");
 }
 
 //------------------------------------------------------------------------------

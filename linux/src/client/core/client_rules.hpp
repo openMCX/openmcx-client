@@ -205,6 +205,79 @@ inline std::vector<std::string> parse_profile_groups(std::string_view xml) {
 }
 
 //------------------------------------------------------------------------------
+// The content of the first element of the given local name in an XML text (any namespace prefix), between its
+// opening and closing tags; empty when there is none (or it is empty or unterminated).
+inline std::string_view xml_element_content(std::string_view xml, std::string_view name) {
+  for (std::size_t open = xml.find(name); open != std::string_view::npos; open = xml.find(name, open + 1)) {
+    if (open == 0 || (xml[open - 1] != '<' && xml[open - 1] != ':')) continue;
+    const auto after = open + name.size();
+    if (after >= xml.size() || (xml[after] != '>' && xml[after] != ' ' && xml[after] != '\t' && xml[after] != '\n'))
+      continue;
+    // The opening tag starts at '<' (a prefix "p:" between); its end is the next '>'.
+    const auto tag_end = xml.find('>', after);
+    if (tag_end == std::string_view::npos || xml[tag_end - 1] == '/') return {};
+    const auto lt = xml.rfind('<', open);
+    const auto prefix = xml.substr(lt + 1, open - lt - 1); // "" or "p:"
+    const auto close = xml.find("</" + std::string(prefix) + std::string(name) + ">", tag_end);
+    if (close == std::string_view::npos) return {};
+    return xml.substr(tag_end + 1, close - tag_end - 1);
+  }
+  return {};
+}
+
+// TS 24.484 clause 8.3.2: an <entry> of a user profile reached by the element path (e.g. {"MCPTT-group-call",
+// "EmergencyCall", "MCPTTGroupInitiation"}): its "entry-info" attribute and the <uri-entry> values of the list.
+// present: false when the path or its entry does not exist.
+struct ProfileEntry {
+  bool present = false;
+  std::string entry_info;
+  std::vector<std::string> uris;
+};
+
+inline ProfileEntry profile_entry(std::string_view xml, std::initializer_list<std::string_view> path) {
+  ProfileEntry result;
+  std::string_view block = xml;
+  for (const auto element : path) {
+    block = xml_element_content(block, element);
+    if (block.empty()) return result;
+  }
+  for (auto at = block.find("entry"); at != std::string_view::npos; at = block.find("entry", at + 1)) {
+    if (at == 0 || (block[at - 1] != '<' && block[at - 1] != ':') || at + 5 >= block.size() ||
+        (block[at + 5] != ' ' && block[at + 5] != '>'))
+      continue;
+    const auto tag_end = block.find('>', at);
+    if (tag_end == std::string_view::npos) break;
+    const auto tag = block.substr(at, tag_end - at);
+    result.present = true;
+    if (const auto info = tag.find("entry-info=\""); info != std::string_view::npos) {
+      const auto start = info + 12;
+      result.entry_info = std::string(tag.substr(start, tag.find('"', start) - start));
+    }
+    // The <uri-entry> values of the list (opening tags only: preceded by '<' or a prefix's ':').
+    constexpr std::string_view uri_entry = "uri-entry>";
+    for (auto uri = block.find(uri_entry); uri != std::string_view::npos; uri = block.find(uri_entry, uri + 1)) {
+      if (uri == 0 || (block[uri - 1] != '<' && block[uri - 1] != ':')) continue;
+      if (block.rfind('<', uri) != std::string_view::npos && block[block.rfind('<', uri) + 1] == '/') continue;
+      const auto value = uri + uri_entry.size();
+      const auto end = block.find('<', value);
+      if (end == std::string_view::npos) break;
+      if (end > value) result.uris.push_back(xml_unescape(std::string(block.substr(value, end - value))));
+    }
+    break;
+  }
+  return result;
+}
+
+// TS 24.379 clauses 6.2.8.1.6, 6.2.8.1.8, 6.2.8.3.1.1 and 6.2.8.3.1.3: whether the profile's entry allows the target:
+// entry_info `dedicated` ("DedicatedGroup", "UsePreConfigured") with the target among the <uri-entry> values, or
+// `local` ("UseCurrentlySelectedGroup", "LocallyDetermined").
+inline bool profile_entry_allows(const ProfileEntry &entry, std::string_view dedicated, std::string_view local,
+                                 const std::string &target) {
+  if (entry.entry_info == local) return true;
+  return entry.entry_info == dedicated && std::find(entry.uris.begin(), entry.uris.end(), target) != entry.uris.end();
+}
+
+//------------------------------------------------------------------------------
 // TS 24.380 table 8.2.2.1-1: the name of a floor control message by its type (the subtype's last four bits), for
 // events and the status file.
 inline std::string_view floor_message_name(std::uint8_t type) {

@@ -53,7 +53,9 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
   require_profile({"allow-private-call", mode == "auto"     ? "allow-automatic-commencement"
                                          : mode == "manual" ? "allow-manual-commencement"
                                                             : "allow-force-auto-answer"});
-  if (emergency) require_profile({"allow-emergency-private-call"});
+  // TS 24.379 clause 11.1.1.2.1.1 with clauses 6.2.8.3.1.1 and 6.2.8.3.1.3: the emergency private call and alert rights.
+  if (emergency) require_priority_right("emergency-private", target);
+  if (alert) require_priority_right("private-alert", target);
   if (to_alias && emergency) throw std::runtime_error("emergency calls to a functional alias are not implemented");
   mode_for_redirect_ = mode;
   std::vector<SipHeader> headers;
@@ -335,6 +337,11 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
   if (to_alias) info.call_to_functional_alias = true;
   if (alert && !emergency) throw std::runtime_error("alert requires an emergency first-to-answer call");
   if (to_alias && emergency) throw std::runtime_error("emergency calls to a functional alias are not implemented");
+  // TS 24.379 clauses 6.2.8.3.1.1 and 6.2.8.3.1.3: the emergency private call and alert rights, for each invitee.
+  for (const auto &invitee : targets) {
+    if (emergency) require_priority_right("emergency-private", invitee);
+    if (alert) require_priority_right("private-alert", invitee);
+  }
   std::vector<SipHeader> headers;
   if (emergency) {
     info.emergency = true;

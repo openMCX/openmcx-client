@@ -31,6 +31,66 @@ void Client::require_profile(std::initializer_list<const char *> actions) const 
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 6.2.8 (the authorisation of priority requests from the MCPTT user profile, TS 24.484 clause 8.3.2;
+// with mcptt.enforce_profile_ruleset and the profile read): an unauthorised request is refused before anything is
+// sent (the command fails: "should indicate to the MCPTT user that they are not authorised"). request:
+//   "emergency-group" (clause 6.2.8.1.8: <allow-emergency-group-call> and <MCPTT-group-call>/<EmergencyCall>/
+//     <MCPTTGroupInitiation> "DedicatedGroup" naming the group or "UseCurrentlySelectedGroup");
+//   "imminent-group" (clause 6.2.8.1.8: <allow-imminent-peril-call> and <ImminentPerilCall>/<MCPTTGroupInitiation>);
+//   "imminent-cancel" (clause 6.2.8.1.10: <allow-cancel-imminent-peril>);
+//   "alert" (clause 6.2.8.1.6: <allow-activate-emergency-alert> and <EmergencyAlert> "DedicatedGroup" naming the
+//     group or "UseCurrentlySelectedGroup"; the group document's <allow-MCPTT-emergency-alert> is the server's);
+//   "alert-cancel", "private-alert-cancel" (clauses 6.2.8.1.6, 6.2.8.3.1.3: <allow-cancel-emergency-alert>);
+//   "emergency-private" (clause 6.2.8.3.1.1: <allow-emergency-private-call> and <PrivateCall>/<EmergencyCall>/
+//     <MCPTTPrivateRecipient> "UsePreConfigured" naming the user or "LocallyDetermined");
+//   "emergency-private-cancel" (clause 6.2.8.3.1.2: <allow-cancel-private-emergency-call>);
+//   "private-alert" (clause 6.2.8.3.1.3: <allow-activate-emergency-alert> and <OnNetwork>/<PrivateEmergencyAlert>
+//     "UsePreConfigured" naming the user or "LocallyDetermined").
+void Client::require_priority_right(const std::string &request, const std::string &target) const {
+  if (!cfg_.at("mcptt").value("enforce_profile_ruleset", true) || !profile_loaded_) return;
+  using client_rules::profile_entry;
+  using client_rules::profile_entry_allows;
+  const auto deny = [&](const char *right) {
+    throw std::runtime_error("not authorised by the user profile: " + request + " (" + right + ")");
+  };
+  const auto action = [&](const char *name) {
+    if (!profile_actions_.contains(name)) deny(name);
+  };
+  if (request == "emergency-group") {
+    action("allow-emergency-group-call");
+    if (!profile_entry_allows(profile_entry(profile_body_, {"MCPTT-group-call", "EmergencyCall", "MCPTTGroupInitiation"}),
+                              "DedicatedGroup", "UseCurrentlySelectedGroup", target))
+      deny("EmergencyCall MCPTTGroupInitiation");
+  } else if (request == "imminent-group") {
+    action("allow-imminent-peril-call");
+    if (!profile_entry_allows(profile_entry(profile_body_, {"ImminentPerilCall", "MCPTTGroupInitiation"}),
+                              "DedicatedGroup", "UseCurrentlySelectedGroup", target))
+      deny("ImminentPerilCall MCPTTGroupInitiation");
+  } else if (request == "imminent-cancel") {
+    action("allow-cancel-imminent-peril");
+  } else if (request == "alert") {
+    action("allow-activate-emergency-alert");
+    if (!profile_entry_allows(profile_entry(profile_body_, {"MCPTT-group-call", "EmergencyAlert"}), "DedicatedGroup",
+                              "UseCurrentlySelectedGroup", target))
+      deny("EmergencyAlert");
+  } else if (request == "alert-cancel" || request == "private-alert-cancel") {
+    action("allow-cancel-emergency-alert");
+  } else if (request == "emergency-private") {
+    action("allow-emergency-private-call");
+    if (!profile_entry_allows(profile_entry(profile_body_, {"PrivateCall", "EmergencyCall", "MCPTTPrivateRecipient"}),
+                              "UsePreConfigured", "LocallyDetermined", target))
+      deny("EmergencyCall MCPTTPrivateRecipient");
+  } else if (request == "emergency-private-cancel") {
+    action("allow-cancel-private-emergency-call");
+  } else if (request == "private-alert") {
+    action("allow-activate-emergency-alert");
+    if (!profile_entry_allows(profile_entry(profile_body_, {"OnNetwork", "PrivateEmergencyAlert"}), "UsePreConfigured",
+                              "LocallyDetermined", target))
+      deny("PrivateEmergencyAlert");
+  }
+}
+
+//------------------------------------------------------------------------------
 // TS 24.282 clause 6.2.8.1: refuses an MCData request whose rights the MCData user profile (TS 24.484 clause 10.3)
 // does not grant, as require_profile does for the MCPTT user profile.
 void Client::require_mcdata_profile(std::initializer_list<const char *> actions) const {
@@ -236,6 +296,9 @@ void Client::change_private_priority(bool enable, bool with_alert) {
   if (priority_pending_) throw std::runtime_error("priority update already pending");
   if (enable && mepp_ == 2) throw std::runtime_error("private call is already an emergency call");
   if (!enable && mepp_ != 2) throw std::runtime_error("private call is not an emergency call");
+  // TS 24.379 clauses 6.2.8.3.1.1 to 6.2.8.3.1.3 (clause 11.1.1.2.1.5 1), clause 11.1.1.2.1.4 1)): the user's rights.
+  require_priority_right(enable ? "emergency-private" : "emergency-private-cancel", private_peer_);
+  if (with_alert) require_priority_right(enable ? "private-alert" : "private-alert-cancel", private_peer_);
   McpttInfo info;
   info.session_type = "private";
   info.client_id = client_id();
@@ -327,6 +390,11 @@ void Client::change_priority(bool emergency, bool enabled) {
   if (!active && !(emergency && !enabled && authorized_ && affiliated_))
     throw std::runtime_error("priority change requires active call or affiliated emergency cancellation");
   if (priority_pending_) throw std::runtime_error("priority update already pending");
+  // TS 24.379 clauses 10.1.1.2.1.3 1), 2) (6.2.8.1.8) and 10.1.1.2.1.5 1) b) (6.2.8.1.10): the user's rights; the
+  // cancel of the emergency state is local policy (clause 6.2.8.1.7).
+  const auto target_group = active && selected_priority_ ? call_group_ : active ? active_group() : group();
+  if (enabled) require_priority_right(emergency ? "emergency-group" : "imminent-group", target_group);
+  if (!enabled && !emergency) require_priority_right("imminent-cancel", target_group);
   McpttInfo info;
   info.session_type = call_type_ == "chat" ? "chat" : "prearranged";
   // A call on a monitored group changes that group's priority.
@@ -407,7 +475,7 @@ void Client::imminent_state_cancel(const std::string &target) {
   const auto group = target.empty() ? this->group() : target;
   if (!dialog_.empty() && status_.value("call_state", "") == "active" && active_group() == group)
     throw std::runtime_error("a call is ongoing on the group: its imminent peril is cancelled in the call");
-  require_profile({"allow-cancel-imminent-peril"}); // step 1
+  require_priority_right("imminent-cancel", group); // step 1
   if (priority_pending_) throw std::runtime_error("priority update already pending");
   McpttInfo info;
   info.request_uri = group;                   // step 5 a)
@@ -468,6 +536,8 @@ void Client::change_alert(bool enabled, const std::string &origin, const std::st
   if (!shown_group.empty() && shown_group != group() && !monitoring(shown_group))
     throw std::runtime_error("alert cancellation: the group is neither the selected nor a monitored one");
   info.request_uri = !shown_group.empty() ? shown_group : shown_for_call ? call_group_ : group();
+  // TS 24.379 clauses 12.1.1.1 1) and 12.1.1.2 1) (clause 6.2.8.1.6): the user's rights.
+  require_priority_right(enabled ? "alert" : "alert-cancel", info.request_uri);
   info.client_id = client_id();
   info.alert = enabled;
   info.originated_by = origin;

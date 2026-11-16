@@ -397,6 +397,7 @@ void Client::group_management_command(const std::string &cmd) {
 void Client::take_profile_groups(const std::string &profile) {
   profile_groups_ = client_rules::parse_profile_groups(profile);
   remote_selection_targets_ = client_rules::parse_profile_uri_entries(profile, "RemoteGroupSelectionURIList");
+  profile_body_ = profile;
   status_["profile_groups"] = profile_groups_;
 }
 
