@@ -15,8 +15,10 @@ namespace mcx {
 
 namespace {
 // The MCPTT commands of the procedures shared with MCVideo (core/settings_affiliation.cpp, procedures_command).
-const std::set<std::string> mcptt_procedure_verbs{"settings-publish", "settings-subscribe", "settings-resubscribe",
-                                                   "settings-unsubscribe"};
+const std::set<std::string> mcptt_procedure_verbs{
+    "settings-publish",      "settings-subscribe", "settings-resubscribe", "settings-unsubscribe",
+    "affiliation-subscribe", "affiliation-unsubscribe", "affiliate-remote", "affiliation-accept",
+    "affiliation-decline"};
 } // namespace
 
 //------------------------------------------------------------------------------
@@ -79,6 +81,10 @@ void Client::command(const std::string &command_line) {
 //   affiliate, deaffiliate: affiliation status change (clause 9.2.1.2);
 //   settings-publish [remove]: the PUBLISH for the MCPTT service settings only (clause 7.2.3);
 //   settings-subscribe [fetch], settings-resubscribe, settings-unsubscribe: the MCPTT service settings (clause 7.2.4);
+//   affiliation-subscribe <MCPTT ID> [fetch], affiliation-unsubscribe <MCPTT ID>: the affiliation status of another
+//     user (clause 9.2.1.3); affiliate-remote <MCPTT ID> <group> affiliate|deaffiliate mandatory|negotiated: a change
+//     for another user (clauses 9.2.1.2, 9.2.1.4); affiliation-accept [<group>...], affiliation-decline: the user's
+//     answer to a negotiated-mode request (clause 9.2.1.5);
 //   options <SIP URI>: reachability probe (RFC 3261 section 11);
 //   log-off, log-on: log off every MC service (clause 7.2.1A step 4 and NOTE 3) and de-register, then back;
 //   quit; the other words go to the private call service, ad hoc, functional alias, MCData, MCVideo, SEAL, location,
@@ -240,6 +246,7 @@ void Client::run_command(const std::string &cmd) {
   } else if (cmd == "affiliate") {
     if (!authorized_) throw std::runtime_error("authorization required");
     desired_affiliation_ = true;
+    left_selected_ = false;
     affiliate();
   } else if (cmd == "deaffiliate") {
     deaffiliate_command();
@@ -375,6 +382,7 @@ void Client::select_group(const std::string &cmd) {
   alert_pending_.clear();
   status_["alert_locations"] = Json::object();
   desired_affiliation_ = true;
+  left_selected_ = false;
   affiliated_ = false;
   session_uri_.clear();
   status_["session_uri"] = "";

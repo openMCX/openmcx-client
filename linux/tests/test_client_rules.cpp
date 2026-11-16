@@ -291,6 +291,35 @@ void test_counts_as_affiliated() {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 9.2.1.5 3): an accepted negotiated-mode request affiliates to the groups not affiliated and
+// de-affiliates from those affiliated, each once; annex F.4: the groups of the <command-list>.
+void test_affiliation_change() {
+  using mcx::client_rules::affiliation_change;
+  const std::set<std::string> current{"sip:g1@x", "sip:g2@x"};
+  const auto affiliated = [&current](const std::string &group) { return current.contains(group); };
+  const auto [added, removed] =
+      affiliation_change({"sip:g1@x", "sip:g3@x", "sip:g3@x"}, {"sip:g2@x", "sip:g4@x", "sip:g2@x"}, affiliated);
+  check(added == std::vector<std::string>{"sip:g3@x"}, "a) only the groups not affiliated, once");
+  check(removed == std::vector<std::string>{"sip:g2@x"}, "b) only the groups affiliated, once");
+  const auto [none, nothing] = affiliation_change({"sip:g1@x"}, {"sip:g4@x"}, affiliated);
+  check(none.empty() && nothing.empty(), "no change when every group is as asked");
+
+  using mcx::client_rules::affiliation_command_groups;
+  const std::string command = "<?xml version=\"1.0\"?><cl:command-list xmlns:cl=\"urn:3gpp:ns:affiliationCommand:1.0\">"
+                              "<cl:affiliate><cl:group>sip:g1@x</cl:group><cl:group>sip:g2@x</cl:group></cl:affiliate>"
+                              "<cl:de-affiliate><cl:group>sip:g3@x</cl:group></cl:de-affiliate></cl:command-list>";
+  check(affiliation_command_groups(command, "affiliate") == std::vector<std::string>{"sip:g1@x", "sip:g2@x"},
+        "the <affiliate> list (prefixed)");
+  check(affiliation_command_groups(command, "de-affiliate") == std::vector<std::string>{"sip:g3@x"},
+        "the <de-affiliate> list (prefixed)");
+  const std::string plain = "<command-list xmlns=\"urn:3gpp:ns:affiliationCommand:1.0\"><de-affiliate>"
+                            "<group>sip:g5@x</group><group></group></de-affiliate></command-list>";
+  check(affiliation_command_groups(plain, "affiliate").empty(), "no <affiliate> list");
+  check(affiliation_command_groups(plain, "de-affiliate") == std::vector<std::string>{"sip:g5@x"},
+        "the <de-affiliate> list (default namespace), an empty <group> skipped");
+}
+
+//------------------------------------------------------------------------------
 // TS 24.380 clause 14.2.5: the implicit floor request word of a call command; clause 6.2.1 item 2: not for a rejoin.
 void test_implicit_word() {
   using mcx::client_rules::implicit_word;
@@ -424,6 +453,7 @@ int main() {
   test_authorization_retry();
   test_alias_outcome();
   test_counts_as_affiliated();
+  test_affiliation_change();
   test_implicit_word();
   test_answer_parameters();
   test_reg_event_rules();

@@ -100,8 +100,10 @@ std::pair<std::string, std::string> Client::publish_body(bool affiliation) {
   if (affiliation) {
     info.request_uri = user();
     parts = info_parts(info);
-    // TS 24.379 clause 9.2.1.2: the selected group and the groups monitored besides it.
-    std::vector<std::string> groups{group()};
+    // TS 24.379 clause 9.2.1.2: the selected group (unless the user is no longer interested in it, left_selected_)
+    // and the groups monitored besides it.
+    std::vector<std::string> groups;
+    if (!left_selected_) groups.push_back(group());
     groups.insert(groups.end(), monitored_groups_.begin(), monitored_groups_.end());
     Affiliation request{user(), client_id(), random_id(), groups, {}};
     parts.push_back({"application/pidf+xml", affiliation_xml(request, false)});
@@ -380,6 +382,58 @@ void Client::affiliate() {
     affiliation_etag_ = get_header(response.headers, "SIP-ETag");
     event("affiliation_published");
   });
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9.2.1.5 3) with clause 9.2.1.2: one PUBLISH with the affiliation changed: a) the groups of
+// `affiliate` the client is not affiliated to join it, b) the groups of `leave` it is affiliated to leave it; the other
+// groups stay (clause 9.2.1.2 5) c): the request names all the groups the user is interested in at the client).
+// Affiliated: a group of this client's interest (the selected group while wanted, the monitored groups) or one
+// notified affiliated (clause 9.2.1.3). A group joined besides the selected one is monitored (monitor_command); the
+// selected group left is left out of every PUBLISH (left_selected_) until it is affiliated again. No group left: the
+// de-affiliation of clause 9.2.1.2 4) (Expires 0). False when nothing changes.
+bool Client::mcptt_change_affiliation(const std::vector<std::string> &affiliate, const std::vector<std::string> &leave) {
+  if (!authorized_) throw std::runtime_error("MCPTT affiliation requires MCPTT service authorisation");
+  const bool selected_wanted = desired_affiliation_ && !left_selected_ && !group().empty();
+  std::set<std::string> current(monitored_groups_.begin(), monitored_groups_.end());
+  if (selected_wanted) current.insert(group());
+  const auto affiliated = [&](const std::string &candidate) {
+    return current.contains(candidate) ||
+           (affiliation_statuses_.contains(candidate) &&
+            client_rules::counts_as_affiliated(affiliation_statuses_.value(candidate, std::string{})));
+  };
+  const auto [added, removed] = client_rules::affiliation_change(affiliate, leave, affiliated);
+  if (selected_priority_ && std::find(removed.begin(), removed.end(), call_group_) != removed.end())
+    throw std::runtime_error("the call's group stays monitored until the call ends");
+  event("affiliation_change", {{"affiliate", added}, {"de-affiliate", removed}});
+  if (added.empty() && removed.empty()) return false;
+  // The selected group: wanted again when affiliated to, or left; a group of interest before stays one.
+  bool keep_selected = selected_wanted;
+  for (const auto &candidate : removed) {
+    if (candidate == group()) {
+      keep_selected = false;
+      continue;
+    }
+    std::erase(monitored_groups_, candidate);
+    monitored_state_.erase(candidate);
+  }
+  for (const auto &candidate : added) {
+    if (candidate == group())
+      keep_selected = true;
+    else
+      monitored_groups_.push_back(candidate);
+  }
+  event("monitored_groups", {{"groups", monitored_groups_}});
+  if (!keep_selected && monitored_groups_.empty()) {
+    deaffiliate_command(); // clause 9.2.1.2 4): no group of interest left
+    return true;
+  }
+  left_selected_ = !keep_selected;
+  desired_affiliation_ = true;
+  // With protected media, each monitored group's GMK (TS 33.180 clause 7.4.2), as in monitor_command.
+  update_key_subscriptions();
+  this->affiliate();
+  return true;
 }
 
 //------------------------------------------------------------------------------

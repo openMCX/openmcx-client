@@ -635,6 +635,12 @@ class Client {
   // alerts of each monitored group (clause 12.1.1.3), kept apart from the selected group's. During a call on a
   // monitored group the call's state is the live one and the selected group's waits in selected_priority_.
   std::vector<std::string> monitored_groups_;
+  // TS 24.379 clause 9.2.1.5 3) b): the user is no longer interested in the selected group at this client (a
+  // negotiated-mode de-affiliation accepted while other groups stay): it is left out of the affiliation PUBLISH until
+  // the user affiliates or selects a group again.
+  bool left_selected_ = false;
+  // TS 24.379 clause 9.2.1.5 3) with clause 9.2.1.2 (mcptt/service.cpp).
+  bool mcptt_change_affiliation(const std::vector<std::string> &affiliate, const std::vector<std::string> &leave);
   Json affiliation_statuses_ = Json::object(), monitored_state_ = Json::object();
   std::optional<Json> selected_priority_;
 
@@ -786,6 +792,7 @@ class Client {
   void gdd_command(const ServiceProfile &service, const std::string &verb, std::istringstream &words);
   SipResponse gdd_notify(const ServiceProfile &service, const SipMessage &message, const std::string &group);
   SipResponse extra_notify(const ServiceProfile &service, const SipMessage &message);
+  static bool carries_affiliation_command(const ServiceProfile &service, const SipMessage &message);
   SipResponse affiliation_command_message(const ServiceProfile &service, const SipMessage &message);
   void affiliation_command_answer(const ServiceProfile &service, bool accept, const std::set<std::string> &only = {});
   // The commands of these procedures by verb without the service's prefix ("settings-publish", "gdd-subscribe", ...);

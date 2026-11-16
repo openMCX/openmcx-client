@@ -46,36 +46,16 @@ std::string affiliation_command_xml(const std::vector<std::string> &affiliate, c
   return xml + "</command-list>";
 }
 
-// The text of each <group> inside <name> (the namespace prefix, if any, is ignored).
-std::vector<std::string> command_groups(const std::string &xml, const std::string &name) {
-  std::vector<std::string> out;
-  const auto open = xml.find(":" + name + ">") != std::string::npos ? xml.find(":" + name + ">")
-                                                                     : xml.find("<" + name + ">");
-  if (open == std::string::npos) return out;
-  const auto close = xml.find(name + ">", open + name.size() + 2);
-  const auto section = xml.substr(open, close == std::string::npos ? std::string::npos : close - open);
-  for (std::size_t at = 0; (at = section.find("group>", at)) != std::string::npos;) {
-    const auto start = at + 6;
-    const auto end = section.find('<', start);
-    if (end == std::string::npos) break;
-    if (section[at - 1] != '/') {
-      std::string value = section.substr(start, end - start);
-      if (!value.empty()) out.push_back(value);
-    }
-    at = end;
-  }
-  return out;
-}
-
-// The body of the given type of a message, single or one of its parts; empty when there is none.
+// The body of the given type of a message, single or one of its parts (RFC 2046 multipart/mixed); empty when there
+// is none.
 std::string part_of(const SipMessage &message, const std::string &type) {
+  if (message.parts.empty() && message.content_type.starts_with(type)) return message.body;
   std::string body;
-  if (message.parts.empty()) {
-    if (message.content_type.starts_with(type)) body = message.body;
-  } else {
-    for (const auto &part : message.parts)
-      if (part.content_type.starts_with(type)) body = part.body;
-  }
+  const auto parts = message.parts.empty() && message.content_type.starts_with("multipart/")
+                         ? parse_body_parts(message.content_type, message.body)
+                         : message.parts;
+  for (const auto &part : parts)
+    if (part.content_type.starts_with(type)) body = part.body;
   return body;
 }
 } // namespace
@@ -125,8 +105,8 @@ std::string &Client::settings_etag(const ServiceProfile &service) {
 // (8.2.1.2) for this client.
 bool Client::change_affiliation(const ServiceProfile &service, const std::vector<std::string> &affiliate,
                                 const std::vector<std::string> &leave) {
-  if (service.service != Service::mcvideo) throw std::runtime_error("MCPTT affiliation change not supported");
-  return mcvideo_change_affiliation(affiliate, leave);
+  return service.service == Service::mcvideo ? mcvideo_change_affiliation(affiliate, leave)
+                                             : mcptt_change_affiliation(affiliate, leave);
 }
 
 //------------------------------------------------------------------------------
@@ -562,6 +542,12 @@ SipResponse Client::extra_notify(const ServiceProfile &service, const SipMessage
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 9.2.1.5 2) (TS 24.281 clause 8.2.1.5 2)): whether a MESSAGE carries the service's affiliation command.
+bool Client::carries_affiliation_command(const ServiceProfile &service, const SipMessage &message) {
+  return !part_of(message, affiliation_command_mime(service)).empty();
+}
+
+//------------------------------------------------------------------------------
 // TS 24.379 clause 9.2.1.5 (TS 24.281 clause 8.2.1.5): a MESSAGE with the service's affiliation command (the ICSI in
 // P-Asserted-Service is checked by the caller): 1) 200 (OK) at once, then 2) the user's confirmation of the list of
 // groups for affiliation and of the list for de-affiliation: the request is kept (status affiliation_command) until
@@ -571,8 +557,8 @@ SipResponse Client::affiliation_command_message(const ServiceProfile &service, c
   response.status_code = 200;
   auto &state = procedures(service);
   const auto body = part_of(message, affiliation_command_mime(service));
-  state.affiliation_command = {{"affiliate", command_groups(body, "affiliate")},
-                               {"de-affiliate", command_groups(body, "de-affiliate")},
+  state.affiliation_command = {{"affiliate", client_rules::affiliation_command_groups(body, "affiliate")},
+                               {"de-affiliate", client_rules::affiliation_command_groups(body, "de-affiliate")},
                                {"from", message.from_uri}};
   status_[service_key(service, "affiliation_command")] = state.affiliation_command;
   event(service_key(service, "affiliation_command_received"), state.affiliation_command);

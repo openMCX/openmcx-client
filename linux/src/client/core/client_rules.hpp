@@ -336,6 +336,47 @@ inline bool counts_as_affiliated(std::string_view status) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 9.2.1.5 3) (TS 24.281 clause 8.2.1.5 3)): the change an accepted negotiated-mode request makes:
+// a) the groups of the accepted affiliation list the client is not affiliated to, b) those of the accepted
+// de-affiliation list it is affiliated to; each once, in the order of the lists. `affiliated` tells a group's status.
+template <typename Affiliated>
+std::pair<std::vector<std::string>, std::vector<std::string>>
+affiliation_change(const std::vector<std::string> &affiliate, const std::vector<std::string> &leave,
+                   Affiliated affiliated) {
+  std::pair<std::vector<std::string>, std::vector<std::string>> out;
+  auto &[added, removed] = out;
+  for (const auto &group : affiliate)
+    if (!affiliated(group) && std::find(added.begin(), added.end(), group) == added.end()) added.push_back(group);
+  for (const auto &group : leave)
+    if (affiliated(group) && std::find(removed.begin(), removed.end(), group) == removed.end())
+      removed.push_back(group);
+  return out;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 annex F.4 (TS 24.281 annex F.4): the text of each <group> inside the <affiliate> or <de-affiliate> element
+// (`name`) of an affiliation command <command-list> (any namespace prefix ignored; an empty <group> is skipped).
+inline std::vector<std::string> affiliation_command_groups(const std::string &xml, const std::string &name) {
+  std::vector<std::string> out;
+  const auto open = xml.find(":" + name + ">") != std::string::npos ? xml.find(":" + name + ">")
+                                                                     : xml.find("<" + name + ">");
+  if (open == std::string::npos) return out;
+  const auto close = xml.find(name + ">", open + name.size() + 2);
+  const auto section = xml.substr(open, close == std::string::npos ? std::string::npos : close - open);
+  for (std::size_t at = 0; (at = section.find("group>", at)) != std::string::npos;) {
+    const auto start = at + 6;
+    const auto end = section.find('<', start);
+    if (end == std::string::npos) break;
+    if (section[at - 1] != '/') {
+      std::string value = section.substr(start, end - start);
+      if (!value.empty()) out.push_back(value);
+    }
+    at = end;
+  }
+  return out;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.380 clause 14.2.5 (whether a call's INVITE is an implicit floor request is an implementation option): the
 // last word of a call command, "implicit", "implicit=<WAV>" or "no-implicit", taken off (command: the rest).
 // requested: none when the command ends in no such word; rejoin: the word ends a "rejoin", which TS 24.380 clause

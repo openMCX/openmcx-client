@@ -90,6 +90,11 @@ SipResponse Client::incoming_clear_message(const SipMessage &message) {
     if (auto handled = mcdata_location_incoming(message)) return *handled;
     return mcdata_incoming(message);
   }
+  // TS 24.379 clause 9.2.1.5: a MESSAGE with 1) the MCPTT ICSI in P-Asserted-Service and 2) an
+  // application/vnd.3gpp.mcptt-affiliation-command+xml body: a negotiated-mode affiliation status change request.
+  if (get_header(message.headers, "P-Asserted-Service") == mcptt_service.icsi &&
+      carries_affiliation_command(mcptt_service, message))
+    return affiliation_command_message(mcptt_service, message);
   // TS 24.379 clause 16.2.1.3 and clause 16.2.1.4: the regroup this user's group has been put into.
   if (body_of(message, regroup_mime)) return regroup_message(message);
   const auto info = message_info(message);
