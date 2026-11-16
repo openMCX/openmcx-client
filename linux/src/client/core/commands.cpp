@@ -18,7 +18,7 @@ namespace {
 const std::set<std::string> mcptt_procedure_verbs{
     "settings-publish",      "settings-subscribe", "settings-resubscribe", "settings-unsubscribe",
     "affiliation-subscribe", "affiliation-unsubscribe", "affiliate-remote", "affiliation-accept",
-    "affiliation-decline"};
+    "affiliation-decline",   "gdd-subscribe",      "gdd-resubscribe",      "gdd-unsubscribe"};
 } // namespace
 
 //------------------------------------------------------------------------------
@@ -85,6 +85,8 @@ void Client::command(const std::string &command_line) {
 //     user (clause 9.2.1.3); affiliate-remote <MCPTT ID> <group> affiliate|deaffiliate mandatory|negotiated: a change
 //     for another user (clauses 9.2.1.2, 9.2.1.4); affiliation-accept [<group>...], affiliation-decline: the user's
 //     answer to a negotiated-mode request (clause 9.2.1.5);
+//   gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated], gdd-resubscribe <group>,
+//     gdd-unsubscribe <group>: the subscription to group dynamic data (clause 9.2.1.6);
 //   options <SIP URI>: reachability probe (RFC 3261 section 11);
 //   log-off, log-on: log off every MC service (clause 7.2.1A step 4 and NOTE 3) and de-register, then back;
 //   quit; the other words go to the private call service, ad hoc, functional alias, MCData, MCVideo, SEAL, location,
