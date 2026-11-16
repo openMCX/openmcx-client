@@ -72,6 +72,7 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
     mepc_ = 2;
     mepp_ = 4;
     if (alert) mpea_ = 2;
+    emergency_state_ = true; // TS 24.379 annex G.1: set by originating an emergency private call
   }
   // TS 24.379 clause 11.1.1.2.1.1 step 13: "if implicit floor control is required"; a call without floor control
   // has no floor control parameters (TS 24.380 clause 14.2.6).
@@ -347,6 +348,7 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
     mepc_ = 2;
     mepp_ = 4;
     if (alert) mpea_ = 2;
+    emergency_state_ = true; // TS 24.379 annex G.1: set by originating an emergency private call
   }
   // TS 24.379 clause 11.1.1.2.1.1 step 13 (the first-to-answer call's INVITE as well): "if implicit floor control
   // is required".

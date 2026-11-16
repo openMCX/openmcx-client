@@ -316,6 +316,10 @@ void Client::floor_and_priority_status() {
   status_["group_id"] = group();
   status_["group"] = group();
   status_["imminent_group_state"] = imminent_group_states_;
+  status_["emergency_state"] = emergency_state_; // TS 24.379 annex G.1
+  // TS 24.379 clause 18.1.1: "sent" {target, group, status, warning, outcome, request} of this user's last trigger,
+  // "received" {from, group, status, warning, floor_requested} of the last one received.
+  status_["remote_floor"] = remote_floor_;
   // TS 24.379 clause 9A.2.1.3: whether this user's functional alias status subscription is in place ("active" from
   // its SUBSCRIBE until a NOTIFY ends it, else "none"); its last answer in functional_alias_subscription_result.
   status_["functional_alias_subscription"] = alias_status_dialog_.empty() ? "none" : "active"; // group -> MIG state (TS 24.379 clause 10.1.6.2) // the selected group (TS 24.379 clauses 9.2.1.2, 10.1.4.2.2 step 2)

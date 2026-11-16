@@ -118,6 +118,13 @@ void Client::run_command(const std::string &cmd) {
     floor_priority_command(cmd);
   } else if (cmd.starts_with("answer-mode ")) {
     answer_mode_command(cmd);
+  } else if (cmd.starts_with("remote-floor ")) {
+    // TS 24.379 clause 18.1.1.1: remote-floor <MCPTT ID> [<group>] (no group: the emergency private call).
+    std::istringstream words(cmd.substr(13));
+    std::string target, called;
+    words >> target >> called;
+    if (target.empty()) throw std::runtime_error("usage: remote-floor <MCPTT ID> [<group>]");
+    remote_floor_command(target, called);
   } else if (cmd.starts_with("remote-select ")) {
     // TS 24.379 clause 10.1.4.2.1: remote-select <MCPTT ID> <group>.
     std::istringstream words(cmd.substr(14));
@@ -487,6 +494,7 @@ void Client::group_call_command(const std::string &cmd) {
   if (emergency || (!chat && alerts_.contains(user()))) {
     info.emergency = true;
     info.alert = false;
+    emergency_state_ = true; // TS 24.379 clause 6.2.8.1.1 1): the MCPTT emergency state
   }
   if (imminent && !info.emergency) info.imminent_peril = true;
 

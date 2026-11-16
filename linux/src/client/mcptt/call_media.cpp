@@ -224,6 +224,7 @@ void Client::call_state(std::string_view id, SipCallState state, int code) {
 // conference subscription, media, floor and priority states, keep its type and group for a rejoin, and save the
 // received audio.
 void Client::clear_call_state() {
+  next_floor_priority_.reset();
   end_speech("call ended");
   awaiting_answer_key_ = false;
   dialog_.clear();
@@ -321,7 +322,8 @@ FloorPacket Client::floor_message(FloorType type) const {
   if (type == FloorType::Request) packet.fields.push_back(location_not_provided_field());
   if (type == FloorType::Request)
     packet.fields.push_back(priority_field(static_cast<std::uint8_t>(
-        std::min<unsigned>(cfg_.at("mcptt").value("floor_priority", 0u), remote_->floor_priority.value_or(0)))));
+        std::min<unsigned>(next_floor_priority_ ? *next_floor_priority_ : cfg_.at("mcptt").value("floor_priority", 0u),
+                           remote_->floor_priority.value_or(0)))));
   return packet;
 }
 
@@ -330,6 +332,7 @@ FloorPacket Client::floor_message(FloorType type) const {
 // Floor Release when the floor was held or requested.
 void Client::release() {
   const bool send_release = (talking_ || requesting_) && !no_floor();
+  next_floor_priority_.reset();
   talking_ = requesting_ = false;
   live_talk_ = false;
   live_in_.clear();

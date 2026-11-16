@@ -390,6 +390,14 @@ class Client {
   // private call, annex G.11), MEPP (emergency private priority of this call, annex G.10)
   // and MPEA (private emergency alert, annex G.12), each held as its state number.
   int mepc_ = 1, mepp_ = 1, mpea_ = 1;
+  // TS 24.379 annex G.1: the MCPTT emergency state (MES) of this client, set by originating an emergency group or
+  // private call or an emergency alert, cleared by the user's cancellation of them.
+  bool emergency_state_ = false;
+  // TS 24.379 clause 18.1.1: this user's last emergency remote floor request trigger (sent) and the last received.
+  Json remote_floor_ = {{"sent", nullptr}, {"received", nullptr}};
+  // TS 24.380 clause 6.2.4.3.5: a floor priority for the next Floor Request in place of the configured one (the
+  // emergency priority of a triggered request, clause 18.1.1.2 6)).
+  std::optional<std::uint8_t> next_floor_priority_;
   // TS 24.379 clause 11.1.1.2.1.2 step 3b: MEPP saved when invited to an emergency first-to-answer
   // call, restored if this client is cancelled or released as not selected.
   std::optional<int> saved_mepp_;
@@ -696,6 +704,10 @@ class Client {
   void change_private_priority(bool enable, bool with_alert);
 
   void change_priority(bool emergency, bool enabled);
+
+  void remote_floor_command(const std::string &target, const std::string &group);
+
+  SipResponse remote_floor_received(const SipMessage &message, const McpttInfo &info);
 
   // TS 24.379 clauses 10.1.1.2.1.1, 10.1.1.2.2.1 and 10.1.2.2.1.1: <preconfigured-group-use-only> of each group
   // document read (TS 24.481 clause 7.2.4.2), true for a group on which this user may not call.

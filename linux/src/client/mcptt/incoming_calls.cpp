@@ -98,6 +98,10 @@ SipResponse Client::incoming_clear_message(const SipMessage &message) {
   // TS 24.379 clause 16.2.1.3 and clause 16.2.1.4: the regroup this user's group has been put into.
   if (body_of(message, regroup_mime)) return regroup_message(message);
   const auto info = message_info(message);
+  // TS 24.379 clause 6.2.0.1 and 18.1.1.2: a "SIP MESSAGE request for emergency remote floor request trigger for
+  // terminating client".
+  if (info.service.contains("req-type") && info.service.at("req-type") == "emergency-remote-floor-request-trigger")
+    return remote_floor_received(message, info);
   if (info.service.contains("request-type") || info.service.contains("response-type"))
     return private_service_received(message, info);
   // TS 24.379 clause 12.1A.1.3: alert notification (or the receipt of our own alert).

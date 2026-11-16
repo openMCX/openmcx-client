@@ -249,6 +249,7 @@ void Client::change_private_priority(bool enable, bool with_alert) {
     parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
   auto headers = priority_headers(info);
   const int previous_mpea = mpea_;
+  emergency_state_ = enable; // TS 24.379 annex G.1 (clauses 6.2.8.3.2, 6.2.8.3.6)
   if (enable) {
     mepc_ = 2;
     mepp_ = 4;
@@ -328,6 +329,7 @@ void Client::change_priority(bool emergency, bool enabled) {
   if (emergency) {
     info.emergency = enabled;
     if (enabled) info.alert = false;
+    emergency_state_ = enabled; // TS 24.379 clause 6.2.8.1.1 1) (set), clause 6.2.8.1.3 2) (cleared)
   } else
     info.imminent_peril = enabled;
   auto headers = priority_headers(info);
@@ -438,6 +440,11 @@ void Client::change_alert(bool enabled, const std::string &origin, const std::st
   if (location) parts.push_back({mcptt_location_mime, emergency_location_xml(*location)});
   const auto boundary = "mcx-" + random_id();
   alert_pending_ = enabled ? "start" : "cancel";
+  // TS 24.379 annex G.1: an emergency alert sets the MCPTT emergency state; the user's own cancellation clears it.
+  if (enabled)
+    emergency_state_ = true;
+  else if (origin.empty() || origin == user())
+    emergency_state_ = false;
   alert_pending_group_ = info.request_uri;
   const auto [type, body] = message_body(parts, boundary);
   sip_.request(
@@ -459,6 +466,100 @@ void Client::change_alert(bool enabled, const std::string &origin, const std::st
             status_["alert_locations"][user()] = {{"latitude", location->latitude}, {"longitude", location->longitude}};
         }
       });
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 18.1.1.1: "remote-floor <user> [<group>]": a remote emergency floor request trigger to the user
+// who initiated an ongoing emergency group call (on <group>) or emergency private call (no group):
+//   1) without <allow-trigger-remote-floor-request> in the user profile, the user is told (the command fails) and
+//      nothing is sent;
+//   2) a SIP MESSAGE: a), b) P-Preferred-Service and Accept-Contact with the MCPTT ICSI; d) the mcptt-info with i)
+//      <mcptt-request-uri> the group (a group call only), ii) A) <req-type> "emergency-remote-floor-request-trigger",
+//      B) the functional alias in use; e) the remote user in a resource-lists body; f) to the PSI of the
+//      participating function; 3) sent.
+// The 200 (OK) is the success of the transmission, a 4xx-6xx its failure (status remote_floor.sent).
+void Client::remote_floor_command(const std::string &target, const std::string &group) {
+  if (!authorized_) throw std::runtime_error("remote floor request trigger requires MCPTT service authorisation");
+  if (cfg_.at("mcptt").value("enforce_profile_ruleset", true) && profile_loaded_ &&
+      !profile_actions_.contains("allow-trigger-remote-floor-request"))
+    throw std::runtime_error("not authorised to trigger a remote emergency floor request");
+  McpttInfo info;
+  if (!group.empty()) info.request_uri = group;                       // 2) d) i)
+  info.service = {{"req-type", "emergency-remote-floor-request-trigger"}}; // 2) d) ii) A)
+  info.functional_alias = functional_alias_;                             // 2) d) ii) B)
+  const auto request = remote_floor_["sent"].is_object() ? remote_floor_["sent"].value("request", 0u) + 1 : 1u;
+  remote_floor_["sent"] = {{"target", target}, {"group", group}, {"status", 0},
+                           {"warning", ""},    {"outcome", ""},  {"request", request}};
+  send_service_message(target, info, [this, request](const SipResponse &response) {
+    auto &sent = remote_floor_["sent"];
+    if (!sent.is_object() || sent.value("request", 0u) != request) return;
+    sent["status"] = response.status_code;
+    sent["warning"] = std::string(get_header(response.headers, "Warning"));
+    sent["outcome"] = response.status_code < 300 ? "success" : "fail";
+    event("remote_floor_result", sent);
+  });
+  event("remote_floor_requested", {{"target", target}, {"group", group}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 18.1.1.2: the "SIP MESSAGE request for emergency remote floor request trigger for terminating
+// client":
+//   1) a group call with <mcptt-calling-group-id>, else a private call;
+//   2) a group call with no ongoing emergency group call on that group: 403, warning 197;
+//   3) a private call with no ongoing emergency private call with <mcptt-calling-user-id>: 403, warning 198;
+//   4) the MCPTT emergency state (annex G.1) not set: 403, warning 199;
+//   5) 200 (OK); 6) a Floor Request for the targeted call (TS 24.380 clause 6.2.4.3.5, the PTT of the user) at the
+//      highest floor priority negotiated for it (the emergency priority), when the client neither holds nor asks for
+//      the floor already.
+SipResponse Client::remote_floor_received(const SipMessage &message, const McpttInfo &info) {
+  SipResponse response;
+  response.status_code = 200;
+  if (message.from_uri != service() || asserted_identity(message) != service()) {
+    response.status_code = 403;
+    return response;
+  }
+  const auto refuse = [&](const char *warning) {
+    response.status_code = 403;
+    response.headers = {{"Warning", std::string("399 mcx \"") + warning + "\""}};
+    remote_floor_["received"] = {{"from", info.calling_user}, {"group", info.calling_group},
+                                 {"status", 403},             {"warning", warning},
+                                 {"floor_requested", false}};
+    event("remote_floor_received", remote_floor_["received"]);
+    return response;
+  };
+  const bool group_call = !info.calling_group.empty();
+  const bool active = !dialog_.empty() && remote_ && status_.value("call_state", "") == "active";
+  if (group_call &&
+      !(active && call_type_ != "private" && call_type_ != "ambient" && active_group() == info.calling_group &&
+        (call_type_ == "adhoc" ? adhoc_priority_ == "emergency" : emergency_)))
+    return refuse("197 targeted emergency group call is not ongoing");
+  if (!group_call && !(active && call_type_ == "private" && private_peer_ == info.calling_user && mepp_ == 2))
+    return refuse("198 targeted emergency private call is not ongoing");
+  if (!emergency_state_) return refuse("199 remote user is not in emergency state");
+  const bool request = !no_floor() && !talking_ && !requesting_;
+  remote_floor_["received"] = {{"from", info.calling_user}, {"group", info.calling_group}, {"status", 200},
+                               {"warning", ""},             {"floor_requested", request}};
+  event("remote_floor_received", remote_floor_["received"]);
+  if (request)
+    schedule([this] {
+      if (!remote_ || talking_ || requesting_ || no_floor()) return;
+      next_floor_priority_ = 255; // capped by the negotiated priority (floor_message): the highest allowed
+      requesting_ = true;
+      // What the user then says: the configured mcptt.remote_floor_wav, else silence for mcptt.remote_floor_hold_ms
+      // (5 s), after which the floor is released as at the end of any transmission.
+      const auto wav = cfg_.at("mcptt").value("remote_floor_wav", std::string{});
+      transmit_ = wav.empty() ? std::vector<std::int16_t>(
+                                    16 * cfg_.at("mcptt").value("remote_floor_hold_ms", std::size_t{5000}), 0)
+                              : read_wav(wav);
+      transmit_offset_ = 0;
+      try {
+        send_floor(FloorType::Request);
+      } catch (const std::exception &error) {
+        requesting_ = false;
+        failure(std::string("remote emergency floor request: ") + error.what());
+      }
+    });
+  return response;
 }
 
 } // namespace mcx
