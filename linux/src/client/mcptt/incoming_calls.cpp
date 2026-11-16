@@ -102,6 +102,26 @@ SipResponse Client::incoming_clear_message(const SipMessage &message) {
   // terminating client".
   if (info.service.contains("req-type") && info.service.at("req-type") == "emergency-remote-floor-request-trigger")
     return remote_floor_received(message, info);
+  // TS 24.379 clause 17.2.7.1: a "SIP MESSAGE request with notification of ad hoc group call redirection" (clause
+  // 6.2.0.1: <forwarding-reason> "migrated"; clause 6.3.3.1.26: the ad hoc group in <mcptt-calling-group-id>, the
+  // migrated user's <partner-mcptt-id> and <primary-mcptt-id>): 1) the user is notified (event adhoc_call_redirected,
+  // status adhoc_redirections), 2) the 200 (OK).
+  if (const auto reason = info.service.find("forwarding-reason");
+      reason != info.service.end() && reason->second == "migrated" && !info.service.contains("request-type")) {
+    SipResponse response;
+    response.status_code = 200;
+    if (message.from_uri != service() || asserted_identity(message) != service() || info.request_uri != user()) {
+      response.status_code = 403;
+      return response;
+    }
+    Json entry{{"group", info.calling_group},
+               {"partner_id", info.partner_mcvideo_id},
+               {"primary_id", info.primary_mcvideo_id},
+               {"in_call", call_type_ == "adhoc" && call_group_ == info.calling_group}};
+    adhoc_redirections_.push_back(entry);
+    event("adhoc_call_redirected", entry);
+    return response;
+  }
   if (info.service.contains("request-type") || info.service.contains("response-type"))
     return private_service_received(message, info);
   // TS 24.379 clause 12.1A.1.3: alert notification (or the receipt of our own alert).

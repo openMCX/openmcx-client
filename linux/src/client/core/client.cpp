@@ -317,6 +317,7 @@ void Client::floor_and_priority_status() {
   status_["group"] = group();
   status_["imminent_group_state"] = imminent_group_states_;
   status_["emergency_state"] = emergency_state_; // TS 24.379 annex G.1
+  status_["adhoc_redirections"] = adhoc_redirections_; // TS 24.379 clause 17.2.7.1
   // TS 24.379 clause 18.1.1: "sent" {target, group, status, warning, outcome, request} of this user's last trigger,
   // "received" {from, group, status, warning, floor_requested} of the last one received.
   status_["remote_floor"] = remote_floor_;

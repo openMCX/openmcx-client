@@ -404,6 +404,8 @@ class Client {
   bool fta_not_selected_ = false;
   // Ad hoc group call priority learned at setup: "normal", "emergency" or "imminent".
   std::string adhoc_priority_ = "normal";
+  // TS 24.379 clause 17.2.7.1: the ad hoc group call redirections notified ({group, partner_id, primary_id, in_call}).
+  Json adhoc_redirections_ = Json::array();
   // TS 24.379 clause 17.2.6.1.1 step 1: the participant criteria of the ad hoc call this client originated (or last
   // set), sent again with a change of its participant list.
   std::string adhoc_criteria_;
