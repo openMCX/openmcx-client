@@ -728,6 +728,7 @@ class Client {
   void change_priority(bool emergency, bool enabled, const std::string &other_alert = {}, bool third_party = false);
 
   void require_priority_right(const std::string &request, const std::string &target) const;
+  bool private_alert_authorised(const std::string &target);
 
   bool upgrade_implicit_begin();
 

@@ -55,7 +55,8 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
                                                             : "allow-force-auto-answer"});
   // TS 24.379 clause 11.1.1.2.1.1 with clauses 6.2.8.3.1.1 and 6.2.8.3.1.3: the emergency private call and alert rights.
   if (emergency) require_priority_right("emergency-private", target);
-  if (alert) require_priority_right("private-alert", target);
+  // TS 24.379 clause 6.2.8.3.2 3): an unauthorised alert does not refuse the call; it is sent without the alert.
+  if (alert && emergency) alert = private_alert_authorised(target);
   // TS 24.379 clause 11.1.1.2.1.1 14c) with clause 6.2.8.3.2: an emergency private call to a functional alias is the
   // emergency call of a user target with <call-to-functional-alias-ind>; the server resolves the alias.
   mode_for_redirect_ = mode;
@@ -343,10 +344,12 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
   // TS 24.379 clause 11.1.1.2.1.1 14c) with clause 6.2.8.3.2: an emergency private call to a functional alias is the
   // emergency call of a user target with <call-to-functional-alias-ind>; the server resolves the alias.
   // TS 24.379 clauses 6.2.8.3.1.1 and 6.2.8.3.1.3: the emergency private call and alert rights, for each invitee.
-  for (const auto &invitee : targets) {
+  for (const auto &invitee : targets)
     if (emergency) require_priority_right("emergency-private", invitee);
-    if (alert) require_priority_right("private-alert", invitee);
-  }
+  // TS 24.379 clause 6.2.8.3.2 3): an alert not authorised for every invitee is left out; the call goes on.
+  if (alert)
+    for (const auto &invitee : targets)
+      if (alert && !private_alert_authorised(invitee)) alert = false;
   std::vector<SipHeader> headers;
   if (emergency) {
     info.emergency = true;

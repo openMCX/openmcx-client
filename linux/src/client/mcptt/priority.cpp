@@ -91,6 +91,22 @@ void Client::require_priority_right(const std::string &request, const std::strin
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 6.2.8.3.2 3): the emergency alert of an emergency private call is sent only when it "is an authorised
+// request for MCPTT emergency alert as determined by the procedures of clause 6.2.8.3.1.3"; otherwise the call goes
+// on as an emergency private call without the alert (no <alert-ind> "true", no MPEA change, no location). False, with
+// the user told (status emergency_alert_not_authorised and an event), when the alert to target is not authorised.
+bool Client::private_alert_authorised(const std::string &target) {
+  try {
+    require_priority_right("private-alert", target);
+    return true;
+  } catch (const std::runtime_error &error) {
+    status_["emergency_alert_not_authorised"] = target;
+    event("emergency_alert_not_authorised", {{"target", target}, {"reason", error.what()}});
+    return false;
+  }
+}
+
+//------------------------------------------------------------------------------
 // TS 24.282 clause 6.2.8.1: refuses an MCData request whose rights the MCData user profile (TS 24.484 clause 10.3)
 // does not grant, as require_profile does for the MCPTT user profile.
 void Client::require_mcdata_profile(std::initializer_list<const char *> actions) const {
@@ -299,7 +315,9 @@ void Client::change_private_priority(bool enable, bool with_alert, const std::st
   if (!enable && mepp_ != 2 && !third_party) throw std::runtime_error("private call is not an emergency call");
   // TS 24.379 clauses 6.2.8.3.1.1 to 6.2.8.3.1.3 (clause 11.1.1.2.1.5 1), clause 11.1.1.2.1.4 1)): the user's rights.
   require_priority_right(enable ? "emergency-private" : "emergency-private-cancel", private_peer_);
-  if (with_alert) require_priority_right(enable ? "private-alert" : "private-alert-cancel", private_peer_);
+  // TS 24.379 clause 11.1.1.2.1.5 with clause 6.2.8.3.2 3): an unauthorised alert leaves the upgrade without it.
+  if (with_alert && enable) with_alert = private_alert_authorised(private_peer_);
+  if (with_alert && !enable) require_priority_right("private-alert-cancel", private_peer_);
   McpttInfo info;
   info.session_type = "private";
   info.client_id = client_id();
