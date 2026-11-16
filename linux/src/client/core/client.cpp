@@ -116,7 +116,7 @@ void Client::floor_participant_tick(std::uint64_t now) {
       const Json loss{{"state", state == FloorParticipantState::NoPermission ? "NoPermission" : "PendingRelease"},
                       {"last_message", last_floor_message_}};
       status_["last_floor_loss"] = loss;
-      event("floor_lost", loss);
+      floor_event("floor_lost", loss);
     }
     // The talk burst staged for an implicit floor request still waiting for its answer (upgrade_implicit_begin: an
     // upgrade's re-INVITE with "mc_implicit_request") is kept: the participant stays in 'U: has no permission' until
@@ -228,7 +228,10 @@ void Client::save_status(std::uint64_t now) {
                                         {"null_alert", ambient_->null_alert},
                                         {"attached", !dialog_.empty() && dialog_ == ambient_->dialog},
                                         {"transmitting", hidden && talking_},
-                                        {"connected", hidden && remote_.has_value()}};
+                                        {"connected", hidden && remote_.has_value()},
+                                        // The floor participant state of the hidden call (protocol state only).
+                                        {"floor_state", hidden ? status_.value("floor_state", "") : ""},
+                                        {"floor_owner", hidden ? status_.value("floor_owner", "") : ""}};
   status_["last_ambient"] = last_ambient_;
   status_["first_to_answer"] = first_to_answer_;
   status_["private_emergency_state"] = mepc_name(mepc_);
@@ -293,7 +296,19 @@ void Client::save_status(std::uint64_t now) {
   procedures_status(mcptt_service);
   if (mcdata_enabled()) mcdata_status();
   if (mcvideo_enabled()) mcvideo_status();
-  write_status(cfg_, status_);
+  if (hidden) {
+    // TS 24.379 clauses 11.1.6.2.0 and 11.1.6.2.1.2 6): the listened-to user is not shown the call nor its floor; the
+    // floor participant state goes on (TS 24.380 clause 6.2.4) and is reported under "ambient" only.
+    auto shown = status_;
+    shown["floor_state"] = "NoPermission";
+    shown["floor_owner"] = "";
+    shown["requesting_floor"] = false;
+    shown["queued"] = false;
+    shown["pending_floor_confirmation"] = false;
+    write_status(cfg_, shown);
+  } else {
+    write_status(cfg_, status_);
+  }
   save_audio();
   last_save_ = now;
 }

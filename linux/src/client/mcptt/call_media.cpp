@@ -41,6 +41,16 @@ void Client::check_remote(const MediaDescription &media, bool private_call) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clauses 11.1.6.2.0 and 11.1.6.2.1.2 6): a floor event of the call; that of a listened-to client's hidden
+// ambient listening call is no user indication and is reported as "ambient_<kind>".
+void Client::floor_event(std::string_view kind, const Json &detail) {
+  if (ambient_hidden())
+    event("ambient_" + std::string(kind), detail);
+  else
+    event(kind, detail);
+}
+
+//------------------------------------------------------------------------------
 // TS 24.380 clause 14.4: "if the attribute contains attribute parameters that were not present in the associated
 // offer, the offerer shall discard those attribute parameters": "mc_queueing" without this client's, and
 // "mc_implicit_request" unless this client's INVITE requested the floor with it (implicit_offered_). The "mc_ssrc"
@@ -173,7 +183,7 @@ void Client::implicit_floor_answered() {
     requesting_ = false;
     next_audio_ = monotonic_ms();
     status_["implicit_floor_request"] = "granted";
-    event("floor_granted", {{"by", "mc_granted"}});
+    floor_event("floor_granted", {{"by", "mc_granted"}});
   }
   event("implicit_floor_request_accepted", {{"dialog", dialog_}, {"stored_floor_messages", stored.size()}});
   for (const auto &datagram : stored) {
@@ -411,7 +421,7 @@ void Client::release() {
       }
     }
   }
-  event("floor_released");
+  floor_event("floor_released");
 }
 
 //------------------------------------------------------------------------------
@@ -509,7 +519,7 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     if (!audio_ssrc_) audio_ssrc_ = remote_->granted_audio_ssrc;
     if (!audio_ssrc_) throw std::runtime_error("Floor Granted lacks audio SSRC");
     if (floor_timers_.awaiting_user_confirmation()) {
-      event("queued_floor_granted", {{"action", "floor-confirm"}});
+      floor_event("queued_floor_granted", {{"action", "floor-confirm"}});
       return;
     }
     if (ambient_hidden() && transmit_.empty()) {
@@ -519,7 +529,7 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     talking_ = true;
     requesting_ = false;
     next_audio_ = monotonic_ms();
-    event("floor_granted");
+    floor_event("floor_granted");
   } else if (packet.type == FloorType::QueuePositionInfo) {
     status_["floor_queue_info_received"] = status_.value("floor_queue_info_received", 0u) + 1;
     for (const auto &field : packet.fields)
@@ -534,10 +544,10 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
       if (field.id == static_cast<unsigned>(FloorFieldId::RejectCause))
         status_["last_floor_reject_cause"] = read_reject_cause(field).cause; // 5 = receive only
     status_["floor_denials"] = status_["floor_denials"].get<unsigned>() + 1;
-    event("floor_denied", {{"reject_cause", status_.value("last_floor_reject_cause", Json())}});
+    floor_event("floor_denied", {{"reject_cause", status_.value("last_floor_reject_cause", Json())}});
   } else if (packet.type == FloorType::Revoke) {
     release();
-    event("floor_revoked");
+    floor_event("floor_revoked");
   } else if (packet.type == FloorType::Idle) {
     // TS 24.380 clause 6.2.4.4: 'U: has permission' takes no Floor Idle. One over the subchannel can be a T7
     // repetition sent before the server granted this user's request, overtaken by the unicast Floor Granted.

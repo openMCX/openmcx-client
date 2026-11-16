@@ -512,6 +512,7 @@ class Client {
 
   // This client is being listened to on its current dialog. TS 24.379 clause 11.1.6.2.0: its
   // user is given no indication of the call, so it presents as idle.
+  void floor_event(std::string_view kind, const Json &detail = Json::object());
   bool ambient_hidden() const { return ambient_listened_to() && !dialog_.empty() && dialog_ == ambient_->dialog; }
 
   std::vector<std::int16_t> ambient_audio() const;
