@@ -22,6 +22,7 @@ add_executable(mcx-client
     src/client/core/client.cpp
     src/client/core/commands.cpp
     src/client/core/group_management.cpp
+    src/client/core/group_selection.cpp
     src/client/core/location.cpp
     src/client/core/log_off.cpp
     src/client/core/reg_event.cpp

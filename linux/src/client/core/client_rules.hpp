@@ -174,16 +174,16 @@ inline std::string xml_unescape(std::string text) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.484 clause 8.3.2: the groups of an MCPTT user profile, the <uri-entry> values of its <MCPTTGroupInfo>
-// elements (<OnNetwork>/<MCPTTGroupInfo>/<entry>), in document order, without duplicates and at most 256. The
-// elements may carry a namespace prefix; an empty <uri-entry/> is skipped.
-inline std::vector<std::string> parse_profile_groups(std::string_view xml) {
-  constexpr std::string_view group_info = "MCPTTGroupInfo", uri_entry = "uri-entry>";
+// TS 24.484 clause 8.3.2: the <uri-entry> values of the given list elements of an MCPTT user profile (as
+// <OnNetwork>/<MCPTTGroupInfo>/<entry>, <RemoteGroupSelectionURIList>/<entry>), in document order, without duplicates
+// and at most 256. The elements may carry a namespace prefix; an empty <uri-entry/> is skipped.
+inline std::vector<std::string> parse_profile_uri_entries(std::string_view xml, std::string_view group_info) {
+  constexpr std::string_view uri_entry = "uri-entry>";
   constexpr std::size_t max_groups = 256;
   std::vector<std::string> groups;
   for (auto open = xml.find(group_info); open != std::string_view::npos; open = xml.find(group_info, open + 1)) {
     if (open == 0 || (xml[open - 1] != '<' && xml[open - 1] != ':')) continue; // an opening tag, maybe prefixed
-    const auto close = xml.find("MCPTTGroupInfo>", open + group_info.size());
+    const auto close = xml.find(std::string(group_info) + ">", open + group_info.size());
     if (close == std::string_view::npos) break;
     const auto block = xml.substr(open, close - open);
     for (auto at = block.find(uri_entry); at != std::string_view::npos; at = block.find(uri_entry, at + 1)) {
@@ -197,6 +197,11 @@ inline std::vector<std::string> parse_profile_groups(std::string_view xml) {
     open = close;
   }
   return groups;
+}
+
+// The groups of the user profile: the <uri-entry> values of its <MCPTTGroupInfo> elements (TS 24.484 clause 8.3.2).
+inline std::vector<std::string> parse_profile_groups(std::string_view xml) {
+  return parse_profile_uri_entries(xml, "MCPTTGroupInfo");
 }
 
 //------------------------------------------------------------------------------

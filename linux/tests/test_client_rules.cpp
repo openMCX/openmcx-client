@@ -163,6 +163,13 @@ void test_profile_groups() {
   for (int index = 0; index < 300; ++index)
     many += "<entry><uri-entry>sip:g" + std::to_string(index) + "@x</uri-entry></entry>";
   check(parse_profile_groups(many + "</MCPTTGroupInfo>").size() == 256, "at most 256 groups");
+  // TS 24.379 clause 10.1.4.2.1 step 1: the users of <RemoteGroupSelectionURIList>, apart from the groups.
+  const std::string remote = "<MCPTTGroupInfo><entry><uri-entry>sip:g@x</uri-entry></entry></MCPTTGroupInfo>"
+                             "<RemoteGroupSelectionURIList><entry><uri-entry>sip:u1@x</uri-entry></entry>"
+                             "</RemoteGroupSelectionURIList>";
+  check(mcx::client_rules::parse_profile_uri_entries(remote, "RemoteGroupSelectionURIList") == Groups{"sip:u1@x"},
+        "the remote group selection list");
+  check(parse_profile_groups(remote) == Groups{"sip:g@x"}, "the groups without the remote selection list");
 }
 
 //------------------------------------------------------------------------------

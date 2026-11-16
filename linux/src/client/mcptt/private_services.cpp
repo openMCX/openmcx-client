@@ -99,6 +99,10 @@ void Client::service_message(const McpttInfo &info) {
     if (pccb_requesting_.value(from, "") == "PCCB-I2: confirm-pending") pccb_requesting_[from] = "PCCB-I3: confirmed";
   } else if (type == "private-call-call-back-cancel-response") {
     if (pccb_requesting_.value(from, "") == "PCCB-I4: cancel-pending") pccb_requesting_.erase(from);
+  } else if (type == "group-selection-change-request") {
+    selection_requested(mcptt_service, info); // TS 24.379 clause 10.1.4.2.2
+  } else if (type == "group-selection-change-response") {
+    selection_outcome(mcptt_service, info); // TS 24.379 clause 10.1.4.2.1
   } else if (type == "remotely-initiated-group-call-request") {
     remote_group_call_request(info, from);
   } else if (type == "remotely-initiated-private-call-request" || type == "transfer-private-call-request" ||

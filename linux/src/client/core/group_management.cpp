@@ -396,6 +396,7 @@ void Client::group_management_command(const std::string &cmd) {
 // Helper: keep the groups of the MCPTT user profile (TS 24.484 clause 8.3.2), and show them in the status file.
 void Client::take_profile_groups(const std::string &profile) {
   profile_groups_ = client_rules::parse_profile_groups(profile);
+  remote_selection_targets_ = client_rules::parse_profile_uri_entries(profile, "RemoteGroupSelectionURIList");
   status_["profile_groups"] = profile_groups_;
 }
 

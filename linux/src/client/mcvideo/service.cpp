@@ -514,11 +514,10 @@ SipResponse Client::mcvideo_affiliation_notify(const SipMessage &message) {
   if (!affiliation.publication_id.empty()) mcvideo_received_pid_ = affiliation.publication_id;
 
   // TS 24.281 clause 9.2.4.2.2 step 1 c): the NOTIFY for the affiliation a group selection change asked for.
-  if (mcvideo_selection_pending_.is_object() && !affiliation.publication_id.empty() &&
-      affiliation.publication_id == mcvideo_selection_pending_.value("p_id", std::string{})) {
-    const std::string group = mcvideo_selection_pending_.at("group");
-    schedule([this, ok = groups.contains(group)] { mcvideo_selection_affiliated(ok); });
-  }
+  if (const auto &pending = mcvideo_procedures_.selection_pending;
+      pending.is_object() && !affiliation.publication_id.empty())
+    selection_affiliation_notified(mcvideo_service, affiliation.publication_id,
+                                   groups.contains(pending.value("group", std::string{})));
   event("mcvideo_affiliation_status", {{"groups", groups}, {"terminated", terminated}});
   schedule([this] { mcvideo_update_key_subscriptions(); });
   if (terminated) {
@@ -593,9 +592,9 @@ void Client::mcvideo_publish_affiliation(bool affiliate, const std::vector<std::
                           if (mcvideo_authorized_) mcvideo_publish_affiliation(affiliate, added, group);
                         });
                       }
-                      if (mcvideo_selection_pending_.is_object() &&
-                          mcvideo_selection_pending_.value("group", std::string{}) == group)
-                        schedule([this] { mcvideo_selection_affiliated(false); });
+                      if (mcvideo_procedures_.selection_pending.is_object() &&
+                          mcvideo_procedures_.selection_pending.value("group", std::string{}) == group)
+                        selection_affiliation_notified(mcvideo_service, {}, false);
                       return;
                     }
                     for (const auto &each : added) {
@@ -726,7 +725,7 @@ void Client::mcvideo_command(const std::string &cmd) {
     std::string group;
     words >> group;
     if (argument.empty() || group.empty()) throw std::runtime_error("mcvideo-select-remote <MCVideo ID> <group>");
-    return mcvideo_select_remote(argument, group);
+    return select_remote(mcvideo_service, argument, group);
   }
   // TS 24.281 clauses 20.4.2.1.2 and 20.4.2.1.3: bind an alias to groups, or unbind it.
   if (verb == "mcvideo-fa-bind" || verb == "mcvideo-fa-unbind")
@@ -1060,8 +1059,8 @@ void Client::mcvideo_status() {
   status_["mcvideo_adhoc_alert_group"] = mcvideo_adhoc_alert_group_;
   status_["mcvideo_received_adhoc_alerts"] = mcvideo_adhoc_alerts_;
   status_["mcvideo_adhoc_alert_result"] = mcvideo_adhoc_alert_result_;
-  status_["mcvideo_group_selection_result"] = mcvideo_selection_result_;
-  status_["mcvideo_group_selection"] = mcvideo_selection_;
+  status_["mcvideo_group_selection_result"] = mcvideo_procedures_.selection_result;
+  status_["mcvideo_group_selection"] = mcvideo_procedures_.selection;
   status_["mcvideo_alias_users"] = mcvideo_alias_users_;
   status_["mcvideo_functional_alias_notified"] = mcvideo_fa_notified_;
   {

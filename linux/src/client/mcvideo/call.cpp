@@ -621,16 +621,11 @@ SipResponse Client::mcvideo_message(const SipMessage &message) {
   }
   // TS 24.281 clauses 9.2.4.2.2 and 9.2.4.2.1: a group selection change request, or the response to ours.
   if (info.service.contains("request-type") && info.service.at("request-type") == "group-selection-change-request") {
-    schedule([this, info] { mcvideo_selection_requested(info); });
+    schedule([this, info] { selection_requested(mcvideo_service, info); });
     return response;
   }
   if (info.service.contains("response-type") && info.service.at("response-type") == "group-selection-change-response") {
-    const auto outcome =
-        info.service.contains("selected-group-change-outcome") ? info.service.at("selected-group-change-outcome") : "";
-    mcvideo_selection_result_["outcome"] = outcome;
-    mcvideo_selection_result_["group"] = info.calling_group;
-    mcvideo_selection_result_["from"] = info.calling_user;
-    event("mcvideo_group_selection_outcome", mcvideo_selection_result_);
+    selection_outcome(mcvideo_service, info);
     return response;
   }
   if (info.alert.has_value()) {

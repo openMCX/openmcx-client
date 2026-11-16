@@ -116,6 +116,13 @@ void Client::run_command(const std::string &cmd) {
     floor_priority_command(cmd);
   } else if (cmd.starts_with("answer-mode ")) {
     answer_mode_command(cmd);
+  } else if (cmd.starts_with("remote-select ")) {
+    // TS 24.379 clause 10.1.4.2.1: remote-select <MCPTT ID> <group>.
+    std::istringstream words(cmd.substr(14));
+    std::string target, selected;
+    words >> target >> selected;
+    if (target.empty() || selected.empty()) throw std::runtime_error("usage: remote-select <MCPTT ID> <group>");
+    select_remote(mcptt_service, target, selected);
   } else if (cmd.starts_with("group ")) {
     select_group(cmd);
   } else if (cmd == "floor-confirm") {

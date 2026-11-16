@@ -106,6 +106,7 @@ std::pair<std::string, std::string> Client::publish_body(bool affiliation) {
     if (!left_selected_) groups.push_back(group());
     groups.insert(groups.end(), monitored_groups_.begin(), monitored_groups_.end());
     Affiliation request{user(), client_id(), random_id(), groups, {}};
+    mcptt_sent_pid_ = request.publication_id; // TS 24.379 clause 10.1.4.2.2 step 1 c): the NOTIFY naming it
     parts.push_back({"application/pidf+xml", affiliation_xml(request, false)});
   } else {
     // TS 24.379 clause 7.2.2 4)c) / 5)c): <gw-mcptt-usage> "true" when this client reaches the MCPTT system through an
@@ -388,6 +389,8 @@ void Client::affiliate() {
     if (response.status_code < 200) return;
     if (response.status_code != 200) {
       failure("affiliation publication: " + std::to_string(response.status_code));
+      // TS 24.379 clause 10.1.4.2.2 step 1 c): a refused affiliation fails a remote group selection awaiting it.
+      if (response.status_code != 412) selection_affiliation_notified(mcptt_service, {}, false);
       // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew.
       if (refresh && response.status_code == 412) {
         affiliation_etag_.clear();

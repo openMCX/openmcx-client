@@ -770,6 +770,11 @@ class Client {
     Json affiliation_command = nullptr;                     // a negotiated-mode request awaiting the user (9.2.1.5)
     std::map<std::string, std::string> gdd_dialogs;         // group -> its dynamic data subscription (9.2.1.6)
     Json gdd = Json::object();                              // group -> dynamic data last notified
+    // The remote change of a selected group (TS 24.379 clause 10.1.4.2, TS 24.281 clause 9.2.4.2):
+    // selection_result: this user's last request and its outcome; selection: the last request received, while it is
+    // handled and after; selection_pending: the affiliation it waits for (the group and the PUBLISH's p-id).
+    Json selection_result = nullptr, selection = nullptr, selection_pending = nullptr;
+    unsigned selection_requests = 0;
   };
   ServiceProcedures mcptt_procedures_, mcvideo_procedures_;
   ServiceProcedures &procedures(const ServiceProfile &service);
@@ -995,6 +1000,9 @@ class Client {
   // The groups of the user profile, <OnNetwork>/<MCPTTGroupInfo> (TS 24.484 clause 8.3.2): groups the user may
   // select besides the configured ones (the dispatcher's group picker).
   std::vector<std::string> profile_groups_;
+  // TS 24.484 clause 8.3.2 (TS 24.379 clause 10.1.4.2.1 step 1): the users whose selected group this user may change,
+  // the <uri-entry> values of <RemoteGroupSelectionURIList> of the user profile.
+  std::vector<std::string> remote_selection_targets_;
 
   void take_profile_groups(const std::string &profile);
 
@@ -1766,19 +1774,28 @@ private:
 
   Json mcvideo_location_status() const;
 
-  // ---- Remote change of the selected group, mcvideo/group_selection.cpp (TS 24.281 clause 9.2.4).
-  // mcvideo_selection_result_: this user's last request and its outcome; mcvideo_selection_: the last request
-  // received, while it is handled and after; mcvideo_selection_pending_: the affiliation it waits for.
-  Json mcvideo_selection_result_ = nullptr, mcvideo_selection_ = nullptr, mcvideo_selection_pending_ = nullptr;
-  unsigned mcvideo_selection_requests_ = 0;
+  // ---- Remote change of the selected group, core/group_selection.cpp (TS 24.379 clause 10.1.4.2, TS 24.281 clause
+  // 9.2.4.2), one implementation for MCPTT and MCVideo; the state is the service's ServiceProcedures.
+  std::vector<SipHeader> service_message_headers(const ServiceProfile &service) const;
 
-  void mcvideo_select_remote(const std::string &target, const std::string &group);
+  void select_remote(const ServiceProfile &service, const std::string &target, const std::string &group);
 
-  void mcvideo_selection_requested(const McpttInfo &info);
+  void selection_requested(const ServiceProfile &service, const McpttInfo &info);
 
-  void mcvideo_selection_affiliated(bool affiliated);
+  void selection_outcome(const ServiceProfile &service, const McpttInfo &info);
 
-  void mcvideo_selection_answer(bool success);
+  void selection_affiliated(const ServiceProfile &service, bool affiliated);
+
+  void selection_answer(const ServiceProfile &service, bool success);
+
+  bool selection_affiliate(const ServiceProfile &service, const std::string &group);
+
+  bool selection_apply(const ServiceProfile &service, const std::string &group);
+
+  void selection_affiliation_notified(const ServiceProfile &service, const std::string &publication_id,
+                                      bool group_affiliated);
+
+  std::string mcptt_sent_pid_; // the p-id of this client's last MCPTT affiliation PUBLISH (clause 9.2.1.2)
 
   // TS 24.281 clauses 20.4.2.1.2 and 20.4.2.1.3: a SIP MESSAGE with <request-type> "fa-group-binding-req",
   // <binding-ind>, the alias in <binding-fa-uri> or <unbinding-fa-uri>, and the groups

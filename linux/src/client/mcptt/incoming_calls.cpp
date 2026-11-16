@@ -613,6 +613,13 @@ SipResponse Client::affiliation_notify(const SipMessage &message) {
     if (affiliation.groups[index] == group() && client_rules::counts_as_affiliated(state)) affiliated_ = true;
   }
   event("affiliation_status", {{"affiliated", affiliated_}});
+  // TS 24.379 clause 10.1.4.2.2 step 1 c): the NOTIFY for the affiliation a remote group selection asked for.
+  if (const auto &pending = mcptt_procedures_.selection_pending;
+      pending.is_object() && !affiliation.publication_id.empty()) {
+    const auto group = pending.value("group", std::string{});
+    selection_affiliation_notified(mcptt_service, affiliation.publication_id,
+                                   client_rules::counts_as_affiliated(affiliation_statuses_.value(group, "")));
+  }
   return response;
 }
 
