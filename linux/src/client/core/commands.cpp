@@ -13,6 +13,11 @@
 
 namespace mcx {
 
+namespace {
+// The MCPTT commands of the procedures shared with MCVideo (core/settings_affiliation.cpp, procedures_command).
+const std::set<std::string> mcptt_procedure_verbs{"settings-publish"};
+} // namespace
+
 //------------------------------------------------------------------------------
 // TS 24.380 clause 14.2.5 (an implementation option): a call command ("call ...", "chat ...", "private ...",
 // "private-fa ...", "first-to-answer[-fa] ...", "adhoc ...") may end in "implicit" or "implicit=<WAV>" (the INVITE
@@ -71,12 +76,18 @@ void Client::command(const std::string &command_line) {
 //   chat-join <group>: test aid for the server's refusals;
 //   hangup: release the call (clause 10.1.1.2.3.1, clause 11.1.3.1.1.1, ambient clause 11.1.6.2.1.3);
 //   affiliate, deaffiliate: affiliation status change (clause 9.2.1.2);
+//   settings-publish [remove]: the PUBLISH for the MCPTT service settings only (clause 7.2.3);
 //   options <SIP URI>: reachability probe (RFC 3261 section 11);
 //   log-off, log-on: log off every MC service (clause 7.2.1A step 4 and NOTE 3) and de-register, then back;
 //   quit; the other words go to the private call service, ad hoc, functional alias, MCData, MCVideo, SEAL, location,
 //   profile and group management commands.
 void Client::run_command(const std::string &cmd) {
-  if (cmd == "emergency on alert" || cmd == "emergency off alert") {
+  const auto verb = cmd.substr(0, cmd.find(' '));
+  if (mcptt_procedure_verbs.contains(verb)) {
+    // TS 24.379 clauses 7.2.3, 7.2.4, 9.2.1.2 to 9.2.1.6 (core/settings_affiliation.cpp).
+    std::istringstream words(cmd.substr(verb.size()));
+    procedures_command(mcptt_service, verb, words);
+  } else if (cmd == "emergency on alert" || cmd == "emergency off alert") {
     if (call_type_ != "private") throw std::runtime_error("use 'alert on|off' for group emergency alerts");
     change_private_priority(cmd.starts_with("emergency on"), true);
   } else if (cmd == "emergency on" || cmd == "emergency off") {
@@ -270,12 +281,16 @@ void Client::floor_priority_command(const std::string &cmd) {
 }
 
 //------------------------------------------------------------------------------
-// Local setting: "answer-mode auto|manual", the commencement mode of incoming calls (TS 24.379 clause 6.2.3.2).
+// "answer-mode auto|manual": the commencement mode of incoming calls (TS 24.379 clause 6.2.3.2), an MCPTT service
+// setting: once authorised, the new setting is sent to the server with the PUBLISH for the MCPTT service settings only
+// (clause 7.2.3, "to ... update ... the MCPTT service settings"; item 4) a) the current answer mode).
 void Client::answer_mode_command(const std::string &cmd) {
   if (!dialog_.empty()) throw std::runtime_error("answer mode requires idle state");
   const auto mode = cmd.substr(12);
   if (mode != "auto" && mode != "manual") throw std::runtime_error("answer mode must be auto or manual");
   cfg_["mcptt"]["answer_mode"] = mode;
+  event("answer_mode", {{"mode", mode}});
+  if (authorized_) settings_publish(mcptt_service, false);
 }
 
 //------------------------------------------------------------------------------

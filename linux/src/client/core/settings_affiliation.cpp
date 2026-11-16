@@ -112,7 +112,7 @@ bool Client::service_authorized(const ServiceProfile &service) const {
 
 // The poc-settings of this client for the service (TS 24.379 clause 7.2.3 4), TS 24.281 clause 7.2.3 4)).
 std::string Client::service_poc_settings(const ServiceProfile &service) {
-  return service.service == Service::mcvideo ? mcvideo_poc_settings() : poc_settings_xml(client_id());
+  return service.service == Service::mcvideo ? mcvideo_poc_settings() : mcptt_poc_settings();
 }
 
 // RFC 3903: the entity-tag of the service's poc-settings publication (that of the service authorisation PUBLISH of

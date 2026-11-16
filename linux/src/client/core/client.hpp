@@ -744,6 +744,8 @@ class Client {
   }
 
   std::pair<std::string, std::string> publish_body(bool affiliation);
+  // TS 24.379 clauses 7.2.2 6) and 7.2.3 4): the poc-settings of this MCPTT client.
+  std::string mcptt_poc_settings() const;
 
   std::pair<std::string, std::string> affiliation_subscribe_body();
 

@@ -106,11 +106,22 @@ std::pair<std::string, std::string> Client::publish_body(bool affiliation) {
     Affiliation request{user(), client_id(), random_id(), groups, {}};
     parts.push_back({"application/pidf+xml", affiliation_xml(request, false)});
   } else {
-    parts.push_back({"application/poc-settings+xml", poc_settings_xml(client_id())});
+    // TS 24.379 clause 7.2.2 6): the current answer mode and the selected user profile's index (mcptt_poc_settings).
+    parts.push_back({"application/poc-settings+xml", mcptt_poc_settings()});
     if (!csk_upload_.empty()) parts.push_back({"application/mikey", csk_upload_});
   }
   auto boundary = "mcx-" + random_id();
   return {"multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary)};
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clauses 7.2.2 6) and 7.2.3 4): the application/poc-settings+xml of this MCPTT client: a) the current
+// answer mode in <am-settings> (mcptt.answer_mode, changed by "answer-mode"; RFC 4354 "automatic" or "manual"), b)
+// <selected-user-profile-index> set to the "user-profile-index" of the selected MCPTT user profile (TS 24.484 clause
+// 8.3.2.1: that of the profile document read, else the configured mcptt.profile_index) and c) <multiplex-support>
+// (clause 7.4.1.2.2; "false": this client does not multiplex, clause 6.2.10).
+std::string Client::mcptt_poc_settings() const {
+  return poc_settings_xml(client_id(), profile_index_, cfg_.at("mcptt").value("answer_mode", std::string("auto")) == "manual");
 }
 
 //------------------------------------------------------------------------------
@@ -205,6 +216,11 @@ void Client::service_authorized() {
   location_signal(location::Event::InitialLogOn);
   if (mcdata_enabled()) schedule([this] { mcdata_authorize(); });
   if (mcvideo_enabled()) schedule([this] { mcvideo_authorize(); });
+  // Authorised by REGISTER (clause 7.2.1), which carries no service settings: the client sets them with the PUBLISH
+  // for the MCPTT service settings only (clause 7.2.3, "to set ... the MCPTT service settings").
+  if (authorise_by_register()) schedule([this] {
+    if (authorized_) settings_publish(mcptt_service, false);
+  });
   if (config_subscription_.empty() && cfg_.at("mcptt").value("subscribe_configuration", true))
     schedule([this] { subscribe_configuration(); });
   schedule([this] { subscribe_own_group_documents(); });

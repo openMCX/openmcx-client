@@ -283,6 +283,9 @@ void Client::save_status(std::uint64_t now) {
   status_["talking"] = talking_ && !hidden;
   status_["requesting_floor"] = requesting_;
   status_["received_samples"] = received_.size();
+  // TS 24.379 clauses 7.2.3, 7.2.4, 9.2.1.3, 9.2.1.5 and 9.2.1.6: service_settings, settings_publication,
+  // affiliation_command, group_dynamic_data and target_affiliations (core/settings_affiliation.cpp).
+  procedures_status(mcptt_service);
   if (mcdata_enabled()) mcdata_status();
   if (mcvideo_enabled()) mcvideo_status();
   write_status(cfg_, status_);
