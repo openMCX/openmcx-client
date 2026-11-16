@@ -37,6 +37,15 @@ void Client::adhoc_call(const std::string &arguments) {
   }
   require_profile({"allow-adhoc-group-call"});
   if (priority == "emergency") require_profile({"allow-emergency-adhoc-group-call"});
+  // TS 24.379 clause 17.2.2.1.1 15): "or is originating an MCPTT adhoc group call and the MCPTT emergency state is
+  // already set" the call is an emergency ad hoc group call (clause 6.2.8.1.21), when authorised (clause 6.2.8.1.24);
+  // the state stays set until the user cancels it (annex G.1; clause 6.2.8.1.27 clears only the ad hoc call and group
+  // states).
+  if (priority == "normal" && emergency_state_) try {
+      require_profile({"allow-emergency-adhoc-group-call"});
+      priority = "emergency";
+    } catch (const std::runtime_error &) {
+    }
   if (priority == "imminent") require_profile({"allow-imminent-peril-adhoc-group-call"});
 
   // TS 24.379 clause 17.2.2.1.1 step 10 NOTE 1: a call following an ad hoc emergency alert names the alert's group.
@@ -66,6 +75,7 @@ void Client::adhoc_call(const std::string &arguments) {
     if (priority == "emergency") {
       info.adhoc_emergency = true;
       level.emergency = true;
+      emergency_state_ = true; // TS 24.379 clause 6.2.8.1.21 1)
     } else {
       info.imminent_peril = true;
       level.imminent_peril = true;
