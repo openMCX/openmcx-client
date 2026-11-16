@@ -94,6 +94,45 @@ void Client::invite_with_implicit(bool implicit, bool own, const std::function<v
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 6.4 (a re-INVITE upgrading the call to an emergency group or private call, or to an imminent peril
+// group call, with "mc_implicit_request" is an implicit floor request; clauses 10.1.1.2.1.3, 10.1.2.2.1.3,
+// 11.1.1.2.1.5 4); TS 24.380 clauses 14.2.5, 14.5): with the command's "implicit[=<WAV>]" (take_implicit_choice), the
+// upgrade's offer carries the attribute and the WAV waits for the grant, as for a call's INVITE. True when it does;
+// the caller sends the re-INVITE with local_ and then clears local_.implicit_request. The floor messages for this
+// client before the re-INVITE's answer are stored as for the INVITE (TS 24.380 clause 6.2.4.2.2 step 2).
+bool Client::upgrade_implicit_begin() {
+  const auto choice = std::exchange(next_implicit_, std::nullopt);
+  if (!choice || !choice->requested) return false;
+  if (no_floor()) throw std::runtime_error("an implicit floor request needs floor control in the call");
+  if (talking_ || requesting_) throw std::runtime_error("the floor is already held or requested");
+  prepare_implicit_speech(*choice);
+  early_floor_.clear();
+  call_answered_ = false;
+  implicit_offered_ = true;
+  local_.implicit_request = true;
+  status_["implicit_floor_request"] = "offered";
+  return true;
+}
+
+// The final response to the upgrade's re-INVITE: a 2xx completes it (implicit_floor_answered, with the answer's
+// "mc_implicit_request" once its SDP is in), a refusal leaves the floor as it was.
+void Client::upgrade_implicit_answered(int status_code) {
+  if (!implicit_offered_ || call_answered_) return;
+  if (status_code >= 300) {
+    implicit_offered_ = false;
+    call_answered_ = true;
+    early_floor_.clear();
+    transmit_.clear();
+    transmit_offset_ = 0;
+    status_["implicit_floor_request"] = "not accepted";
+    event("implicit_floor_request_not_accepted", {{"dialog", dialog_}, {"status", status_code}});
+    return;
+  }
+  call_answered_ = true;
+  implicit_floor_answered();
+}
+
+//------------------------------------------------------------------------------
 // TS 24.380 clause 6.2.4.2.2 (originating floor participant), once both the 200 (OK) and its SDP answer are in:
 // with the implicit floor request negotiated (clause 6.2.1 item 1; the answer's "mc_implicit_request", clause
 // 14.3.5), step 4: "a. shall start timer T101 (Floor Request) and initialise counter C101 (Floor Request) to 1;

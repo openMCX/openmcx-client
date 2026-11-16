@@ -383,7 +383,8 @@ inline std::vector<std::string> affiliation_command_groups(const std::string &xm
 
 //------------------------------------------------------------------------------
 // TS 24.380 clause 14.2.5 (whether a call's INVITE is an implicit floor request is an implementation option): the
-// last word of a call command, "implicit", "implicit=<WAV>" or "no-implicit", taken off (command: the rest).
+// last word of a call command (or of an upgrade to emergency or imminent peril, "emergency on [alert]", "imminent on"),
+// "implicit", "implicit=<WAV>" or "no-implicit", taken off (command: the rest).
 // requested: none when the command ends in no such word; rejoin: the word ends a "rejoin", which TS 24.380 clause
 // 6.2.1 item 2 never lets be an implicit floor request.
 struct ImplicitWord {
@@ -409,7 +410,10 @@ inline ImplicitWord implicit_word(std::string_view cmd) {
   const bool call_command = head == "call" || head.starts_with("call ") || head == "chat" ||
                             head.starts_with("chat ") || head.starts_with("private ") ||
                             head.starts_with("private-fa ") || head.starts_with("first-to-answer ") ||
-                            head.starts_with("first-to-answer-fa ") || head.starts_with("adhoc ");
+                            head.starts_with("first-to-answer-fa ") || head.starts_with("adhoc ") ||
+                            // TS 24.379 clause 6.4: the re-INVITE of an upgrade of the call to an emergency or
+                            // imminent peril call (clauses 10.1.1.2.1.3, 10.1.2.2.1.3, 11.1.1.2.1.5 4)).
+                            head == "emergency on" || head == "emergency on alert" || head == "imminent on";
   if (!call_command) return result;
   result.command = std::string(head);
   result.requested = word != "no-implicit";

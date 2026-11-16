@@ -340,6 +340,11 @@ void test_implicit_word() {
   check(implicit_word("adhoc bob carol implicit").command == "adhoc bob carol", "adhoc ... implicit");
   check(implicit_word("first-to-answer bob carol implicit").requested == true, "first-to-answer ... implicit");
   check(!implicit_word("call").requested && implicit_word("call").command == "call", "no word: unchanged");
+  const auto upgrade = implicit_word("emergency on alert implicit=/media/u.wav");
+  check(upgrade.command == "emergency on alert" && upgrade.requested == true && upgrade.wav == "/media/u.wav",
+        "emergency on alert implicit=<WAV>");
+  check(implicit_word("imminent on implicit").command == "imminent on", "imminent on implicit");
+  check(!implicit_word("emergency off implicit").requested, "a cancellation is no implicit floor request");
   check(!implicit_word("call emergency").requested, "another last word: unchanged");
   check(!implicit_word("ptt implicit").requested && implicit_word("ptt implicit").command == "ptt implicit",
         "not a call command: unchanged");

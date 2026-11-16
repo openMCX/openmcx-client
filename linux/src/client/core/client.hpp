@@ -705,6 +705,10 @@ class Client {
 
   void change_priority(bool emergency, bool enabled);
 
+  bool upgrade_implicit_begin();
+
+  void upgrade_implicit_answered(int status_code);
+
   void remote_floor_command(const std::string &target, const std::string &group);
 
   SipResponse remote_floor_received(const SipMessage &message, const McpttInfo &info);

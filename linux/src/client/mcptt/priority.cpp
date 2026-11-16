@@ -248,6 +248,8 @@ void Client::change_private_priority(bool enable, bool with_alert) {
   if (enable && with_alert)
     parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
   auto headers = priority_headers(info);
+  // TS 24.379 clause 11.1.1.2.1.5 4) and clause 6.4: the upgrade may be an implicit floor request.
+  const bool implicit = enable && upgrade_implicit_begin();
   const int previous_mpea = mpea_;
   emergency_state_ = enable; // TS 24.379 annex G.1 (clauses 6.2.8.3.2, 6.2.8.3.6)
   if (enable) {
@@ -262,8 +264,9 @@ void Client::change_private_priority(bool enable, bool with_alert) {
   try {
     sip_.reinvite(
         dialog_, local_, parts,
-        [this, enable, previous_mpea](const SipResponse &response) {
+        [this, enable, previous_mpea, implicit](const SipResponse &response) {
           if (response.status_code < 200) return;
+          if (implicit) schedule([this, code = response.status_code] { upgrade_implicit_answered(code); });
           priority_pending_ = false;
           status_["priority_updates_completed"] = status_.value("priority_updates_completed", 0u) + 1;
           if (response.status_code < 300) {
@@ -297,9 +300,12 @@ void Client::change_private_priority(bool enable, bool with_alert) {
         headers);
   } catch (...) {
     priority_pending_ = false;
+    if (implicit) upgrade_implicit_answered(500);
+    local_.implicit_request = false;
     throw;
   }
-  event("private_priority_requested", {{"emergency", enable}, {"alert", with_alert}});
+  local_.implicit_request = false;
+  event("private_priority_requested", {{"emergency", enable}, {"alert", with_alert}, {"implicit", implicit}});
 }
 
 //------------------------------------------------------------------------------
@@ -346,9 +352,24 @@ void Client::change_priority(bool emergency, bool enabled) {
       priority_response(response);
       if (response.status_code >= 300) failure("priority update: " + std::to_string(response.status_code));
     };
-    if (active)
-      sip_.reinvite(dialog_, local_, info_parts(info), completed, headers);
-    else
+    if (active) {
+      // TS 24.379 clause 6.4: an upgrade (not a cancellation) may be an implicit floor request.
+      const bool implicit = enabled && upgrade_implicit_begin();
+      auto done = implicit ? std::function<void(const SipResponse &)>([this, completed](const SipResponse &response) {
+        completed(response);
+        if (response.status_code >= 200)
+          schedule([this, code = response.status_code] { upgrade_implicit_answered(code); });
+      })
+                           : std::function<void(const SipResponse &)>(completed);
+      try {
+        sip_.reinvite(dialog_, local_, info_parts(info), done, headers);
+      } catch (...) {
+        if (implicit) upgrade_implicit_answered(500);
+        local_.implicit_request = false;
+        throw;
+      }
+      local_.implicit_request = false;
+    } else
       sip_.request("MESSAGE", service(), mcptt_mime, mcptt_info_xml(info), headers, completed);
   } catch (...) {
     priority_pending_ = false;
