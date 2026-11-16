@@ -19,7 +19,7 @@ namespace mcx {
 // "mc_implicit_request" this client did not offer is no reason to refuse it: an answer's is discarded
 // (negotiated_media), and an offer's is answered without it.
 void Client::check_remote(const MediaDescription &media, bool private_call) {
-  if ((media.control == MediaControl::none) != no_floor())
+  if ((media.control == MediaControl::none || media.no_floor_control) != no_floor())
     throw std::runtime_error("floor control negotiation mismatch");
   // TS 24.380 clause 4.3.3.1: the server's SSRC for this client's floor control messages; refused when it is this
   // client's own or, under the CSK, one already used for another stream, also of the held call that has carried no
@@ -297,6 +297,7 @@ void Client::clear_call_state() {
   implicit_offered_ = call_answered_ = false;
   early_floor_.clear();
   local_.control = MediaControl::floor;
+  local_.no_floor_control = false;
   leave_monitored_call();
   last_call_type_ = call_type_;
   last_call_group_ = call_group_;

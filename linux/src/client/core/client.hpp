@@ -199,7 +199,9 @@ class Client {
 
   // A private call without floor control (TS 24.379 clause 11.1.2): the SDP has no
   // m=application, both parties speak at once and no floor message is exchanged.
-  bool no_floor() const { return local_.control == MediaControl::none; }
+  // No floor control in the call: no media plane control channel (TS 24.379 clause 11.1.2), or one with
+  // "mc_no_floor_ctrl" (TS 24.380 clauses 14.2.6, 14.3.7).
+  bool no_floor() const { return local_.control == MediaControl::none || local_.no_floor_control; }
 
   // A private or ambient listening call is protected by its PCK, a group call by the GMK.
   bool media_key_ready() const { return private_media() ? protection_.private_ready() : protection_.group_ready(); }

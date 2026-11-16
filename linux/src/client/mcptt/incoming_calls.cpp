@@ -904,6 +904,10 @@ SipResponse Client::incoming_private(const SipMessage &message, const McpttInfo 
   // TS 24.379 clause 11.1.2.2: an offer without a media-floor control section is a private call
   // without floor control, answered without one.
   local_.control = message.remote_media->control == MediaControl::none ? MediaControl::none : MediaControl::floor;
+  // TS 24.380 clauses 14.2.6 and 14.3.7: an offer with "mc_no_floor_ctrl" is a call without floor control too; the
+  // answer keeps the control channel and says "mc_no_floor_ctrl" (no floor control attributes).
+  local_.no_floor_control = message.remote_media->no_floor_control;
+  if (local_.no_floor_control) local_.floor_priority.reset();
   if (no_floor()) {
     local_.queueing = false;
     local_.audio_ssrc = random_ssrc();
@@ -912,6 +916,7 @@ SipResponse Client::incoming_private(const SipMessage &message, const McpttInfo 
     check_remote(*message.remote_media, true);
   } catch (...) {
     local_.control = MediaControl::floor;
+    local_.no_floor_control = false;
     throw;
   }
   // Step 4: a protected private call carries the PCK in the offer. A first-to-answer
