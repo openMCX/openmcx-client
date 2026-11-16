@@ -685,6 +685,14 @@ void Client::mcdata_sds_session_command(std::istringstream &words) {
     if (scope == "all") return mcdata_media_close({{"Reason", "SIP;cause=200;text=\"User requested release\""}});
     return mcdata_media_close();
   }
+  if (word == "conference") {
+    // TS 24.282 clause 25.2: "conference" subscribes (current state and changes), "conference fetch" fetches the
+    // current state (Expires 0), "conference end" ends the subscription
+    std::string action;
+    words >> action;
+    if (action == "end") return mcdata_conference_unsubscribe();
+    return mcdata_conference_subscribe(action == "fetch");
+  }
   if (word == "emergency" || word == "imminent") {
     std::string action, extra;
     words >> action >> extra;
@@ -1177,6 +1185,7 @@ void Client::mcdata_status() {
   status_["mcdata_fa_last_result"] = mcdata_fa_last_result_;
   status_["mcdata_fa_binding_result"] = mcdata_fa_binding_result_;
   status_["mcdata_emergency_cancel"] = mcdata_emergency_cancel_;
+  status_["mcdata_conference"] = mcdata_conference_;
   status_["mcdata_functional_alias_subscription_result"] = mcdata_alias_subscription_result_;
   status_["mcdata_functional_aliases_take_over_possible"] = mcdata_takeover_possible_;
   status_["mcdata_alert_state"] = mdea_name(mdea_);

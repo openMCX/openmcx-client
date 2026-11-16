@@ -266,6 +266,8 @@ void Client::mcdata_session_answered(const SipResponse &raw) {
         mcdata_media_result_["state"] = "open";
       }
     mcdata_adhoc_answered(response);
+    // TS 24.282 clause 25.2 2): the MCData session identity of the group session (the focus's Contact)
+    mcdata_session_uri_ = contact_uri_of(get_header(raw.headers, "Contact"));
     // TS 24.282 clause 6.2.8.3.4: the emergency condition is granted by the 2xx.
     if (mdepc_ == 2) mdepc_ = 3;
     mcdata_priority_response(response); // TS 24.282 clause 6.2.8.1.4

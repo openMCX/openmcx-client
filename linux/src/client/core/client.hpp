@@ -1978,6 +1978,9 @@ private:
   void mcdata_alert_authorised(const std::string &group);
   void mcdata_regroup_command(std::istringstream &words);
   std::string mcdata_media_current_sdp() const;
+  void mcdata_conference_subscribe(bool fetch);
+  void mcdata_conference_unsubscribe();
+  SipResponse mcdata_conference_notify(const SipMessage &message);
   void mcdata_emergency_cancel_command(std::istringstream &words);
   SipResponse mcdata_emergency_cancel_received(const mcdata::Info &info);
   void mcdata_fa_binding(bool bind, const std::string &alias, const std::vector<std::string> &groups);
@@ -2174,6 +2177,10 @@ private:
   // the <originated-by> of a third-party cancel (6.2.8.1.14, 6.2.8.3.8)
   std::string mcdata_group_alert_originator_, mcdata_private_alert_originator_;
   Json mcdata_emergency_cancel_ = nullptr; // TS 24.282 clause 6.2.7.5: the pending cancel {group, alert, client_id}
+  // TS 24.282 clause 25.2: the MCData session identity of the open group session (its focus's Contact) and the
+  // conference event subscription to it ({participants, version, status})
+  std::string mcdata_session_uri_, mcdata_conference_dialog_;
+  Json mcdata_conference_ = nullptr;
   bool mcdata_session_imminent_ = false;
   std::string mcdata_session_group_;  // the group of an open group SDS session
   bool mcdata_session_adhoc_ = false; // that group is an ad hoc group (clause 24)

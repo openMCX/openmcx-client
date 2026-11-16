@@ -96,6 +96,7 @@ SipResponse Client::mcdata_media_invite(const SipMessage &invite) {
   // TS 24.282 clauses 9.2.3.4.3 step c and 9.2.4.4.3 step d: the priority the controlling function applied.
   mcdata_media_result_["used_priority"] = info.used_priority ? Json(*info.used_priority) : Json(nullptr);
   mcdata_media_group_ = info.calling_group;
+  mcdata_session_uri_ = contact_uri_of(get_header(invite.headers, "Contact")); // TS 24.282 clause 25.2 2)
   mcdata_media_peer_ = info.calling_group.empty() ? info.calling_user : std::string{};
   mcdata_media_select_key(info, adhoc);
   mcdata_media_offered_ = offered;

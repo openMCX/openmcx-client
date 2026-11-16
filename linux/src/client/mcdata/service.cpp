@@ -626,4 +626,80 @@ SipResponse Client::mcdata_emergency_cancel_received(const mcdata::Info &info) {
   return response;
 }
 
+//------------------------------------------------------------------------------
+// TS 24.282 clause 25.2: subscribe to the conference event package of the open group session: a SUBSCRIBE in a new
+// dialog (1), 9)) to the MCData session identity (2)), P-Preferred-Service and Accept-Contact with the MCData ICSI
+// (3)-4)), Expires 4294967295 (current state and changes, 5)) or 0 (fetch, 6)), Accept application/conference-info+xml
+// (7)), an MCData-Info with <mcdata-request-uri> the group (8)).
+void Client::mcdata_conference_subscribe(bool fetch) {
+  const auto group = !mcdata_session_group_.empty() ? mcdata_session_group_ : mcdata_media_group_;
+  if (!mcdata_media_ || !mcdata_media_session_ || group.empty() || mcdata_session_uri_.empty())
+    throw std::runtime_error("no group SDS session is open");
+  if (!fetch && !mcdata_conference_dialog_.empty()) throw std::runtime_error("already subscribed");
+  const std::string icsi = mcdata::icsi;
+  std::vector<SipHeader> headers{{"P-Preferred-Service", icsi},
+                                 {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(icsi) + "\";require;explicit"},
+                                 {"Accept", "application/conference-info+xml"}};
+  mcdata::Info info;
+  info.request_uri = group;
+  const auto parts = mcdata_seal_signalling({{mcdata::info_mime, mcdata::info_xml(info)}});
+  mcdata_conference_ = {{"group", group}, {"status", 0}, {"participants", Json::array()}, {"fetch", fetch}};
+  const auto dialog = sip_.subscribe(
+      mcdata_session_uri_, "conference", fetch ? 0u : 4294967295u, headers,
+      [this](const SipResponse &response) {
+        if (!mcdata_conference_.is_object()) return;
+        mcdata_conference_["status"] = response.status_code;
+        if (response.status_code >= 300) mcdata_conference_dialog_.clear();
+        event("mcdata_conference_subscribed", {{"status", response.status_code}});
+      },
+      parts.front().content_type, parts.front().body);
+  mcdata_conference_dialog_ = dialog;
+  event("mcdata_conference_subscribing", {{"group", group}, {"fetch", fetch}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 25.2 ("shall terminate the subscription"), RFC 6665 section 4.1.2.3: a SUBSCRIBE in its dialog
+// with Expires 0.
+void Client::mcdata_conference_unsubscribe() {
+  if (mcdata_conference_dialog_.empty()) throw std::runtime_error("no conference event subscription");
+  const std::string icsi = mcdata::icsi;
+  sip_.request_in_dialog(mcdata_conference_dialog_, "SUBSCRIBE", "", "",
+                         {{"Event", "conference"},
+                          {"Expires", "0"},
+                          {"Accept", "application/conference-info+xml"},
+                          {"P-Preferred-Service", icsi}},
+                         [this](const SipResponse &response) {
+                           event("mcdata_conference_unsubscribed", {{"status", response.status_code}});
+                         });
+  event("mcdata_conference_unsubscribing");
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 25.2 with RFC 6665 and RFC 4575: a NOTIFY of the subscription: 200 (OK); the participants of a
+// conference-info document kept (and shown); "terminated" ends the subscription.
+SipResponse Client::mcdata_conference_notify(const SipMessage &message) {
+  SipResponse response;
+  response.status_code = 200;
+  if (!mcdata_conference_.is_object()) mcdata_conference_ = {{"participants", Json::array()}};
+  for (const auto &part :
+       message.parts.empty() ? std::vector<BodyPart>{{message.content_type, message.body}} : message.parts) {
+    if (part.content_type != "application/conference-info+xml") continue;
+    try {
+      const auto info = parse_conference_info(part.body);
+      Json users = Json::array();
+      for (const auto &user : info.users) users.push_back({{"id", user.user_id}, {"status", user.status}});
+      mcdata_conference_["participants"] = users;
+      mcdata_conference_["version"] = info.version;
+      event("mcdata_conference_notified", {{"version", info.version}, {"participants", users}});
+    } catch (const std::exception &error) {
+      event("mcdata_conference_unreadable", {{"reason", error.what()}});
+    }
+  }
+  if (get_header(message.headers, "Subscription-State").starts_with("terminated")) {
+    mcdata_conference_dialog_.clear();
+    mcdata_conference_["terminated"] = true;
+  }
+  return response;
+}
+
 } // namespace mcx

@@ -381,6 +381,9 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
     ok.status_code = 200;
     return ok;
   }
+  // TS 24.282 clause 25.2: the MCData group session's conference event subscription.
+  if (mcdata_enabled() && !message.dialog_id.empty() && message.dialog_id == mcdata_conference_dialog_)
+    return mcdata_conference_notify(message);
   // TS 24.379 clause 9A.2.1.3: this user's functional alias status.
   if (!message.dialog_id.empty() && message.dialog_id == alias_status_dialog_) return alias_status_notify(message);
   if (get_header(message.headers, "Event") == "conference") return conference_notify(message);
