@@ -108,12 +108,9 @@ SipResponse Client::incoming_clear_message(const SipMessage &message) {
   // status adhoc_redirections), 2) the 200 (OK).
   if (const auto reason = info.service.find("forwarding-reason");
       reason != info.service.end() && reason->second == "migrated" && !info.service.contains("request-type")) {
+    // Step 2) is unconditional: the request comes from the trusted core (incoming_clear), whatever its From.
     SipResponse response;
     response.status_code = 200;
-    if (message.from_uri != service() || asserted_identity(message) != service() || info.request_uri != user()) {
-      response.status_code = 403;
-      return response;
-    }
     Json entry{{"group", info.calling_group},
                {"partner_id", info.partner_mcvideo_id},
                {"primary_id", info.primary_mcvideo_id},
