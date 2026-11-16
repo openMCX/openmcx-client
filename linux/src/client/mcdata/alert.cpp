@@ -25,9 +25,14 @@ const char *Client::mdea_name(int state) {
 // send the SIP MESSAGE request of an MCData emergency alert and follow the MDEA state on its response.
 void Client::mcdata_alert(bool activate, std::string group, const std::string &originator) {
   if (!mcdata_authorized_) throw std::runtime_error("emergency alert requires MCData service authorisation");
+  // TS 24.282 clause 16.2.1.1: without a group from the user, the <uri-entry> of <GroupEmergencyAlert>, else the
+  // group last used (here the configured MCData group).
+  if (group.empty() && activate && !mcdata_alert_entry_uri_.empty()) group = mcdata_alert_entry_uri_;
   if (group.empty()) group = activate || mcdata_alert_group_.empty() ? mcdata_group() : mcdata_alert_group_;
-  if (activate)
-    require_mcdata_profile({"allow-activate-emergency-alert"}); // TS 24.282 clause 6.2.8.1.6
+  if (activate) {
+    require_mcdata_profile({"allow-activate-emergency-alert"}); // TS 24.282 clause 6.2.8.1.6 1)
+    mcdata_alert_authorised(group);                              // TS 24.282 clause 6.2.8.1.6 2), 3)
+  }
   else
     require_mcdata_profile({originator.empty() || originator == mcdata_user()
                                 ? "allow-cancel-emergency-alert"
@@ -79,6 +84,35 @@ void Client::mcdata_alert(bool activate, std::string group, const std::string &o
       "MESSAGE");
   event("mcdata_emergency_alert_requested",
         {{"activate", activate}, {"group", group}, {"originated_by", info.originated_by}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 6.2.8.1.6: an emergency alert to `group` is authorised only if the group document has no
+// <preconfigured-group-use-only> "true" and the <entry> of <GroupEmergencyAlert> is a) "DedicatedGroup" with
+// <uri-entry> the group, or b) "UseCurrentlySelectedGroup" and the group document grants this user
+// <mcdata-allow-emergency-alert> (TS 24.481 clause 7.2.2); "in all other cases" it is not.
+void Client::mcdata_alert_authorised(const std::string &group) {
+  const auto document = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(group), {},
+                                      {{"Authorization", bearer()}});
+  std::string reason;
+  try {
+    if (document.status == 200 && parse_mcdata_group_sds(document.body).preconfigured_use_only)
+      reason = "preconfigured-group-use-only";
+    else if (mcdata_alert_entry_info_ == "DedicatedGroup") {
+      if (mcdata_alert_entry_uri_ != group) reason = "GroupEmergencyAlert DedicatedGroup names another group";
+    } else if (mcdata_alert_entry_info_ == "UseCurrentlySelectedGroup") {
+      if (document.status != 200 ||
+          !group_document_allows(document.body, "mcdata-allow-emergency-alert", {mcdata_user(), user()}))
+        reason = "mcdata-allow-emergency-alert";
+    } else
+      reason = "no GroupEmergencyAlert entry";
+  } catch (const std::exception &error) {
+    reason = std::string("unreadable group document: ") + error.what();
+  }
+  if (reason.empty()) return;
+  status_["mcdata_alert_not_allowed"] = {{"group", group}, {"reason", reason}};
+  event("mcdata_alert_not_allowed", {{"group", group}, {"reason", reason}});
+  throw std::runtime_error("emergency alert not allowed on " + group + " (" + reason + ", TS 24.282 clause 6.2.8.1.6)");
 }
 
 //------------------------------------------------------------------------------
@@ -289,6 +323,21 @@ void Client::mcdata_notify(Json &received, mcdata::DispositionNotification type)
   notice.sender = mcdata_user(); // Sender MCData user ID IE: identifies this notifier in an aggregate
   if (!received.at("application_id").is_null())
     notice.application_id = received.at("application_id").get<std::uint8_t>();
+  // TS 24.282 clause 6.2.3.1 step 9b: the Extended application ID of the message
+  if (received.contains("extended_application_id") && received.at("extended_application_id").is_string())
+    notice.extended_application_id = received.at("extended_application_id").get<std::string>();
+  // TS 24.582 clauses 6.1.2.6 1.a and 6.1.2.5: a message of the SDS session still open is answered in it (an MSRP
+  // SEND of the SDS NOTIFICATION, 6.1.2.5.3); otherwise, standalone or after the release, by SIP MESSAGE (TS 24.282
+  // clauses 9.2.1.3, 9.2.4.2.4, 12.2.1.1).
+  const auto serial = received.value("session_serial", Json(nullptr));
+  if (serial.is_number() && serial.get<std::uint64_t>() == mcdata_media_serial_ && mcdata_media_ &&
+      mcdata_media_session_) {
+    mcdata_media_->send_parts(mcdata_seal_msrp({{std::string(mcdata::signalling_mime), mcdata::encode(notice)}}));
+    event("mcdata_session_notification_sent",
+          {{"message_id", received.at("message_id")}, {"type", static_cast<int>(type)}});
+    received["notified"].push_back(static_cast<int>(type));
+    return;
+  }
   mcdata_request(
       "",
       {{mcdata::info_mime, mcdata::info_xml(info)},

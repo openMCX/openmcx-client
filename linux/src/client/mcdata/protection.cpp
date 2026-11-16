@@ -302,18 +302,204 @@ std::uint64_t Client::data_pck_end(const keying::KeyMessage &key) const {
 // whose I_MESSAGE the request carries in an application/mikey body.
 std::pair<keying::KeyMessage, std::string> Client::mcdata_pck_for(const std::string &peer) {
   expire_data_keys();
-  for (const auto &[id, context] : mcdata_pcks_)
-    if (context.peer == peer) return {context.key, {}};
   if (!mcdata_keys_) throw std::runtime_error("MCData key management client unavailable");
-  auto [key, message] = mcdata_keys_->make_pck(peer);
+  // TS 24.282 clauses 9.2.2.2.1 2)c)iv) and 9.2.3.2.3 7)c): the PCK is encrypted "using the MCData ID of the invited
+  // user" and its KMS URI (clause 6.2.8.3.9; after a KMS Redirect Response the receiver KMS it selected, TS 33.180
+  // clause 5.2.8.2.5). A security context with the peer under that KMS is kept; one under another KMS is replaced.
+  auto [kms, source] = mcdata_redirect_kms_.first == peer
+                           ? std::pair{std::exchange(mcdata_redirect_kms_, {}).second, std::string("kms-redirect")}
+                           : mcdata_target_kms(peer);
+  for (const auto &[id, context] : mcdata_pcks_)
+    if (context.peer == peer && (context.kms.empty() || context.kms == kms) && source != "kms-redirect")
+      return {context.key, {}};
+  std::erase_if(mcdata_pcks_, [&peer](const auto &entry) { return entry.second.peer == peer; });
+  if (!mcdata_keys_->knows_kms(kms)) {
+    status_["mcdata_pck_kms"] = {{"target", peer}, {"kms_uri", kms}, {"source", source}, {"known", false}};
+    throw std::runtime_error("no KMS certificate for the KMS URI of " + peer + ": " + kms);
+  }
+  auto [key, message] = mcdata_keys_->make_pck(peer, kms);
   if (mcdata_pcks_.size() >= 256) throw std::runtime_error("MCData PCK context capacity reached");
-  mcdata_pcks_[key.csb_id] = {key, peer, data_pck_end(key)};
+  mcdata_pcks_[key.csb_id] = {key, peer, data_pck_end(key), kms};
+  status_["mcdata_pck_kms"] = {{"target", peer}, {"kms_uri", kms}, {"source", source}, {"known", true}};
+  event("mcdata_pck_kms", status_["mcdata_pck_kms"]);
   return {key, message};
 }
 
 //------------------------------------------------------------------------------
+// TS 24.282 clause 11.1 and the SDS procedures, from the group document of the group (TS 24.481, read when needed):
+//   2)  <mcdata-allow-transmit-data-in-this-group> not granted to the user: "not allowed to send group MCData
+//       communications on this group identity";
+//   9.2.2.2.1 3)a) (and 9.2.3.2.3 8)a), 9.2.4.2.3 8)a)): <AllowedSDS> "false" refuses the SDS; that leaf is of the
+//       group configuration MO (TS 24.483), whose group document element is <mcdata-allow-short-data-service>; 11.1
+//       10) refuses an SDS session when that element is absent or "false";
+//   5)  a payload larger than <mcdata-on-network-max-data-size-for-SDS>;
+//   9.2.3.2.3 (pre-check) and 9.2.4.2.3 8)a1): <preconfigured-group-use-only> "true": no standalone SDS over the
+//       media plane and no SDS session on the group.
+void Client::mcdata_group_sds_allowed(const std::string &group, std::size_t size, bool media_plane, bool session) {
+  const auto response = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(group), {},
+                                      {{"Authorization", bearer()}});
+  event("mcdata_group_document_checked", {{"group", group}, {"status", response.status}});
+  if (response.status != 200) return; // no document: the server decides (TS 24.282 clause 11.1 for the server)
+  std::string reason;
+  try {
+    const auto sds = parse_mcdata_group_sds(response.body);
+    // the user is a list member by the "uri" of its <entry> (TS 24.481 clause 7.2.2: here the MC user's MCPTT ID) or by
+    // its <mcdata-mcdata-id>
+    if (!group_document_allows(response.body, "mcdata-allow-transmit-data-in-this-group", {mcdata_user(), user()}))
+      reason = "mcdata-allow-transmit-data-in-this-group";
+    else if (!sds.allow_sds)
+      reason = "mcdata-allow-short-data-service";
+    else if (sds.max_sds_bytes && size > *sds.max_sds_bytes)
+      reason = "mcdata-on-network-max-data-size-for-SDS";
+    else if (sds.preconfigured_use_only && (media_plane || session))
+      reason = "preconfigured-group-use-only";
+  } catch (const std::exception &error) {
+    reason = std::string("unreadable group document: ") + error.what();
+  }
+  if (reason.empty()) return;
+  status_["mcdata_sds_not_allowed"] = {{"group", group}, {"reason", reason}};
+  event("mcdata_sds_not_allowed", {{"group", group}, {"reason", reason}});
+  throw std::runtime_error("group SDS not allowed on " + group + " (" + reason + ", TS 24.282 clause 11.1)");
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clauses 10.2.2.1 and 10.2.4.2.1 (the group pre-check: <preconfigured-group-use-only> "true" - the user is
+// told and the procedure skipped), 10.2.4.2.1 3)a) / 10.2.5.2.3 9)a), a1) (AllowedFD, the group document's
+// <mcdata-allow-file-distribution>, clause 10.1), and clause 11.1 2), 6) (the transmit right, the group's
+// <mcdata-on-network-max-data-size-for-FD>): a group FD the group document does not allow is refused before anything
+// is sent.
+void Client::mcdata_group_fd_allowed(const std::string &group, std::uint64_t size) {
+  const auto response = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(group), {},
+                                      {{"Authorization", bearer()}});
+  event("mcdata_group_document_checked", {{"group", group}, {"status", response.status}, {"fd", true}});
+  if (response.status != 200) return; // no document: the server decides (clause 11.1 for the server)
+  std::string reason;
+  try {
+    const auto rules = parse_mcdata_group_sds(response.body);
+    if (rules.preconfigured_use_only)
+      reason = "preconfigured-group-use-only";
+    else if (!group_document_allows(response.body, "mcdata-allow-transmit-data-in-this-group", {mcdata_user(), user()}))
+      reason = "mcdata-allow-transmit-data-in-this-group";
+    else if (!rules.allow_fd)
+      reason = "mcdata-allow-file-distribution";
+    else if (rules.max_fd_bytes && size > *rules.max_fd_bytes)
+      reason = "mcdata-on-network-max-data-size-for-FD";
+  } catch (const std::exception &error) {
+    reason = std::string("unreadable group document: ") + error.what();
+  }
+  if (reason.empty()) return;
+  status_["mcdata_fd_not_allowed"] = {{"group", group}, {"reason", reason}};
+  event("mcdata_fd_not_allowed", {{"group", group}, {"reason", reason}});
+  throw std::runtime_error("group FD not allowed on " + group + " (" + reason + ", TS 24.282 clauses 10.2.4.2.1, 11.1)");
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 9.2.2.2.1 3)b)iii): "if the group identity identifies a temporary group ..., the <anyExt> element
+// with the <associated-group-id> element set to the MCData group ID of a constituent group the MCData client is member
+// of": the constituents of the group's <on-network-temporary> (TS 24.481 clause 7.2.4.2); the user's configured MCData
+// group or one it is affiliated to first, else the first listed (the GMS forms the group of the user's groups).
+std::string Client::mcdata_associated_group(const std::string &group) {
+  const auto response = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(group), {},
+                                      {{"Authorization", bearer()}});
+  if (response.status != 200) return {};
+  std::vector<std::string> constituents;
+  try {
+    constituents = group_temporary_constituents(response.body);
+  } catch (const std::exception &) {
+    return {};
+  }
+  if (constituents.empty()) return {};
+  for (const auto &id : constituents)
+    if (id == mcdata_group()) return id;
+  for (const auto &id : constituents)
+    if (mcdata_groups_.contains(id)) return id;
+  return constituents.front();
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 6.2.8.3.9, on network: "1) shall search for the <One-to-One-CommunicationListEntry> ... a) if
+// ... found and contains in the <anyExt> element a non-empty <MCData-ID-KMSURI> element, shall retrieve the KMS URI
+// contained therein; or b) if ... not found or the <MCData-ID-KMSURI> element is empty, shall retrieve the <kms>
+// element of the <App-Server-Info> ... of the UE initial configuration document": this client's own KMS.
+std::pair<std::string, std::string> Client::mcdata_target_kms(const std::string &target) const {
+  if (const auto found = mcdata_profile_kms_.find(target); found != mcdata_profile_kms_.end() && !found->second.empty())
+    return {found->second, "user-profile"};
+  return {mcdata_keys_->kms_uri_of(target), "initial-configuration"};
+}
+
+//------------------------------------------------------------------------------
+// TS 33.180 clause 5.2.8.2.5 ("Upon receipt of a KRR due to a previous attempt to distribute a key"), for the PCK of
+// a one-to-one MCData communication over the media plane (a 488 to its INVITE, TS 24.282 clauses 9.2.3.2.4 3)d),
+// 9.2.4.2.4 3)): the initiator KMS must be listed (1.), the receiver KMS is chosen among the listed ones this client
+// holds a certificate of (2.); then "a new MIKEY message using the selected KMSs", else the communication fails.
+bool Client::mcdata_kms_redirect(const SipResponse &response) {
+  const auto body = krr_body(response);
+  const auto target = mcdata_media_peer_;
+  if (!body || target.empty() || !mcdata_keys_ || !mcdata_media_retry_) return false;
+  Json record{{"target", target}};
+  std::string chosen;
+  try {
+    const auto krr = keying::parse_krr(*body);
+    record.update({{"creator", krr.creator},
+                   {"initiator_kms", krr.initiator_kms},
+                   {"receiver_kms", krr.receiver_kms},
+                   {"initiator_list", krr.initiator_any ? Json("ANY") : Json(krr.initiator_list)},
+                   {"receiver_list", krr.receiver_any ? Json("ANY") : Json(krr.receiver_list)}});
+    if (krr.initiator != mcdata_user() || krr.receiver != target)
+      throw std::runtime_error("a KMS Redirect Response for another MIKEY message");
+    if (mcdata_krr_count_ >= 3) throw std::runtime_error("too many KMS Redirect Responses");
+    const auto known = mcdata_keys_->known_kms();
+    if (known.empty()) throw std::runtime_error("KMS identity not provisioned");
+    const auto &home = known.front();
+    const auto listed = [](const std::vector<std::string> &list, const std::string &uri) {
+      return std::find(list.begin(), list.end(), uri) != list.end();
+    };
+    if (!krr.initiator_any && !listed(krr.initiator_list, home))
+      throw std::runtime_error("no acceptable initiator KMS");
+    std::vector<std::string> receivers;
+    if (krr.receiver_any)
+      receivers = known;
+    else
+      for (const auto &uri : krr.receiver_list)
+        if (listed(known, uri)) receivers.push_back(uri);
+    if (receivers.empty()) throw std::runtime_error("no acceptable receiver KMS");
+    chosen = listed(receivers, home) ? home : receivers.front();
+    if (chosen == krr.receiver_kms && home == krr.initiator_kms)
+      throw std::runtime_error("the KMS Redirect Response selects the KMSs already used");
+    record["selected_receiver_kms"] = chosen;
+    record["result"] = "new MIKEY message";
+  } catch (const std::exception &error) {
+    record["result"] = std::string("communication fails: ") + error.what();
+    status_["mcdata_last_krr"] = record;
+    event("mcdata_kms_redirect", record);
+    return false;
+  }
+  ++mcdata_krr_count_;
+  status_["mcdata_last_krr"] = record;
+  event("mcdata_kms_redirect", record);
+  mcdata_redirect_kms_ = {target, chosen};
+  mcdata_media_result_["state"] = "kms-redirect";
+  mcdata_media_close();
+  schedule([this, retry = mcdata_media_retry_] {
+    try {
+      retry();
+    } catch (const std::exception &error) {
+      failure(std::string("MCData media plane request after a KMS Redirect Response: ") + error.what());
+    }
+  });
+  return true;
+}
+
+//------------------------------------------------------------------------------
 // TS 33.180 clause 8.4 with TS 24.282 clause 6.6.3.2: the current GMK whose MC group IDs include the group.
-keying::KeyMessage Client::mcdata_gmk_for(const std::string &group) const { return gmk_for(group); }
+// TS 24.282 clause 23.1: a regroup using a preconfigured group takes the security keys of that group (its GMK).
+keying::KeyMessage Client::mcdata_gmk_for(const std::string &group) const {
+  if (mcdata_regroups_.contains(group)) {
+    const auto preconfigured = mcdata_regroups_.at(group).value("preconfigured", std::string{});
+    if (!preconfigured.empty()) return gmk_for(preconfigured);
+  }
+  return gmk_for(group);
+}
 
 //------------------------------------------------------------------------------
 // TS 33.180 clause 8.5.1: the Protected Payload message of an MCData message under a key (a DPPK or the CSK); it
@@ -402,7 +588,8 @@ std::string Client::mcdata_seal_file(const std::string &contents, const keying::
 // TS 33.180 clauses 8.5.1 and 8.5.4: the clear file from the protected binary data representing it.
 std::string Client::mcdata_open_file(const std::string &data, const mcdata::Info &info) {
   const std::span bytes(reinterpret_cast<const std::uint8_t *>(data.data()), data.size());
-  const auto plain = keying::open_series(bytes, protected_file_type,
+  // TS 33.180 assigns a protected file no message type (TS 37.579-1 table 5.5.3.10-1/-2: '01??????'B): any one type.
+  const auto plain = keying::open_series(bytes, 0,
                                          mcdata_dppk(keying::payload_key_id(bytes), info).key, payload_profile());
   ++mcdata_protected_received_;
   return {plain.begin(), plain.end()};

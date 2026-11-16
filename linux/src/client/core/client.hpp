@@ -577,6 +577,9 @@ class Client {
   std::map<std::string, ServiceProtection> service_protection_;
   // TS 24.484 clause 9.4.2.1 item c: the ad hoc group call support of each service configuration read.
   std::map<std::string, ServiceAdhoc> service_adhoc_;
+  // TS 24.484 clause 10.4.2.1 item 2: the <tx-and-rx-control> limits of the MCData service configuration (TS 24.282
+  // clause 9.2.1.1 2): the plane of a standalone SDS by <max-payload-size-sds-cplane-bytes>).
+  McDataTxRxLimits mcdata_tx_limits_;
   std::optional<ServiceProtection> protection_of(const std::string &service) const;
   void require_protection_known(const std::string &service, const std::vector<BodyPart> &parts) const;
   // mcptt.documents_on_notify: the sign-in waits for the MCPTT service configuration document of the configuration
@@ -887,17 +890,20 @@ class Client {
   void xcap_request(const std::string &method, const std::string &url, const std::string &content_type = {},
                     const std::string &body = {});
 
-  // TS 24.481 clauses 7.2.2 and 7.2.8: with mcvideo, an MCVideo group document (MCVideo <supported-services>,
-  // <mcvideo-mcvideo-id> in each <entry>).
+  // TS 24.481 clause 7.2.2: the MC service of a group document the client writes: MCPTT, an MCVideo group document
+  // (clause 7.2.8: MCVideo <supported-services>, <mcvideo-mcvideo-id> in each <entry>) or an MCData one
+  // (<mcdata-mcdata-id> in each <entry>, the MCData ICSI in <supported-services>).
+  enum class GroupDocService { Mcptt, Mcvideo, Mcdata };
+
   static std::string group_document_xml(const std::string &group, const std::vector<std::string> &members,
-                                        bool mcvideo = false);
+                                        GroupDocService service = GroupDocService::Mcptt);
 
   void profile_command(const std::string &cmd);
 
   void group_management_command(const std::string &cmd);
 
   static std::string temporary_group_request_xml(const std::string &group_id, const std::string &groups, bool chat,
-                                                 bool protect, bool mcvideo = false);
+                                                 bool protect, GroupDocService service = GroupDocService::Mcptt);
 
   std::string group_documents_subscribe(const std::vector<std::string> &args);
 
@@ -1954,7 +1960,46 @@ private:
     keying::KeyMessage key;
     std::string peer;
     std::uint64_t expires = 0;
+    std::string kms; // the KMS URI the PCK is keyed to (IDRkmsr, TS 24.282 clause 6.2.8.3.9)
   };
+  // TS 24.282 clause 6.2.8.3.9: the <MCData-ID-KMSURI> of each <One-to-One-CommunicationListEntry> of the MCData
+  // user profile; TS 33.180 clause 5.2.8.2.5: the receiver KMS a KMS Redirect Response selected for a target, the
+  // media plane request to send again with it, and the responses taken so far.
+  std::map<std::string, std::string> mcdata_profile_kms_;
+  std::string mcdata_alert_entry_info_, mcdata_alert_entry_uri_; // <GroupEmergencyAlert> (TS 24.282 6.2.8.1.6)
+  std::pair<std::string, std::string> mcdata_redirect_kms_;
+  std::function<void()> mcdata_media_retry_;
+  unsigned mcdata_krr_count_ = 0;
+  std::pair<std::string, std::string> mcdata_target_kms(const std::string &target) const;
+  // TS 24.282 clause 11.1 2), 5), 10), 9.2.2.2.1 3)a), 9.2.3.2.3, 9.2.4.2.3 8)a1): a group SDS the group document
+  // does not allow is refused before anything is sent.
+  void mcdata_group_sds_allowed(const std::string &group, std::size_t size, bool media_plane, bool session);
+  void mcdata_group_fd_allowed(const std::string &group, std::uint64_t size);
+  void mcdata_alert_authorised(const std::string &group);
+  void mcdata_regroup_command(std::istringstream &words);
+  std::string mcdata_media_current_sdp() const;
+  void mcdata_conference_subscribe(bool fetch);
+  void mcdata_adhoc_determine_command(std::istringstream &words);
+  void mcdata_adhoc_rejoin();
+  void mcdata_adhoc_modify(std::istringstream &words);
+  void mcdata_adhoc_alert_command(std::istringstream &words);
+  SipResponse mcdata_adhoc_alert_received(const mcdata::Info &info);
+  void mcdata_conference_unsubscribe();
+  SipResponse mcdata_conference_notify(const SipMessage &message);
+  void mcdata_emergency_cancel_command(std::istringstream &words);
+  SipResponse mcdata_emergency_cancel_received(const mcdata::Info &info);
+  void mcdata_fa_binding(bool bind, const std::string &alias, const std::vector<std::string> &groups);
+  Json mcdata_fa_binding_result_ = nullptr; // TS 24.282 clause 22.4.2.1: the outcome of the last binding request
+  std::optional<SipResponse> mcdata_regroup_received(const std::vector<BodyPart> &parts);
+  // TS 24.282 clause 9.2.2.2.1 3)b)iii) (C8): the temporary groups a constituent group's document names
+  // (<on-network-regrouped>), whose GMK is subscribed to (TS 33.180 clause 5.7), and the constituent group named in
+  // <associated-group-id> for an SDS to a temporary group.
+  std::set<std::string> mcdata_temporary_groups_;
+  // TS 24.282 clause 23: the regroups using a preconfigured group this client knows (temporary group identity ->
+  // {preconfigured, groups, users}) and the result of its last regroup request
+  Json mcdata_regroups_ = Json::object(), mcdata_regroup_result_ = nullptr;
+  std::string mcdata_associated_group(const std::string &group);
+  bool mcdata_kms_redirect(const SipResponse &response);
 
   std::map<std::uint32_t, DataKey> mcdata_pcks_;
   std::map<std::uint32_t, keying::KeyMessage> group_keys_;
@@ -2001,6 +2046,7 @@ private:
   // File distribution: files this client offered and received, and timer TDU2
   // (FD non-mandatory download timer, annex F.2.3) per Message ID.
   Json mcdata_files_sent_ = Json::array(), mcdata_fd_last_result_ = nullptr, mcdata_file_notifications_ = Json::array();
+  Json mcdata_deferred_list_ = nullptr; // TS 24.282 clause 11.3.2.2: the last list of deferred communications
   // The media storage function URI learned by discovery (clause 10.2.1.3) and the outcome.
   std::string mcdata_discovered_content_server_;
   Json mcdata_discovery_result_ = nullptr;
@@ -2029,6 +2075,42 @@ private:
 
   void mcdata_affiliate(bool affiliate);
 
+  // ---- MCData service settings and affiliation procedures, mcdata/settings_affiliation.cpp (TS 24.282 clauses 7.2.3,
+  // 7.2.4, 8.2.2-8.2.5, 8.2.7).
+  // The groups the user joined (clause 8.2.2) besides the configured one, and those it left (kept out of every
+  // PUBLISH until joined again).
+  std::set<std::string> mcdata_extra_groups_, mcdata_left_groups_;
+  // The selected MCData user profile (mcdata-profile; the configuration's profile_index otherwise), the service
+  // settings subscription, the settings cached per client (clause 7.2.4) and the result of the last settings PUBLISH.
+  std::optional<unsigned> mcdata_profile_index_;
+  std::string mcdata_settings_subscription_;
+  Json mcdata_service_settings_ = Json::object();
+  Json mcdata_settings_result_ = nullptr;
+  // Subscriptions besides the client's own affiliation status: dialog -> "poc-settings", "gdd:<group>" or the targeted
+  // MCData ID; the targeted users' affiliations (client ID, groups) for a mandatory-mode change; a received
+  // negotiated-mode request (clause 8.2.5) awaiting the user's answer.
+  std::map<std::string, std::string> mcdata_extra_subscriptions_;
+  std::map<std::string, Affiliation> mcdata_target_affiliations_;
+  Json mcdata_affiliation_command_;
+  // Group dynamic data (clause 8.2.7): the subscription dialog per group and what was notified.
+  std::map<std::string, std::string> mcdata_gdd_dialogs_;
+  Json mcdata_gdd_ = Json::object();
+
+  std::string mcdata_poc_settings() const;
+  std::string mcdata_client_filter() const;
+  void mcdata_settings_publish(bool remove);
+  SipResponse mcdata_settings_notify(const SipMessage &message);
+  void mcdata_settings_command(const std::string &verb, std::istringstream &words);
+  void mcdata_target_affiliation_command(const std::string &verb, std::istringstream &words);
+  void mcdata_gdd_command(const std::string &verb, std::istringstream &words);
+  SipResponse mcdata_extra_notify(const SipMessage &message);
+  std::optional<SipResponse> mcdata_affiliation_command_message(const SipMessage &message,
+                                                                const std::vector<BodyPart> &parts);
+  void mcdata_affiliation_command_answer(bool accept, const std::set<std::string> &only = {});
+  std::vector<std::string> mcdata_interest(const std::vector<std::string> &added) const;
+  bool mcdata_change_affiliation(const std::vector<std::string> &affiliate, const std::vector<std::string> &leave);
+  void mcdata_publish_affiliation(const std::vector<std::string> &added, bool none = false);
+
   //------------------------------------------------------------------------------
   // TS 24.282 clause 9.2.2.2.1 with clause 6.2.2.1: a standalone SDS message over the signalling control plane.
   // type is "one-to-one-sds" (target: MCData ID, or a functional alias with
@@ -2043,6 +2125,9 @@ private:
     bool to_alias = false;                                   // <call-to-functional-alias-ind>
     std::string called_alias;                                // <called-functional-alias-URI> after a 300 redirect
     mcdata::ContentType content = mcdata::ContentType::Text; // ENHANCED STATUS for clause 14.2.1.1
+    // TS 24.282 clause 6.2.2.1 (SDS SIGNALLING PAYLOAD) steps 7b and 12: the Extended application ID and the
+    // Application metadata container; the Payload data of a non-text payload (clause 15.2.13) is in text as given.
+    std::optional<std::string> extended_application, metadata;
     bool tamper_key = false;                                 // test aid: send an altered I_MESSAGE with a new PCK
     bool tamper_signature = false;                           // test aid: send a payload whose signature is altered
   };
@@ -2054,7 +2139,8 @@ private:
 
   const EnhancedStatusValues &mcdata_group_status_values(const std::string &group, bool refresh);
 
-  void mcdata_send_enhanced_status(const std::string &group, const std::string &id, bool force = false);
+  void mcdata_send_enhanced_status(const std::string &group, const std::string &id, bool force = false,
+                                   mcdata::DispositionRequest disposition = mcdata::DispositionRequest::None);
 
   std::vector<std::string> mcdata_adhoc_target(const std::string &spec, mcdata::Info &info) const;
 
@@ -2078,14 +2164,37 @@ private:
   std::vector<std::pair<std::string, std::string>> mcdata_media_pending_;
   std::string mcdata_media_message_id_;
   bool mcdata_media_acknowledged_ = false, mcdata_media_session_ = false;
+  // The media plane communications closed so far: a received message of the open SDS session carries the current
+  // value, so that its disposition notification goes in that session (TS 24.582 clause 6.1.2.5).
+  std::uint64_t mcdata_media_serial_ = 0;
   // MCData emergency private communication state (TS 24.282 annex G.4.11) of the open session, and
   // whether this client asked for the emergency condition.
   int mdepc_ = 1;
+  int mdepp_ = 1; // TS 24.282 annex G.4.10: the MCData emergency private priority state (MDEPP) of the session
   bool mcdata_session_emergency_ = false;
   // The priority states of a group SDS session (TS 24.282 annex G.4): the emergency and imminent peril group
   // communication states of this client (MDEGC annex G.4.5, MDIGC annex G.4.8) and the in-progress states of the
   // group itself as this client knows them (MDEG annex G.4.3, MDIG annex G.4.6).
   int mdegc_ = 1, mdeg_ = 1, mdigc_ = 1, mdig_ = 1;
+  std::string mcdata_priority_group_; // the group MDEG and MDIG are the states of (empty: none known)
+  bool mcdata_media_priority_request_ = false; // the open FD over the media plane is a priority request (10.2.5.2.3)
+  // the MCData ID of the user whose emergency alert a received priority request announced (6.2.7.4 1), 6.2.8.4.2 1)):
+  // the <originated-by> of a third-party cancel (6.2.8.1.14, 6.2.8.3.8)
+  std::string mcdata_group_alert_originator_, mcdata_private_alert_originator_;
+  Json mcdata_emergency_cancel_ = nullptr; // TS 24.282 clause 6.2.7.5: the pending cancel {group, alert, client_id}
+  // TS 24.282 clause 25.2: the MCData session identity of the open group session (its focus's Contact) and the
+  // conference event subscription to it ({participants, version, status})
+  std::string mcdata_session_uri_, mcdata_conference_dialog_;
+  Json mcdata_conference_ = nullptr;
+  // TS 24.282 clause 24: the result of an ad hoc group determination (24.2.7.2), the last ad hoc group session
+  // {uri, target, criteria} for a rejoin (24.2.5.1.1) and the Request-URI of one being rejoined
+  Json mcdata_adhoc_determined_ = nullptr, mcdata_adhoc_last_ = nullptr;
+  std::string mcdata_rejoin_uri_;
+  // TS 24.282 clause 16.2A and annex G.4.13: this user's ad hoc group emergency alert {group, criteria, client_id,
+  // state} and its state AH-MEA; the ad hoc alerts received
+  Json mcdata_adhoc_alert_ = nullptr;
+  int mcdata_ah_mea_ = 1;
+  Json mcdata_adhoc_alerts_ = Json::array();
   bool mcdata_session_imminent_ = false;
   std::string mcdata_session_group_;  // the group of an open group SDS session
   bool mcdata_session_adhoc_ = false; // that group is an ad hoc group (clause 24)
@@ -2128,6 +2237,17 @@ private:
   Json mcdata_media_files_ = Json::array();         // files received over the media plane
   Json mcdata_group_notifications_ = Json::array(); // in-progress state notifications (clause 6.3.7.1.2)
   Json mcdata_media_offered_ = nullptr;             // the file being offered to this client
+  // TS 24.282 clause 10.2.5.2.4 7)a): an FD INVITE (non-mandatory download) waiting for the user's decision, and the
+  // decision taken (accept) while the invitation is answered
+  std::optional<SipMessage> mcdata_media_pending_invite_;
+  bool mcdata_media_user_accepted_ = false;
+  // TS 24.282 clause 6.2.8.4.1 2): the priority states as they were before the pending FD invitation changed them
+  // (clause 10.2.5.2.4 steps 5A to 5C), restored when the invitation is cancelled before it is answered.
+  struct McdataPriorityStates {
+    int mdegc, mdeg, mdigc, mdig, mdepp;
+    std::string group, alert_originator;
+  };
+  std::optional<McdataPriorityStates> mcdata_media_pending_states_;
   mcdata::Uuid mcdata_media_conversation_{};
   std::string mcdata_media_answer_; // repeated when a re-INVITE arrives
   Json mcdata_media_sent_ = Json::array();
@@ -2150,17 +2270,19 @@ private:
 
   void mcdata_media_answered(const SipResponse &raw, const char *what);
 
-  void mcdata_session_priority(bool emergency, bool enable);
+  void mcdata_session_priority(bool emergency, bool enable, bool with_alert = false);
 
-  void mcdata_group_priority(bool emergency, bool enable);
+  void mcdata_group_priority(bool emergency, bool enable, bool with_alert = false);
 
   void mcdata_session_send(const std::string &text, mcdata::DispositionRequest disposition);
 
   void mcdata_send_file_media(const std::string &target, bool group, const std::string &path, bool mandatory,
-                              bool completion);
+                              bool completion, const std::optional<std::string> &application_metadata = {},
+                              const std::string &priority = "normal");
 
   void mcdata_send_media_sds(const std::string &target, const std::string &text, bool group = false,
-                             std::optional<unsigned> priority = std::nullopt);
+                             std::optional<unsigned> priority = std::nullopt,
+                             mcdata::DispositionRequest disposition = mcdata::DispositionRequest::None);
 
   // ---- MCData communication release (mcdata/release.cpp) ----
   // TS 24.282 clause 13 over the media plane: what this client learned about the release of
@@ -2213,6 +2335,9 @@ private:
 
   // ---- MCData media plane, terminating side and MSRP transfer (mcdata/media_session.cpp) ----
   SipResponse mcdata_media_invite(const SipMessage &invite);
+  void mcdata_media_file_answer(const std::string &decision);
+  bool mcdata_media_pending_ended(std::string_view id, int code);
+  void mcdata_one_to_one_fd_allowed(std::uint64_t size);
 
   // re-INVITE in the media plane session's dialog: priority state (TS 24.282 clause 6.2.8.4.2, 9.2.4.2.4).
   SipResponse mcdata_media_reinvite(const mcdata::Info &info);
@@ -2245,6 +2370,8 @@ private:
   std::string mcdata_content_server() const;
 
   void mcdata_discover_content_server(const std::string &group);
+  void mcdata_request_deferred_list();
+  SipResponse mcdata_deferred_list_received(const BodyPart &signalling, const mcdata::Info &info);
 
   std::string mcdata_upload(const std::string &path, const std::string &group, std::string &name, std::uint64_t &size,
                             std::string &digest, const keying::KeyMessage *key = nullptr);
@@ -2263,6 +2390,7 @@ private:
     std::optional<std::uint8_t> application;
     std::optional<mcdata::Uuid> conversation;
     std::uint64_t available_for = 0; // seconds; 0 leaves the availability to the server
+    std::optional<std::string> application_metadata; // TS 24.282 clause 6.2.2.2 12), 15.2.28
   };
 
   void mcdata_send_file(const FdRequest &request);
@@ -2356,6 +2484,8 @@ private:
   bool mcdata_render_enhanced_status(const mcdata::DataPayload &payload, const std::string &id,
                                      const mcdata::Info &info);
   // Keep a received SDS and answer its disposition request (TS 24.282 clause 9.2.1.3).
+  bool mcdata_sds_accepted(Json &received, const mcdata::SdsSignalling &sds, const std::string &id,
+                           const mcdata::Info &info);
   void mcdata_deliver_sds(Json &received, const mcdata::SdsSignalling &sds, const mcdata::DataPayload &payload,
                           const std::string &id, const mcdata::Info &info);
 

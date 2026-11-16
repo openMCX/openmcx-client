@@ -74,6 +74,52 @@ void Client::mcdata_discover_content_server(const std::string &group) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.282 clause 11.3.2.1: the request for the list of deferred data group communications: a SIP MESSAGE built as
+// clause 6.2.4.1 says (the FD media feature tag and ICSI, step 2) with the DEFERRED DATA REQUEST.
+void Client::mcdata_request_deferred_list() {
+  if (!mcdata_authorized_) throw std::runtime_error("the deferred list requires MCData service authorisation");
+  mcdata_request(
+      "", {{mcdata::signalling_mime, mcdata::encode_deferred_list_request()}}, mcdata_fd_headers(),
+      [this](const SipResponse &response) {
+        if (response.status_code >= 300) failure("deferred list request: " + std::to_string(response.status_code));
+      },
+      "MESSAGE");
+  event("mcdata_deferred_list_requested", {});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 11.3.2.2: "SIP MESSAGE response for the list of deferred group communications request": 200
+// (OK), then each deferred file URL kept with its group (3)a)i)) and the list given to the user (4)).
+SipResponse Client::mcdata_deferred_list_received(const BodyPart &signalling, const mcdata::Info &info) {
+  SipResponse response;
+  response.status_code = 200;
+  mcdata::DeferredListResponse list;
+  try {
+    list = mcdata::decode_deferred_list_response(signalling.body);
+  } catch (const std::exception &error) {
+    event("mcdata_deferred_list_unreadable", {{"reason", error.what()}});
+    return response;
+  }
+  Json entries = Json::array();
+  for (std::size_t index = 0; index < list.file_urls.size(); ++index)
+    entries.push_back({{"url", list.file_urls[index]},
+                       {"group", index < list.groups.size() ? Json(list.groups[index]) : Json(nullptr)}});
+  for (std::size_t index = 0; index < list.fd_payloads.size(); ++index) {
+    try {
+      const auto fd = mcdata::decode_fd_signalling(list.fd_payloads[index]);
+      entries.push_back({{"url", fd.file_url},
+                         {"group", index < list.groups.size() ? Json(list.groups[index]) : Json(nullptr)},
+                         {"conversation_id", mcdata::uuid_text(fd.conversation)},
+                         {"message_id", mcdata::uuid_text(fd.message)}});
+    } catch (const std::exception &) {
+    }
+  }
+  mcdata_deferred_list_ = entries;
+  event("mcdata_deferred_list_received", {{"count", entries.size()}, {"from", info.calling_user}});
+  return response;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.282 clause 10.2.2.1: upload the file with an HTTP POST of a multipart/mixed body, and keep
 // the URL of the Location header field of the 201 (Created) response.
 std::string Client::mcdata_upload(const std::string &path, const std::string &group, std::string &name,
@@ -199,11 +245,29 @@ std::vector<SipHeader> Client::mcdata_fd_headers() const {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.282 clause 11.1 4): a one-to-one FD larger than <max-data-size-fd-bytes> of the MCData service configuration
+// (TS 24.484 clause 10.4.2.1 2c)) is not allowed: the client stops before it uploads or offers anything.
+void Client::mcdata_one_to_one_fd_allowed(std::uint64_t size) {
+  if (!mcdata_tx_limits_.max_data_size_fd || size <= *mcdata_tx_limits_.max_data_size_fd) return;
+  status_["mcdata_fd_not_allowed"] = {{"reason", "max-data-size-fd-bytes"}, {"size", size},
+                                      {"limit", *mcdata_tx_limits_.max_data_size_fd}};
+  event("mcdata_fd_not_allowed", {{"reason", "max-data-size-fd-bytes"}, {"size", size},
+                                  {"limit", *mcdata_tx_limits_.max_data_size_fd}});
+  throw std::runtime_error("FD larger than <max-data-size-fd-bytes> (TS 24.282 clause 11.1 step 4)");
+}
+
+//------------------------------------------------------------------------------
 // TS 24.282 clauses 10.2.4.1 and 10.2.4.2.1: upload the file, then send the FD request naming its URL; a SIP 300
 // (Multiple Choices) response to a functional alias target sends it again to the selected MCData ID.
 void Client::mcdata_send_file(const FdRequest &request) {
   if (!mcdata_authorized_) throw std::runtime_error("file distribution requires MCData service authorisation");
   require_mcdata_profile({"allow-transmit-data"}); // TS 24.282 clause 11.1 step 1
+  if (request.group && !request.path.empty() && request.url_override.empty())
+    mcdata_group_fd_allowed(request.target, std::filesystem::exists(request.path)
+                                                ? static_cast<std::uint64_t>(std::filesystem::file_size(request.path))
+                                                : 0);
+  if (!request.group && !request.path.empty() && request.url_override.empty() && std::filesystem::exists(request.path))
+    mcdata_one_to_one_fd_allowed(static_cast<std::uint64_t>(std::filesystem::file_size(request.path))); // 11.1 4)
   std::string name, digest;
   std::uint64_t size = 0;
   std::string url = request.url_override;
@@ -244,6 +308,7 @@ void Client::mcdata_send_file(const FdRequest &request) {
   signalling.mandatory_download = request.mandatory;
   signalling.completion_requested = request.completion;
   signalling.file_url = url;
+  signalling.application_metadata = request.application_metadata; // TS 24.282 clause 6.2.2.2 12)
   signalling.metadata = mcdata::file_metadata(
       name.empty() ? std::filesystem::path(request.path).filename().string() : name, size, "application/octet-stream",
       "", request.available_for ? static_cast<std::uint64_t>(std::time(nullptr)) + request.available_for : 0, digest);
@@ -322,6 +387,8 @@ void Client::mcdata_cancel_file(const std::string &id, mcdata::TerminationType t
   request.file_url = record.value("file_url", std::string{});
   mcdata::Info info;
   info.client_id = client_id();
+  // TS 24.282 clause 13.2.4.5.2.2 3)a): the stored PSI of the controlling function
+  if (type == mcdata::TerminationType::ExtensionRequest) info.controller_psi = record.value("controller_psi", std::string{});
   if (own) {
     info.request_type = record.value("request_type", std::string{});
     if (info.request_type == "group-fd") info.request_uri = record.value("target", std::string{});
@@ -336,8 +403,13 @@ void Client::mcdata_cancel_file(const std::string &id, mcdata::TerminationType t
   auto headers = mcdata_fd_headers();
   if (!reason.empty())
     headers.push_back({"Reason", "SIP;cause=200;text=\"" + reason + "\""}); // TS 24.282 clause 13.2.6.3.2.1 step 3
+  std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
+  // TS 24.282 clause 13.2.2.3.2.1.1 2)a): a one-to-one release names the recipient in a resource-lists body (RFC 4826).
+  if (own && info.request_type == "one-to-one-fd")
+    parts.push_back({resource_lists_mime, private_call_resource_list(record.value("target", std::string{}))});
+  parts.push_back({mcdata::signalling_mime, mcdata::encode(request)});
   mcdata_request(
-      "", {{mcdata::info_mime, mcdata::info_xml(info)}, {mcdata::signalling_mime, mcdata::encode(request)}}, headers,
+      "", parts, headers,
       [this, id, action](const SipResponse &response) {
         mcdata_fd_last_result_ = {{"message_id", id},
                                   {"action", action},
@@ -366,6 +438,9 @@ void Client::mcdata_file_incoming(const mcdata::Info &info, const mcdata::FdSign
                {"mandatory", request.mandatory_download},
                {"completion_requested", request.completion_requested},
                {"application_id", request.application_id ? Json(*request.application_id) : Json(nullptr)},
+               // TS 24.282 clause 10.2.1.2.1 7): the Application metadata container, kept for the application
+               {"application_metadata",
+                request.application_metadata ? Json(*request.application_metadata) : Json(nullptr)},
                {"state", "offered"},
                {"notified", Json::array()},
                {"download_status", nullptr}};

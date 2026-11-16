@@ -314,13 +314,28 @@ void Client::msgstore_command(std::istringstream &words) {
   }
   if (op == "subscribe") return store_subscribe();
   if (op == "unsubscribe") return store_unsubscribe();
+  if (op == "subscription-extend") { // TS 24.282 clause 21.2.14A.1 1): extend the lifetime of the subscription
+    need(1);
+    if (store_channel_.subscription.empty()) throw std::runtime_error("not subscribed");
+    store_request("POST", store_channel_.subscription,
+                  {{"nmsSubscriptionUpdate", {{"duration", std::stoll(args[0])}}}});
+    return;
+  }
+  if (op == "channel-lifetime") { // TS 24.282 clause 21.2.21.1: the notification channel's new lifetime
+    need(1);
+    if (store_channel_.resource.empty()) throw std::runtime_error("no notification channel");
+    store_request("PUT", store_channel_.resource + "/channelLifetime",
+                  {{"notificationChannelLifetime", {{"channelLifetime", std::stoll(args[0])}}}});
+    return;
+  }
   if (op == "restart") { // TS 24.282 clause 21.2.14A.1: restart the notification stream from an index
     need(1);
     return msgstore_restart(args);
   }
   throw std::runtime_error(
       "mcdata-msgstore sync|get|payload|search|flag|unflag|bulk-flag|delete|folders|folder|folder-search|"
-      "folder-create|folder-delete|move|copy|move-folder|copy-folder|upload|retrieve|subscribe|unsubscribe|restart");
+      "folder-create|folder-delete|move|copy|move-folder|copy-folder|upload|retrieve|subscribe|unsubscribe|restart|"
+      "subscription-extend|channel-lifetime");
 }
 
 //------------------------------------------------------------------------------

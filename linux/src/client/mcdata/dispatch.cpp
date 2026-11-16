@@ -24,7 +24,10 @@ SipResponse Client::mcdata_incoming(const SipMessage &message) {
     return response;
   }
   const auto parts = message.parts.empty() ? parse_body_parts(message.content_type, message.body) : message.parts;
+  // TS 24.282 clause 8.2.5: a negotiated-mode affiliation status change request from an authorised user.
+  if (auto handled = mcdata_affiliation_command_message(message, parts)) return *handled;
   if (auto handled = mcdata_group_state_received(parts)) return *handled;
+  if (auto handled = mcdata_regroup_received(parts)) return *handled; // TS 24.282 clauses 23.2.1.3, 23.2.1.4
   if (service == mcdata::icsi) {
     response.status_code = 403;
     return response;
@@ -55,6 +58,7 @@ SipResponse Client::mcdata_incoming(const SipMessage &message) {
   case mcdata::MessageType::FdNotification: return mcdata_fd_notifications_received(signalling_parts, info);
   case mcdata::MessageType::FdHttpTermination: return mcdata_fd_termination_received(message, *signalling, info);
   case mcdata::MessageType::FdNetworkNotification: return mcdata_fd_unavailable_received(*signalling, info);
+  case mcdata::MessageType::DeferredListResponse: return mcdata_deferred_list_received(*signalling, info);
   default: break;
   }
   if (service != mcdata::sds_icsi) {
@@ -83,6 +87,12 @@ std::optional<SipResponse> Client::mcdata_group_state_received(const std::vector
   for (const auto &part : parts)
     if (part.content_type == mcdata::info_mime) {
       const auto alert_info = mcdata::parse_info(part.body);
+      // TS 24.282 clause 6.2.7.5: the receipt of this client's cancel of a group's emergency.
+      if (alert_info.emergency_received == true) return mcdata_emergency_cancel_received(alert_info);
+      // TS 24.282 clause 16.2A.1: an ad hoc group emergency alert (before <alert-ind>, which 6.3.7.1.3 also sets)
+      if (alert_info.adhoc_alert.has_value() || alert_info.response_type ==
+                                                    "ad-hoc-emergency-alert-participant-criteria-modification")
+        return mcdata_adhoc_alert_received(alert_info);
       // TS 24.282 clause 6.3.7.1.2: the in-progress emergency or imminent peril state of a group,
       // sent to its affiliated members that are not participating.
       if (!alert_info.calling_group.empty() && (alert_info.emergency || alert_info.imminent_peril)) {
@@ -221,7 +231,12 @@ SipResponse Client::mcdata_fd_termination_received(const SipMessage &message, co
   default: break;
   }
   for (auto &entry : mcdata_files_sent_)
-    if (entry.at("message_id") == id && !state.empty()) entry["state"] = state;
+    if (entry.at("message_id") == id) {
+      if (!state.empty()) entry["state"] = state;
+      // TS 24.282 clause 13.2.4.5.2.1: the controlling function's PSI, for the extension request (13.2.4.5.2.2 3)a));
+      // the clause reads it from the mcdata-signalling body, but the server puts it in the MCData-Info (13.2.4.5.4.1)
+      if (!info.controller_psi.empty()) entry["controller_psi"] = info.controller_psi;
+    }
   bounded_push(mcdata_file_notifications_,
                {{"from", mcdata_service()},
                 {"group", info.calling_group},
@@ -310,6 +325,9 @@ SipResponse Client::mcdata_sds_received(const std::vector<BodyPart> &parts, cons
       {"group", info.calling_group},
       {"request_type", info.request_type},
       {"application_id", sds.application_id ? Json(*sds.application_id) : Json(nullptr)},
+      {"extended_application_id",
+       sds.extended_application_id ? Json(*sds.extended_application_id) : Json(nullptr)},
+      {"application_metadata", sds.application_metadata ? Json(*sds.application_metadata) : Json(nullptr)},
       {"disposition", static_cast<int>(sds.disposition)},
       {"displayed", false},
       {"notified", Json::array()},
@@ -325,22 +343,7 @@ SipResponse Client::mcdata_sds_received(const std::vector<BodyPart> &parts, cons
       {"protected", dppk.has_value()},
       {"dppk_id", dppk ? Json(*dppk) : Json(nullptr)},
       {"authenticated", authenticated}};
-  // TS 24.282 clause 9.2.1.2 steps 6 and 7: user content is rendered; application content goes to a
-  // known application and is discarded otherwise.
-  const auto applications = cfg_.at("mcdata").value("applications", std::vector<unsigned>{});
-  if (sds.application_id &&
-      std::find(applications.begin(), applications.end(), *sds.application_id) == applications.end()) {
-    ++mcdata_discarded_;
-    event("mcdata_sds_discarded", {{"message_id", id}, {"application_id", *sds.application_id}});
-    return response;
-  }
-  if (mcdata_storage_limit_ && mcdata_received_.size() >= *mcdata_storage_limit_) {
-    // TS 24.282 clause 12.2.1.1: tell the participating function, which can store it for re-delivery.
-    mcdata_notify(received, mcdata::DispositionNotification::Undelivered);
-    bounded_push(mcdata_undelivered_, {{"message_id", id}, {"from", info.calling_user}, {"group", info.calling_group}});
-    event("mcdata_sds_undelivered", {{"message_id", id}, {"from", info.calling_user}});
-    return response;
-  }
+  if (!mcdata_sds_accepted(received, sds, id, info)) return response;
   if (!mcdata_render_enhanced_status(payload, id, info)) return response;
   mcdata_deliver_sds(received, sds, payload, id, info);
   return response;
@@ -348,7 +351,8 @@ SipResponse Client::mcdata_sds_received(const std::vector<BodyPart> &parts, cons
 
 //------------------------------------------------------------------------------
 // TS 24.282 clause 9.2.2.2.2 step 3 and clause 6.6.3.2: accept the PCK sent with the message, verify a signed
-// DATA PAYLOAD and decrypt a protected one end to end; the failure response, or empty when the payload is open.
+// DATA PAYLOAD and decrypt a protected one end to end; the response that ends the handling (606 for a MIKEY-SAKKE
+// failure, 200 for a payload that is not opened: accepted, not delivered), or empty when the payload is open.
 std::optional<SipResponse> Client::mcdata_open_sds_payload(const std::vector<BodyPart> &parts, const mcdata::Info &info,
                                                            std::string &data_body, std::optional<std::uint32_t> &dppk,
                                                            bool &authenticated) {
@@ -373,7 +377,8 @@ std::optional<SipResponse> Client::mcdata_open_sds_payload(const std::vector<Bod
     } catch (const std::exception &error) {
       ++mcdata_signature_failures_;
       event("mcdata_signature_rejected", {{"from", info.calling_user}, {"reason", error.what()}});
-      response.status_code = 606;
+      // TS 24.282 clause 9.2.2.2.2: only a MIKEY-SAKKE failure (step 3d, 606) or a lack of resources (step 2, 480)
+      // refuses the request; the message is accepted (steps 4-5) and, unverified, not delivered (TS 33.180 8.5.5)
       return response;
     }
   }
@@ -386,7 +391,7 @@ std::optional<SipResponse> Client::mcdata_open_sds_payload(const std::vector<Bod
       ++mcdata_protection_failures_;
       event("mcdata_payload_undecryptable",
             {{"from", info.calling_user}, {"group", info.calling_group}, {"reason", error.what()}});
-      response.status_code = 606;
+      // as above: 200 (OK), and the message, without plaintext (TS 33.180 8.5.4.2, RFC 5116 2.2), not delivered
       return response;
     }
   }
@@ -427,13 +432,46 @@ bool Client::mcdata_render_enhanced_status(const mcdata::DataPayload &payload, c
 //------------------------------------------------------------------------------
 // TS 24.282 clause 9.2.1.2 and clause 9.2.1.3: keep the received message (the last 50) and answer its disposition
 // request.
+//------------------------------------------------------------------------------
+// TS 24.282 clause 9.2.1.2 (TS 24.582 clauses 6.1.1.3.2 and 6.1.2.6 for an SDS over the media plane): whether a received
+// SDS goes on to be delivered. Application content goes to a known application and is discarded otherwise (steps 6 to
+// 8: an Application ID or Extended application ID this client does not serve); with no room left the SDS is not
+// delivered and its disposition notification is UNDELIVERED (TS 24.282 clause 6.2.3.1 4), 12.2.1.1; TS 24.582 clause
+// 6.1.2.5.2 4): in the session for an SDS of the session).
+bool Client::mcdata_sds_accepted(Json &received, const mcdata::SdsSignalling &sds, const std::string &id,
+                                 const mcdata::Info &info) {
+  const auto applications = cfg_.at("mcdata").value("applications", std::vector<unsigned>{});
+  if (sds.application_id &&
+      std::find(applications.begin(), applications.end(), *sds.application_id) == applications.end()) {
+    ++mcdata_discarded_;
+    event("mcdata_sds_discarded", {{"message_id", id}, {"application_id", *sds.application_id}});
+    return false;
+  }
+  const auto extended = cfg_.at("mcdata").value("extended_applications", std::vector<std::string>{});
+  if (sds.extended_application_id &&
+      std::find(extended.begin(), extended.end(), *sds.extended_application_id) == extended.end()) {
+    ++mcdata_discarded_;
+    event("mcdata_sds_discarded", {{"message_id", id}, {"extended_application_id", *sds.extended_application_id}});
+    return false;
+  }
+  if (mcdata_storage_limit_ && mcdata_received_.size() >= *mcdata_storage_limit_) {
+    // TS 24.282 clause 12.2.1.1: tell the participating function, which can store it for re-delivery.
+    mcdata_notify(received, mcdata::DispositionNotification::Undelivered);
+    bounded_push(mcdata_undelivered_, {{"message_id", id}, {"from", info.calling_user}, {"group", info.calling_group}});
+    event("mcdata_sds_undelivered", {{"message_id", id}, {"from", info.calling_user}});
+    return false;
+  }
+  return true;
+}
+
 void Client::mcdata_deliver_sds(Json &received, const mcdata::SdsSignalling &sds, const mcdata::DataPayload &payload,
                                 const std::string &id, const mcdata::Info &info) {
-  received["delivered_to"] = sds.application_id ? "application" : "user";
+  received["delivered_to"] = sds.application_id || sds.extended_application_id ? "application" : "user";
   Json contents = Json::array();
   for (const auto &part : payload.payloads)
     contents.push_back({{"content_type", static_cast<int>(part.type)},
                         {"text", part.type == mcdata::ContentType::Text ? Json(part.data) : Json(nullptr)},
+                        {"hex", client_rules::hex_text(part.data)},
                         {"bytes", part.data.size()}});
   received["payloads"] = contents;
   mcdata_received_[id] = received;
@@ -494,7 +532,14 @@ void Client::mcdata_tick() {
 //   mcdata-fa activate|takeover|deactivate <alias>...   mcdata-fa use <alias>|none
 //   sds-reply [delivery|read|both] [escaped] <message ID> <text>     (same conversation, InReplyTo)
 //   sds-display <message ID>          (display indication, TS 24.282 clause 9.2.1.3)
-//   mcdata-affiliate | mcdata-deaffiliate
+//   mcdata-affiliate [<group>...] | mcdata-deaffiliate [<group>...]   (clause 8.2.2: without a group, the configured
+//                                     one and every group of interest / every group)
+//   mcdata-affiliation-subscribe <MCData ID> [fetch] | mcdata-affiliation-unsubscribe <MCData ID>   (clause 8.2.3)
+//   mcdata-affiliate-remote <MCData ID> <group> affiliate|deaffiliate mandatory|negotiated   (clauses 8.2.2, 8.2.4)
+//   mcdata-affiliation-accept [<group>...] | mcdata-affiliation-decline   (clause 8.2.5)
+//   mcdata-settings-publish [remove] | mcdata-settings-subscribe [fetch] | mcdata-settings-resubscribe |
+//   mcdata-settings-unsubscribe | mcdata-profile <index>   (clauses 7.2.3, 7.2.4)
+//   mcdata-gdd-subscribe <group> [...] | mcdata-gdd-resubscribe <group> | mcdata-gdd-unsubscribe <group> (8.2.7)
 //   mcdata-storage full|unlimited|<n>   (received messages the client can hold)
 //   mcdata-location request|configure ...  (TS 24.282 clauses 17.3.2.2 and 17.3.3.2)
 //   mcdata-msgstore <operation> ...        (TS 24.282 clause 21.2)
@@ -504,7 +549,21 @@ void Client::mcdata_command(const std::string &cmd) {
   std::istringstream words(cmd);
   std::string verb;
   words >> verb;
-  if (verb == "mcdata-affiliate" || verb == "mcdata-deaffiliate") return mcdata_affiliate(verb == "mcdata-affiliate");
+  if (verb == "mcdata-affiliate" || verb == "mcdata-deaffiliate") {
+    std::vector<std::string> groups;
+    for (std::string group; words >> group;) groups.push_back(group);
+    if (groups.empty()) return mcdata_affiliate(verb == "mcdata-affiliate");
+    if (verb == "mcdata-affiliate")
+      mcdata_change_affiliation(groups, {});
+    else
+      mcdata_change_affiliation({}, groups);
+    return;
+  }
+  if (verb.starts_with("mcdata-settings-") || verb == "mcdata-profile") return mcdata_settings_command(verb, words);
+  if (verb == "mcdata-affiliation-subscribe" || verb == "mcdata-affiliation-unsubscribe" ||
+      verb == "mcdata-affiliate-remote" || verb == "mcdata-affiliation-accept" || verb == "mcdata-affiliation-decline")
+    return mcdata_target_affiliation_command(verb, words);
+  if (verb.starts_with("mcdata-gdd-")) return mcdata_gdd_command(verb, words);
   if (verb == "mcdata-location") return mcdata_location_command(cmd);
   if (verb == "mcdata-msgstore") return msgstore_command(words);
   if (verb == "mcdata-msgstore-ctrl") return msgstore_control_command(words);
@@ -522,6 +581,25 @@ void Client::mcdata_command(const std::string &cmd) {
     std::string word;
     words >> word;
     return mcdata_discover_content_server(word.starts_with("group=") ? word.substr(6) : std::string{});
+  }
+  if (verb == "fd-media-answer") {
+    // fd-media-answer accept|decline|defer   (TS 24.282 clause 10.2.5.2.4 7))
+    std::string word;
+    words >> word;
+    if (word != "accept" && word != "decline" && word != "defer")
+      throw std::runtime_error("usage: fd-media-answer accept|decline|defer");
+    return mcdata_media_file_answer(word);
+  }
+  if (verb == "mcdata-regroup") return mcdata_regroup_command(words);
+  if (verb == "mcdata-emergency-cancel") return mcdata_emergency_cancel_command(words);
+  if (verb == "mcdata-adhoc-determine") return mcdata_adhoc_determine_command(words);
+  if (verb == "mcdata-adhoc-alert") return mcdata_adhoc_alert_command(words);
+  if (verb == "fd-deferred") {
+    // fd-deferred list   (TS 24.282 clause 11.3.2.1)
+    std::string word;
+    words >> word;
+    if (word != "list") throw std::runtime_error("usage: fd-deferred list");
+    return mcdata_request_deferred_list();
   }
   if (verb == "fd-release-intent") return mcdata_fd_release_intent_command(words);
   if (verb == "fd-extension-response") return mcdata_fd_extension_response_command(words);
@@ -567,6 +645,9 @@ void Client::mcdata_fd_send_command(std::istringstream &words) {
     // ref=<object ID>: a file of the user's message store, uploaded by reference (TS 24.282 clause 10.2.2.1).
     else if (word.starts_with("ref="))
       request.store_object = word.substr(4);
+    // metadata=<text>: the Application metadata container (TS 24.282 clause 6.2.2.2 12)).
+    else if (word.starts_with("metadata="))
+      request.application_metadata = word.substr(9);
     else
       break;
   }
@@ -587,7 +668,7 @@ void Client::mcdata_fd_send_command(std::istringstream &words) {
 
 //------------------------------------------------------------------------------
 // TS 24.282 clause 9.2.4.2.3 (SDS session) and clause 13.2.2.2 (release over the media plane):
-// sds-session <MCData ID|group=<id>|adhoc=<ad hoc group>> | send [delivery|read] <text> | close
+// sds-session <MCData ID|group=<id>|adhoc=<ad hoc group>> | send [delivery|read|both] <text> | close
 void Client::mcdata_sds_session_command(std::istringstream &words) {
   std::string word;
   words >> word;
@@ -599,12 +680,14 @@ void Client::mcdata_sds_session_command(std::istringstream &words) {
       disposition = mcdata::DispositionRequest::Delivery;
     else if (next == "read")
       disposition = mcdata::DispositionRequest::Read;
+    else if (next == "both")
+      disposition = mcdata::DispositionRequest::DeliveryAndRead;
     if (disposition == mcdata::DispositionRequest::None) text = next;
     std::string rest;
     std::getline(words, rest);
     if (!rest.empty() && rest.front() == ' ') rest.erase(0, 1);
     if (!rest.empty()) text = text.empty() ? rest : text + " " + rest;
-    if (text.empty()) throw std::runtime_error("usage: sds-session send [delivery|read] <text>");
+    if (text.empty()) throw std::runtime_error("usage: sds-session send [delivery|read|both] <text>");
     return mcdata_session_send(text, disposition);
   }
   if (word == "close") {
@@ -617,10 +700,22 @@ void Client::mcdata_sds_session_command(std::istringstream &words) {
     if (scope == "all") return mcdata_media_close({{"Reason", "SIP;cause=200;text=\"User requested release\""}});
     return mcdata_media_close();
   }
-  if (word == "emergency" || word == "imminent") {
+  if (word == "rejoin") return mcdata_adhoc_rejoin(); // TS 24.282 clause 24.2.5.1.1
+  if (word == "modify") return mcdata_adhoc_modify(words); // TS 24.282 clause 24.2.6.1.1
+  if (word == "conference") {
+    // TS 24.282 clause 25.2: "conference" subscribes (current state and changes), "conference fetch" fetches the
+    // current state (Expires 0), "conference end" ends the subscription
     std::string action;
     words >> action;
-    return mcdata_session_priority(word == "emergency", action != "cancel");
+    if (action == "end") return mcdata_conference_unsubscribe();
+    return mcdata_conference_subscribe(action == "fetch");
+  }
+  if (word == "emergency" || word == "imminent") {
+    std::string action, extra;
+    words >> action >> extra;
+    // "emergency cancel alert": the emergency alert is cancelled as well (the user's own, 6.2.8.1.3 c) / 6.2.8.3.6 c),
+    // or another user's, 6.2.8.1.14 / 6.2.8.3.8)
+    return mcdata_session_priority(word == "emergency", action != "cancel", extra == "alert");
   }
   if (word.empty())
     throw std::runtime_error("usage: sds-session <MCData ID|group=<id>> [emergency|imminent] | send ... | "
@@ -636,12 +731,19 @@ void Client::mcdata_sds_session_command(std::istringstream &words) {
 }
 
 //------------------------------------------------------------------------------
-// fd-media [mandatory] [completed] <MCData ID|group=<id>|adhoc=<ad hoc group>> <path>   (TS 24.282 clauses 10.2.5 and 24.2.2)
+// fd-media [mandatory] [completed] [emergency|imminent] <MCData ID|group=<id>|adhoc=<ad hoc group>> <path>
+// (TS 24.282 clauses 10.2.5 and 24.2.2)
 void Client::mcdata_fd_media_command(std::istringstream &words) {
   std::string word, target, path;
   bool mandatory = false, completion = false;
+  std::string priority = "normal";
+  std::optional<std::string> application_metadata;
   while (words >> word) {
-    if (word == "mandatory" && target.empty())
+    if ((word == "emergency" || word == "imminent") && target.empty())
+      priority = word; // TS 24.282 clause 10.2.5.2.3 8)a0), 9)c)-d)
+    else if (word.starts_with("metadata=") && target.empty())
+      application_metadata = word.substr(9); // TS 24.282 clause 6.2.2.3 10)
+    else if (word == "mandatory" && target.empty())
       mandatory = true;
     else if (word == "completed" && target.empty())
       completion = true;
@@ -655,16 +757,27 @@ void Client::mcdata_fd_media_command(std::istringstream &words) {
   if (target.empty() || path.empty())
     throw std::runtime_error("usage: fd-media [mandatory] [completed] <MCData ID|group=<id>> <path>");
   const bool group = target.starts_with("group=");
-  return mcdata_send_file_media(group ? target.substr(6) : target, group, path, mandatory, completion);
+  return mcdata_send_file_media(group ? target.substr(6) : target, group, path, mandatory, completion,
+                                application_metadata, priority);
 }
 
 //------------------------------------------------------------------------------
-// sds-status <group> <operational value id> [force]   (enhanced status, TS 24.282 clause 14.2.1.1)
+// sds-status [delivery|read|both] <group> <operational value id> [force]   (enhanced status, TS 24.282 clause 14.2.1.1;
+// the disposition request of the group standalone SDS, clause 6.2.2.1 steps 8-10)
 void Client::mcdata_sds_status_command(std::istringstream &words) {
   std::string group, id, force;
-  words >> group >> id >> force;
-  if (group.empty() || id.empty()) throw std::runtime_error("usage: sds-status <group> <operational value id> [force]");
-  return mcdata_send_enhanced_status(group, id, force == "force");
+  auto disposition = mcdata::DispositionRequest::None;
+  words >> group;
+  if (group == "delivery" || group == "read" || group == "both") {
+    disposition = group == "delivery" ? mcdata::DispositionRequest::Delivery
+                  : group == "read"   ? mcdata::DispositionRequest::Read
+                                      : mcdata::DispositionRequest::DeliveryAndRead;
+    words >> group;
+  }
+  words >> id >> force;
+  if (group.empty() || id.empty())
+    throw std::runtime_error("usage: sds-status [delivery|read|both] <group> <operational value id> [force]");
+  return mcdata_send_enhanced_status(group, id, force == "force", disposition);
 }
 
 //------------------------------------------------------------------------------
@@ -712,16 +825,27 @@ void Client::mcdata_ipcon_ping_command(std::istringstream &words) {
 void Client::mcdata_sds_media_command(std::istringstream &words) {
   std::string target, text;
   std::optional<unsigned> priority;
-  words >> target;
-  if (target.starts_with("priority=")) {
-    priority = static_cast<unsigned>(std::stoul(target.substr(9)));
-    words >> target;
+  auto disposition = mcdata::DispositionRequest::None;
+  // sds-media [delivery|read|both] [priority=<n>] <MCData ID|group=<id>> <text>: the SDS disposition request of the
+  // SDS SIGNALLING PAYLOAD (TS 24.282 clause 6.2.2.1 step 4, table 15.2.3-1)
+  for (words >> target;; words >> target) {
+    if (target == "delivery")
+      disposition = mcdata::DispositionRequest::Delivery;
+    else if (target == "read")
+      disposition = mcdata::DispositionRequest::Read;
+    else if (target == "both")
+      disposition = mcdata::DispositionRequest::DeliveryAndRead;
+    else if (target.starts_with("priority="))
+      priority = static_cast<unsigned>(std::stoul(target.substr(9)));
+    else
+      break;
   }
   std::getline(words, text);
   if (!text.empty() && text.front() == ' ') text.erase(0, 1);
-  if (target.empty() || text.empty()) throw std::runtime_error("usage: sds-media <MCData ID|group=<id>> <text>");
+  if (target.empty() || text.empty())
+    throw std::runtime_error("usage: sds-media [delivery|read|both] [priority=<n>] <MCData ID|group=<id>> <text>");
   const bool group = target.starts_with("group=");
-  return mcdata_send_media_sds(group ? target.substr(6) : target, text, group, priority);
+  return mcdata_send_media_sds(group ? target.substr(6) : target, text, group, priority, disposition);
 }
 
 //------------------------------------------------------------------------------
@@ -862,13 +986,33 @@ void Client::mcdata_fa_command(std::istringstream &words) {
   words >> action;
   std::vector<std::string> aliases;
   while (words >> alias) aliases.push_back(alias);
+  // TS 24.282 clause 22.2.1.3: the functional alias status determination, on demand (subscribe), and its end (the
+  // SUBSCRIBE in the dialog with Expires 0, RFC 6665 4.1.2.3).
+  if (action == "subscribe") {
+    if (!mcdata_alias_dialog_.empty()) throw std::runtime_error("already subscribed to the functional alias status");
+    return mcdata_alias_subscribe();
+  }
+  if (action == "unsubscribe") {
+    if (mcdata_alias_dialog_.empty()) throw std::runtime_error("no functional alias status subscription");
+    sip_.request_in_dialog(mcdata_alias_dialog_, "SUBSCRIBE", "", "",
+                           {{"Event", "presence"}, {"Accept", "application/pidf+xml"}, {"Expires", "0"}},
+                           [this](const SipResponse &response) {
+                             event("mcdata_functional_alias_unsubscribed", {{"status", response.status_code}});
+                           });
+    return;
+  }
   if (action == "use") {
     if (aliases.size() != 1) throw std::runtime_error("usage: mcdata-fa use <alias>|none");
     mcdata_alias_in_use_ = aliases.front() == "none" ? std::string{} : aliases.front();
     return;
   }
+  if (action == "bind" || action == "unbind") {
+    if (aliases.size() < 2) throw std::runtime_error("usage: mcdata-fa bind|unbind <alias> <group>...");
+    return mcdata_fa_binding(action == "bind", aliases.front(),
+                             std::vector<std::string>(aliases.begin() + 1, aliases.end()));
+  }
   if ((action != "activate" && action != "takeover" && action != "deactivate") || aliases.empty())
-    throw std::runtime_error("usage: mcdata-fa activate|takeover|deactivate <alias>...");
+    throw std::runtime_error("usage: mcdata-fa activate|takeover|deactivate <alias>... | subscribe | unsubscribe");
   return mcdata_functional_alias(action, aliases);
 }
 
@@ -881,6 +1025,8 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
     throw std::runtime_error("unknown MCData command");
   auto disposition = mcdata::DispositionRequest::None;
   std::optional<std::uint8_t> application;
+  std::optional<std::string> extended_application, metadata;
+  std::string content = "text";
   std::optional<unsigned> priority;
   bool tamper = false, tamper_signature = false, escaped = false;
   std::string word, target, text;
@@ -893,6 +1039,12 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
       disposition = mcdata::DispositionRequest::DeliveryAndRead;
     else if (word.starts_with("app="))
       application = static_cast<std::uint8_t>(std::stoul(word.substr(4)));
+    else if (word.starts_with("ext-app="))
+      extended_application = word.substr(8);
+    else if (word.starts_with("metadata="))
+      metadata = word.substr(9);
+    else if (word.starts_with("content="))
+      content = word.substr(8);
     else if (word.starts_with("priority="))
       priority = static_cast<unsigned>(std::stoul(word.substr(9)));
     else if (word == "tamper-key")
@@ -910,13 +1062,52 @@ void Client::mcdata_sds_command(const std::string &verb, std::istringstream &wor
   if (escaped) text = client_rules::control_unescape(text);
   if (target.empty() || text.empty())
     throw std::runtime_error("usage: " + verb +
-                             " [delivery|read|both] [app=<n>] [priority=<n>] [escaped] <target> <text>");
+                             " [delivery|read|both] [app=<n>] [ext-app=<id>] [metadata=<text>] "
+                             "[content=text|binary|hyperlinks|location] [priority=<n>] [escaped] <target> <text>");
+  // TS 24.282 clause 11.1 step 3: a one-to-one SDS larger than <max-data-size-sds-bytes> of the MCData service
+  // configuration is not allowed ("shall not continue"): refused here, nothing sent.
+  if ((verb == "sds" || verb == "sds-fa") && mcdata_tx_limits_.max_data_size_sds &&
+      text.size() > *mcdata_tx_limits_.max_data_size_sds) {
+    event("mcdata_sds_not_allowed", {{"reason", "max-data-size-sds-bytes"}, {"size", text.size()},
+                                     {"limit", *mcdata_tx_limits_.max_data_size_sds}});
+    throw std::runtime_error("SDS larger than <max-data-size-sds-bytes> (TS 24.282 clause 11.1 step 3)");
+  }
+  if (verb == "sds-group") {
+    const bool media = mcdata_tx_limits_.max_payload_size_sds_cplane &&
+                       text.size() > *mcdata_tx_limits_.max_payload_size_sds_cplane;
+    mcdata_group_sds_allowed(target, text.size(), media, false);
+  }
+  // TS 24.282 clause 9.2.1.1 2): a one-to-one or pre-arranged group standalone SDS whose payload is larger than the
+  // <max-payload-size-sds-cplane-bytes> of the MCData service configuration goes over the media plane (clause
+  // 9.2.3.2.3); the payload size is the Payload IE's contents less its content type octet (clause 9.2.2.3.1 NOTE 4).
+  if ((verb == "sds" || verb == "sds-group") && !application && !extended_application && !metadata &&
+      content == "text" && !tamper && !tamper_signature &&
+      mcdata_tx_limits_.max_payload_size_sds_cplane && text.size() > *mcdata_tx_limits_.max_payload_size_sds_cplane) {
+    event("mcdata_sds_plane", {{"plane", "media"}, {"size", text.size()},
+                               {"limit", *mcdata_tx_limits_.max_payload_size_sds_cplane}});
+    return mcdata_send_media_sds(target, text, verb == "sds-group", priority, disposition);
+  }
   SdsRequest request;
   request.type = verb == "sds-group" ? "group-sds" : verb == "sds-adhoc" ? "ad-hoc-group-sds" : "one-to-one-sds";
   request.target = target;
   request.text = text;
   request.disposition = disposition;
   request.application = application;
+  request.extended_application = extended_application;
+  request.metadata = metadata;
+  // TS 24.282 clause 6.2.2.1 (DATA PAYLOAD) step 3 b)-d), clause 15.2.13: binary data given in hex, hyperlinks as
+  // they are, a location "<latitude>,<longitude>" in degrees coded as in TS 23.032 clause 6.1 (6 octets)
+  if (content == "binary") {
+    request.content = mcdata::ContentType::Binary;
+    request.text = client_rules::hex_bytes(text);
+  } else if (content == "hyperlinks") {
+    request.content = mcdata::ContentType::Hyperlinks;
+  } else if (content == "location") {
+    request.content = mcdata::ContentType::Location;
+    request.text = client_rules::location_payload(text);
+  } else if (content != "text") {
+    throw std::runtime_error("content= is text, binary, hyperlinks or location");
+  }
   request.priority = priority;
   request.to_alias = verb == "sds-fa"; // one-to-one SDS to a functional alias
   request.tamper_key = tamper;
@@ -985,11 +1176,22 @@ void Client::mcdata_status() {
   status_["mcdata_discovery_result"] = mcdata_discovery_result_;
   status_["mcdata_fd_last_result"] = mcdata_fd_last_result_;
   status_["mcdata_file_notifications"] = mcdata_file_notifications_;
+  status_["mcdata_deferred_list"] = mcdata_deferred_list_;
+  status_["mcdata_regroups"] = mcdata_regroups_;
+  status_["mcdata_regroup_result"] = mcdata_regroup_result_;
   Json files = Json::array();
   for (const auto &id : mcdata_files_order_)
     if (const auto found = mcdata_files_.find(id); found != mcdata_files_.end()) files.push_back(found->second);
   status_["mcdata_files"] = files;
   status_["mcdata_affiliations"] = mcdata_groups_;
+  status_["mcdata_service_settings"] = mcdata_service_settings_;
+  status_["mcdata_settings_publication"] = mcdata_settings_result_;
+  status_["mcdata_affiliation_command"] = mcdata_affiliation_command_;
+  status_["mcdata_group_dynamic_data"] = mcdata_gdd_;
+  Json targets = Json::object();
+  for (const auto &[target, affiliation] : mcdata_target_affiliations_)
+    targets[target] = {{"client_id", affiliation.client_id}, {"groups", affiliation.groups}};
+  status_["mcdata_target_affiliations"] = targets;
   status_["mcdata_affiliation_subscribed"] = !mcdata_subscription_.empty() && mcdata_status_known_;
   status_["mcdata_affiliation_p_id"] = {{"sent", mcdata_sent_pid_}, {"received", mcdata_received_pid_}};
   status_["mcdata_affiliation_fetch"] = mcdata_fetch_result_;
@@ -998,6 +1200,13 @@ void Client::mcdata_status() {
   status_["mcdata_functional_aliases"] = mcdata_aliases_active_;
   status_["mcdata_functional_alias_in_use"] = mcdata_alias_in_use_;
   status_["mcdata_fa_last_result"] = mcdata_fa_last_result_;
+  status_["mcdata_fa_binding_result"] = mcdata_fa_binding_result_;
+  status_["mcdata_emergency_cancel"] = mcdata_emergency_cancel_;
+  status_["mcdata_conference"] = mcdata_conference_;
+  status_["mcdata_adhoc_determined"] = mcdata_adhoc_determined_;
+  status_["mcdata_adhoc_alert"] = mcdata_adhoc_alert_;
+  status_["mcdata_adhoc_alert_state"] = mcdata_ah_mea_;
+  status_["mcdata_adhoc_alerts"] = mcdata_adhoc_alerts_;
   status_["mcdata_functional_alias_subscription_result"] = mcdata_alias_subscription_result_;
   status_["mcdata_functional_aliases_take_over_possible"] = mcdata_takeover_possible_;
   status_["mcdata_alert_state"] = mdea_name(mdea_);

@@ -168,6 +168,11 @@ SipResponse Client::ipcon_incoming(const SipMessage &request, const mcdata::Info
   if (!info.called_functional_alias.empty()) ipcon_result_["called_alias"] = info.called_functional_alias;
   response.status_code = 200;
   response.local_sdp = ipcon_local_sdp_;
+  // TS 24.282 clause 20.2.2 steps 5, 7 and 8: "timer" in Require, the IP connectivity media feature tag and ICSI in the
+  // Contact of the 200 (OK)
+  response.headers.push_back({"Require", "timer"});
+  response.contact_tags =
+      ";+g.3gpp.mcdata.ipconn;+g.3gpp.icsi-ref=\"" + url_encode(std::string(mcdata::ipconn_icsi)) + "\"";
   event("mcdata_ipconn_incoming", {{"from", info.calling_user}, {"peer", ipcon_result_["peer"]}});
   return response;
 }

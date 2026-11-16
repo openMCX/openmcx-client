@@ -483,6 +483,9 @@ void Client::read_mcdata_profile() {
   if (profile.user_id != mcdata_user() || profile.profile_index != index)
     throw std::runtime_error("MCData user profile of another user or index");
   mcdata_profile_actions_ = profile.actions;
+  mcdata_profile_kms_ = profile.one_to_one_kms;
+  mcdata_alert_entry_info_ = profile.group_alert_entry_info;
+  mcdata_alert_entry_uri_ = profile.group_alert_uri;
   mcdata_profile_loaded_ = true;
   status_["mcdata_profile"] = {{"user_id", profile.user_id},
                                {"profile_index", profile.profile_index},
@@ -691,6 +694,7 @@ void Client::read_service_configurations(std::vector<std::string> services) {
       service_priorities_[service] = parse_service_resource_priorities(response.body);
       service_protection_[service] = parse_service_protection(response.body);
       service_adhoc_[service] = parse_service_adhoc(response.body);
+      if (service == "mcdata") mcdata_tx_limits_ = parse_mcdata_tx_limits(response.body);
       event("document_retrieved", {{"resource", path}, {"bytes", response.body.size()}});
     } catch (const std::exception &error) {
       event("service_configuration_unavailable", {{"service", service}, {"reason", error.what()}});
@@ -700,6 +704,10 @@ void Client::read_service_configurations(std::vector<std::string> services) {
   for (const auto &[service, protection] : service_protection_)
     status_["service_protection"][service] = {{"confidentiality", protection.confidentiality},
                                               {"integrity", protection.integrity}};
+  status_["mcdata_tx_limits"] = {
+      {"max_payload_size_sds_cplane_bytes", mcdata_tx_limits_.max_payload_size_sds_cplane
+                                                ? Json(*mcdata_tx_limits_.max_payload_size_sds_cplane)
+                                                : Json(nullptr)}};
   for (const auto &[service, adhoc] : service_adhoc_)
     status_["service_adhoc"][service] = {{"supported", adhoc.supported}, {"max_participants", adhoc.max_participants}};
 }

@@ -389,6 +389,24 @@ void test_reg_event_rules() {
   check(contact_address("sip:alice@[2001:db8::1]:5064") == "alice@[2001:db8::1]:5064", "contact address with IPv6");
 }
 
+//------------------------------------------------------------------------------
+// TS 24.282 clause 15.2.13: hex Payload data and the TS 23.032 clause 6.1 LOCATION payload.
+static void test_sds_payloads() {
+  using namespace mcx::client_rules;
+  check(hex_bytes("00ff7a") == std::string("\x00\xff\x7a", 3) && hex_text(std::string("\x00\xff\x7a", 3)) == "00ff7a",
+        "hex payload data round trip");
+  bool refused = false;
+  try {
+    (void)hex_bytes("abc");
+  } catch (const std::invalid_argument &) {
+    refused = true;
+  }
+  check(refused, "odd hex refused");
+  // 45 N: 2^22; 90 E: 2^22 (2^24 / 4); 45 S: sign bit and 2^22; 90 W: 2^24 - 2^22.
+  check(hex_text(location_payload("45,90")) == "400000400000", "45 N 90 E");
+  check(hex_text(location_payload("-45,-90")) == "c00000c00000", "45 S 90 W");
+}
+
 int main() {
   test_call_floor_ssrcs();
   test_call_key_group();
@@ -410,6 +428,7 @@ int main() {
   test_answer_parameters();
   test_reg_event_rules();
   test_mc_priorities();
+  test_sds_payloads();
   if (failures) std::fprintf(stderr, "%d check(s) failed\n", failures);
   return failures ? 1 : 0;
 }

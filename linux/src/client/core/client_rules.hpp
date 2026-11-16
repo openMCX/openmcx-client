@@ -17,7 +17,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdint>
+#include <stdexcept>
 #include <iterator>
 #include <optional>
 #include <set>
@@ -469,6 +471,45 @@ inline std::optional<std::uint8_t> negotiated_mc_priority(bool answerer, std::op
 inline std::optional<std::uint8_t> request_priority(unsigned requested, std::optional<std::uint8_t> negotiated) {
   if (requested == 0 || !negotiated || *negotiated == 0) return std::nullopt;
   return static_cast<std::uint8_t>(std::min<unsigned>(requested, *negotiated));
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 15.2.13: binary Payload data given as hexadecimal text ("0a1b..."), and the reverse.
+inline std::string hex_bytes(std::string_view text) {
+  if (text.size() % 2) throw std::invalid_argument("hex data has an odd number of digits");
+  const auto digit = [](char c) {
+    if (!std::isxdigit(static_cast<unsigned char>(c))) throw std::invalid_argument("not a hex digit");
+    return std::isdigit(static_cast<unsigned char>(c)) ? c - '0' : std::tolower(static_cast<unsigned char>(c)) - 'a' + 10;
+  };
+  std::string out;
+  for (std::size_t at = 0; at < text.size(); at += 2) out += static_cast<char>(digit(text[at]) * 16 + digit(text[at + 1]));
+  return out;
+}
+
+inline std::string hex_text(std::string_view data) {
+  static constexpr char digits[] = "0123456789abcdef";
+  std::string out;
+  for (const auto c : data) {
+    out += digits[static_cast<unsigned char>(c) >> 4];
+    out += digits[static_cast<unsigned char>(c) & 15];
+  }
+  return out;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 15.2.13: a LOCATION payload, 3 octets of latitude and 3 of longitude coded as in TS 23.032 clause
+// 6.1: the sign bit (south) and N with N <= 2^23 |lat| / 90 < N + 1; the longitude in 2's complement, N <= 2^24 lon /
+// 360 < N + 1. The text is "<latitude>,<longitude>" in degrees.
+inline std::string location_payload(std::string_view text) {
+  const auto comma = text.find(',');
+  if (comma == std::string_view::npos) throw std::invalid_argument("location is <latitude>,<longitude>");
+  const double lat = std::stod(std::string(text.substr(0, comma))), lon = std::stod(std::string(text.substr(comma + 1)));
+  if (lat < -90 || lat > 90 || lon < -180 || lon >= 180) throw std::invalid_argument("location out of range");
+  auto n = static_cast<std::uint32_t>(std::min(std::floor(std::fabs(lat) / 90.0 * 8388608.0), 8388607.0));
+  if (lat < 0) n |= 0x800000u;
+  const auto m = static_cast<std::uint32_t>(static_cast<std::int32_t>(std::floor(lon / 360.0 * 16777216.0))) & 0xFFFFFFu;
+  return std::string{static_cast<char>(n >> 16), static_cast<char>((n >> 8) & 0xFF), static_cast<char>(n & 0xFF),
+                     static_cast<char>(m >> 16), static_cast<char>((m >> 8) & 0xFF), static_cast<char>(m & 0xFF)};
 }
 
 } // namespace mcx::client_rules
