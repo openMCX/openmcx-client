@@ -417,15 +417,12 @@ void Client::answer_command(const std::string &cmd) {
   auto response = *pending_answer_;
   pending_answer_.reset();
   if (cmd == "reject") {
-    if (call_type_ == "private" || call_type_ == "adhoc") {
-      // TS 24.379 clause 6.2.3.2.1: a declined private call invitation.
-      response = {};
-      response.status_code = 480;
-      response.headers = {{"Warning", "399 mcx \"110 user declined the call invitation\""}};
-    } else {
-      response.status_code = 486;
-      response.reason = "Busy Here";
-    }
+    // TS 24.379 clause 6.2.3.2.1 1) (private call) and clause 6.2.3.2.2 2) (group call: prearranged, chat, broadcast,
+    // ad hoc): a declined invitation is answered 480 (Temporarily Unavailable) with the warning text "110 user
+    // declined the call invitation" (clause 4.4).
+    response = {};
+    response.status_code = 480;
+    response.headers = {{"Warning", "399 mcx \"110 user declined the call invitation\""}};
     // TS 24.379 clause 10.1.1.2.2.2: a call offered in the pre-established session is answered by its re-INVITE
     // transaction; declined, the session stays without a call.
     if (auto transaction = std::exchange(pre_session_reinvite_, std::nullopt)) {
