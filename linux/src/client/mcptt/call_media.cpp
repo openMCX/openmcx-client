@@ -223,7 +223,7 @@ void Client::call_state(std::string_view id, SipCallState state, int code) {
     event("call_active", {{"dialog", id}});
     // After this dialog's response handlers, which keep the session identity the listening report names.
     schedule([this] { multicast_join(); });
-    if (cfg_.at("mcptt").value("conference_notifications", true)) schedule([this] { subscribe_conference(); });
+    schedule([this] { subscribe_conference(); }); // automatic, with mcptt.conference_auto_subscribe
   } else if (state == SipCallState::disconnected) {
     if (held_ && id == held_->dialog) {
       // The held call ended: the transferred user left it (TS 24.379 clause 11.1.8.2.3), or, for the transferred user,
