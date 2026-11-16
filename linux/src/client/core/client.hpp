@@ -1979,6 +1979,11 @@ private:
   void mcdata_regroup_command(std::istringstream &words);
   std::string mcdata_media_current_sdp() const;
   void mcdata_conference_subscribe(bool fetch);
+  void mcdata_adhoc_determine_command(std::istringstream &words);
+  void mcdata_adhoc_rejoin();
+  void mcdata_adhoc_modify(std::istringstream &words);
+  void mcdata_adhoc_alert_command(std::istringstream &words);
+  SipResponse mcdata_adhoc_alert_received(const mcdata::Info &info);
   void mcdata_conference_unsubscribe();
   SipResponse mcdata_conference_notify(const SipMessage &message);
   void mcdata_emergency_cancel_command(std::istringstream &words);
@@ -2181,6 +2186,15 @@ private:
   // conference event subscription to it ({participants, version, status})
   std::string mcdata_session_uri_, mcdata_conference_dialog_;
   Json mcdata_conference_ = nullptr;
+  // TS 24.282 clause 24: the result of an ad hoc group determination (24.2.7.2), the last ad hoc group session
+  // {uri, target, criteria} for a rejoin (24.2.5.1.1) and the Request-URI of one being rejoined
+  Json mcdata_adhoc_determined_ = nullptr, mcdata_adhoc_last_ = nullptr;
+  std::string mcdata_rejoin_uri_;
+  // TS 24.282 clause 16.2A and annex G.4.13: this user's ad hoc group emergency alert {group, criteria, client_id,
+  // state} and its state AH-MEA; the ad hoc alerts received
+  Json mcdata_adhoc_alert_ = nullptr;
+  int mcdata_ah_mea_ = 1;
+  Json mcdata_adhoc_alerts_ = Json::array();
   bool mcdata_session_imminent_ = false;
   std::string mcdata_session_group_;  // the group of an open group SDS session
   bool mcdata_session_adhoc_ = false; // that group is an ad hoc group (clause 24)

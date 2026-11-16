@@ -320,6 +320,10 @@ void Client::mcdata_send_sds(const SdsRequest &request) {
   } else if (request.type == "ad-hoc-group-sds") {
     info.client_id = client_id();
     participants = mcdata_adhoc_target(request.target, info);
+    // TS 24.282 clause 9.2.2.2.1 3A)a)iv)A): the preconfigured MCData group ID stored by an ad hoc group
+    // determination (24.2.7.2)
+    if (mcdata_adhoc_determined_.is_object())
+      info.preconfigured_group = mcdata_adhoc_determined_.value("preconfigured_group", std::string{});
   } else if (request.to_alias) {
     info.call_to_functional_alias = true; // TS 24.282 clause 9.2.2.2.1 step 2b ii A
   }
@@ -699,6 +703,226 @@ SipResponse Client::mcdata_conference_notify(const SipMessage &message) {
     mcdata_conference_dialog_.clear();
     mcdata_conference_["terminated"] = true;
   }
+  return response;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 24.2.7.2: ad hoc group determination: a SIP MESSAGE (6.2.4.1) with <request-type>
+// "ad-hoc-group-determination", the users in a resource-lists body or the criteria in <comn-participants-criteria>; on
+// a 2xx the <mcdata-calling-group-id>, the <preconfigured-group> and the criteria of the response are stored.
+// mcdata-adhoc-determine <ID,ID,...|criteria=<criteria>>
+void Client::mcdata_adhoc_determine_command(std::istringstream &words) {
+  if (!mcdata_authorized_) throw std::runtime_error("ad hoc group determination requires MCData service authorisation");
+  std::string spec;
+  words >> spec;
+  if (spec.empty()) throw std::runtime_error("usage: mcdata-adhoc-determine <ID,ID,...|criteria=<criteria>>");
+  mcdata::Info info;
+  info.request_type = "ad-hoc-group-determination";
+  info.client_id = client_id();
+  const auto participants = mcdata_adhoc_target(spec, info);
+  if (!mcdata_alias_in_use_.empty() && mcdata_aliases_active_.contains(mcdata_alias_in_use_))
+    info.functional_alias = mcdata_alias_in_use_;
+  std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
+  if (!participants.empty()) parts.push_back({resource_lists_mime, resource_list_xml(participants)});
+  const std::string icsi = mcdata::icsi;
+  mcdata_adhoc_determined_ = {{"status", 0}};
+  mcdata_request(
+      "", parts, {{"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(icsi) + "\";require;explicit"}},
+      [this](const SipResponse &response) {
+        mcdata_adhoc_determined_["status"] = response.status_code;
+        if (response.status_code >= 300) {
+          failure("ad hoc group determination: " + std::to_string(response.status_code));
+          return;
+        }
+        for (const auto &part : response.parts)
+          if (part.content_type == mcdata::info_mime) {
+            const auto answer = mcdata::parse_info(part.body);
+            mcdata_adhoc_determined_["group"] = answer.calling_group;
+            mcdata_adhoc_determined_["preconfigured_group"] = answer.preconfigured_group;
+            mcdata_adhoc_determined_["criteria"] = answer.participant_criteria;
+          }
+        event("mcdata_adhoc_group_determined", mcdata_adhoc_determined_);
+      },
+      "MESSAGE");
+  event("mcdata_adhoc_determination_sent", {{"spec", spec}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 24.2.5.1.1: rejoin the ad hoc group session the user left: the INVITE of 24.2.2.1.1 with the
+// Request-URI the MCData session identity of the session.
+void Client::mcdata_adhoc_rejoin() {
+  if (!mcdata_adhoc_last_.is_object() || mcdata_adhoc_last_.value("uri", "").empty())
+    throw std::runtime_error("no ad hoc group session to rejoin");
+  mcdata_rejoin_uri_ = mcdata_adhoc_last_.value("uri", "");
+  try {
+    mcdata_open_session(mcdata_adhoc_last_.value("target", ""), true, "normal", false);
+  } catch (...) {
+    mcdata_rejoin_uri_.clear();
+    throw;
+  }
+  mcdata_rejoin_uri_.clear();
+  event("mcdata_adhoc_rejoining", {{"uri", mcdata_adhoc_last_.value("uri", "")}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 24.2.6.1.1: modify the participants of the open ad hoc group session: a re-INVITE with the MCData-Info
+// as established, a resource-lists body of the users to add (method=INVITE) and remove (method=BYE), or (a session set
+// up with criteria only) the new <comn-participants-criteria>, never both (NOTE); an SDP offer of the current media.
+// sds-session modify [add=<ID,...>] [remove=<ID,...>] | criteria=<criteria>
+void Client::mcdata_adhoc_modify(std::istringstream &words) {
+  if (!mcdata_media_ || !mcdata_media_session_ || !mcdata_session_adhoc_ || mcdata_media_dialog_.empty())
+    throw std::runtime_error("no ad hoc group SDS session is open");
+  std::vector<std::string> entries;
+  std::string criteria;
+  const auto split = [](const std::string &value, const char *method, std::vector<std::string> &out) {
+    std::istringstream list(value);
+    for (std::string id; std::getline(list, id, ',');)
+      if (!id.empty()) out.push_back(id + ";method=" + method);
+  };
+  for (std::string word; words >> word;) {
+    if (word.starts_with("add=")) split(word.substr(4), "INVITE", entries);
+    else if (word.starts_with("remove=")) split(word.substr(7), "BYE", entries);
+    else if (word.starts_with("criteria=")) criteria = word.substr(9);
+    else throw std::runtime_error("usage: sds-session modify [add=<ID,...>] [remove=<ID,...>] | criteria=<criteria>");
+  }
+  if (!entries.empty() && !criteria.empty())
+    throw std::runtime_error("the participants and the criteria are not modified together (TS 24.282 24.2.6.1.1 NOTE)");
+  if (entries.empty() && criteria.empty()) throw std::runtime_error("nothing to modify");
+  if (!criteria.empty() && mcdata_adhoc_last_.value("criteria", "").empty())
+    throw std::runtime_error("the session was not set up with criteria (TS 24.282 24.2.6.1.1 2a))");
+  mcdata::Info info;
+  info.request_type = "adhoc-group-sds-session";
+  info.client_id = client_id();
+  if (!criteria.empty()) {
+    info.participant_criteria = criteria;
+    mcdata_adhoc_last_["criteria"] = criteria;
+  }
+  std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
+  if (!entries.empty()) parts.push_back({resource_lists_mime, resource_list_xml(entries)});
+  auto headers = mcdata_media_headers();
+  sip_.reinvite_sdp(
+      mcdata_media_dialog_, mcdata_media_current_sdp(), mcdata_seal_signalling(parts),
+      [this](const SipResponse &raw) {
+        const auto response = mcdata_opened_response(raw);
+        if (response.status_code < 200) return;
+        mcdata_media_result_["modify_status"] = response.status_code;
+        mcdata_media_result_["modify_warning"] = std::string(get_header(response.headers, "Warning"));
+        event("mcdata_adhoc_modified", {{"status", response.status_code}});
+      },
+      headers);
+  event("mcdata_adhoc_modify_requested", {{"entries", entries}, {"criteria", criteria}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clauses 16.2A.1.1 (on), 16.2A.1.2 (off) and 16.2A.1.4 (modify): the ad hoc group emergency alert: a SIP
+// MESSAGE with P-Preferred-Service / Accept-Contact of the MCData ICSI, the MCData-Info (<adhoc-alert-ind>,
+// <mcdata-client-id>, <comn-participants-criteria>, the ad hoc group in <mcdata-request-uri> when known) and, raising
+// or modifying it, the location information (6.2.5.1); the authorisations of 6.2.8.1.19.
+// mcdata-adhoc-alert on criteria=<c> [text...] | off [originated-by=<ID>] | modify criteria=<c> [text...]
+void Client::mcdata_adhoc_alert_command(std::istringstream &words) {
+  if (!mcdata_authorized_) throw std::runtime_error("an ad hoc group emergency alert requires MCData service authorisation");
+  std::string action, criteria, originator, text;
+  words >> action;
+  for (std::string word; words >> word;) {
+    if (word.starts_with("criteria=")) criteria = word.substr(9);
+    else if (word.starts_with("originated-by=")) originator = word.substr(14);
+    else text += (text.empty() ? "" : " ") + word;
+  }
+  if (action != "on" && action != "off" && action != "modify")
+    throw std::runtime_error("usage: mcdata-adhoc-alert on criteria=<c> [text] | off [originated-by=<ID>] | modify criteria=<c>");
+  const auto group = mcdata_adhoc_alert_.is_object() ? mcdata_adhoc_alert_.value("group", "") : std::string{};
+  mcdata::Info info;
+  info.client_id = client_id();
+  if (!mcdata_alias_in_use_.empty() && mcdata_aliases_active_.contains(mcdata_alias_in_use_))
+    info.functional_alias = mcdata_alias_in_use_;
+  std::vector<BodyPart> parts;
+  if (action == "on") {
+    require_mcdata_profile({"allow-activate-adhoc-group-emergency-alert"}); // TS 24.282 clause 6.2.8.1.19
+    if (criteria.empty()) throw std::runtime_error("an ad hoc group emergency alert needs criteria (16.2A.1.1 4)g))");
+    info.request_uri = group;
+    info.adhoc_alert = true;
+    info.participant_criteria = criteria;
+    info.adhoc_additional_information = text;
+    mcdata_emergency_ = true;
+    mcdata_ah_mea_ = 2;
+    mcdata_adhoc_alert_ = {{"group", group}, {"criteria", criteria}, {"client_id", info.client_id}, {"state", 2}};
+  } else if (action == "off") {
+    require_mcdata_profile({"allow-cancel-adhoc-group-emergency-alert"}); // TS 24.282 clause 6.2.8.1.19
+    if (group.empty()) throw std::runtime_error("no ad hoc group emergency alert known");
+    if (originator.empty() && mcdata_ah_mea_ != 3) throw std::runtime_error("no ad hoc group emergency alert of this user");
+    info.request_uri = group;
+    info.adhoc_alert = false;
+    info.originated_by = originator;
+    if (originator.empty()) mcdata_ah_mea_ = 4; // TS 24.282 clause 16.2A.1.2 6)
+    mcdata_adhoc_alert_["originated_by"] = originator;
+  } else {
+    if (group.empty()) throw std::runtime_error("no ad hoc group emergency alert known");
+    if (criteria.empty()) throw std::runtime_error("the new criteria are needed (16.2A.1.4 c)v))");
+    info.request_uri = group;
+    info.adhoc_alert = true;
+    info.request_type = "ad-hoc-emergency-alert-participant-criteria-modification";
+    info.participant_criteria = criteria;
+    info.adhoc_additional_information = text;
+    mcdata_emergency_ = true;
+  }
+  parts.push_back({mcdata::info_mime, mcdata::info_xml(info)});
+  if (action != "off")
+    parts.push_back({mcdata::location_mime, emergency_location_xml(mcdata_emergency_location(), true)});
+  const std::string icsi = mcdata::icsi;
+  mcdata_request(
+      "", parts, {{"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(icsi) + "\";require;explicit"}},
+      [this, action](const SipResponse &response) {
+        mcdata_adhoc_alert_["status"] = response.status_code;
+        if (action == "on") mcdata_ah_mea_ = response.status_code < 300 ? (mcdata_ah_mea_ == 2 ? 3 : mcdata_ah_mea_) : 1; // 16.2A.1.1
+        if (action == "off" && response.status_code >= 300 && mcdata_ah_mea_ == 4) {
+          // TS 24.282 clause 16.2A.1.2 (4xx): <adhoc-alert-ind> true, or none: the alert stays
+          bool stays = true;
+          for (const auto &part : response.parts)
+            if (part.content_type == mcdata::info_mime && mcdata::parse_info(part.body).adhoc_alert == false)
+              stays = false;
+          if (stays) mcdata_ah_mea_ = 3;
+        }
+        mcdata_adhoc_alert_["state"] = mcdata_ah_mea_;
+        if (response.status_code >= 300) failure("ad hoc alert " + action + ": " + std::to_string(response.status_code));
+      },
+      "MESSAGE");
+  event("mcdata_adhoc_alert_sent", {{"action", action}, {"group", group}, {"criteria", criteria}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clauses 16.2A.1.1-16.2A.1.3 and 16.2A.1.5: an incoming SIP MESSAGE about an ad hoc group emergency alert
+// (dispatched on <adhoc-alert-ind> before <alert-ind>: the controlling function also sets <alert-ind>, 6.3.7.1.3):
+// the receipt of this client's request (<adhoc-alert-ind-rcvd> true and its <mcdata-client-id>: the ad hoc group
+// identity stored, AH-MEA settled), the response to a criteria modification (16.2A.1.5) or another user's alert or its
+// cancellation (16.2A.1.3: <originated-by> this user: AH-MEA 1). 200 (OK).
+SipResponse Client::mcdata_adhoc_alert_received(const mcdata::Info &info) {
+  SipResponse response;
+  response.status_code = 200;
+  if (!mcdata_adhoc_alert_.is_object()) mcdata_adhoc_alert_ = Json::object();
+  const bool own = info.client_id == client_id() && info.adhoc_alert_received == true;
+  if (own || !info.response_type.empty()) {
+    if (!info.calling_group.empty()) mcdata_adhoc_alert_["group"] = info.calling_group;
+    if (!info.participant_criteria.empty()) mcdata_adhoc_alert_["criteria"] = info.participant_criteria;
+    const bool by_other = !mcdata_adhoc_alert_.value("originated_by", "").empty();
+    if (info.adhoc_alert == false && mcdata_ah_mea_ == 4 && !by_other) {
+      mcdata_ah_mea_ = 1;
+      mcdata_emergency_ = false;
+    } else if (info.adhoc_alert == true && mcdata_ah_mea_ == 4 && !by_other) {
+      mcdata_ah_mea_ = 3;
+    }
+    mcdata_adhoc_alert_["state"] = mcdata_ah_mea_;
+    event("mcdata_adhoc_alert_receipt", {{"group", info.calling_group}, {"alert", info.adhoc_alert.value_or(false)},
+                                         {"response_type", info.response_type}});
+    return response;
+  }
+  if (info.adhoc_alert == false && info.originated_by == mcdata_user()) mcdata_ah_mea_ = 1; // 16.2A.1.3 2)b)
+  bounded_push(mcdata_adhoc_alerts_, {{"group", info.calling_group},
+                                       {"from", info.originated_by.empty() ? info.calling_user : info.originated_by},
+                                       {"alert", info.adhoc_alert.value_or(false)},
+                                       {"text", info.adhoc_additional_information},
+                                       {"organization", info.organization}});
+  event("mcdata_adhoc_alert_received",
+        {{"group", info.calling_group}, {"from", info.calling_user}, {"alert", info.adhoc_alert.value_or(false)}});
   return response;
 }
 

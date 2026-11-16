@@ -89,6 +89,10 @@ std::optional<SipResponse> Client::mcdata_group_state_received(const std::vector
       const auto alert_info = mcdata::parse_info(part.body);
       // TS 24.282 clause 6.2.7.5: the receipt of this client's cancel of a group's emergency.
       if (alert_info.emergency_received == true) return mcdata_emergency_cancel_received(alert_info);
+      // TS 24.282 clause 16.2A.1: an ad hoc group emergency alert (before <alert-ind>, which 6.3.7.1.3 also sets)
+      if (alert_info.adhoc_alert.has_value() || alert_info.response_type ==
+                                                    "ad-hoc-emergency-alert-participant-criteria-modification")
+        return mcdata_adhoc_alert_received(alert_info);
       // TS 24.282 clause 6.3.7.1.2: the in-progress emergency or imminent peril state of a group,
       // sent to its affiliated members that are not participating.
       if (!alert_info.calling_group.empty() && (alert_info.emergency || alert_info.imminent_peril)) {
@@ -579,6 +583,8 @@ void Client::mcdata_command(const std::string &cmd) {
   }
   if (verb == "mcdata-regroup") return mcdata_regroup_command(words);
   if (verb == "mcdata-emergency-cancel") return mcdata_emergency_cancel_command(words);
+  if (verb == "mcdata-adhoc-determine") return mcdata_adhoc_determine_command(words);
+  if (verb == "mcdata-adhoc-alert") return mcdata_adhoc_alert_command(words);
   if (verb == "fd-deferred") {
     // fd-deferred list   (TS 24.282 clause 11.3.2.1)
     std::string word;
@@ -685,6 +691,8 @@ void Client::mcdata_sds_session_command(std::istringstream &words) {
     if (scope == "all") return mcdata_media_close({{"Reason", "SIP;cause=200;text=\"User requested release\""}});
     return mcdata_media_close();
   }
+  if (word == "rejoin") return mcdata_adhoc_rejoin(); // TS 24.282 clause 24.2.5.1.1
+  if (word == "modify") return mcdata_adhoc_modify(words); // TS 24.282 clause 24.2.6.1.1
   if (word == "conference") {
     // TS 24.282 clause 25.2: "conference" subscribes (current state and changes), "conference fetch" fetches the
     // current state (Expires 0), "conference end" ends the subscription
@@ -1186,6 +1194,10 @@ void Client::mcdata_status() {
   status_["mcdata_fa_binding_result"] = mcdata_fa_binding_result_;
   status_["mcdata_emergency_cancel"] = mcdata_emergency_cancel_;
   status_["mcdata_conference"] = mcdata_conference_;
+  status_["mcdata_adhoc_determined"] = mcdata_adhoc_determined_;
+  status_["mcdata_adhoc_alert"] = mcdata_adhoc_alert_;
+  status_["mcdata_adhoc_alert_state"] = mcdata_ah_mea_;
+  status_["mcdata_adhoc_alerts"] = mcdata_adhoc_alerts_;
   status_["mcdata_functional_alias_subscription_result"] = mcdata_alias_subscription_result_;
   status_["mcdata_functional_aliases_take_over_possible"] = mcdata_takeover_possible_;
   status_["mcdata_alert_state"] = mdea_name(mdea_);

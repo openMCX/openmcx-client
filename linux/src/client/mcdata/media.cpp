@@ -160,8 +160,11 @@ void Client::mcdata_open_session(const std::string &target, bool group, const st
                           {"session", true},        {"adhoc", adhoc},
                           {"emergency", emergency}, {"imminent", imminent},
                           {"priority", priority}};
+  // TS 24.282 clause 24.2.5.1.1: a rejoin goes to the MCData session identity of the ad hoc group session
+  const auto request_uri = mcdata_rejoin_uri_.empty() ? mcdata_service() : mcdata_rejoin_uri_;
+  if (adhoc) mcdata_adhoc_last_ = {{"target", target}, {"criteria", info.participant_criteria}, {"uri", ""}};
   mcdata_media_dialog_ = sip_.invite_sdp(
-      mcdata_service(), msrp_sdp(offer, 1), mcdata_seal_signalling(parts),
+      request_uri, msrp_sdp(offer, 1), mcdata_seal_signalling(parts),
       [this](const SipResponse &raw) { mcdata_session_answered(raw); }, headers);
   event("mcdata_session_opened", {{"target", target}, {"group", group}, {"adhoc", adhoc}, {"priority", priority}});
 }
@@ -268,6 +271,7 @@ void Client::mcdata_session_answered(const SipResponse &raw) {
     mcdata_adhoc_answered(response);
     // TS 24.282 clause 25.2 2): the MCData session identity of the group session (the focus's Contact)
     mcdata_session_uri_ = contact_uri_of(get_header(raw.headers, "Contact"));
+    if (mcdata_session_adhoc_ && mcdata_adhoc_last_.is_object()) mcdata_adhoc_last_["uri"] = mcdata_session_uri_;
     // TS 24.282 clause 6.2.8.3.4: the emergency condition is granted by the 2xx.
     if (mdepc_ == 2) mdepc_ = 3;
     mcdata_priority_response(response); // TS 24.282 clause 6.2.8.1.4
