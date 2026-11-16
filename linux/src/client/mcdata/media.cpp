@@ -214,9 +214,19 @@ void Client::mcdata_media_answered(const SipResponse &raw, const char *what) {
   if (response.status_code == 488 && mcdata_kms_redirect(response)) return;
   if (response.status_code >= 300) {
     mcdata_media_result_["state"] = "rejected";
+    if (mcdata_media_priority_request_) { // TS 24.282 clause 10.2.5.2.3: 6.2.8.1.5 / 6.2.8.3.5
+      mcdata_priority_response(response);
+      if (mdepc_ == 2 || mdepc_ == 3) mdepc_ = 1;
+      mcdata_media_priority_request_ = false;
+    }
     mcdata_media_close();
     failure(std::string("media plane ") + what + ": " + std::to_string(response.status_code));
     return;
+  }
+  if (mcdata_media_priority_request_) { // TS 24.282 clause 10.2.5.2.3: 6.2.8.1.4 / 6.2.8.3.4
+    if (mdepc_ == 2) mdepc_ = 3;
+    mcdata_priority_response(response);
+    mcdata_media_priority_request_ = false;
   }
   mcdata_krr_count_ = 0;
   try {
@@ -473,9 +483,18 @@ void Client::mcdata_session_send(const std::string &text, mcdata::DispositionReq
 // TS 24.282 clauses 10.2.5.2.1 and 10.2.5.2.3 with TS 24.582 clause 7.1.2: offer the file on an MSRP
 // stream, with its metadata in the SDP file attributes of RFC 5547.
 void Client::mcdata_send_file_media(const std::string &target, bool group, const std::string &path, bool mandatory,
-                                    bool completion, const std::optional<std::string> &application_metadata) {
+                                    bool completion, const std::optional<std::string> &application_metadata,
+                                    const std::string &priority) {
   if (!mcdata_authorized_) throw std::runtime_error("file distribution requires MCData service authorisation");
   require_mcdata_profile({"allow-transmit-data"}); // TS 24.282 clause 11.1 step 1
+  // TS 24.282 clause 10.2.5.2.3 8)a0) (one-to-one, 6.2.8.3.1.1), 9)c)-d) (group, 6.2.8.1.8): an emergency or imminent
+  // peril file distribution
+  const bool emergency = priority == "emergency", imminent = priority == "imminent";
+  if (imminent && !group) throw std::runtime_error("imminent peril applies to group communications");
+  if ((emergency || imminent) && target.starts_with("adhoc="))
+    throw std::runtime_error("ad hoc group emergency and imminent peril communications are not implemented");
+  if (emergency) require_mcdata_profile({group ? "allow-emergency-group-call" : "allow-emergency-private-call"});
+  if (imminent) require_mcdata_profile({"allow-imminent-peril-call"});
   if (mcdata_media_) throw std::runtime_error("an MCData media plane session is already open");
   std::ifstream file(path, std::ios::binary);
   if (!file) throw std::runtime_error("cannot read " + path);
@@ -500,6 +519,8 @@ void Client::mcdata_send_file_media(const std::string &target, bool group, const
   if (!mcdata_alias_in_use_.empty() && mcdata_aliases_active_.contains(mcdata_alias_in_use_))
     info.functional_alias = mcdata_alias_in_use_;
   const auto participants = adhoc ? mcdata_adhoc_target(target.substr(6), info) : std::vector<std::string>{};
+  mcdata_media_priority_request_ = emergency || imminent;
+  if (mcdata_media_priority_request_) mcdata_session_priority_state(info, target, group, emergency, imminent, false);
   mcdata::FdSignalling signalling; // TS 24.282 clause 6.2.2.3: no Payload IE, no metadata IE
   signalling.date_time = static_cast<std::uint64_t>(std::time(nullptr));
   signalling.conversation = mcdata::random_uuid();
@@ -527,6 +548,15 @@ void Client::mcdata_send_file_media(const std::string &target, bool group, const
   auto headers = mcdata_fd_headers();
   headers.push_back({"Contact", "<" + sip_.contact_target() + ">;+g.3gpp.mcdata.fd;+g.3gpp.icsi-ref=\"" +
                                     url_encode(mcdata::fd_icsi) + "\""});
+  // TS 24.282 clause 10.2.5.2.3 8)d) (6.2.8.3.3), 9)e)-f) (6.2.8.1.2, 6.2.8.1.12): the Resource-Priority
+  if (emergency || imminent) {
+    for (const auto &header : mcdata_priority_headers(imminent ? "imminent_peril" : "emergency")) headers.push_back(header);
+  } else if (group && !adhoc && (mcdata_priority_group_.empty() || mcdata_priority_group_ == target)) {
+    if (mdeg_ == 2)
+      for (const auto &header : mcdata_priority_headers("emergency")) headers.push_back(header);
+    else if (mdig_ == 2)
+      for (const auto &header : mcdata_priority_headers("imminent_peril")) headers.push_back(header);
+  }
   mcdata_media_result_ = {{"message_id", mcdata_media_message_id_},
                           {"target", target},
                           {"group", group ? target : std::string{}},

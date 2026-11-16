@@ -701,13 +701,17 @@ void Client::mcdata_sds_session_command(std::istringstream &words) {
 }
 
 //------------------------------------------------------------------------------
-// fd-media [mandatory] [completed] <MCData ID|group=<id>|adhoc=<ad hoc group>> <path>   (TS 24.282 clauses 10.2.5 and 24.2.2)
+// fd-media [mandatory] [completed] [emergency|imminent] <MCData ID|group=<id>|adhoc=<ad hoc group>> <path>
+// (TS 24.282 clauses 10.2.5 and 24.2.2)
 void Client::mcdata_fd_media_command(std::istringstream &words) {
   std::string word, target, path;
   bool mandatory = false, completion = false;
+  std::string priority = "normal";
   std::optional<std::string> application_metadata;
   while (words >> word) {
-    if (word.starts_with("metadata=") && target.empty())
+    if ((word == "emergency" || word == "imminent") && target.empty())
+      priority = word; // TS 24.282 clause 10.2.5.2.3 8)a0), 9)c)-d)
+    else if (word.starts_with("metadata=") && target.empty())
       application_metadata = word.substr(9); // TS 24.282 clause 6.2.2.3 10)
     else if (word == "mandatory" && target.empty())
       mandatory = true;
@@ -724,7 +728,7 @@ void Client::mcdata_fd_media_command(std::istringstream &words) {
     throw std::runtime_error("usage: fd-media [mandatory] [completed] <MCData ID|group=<id>> <path>");
   const bool group = target.starts_with("group=");
   return mcdata_send_file_media(group ? target.substr(6) : target, group, path, mandatory, completion,
-                                application_metadata);
+                                application_metadata, priority);
 }
 
 //------------------------------------------------------------------------------

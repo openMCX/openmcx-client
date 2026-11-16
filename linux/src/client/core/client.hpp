@@ -2169,6 +2169,7 @@ private:
   // group itself as this client knows them (MDEG annex G.4.3, MDIG annex G.4.6).
   int mdegc_ = 1, mdeg_ = 1, mdigc_ = 1, mdig_ = 1;
   std::string mcdata_priority_group_; // the group MDEG and MDIG are the states of (empty: none known)
+  bool mcdata_media_priority_request_ = false; // the open FD over the media plane is a priority request (10.2.5.2.3)
   // the MCData ID of the user whose emergency alert a received priority request announced (6.2.7.4 1), 6.2.8.4.2 1)):
   // the <originated-by> of a third-party cancel (6.2.8.1.14, 6.2.8.3.8)
   std::string mcdata_group_alert_originator_, mcdata_private_alert_originator_;
@@ -2248,7 +2249,8 @@ private:
   void mcdata_session_send(const std::string &text, mcdata::DispositionRequest disposition);
 
   void mcdata_send_file_media(const std::string &target, bool group, const std::string &path, bool mandatory,
-                              bool completion, const std::optional<std::string> &application_metadata = {});
+                              bool completion, const std::optional<std::string> &application_metadata = {},
+                              const std::string &priority = "normal");
 
   void mcdata_send_media_sds(const std::string &target, const std::string &text, bool group = false,
                              std::optional<unsigned> priority = std::nullopt,
