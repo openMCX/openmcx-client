@@ -41,6 +41,11 @@ SipResponse Client::mcdata_media_invite(const SipMessage &invite) {
     }
     return ipcon_incoming(invite, info, *sdp);
   }
+  // TS 24.282 clauses 6.2.7.4 and 6.2.8.4.2: a re-INVITE in the dialog of the open session; the controlling function's
+  // re-INVITE (clauses 6.3.7.1.1, 6.3.7.1.13, 6.3.7.1.21) carries no P-Asserted-Service and no <mcdata-request-uri>,
+  // the dialog identifying the session.
+  if (mcdata_media_ && invite.dialog_id == mcdata_media_dialog_)
+    return mcdata_media_reinvite(mcdata::parse_info(info_part->body));
   const bool file_transfer = service == mcdata::fd_icsi; // TS 24.282 clause 10.2.5.2.4
   if (asserted_identity(invite) != mcdata_service() || (service != mcdata::sds_icsi && !file_transfer)) {
     response.status_code = 403;
@@ -112,9 +117,12 @@ SipResponse Client::mcdata_media_invite(const SipMessage &invite) {
 SipResponse Client::mcdata_media_reinvite(const mcdata::Info &info) {
   SipResponse response;
   response.status_code = 200;
-  response.local_sdp = mcdata_media_answer_;
+  // TS 24.282 clauses 6.2.7.4 9) and 6.2.8.4.2 4): an SDP answer (clause 9.2.4.2.2) with the media as established.
+  response.local_sdp = mcdata_media_current_sdp();
   if (!info.calling_group.empty()) {
     mcdata_group_priority_received(info);
+    // TS 24.282 clause 6.2.7.4 7)-8): the g.3gpp.mcdata media feature tag and the MCData ICSI in the Contact.
+    response.contact_tags = ";+g.3gpp.mcdata;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcdata\"";
     if (mcdata_media_result_.is_object()) {
       mcdata_media_result_["emergency"] = mcdata_session_emergency_;
       mcdata_media_result_["imminent"] = mcdata_session_imminent_;
@@ -132,6 +140,21 @@ SipResponse Client::mcdata_media_reinvite(const mcdata::Info &info) {
   if (mcdata_media_result_.is_object()) mcdata_media_result_["emergency"] = emergency;
   event("mcdata_session_emergency_received", {{"from", info.calling_user}, {"emergency", emergency}});
   return response;
+}
+
+//------------------------------------------------------------------------------
+// The SDP of the open media plane session as this client holds it: the answer it gave, or (a session it started)
+// its media with the setup role the exchange gave it (RFC 4145 4.1: an answer is "active" or "passive").
+std::string Client::mcdata_media_current_sdp() const {
+  if (!mcdata_media_answer_.empty() || !mcdata_media_) return mcdata_media_answer_;
+  MsrpMedia media;
+  media.address = resolve_ipv4(cfg_.at("media").at("advertise"));
+  media.port = mcdata_media_->port();
+  media.path = mcdata_media_->local().text();
+  media.setup = mcdata_media_role_.empty() ? "active" : mcdata_media_role_;
+  media.direction = mcdata_media_session_ ? "sendrecv" : "sendonly";
+  media.accept_types = {mcdata::signalling_mime, mcdata::payload_mime};
+  return msrp_sdp(media, 1);
 }
 
 //------------------------------------------------------------------------------

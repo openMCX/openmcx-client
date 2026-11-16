@@ -140,9 +140,17 @@ void Client::mcdata_open_session(const std::string &target, bool group, const st
   auto headers = mcdata_media_headers();
 
   // TS 24.282 clauses 6.2.8.3.3, 6.2.8.1.2 and 6.2.8.1.12: the priority of the request.
-  if (emergency || imminent)
+  if (emergency || imminent) {
     for (const auto &header : mcdata_priority_headers(imminent ? "imminent_peril" : "emergency"))
       headers.push_back(header);
+  } else if (group && !adhoc && (mcdata_priority_group_.empty() || mcdata_priority_group_ == target)) {
+    // TS 24.282 clause 9.2.4.2.3 8)e)-f) with clauses 6.2.8.1.2 1) and 6.2.8.1.12: on a group in the in-progress
+    // emergency (MDEG 2) or imminent peril (MDIG 2) state every communication of the user has that priority.
+    if (mdeg_ == 2)
+      for (const auto &header : mcdata_priority_headers("emergency")) headers.push_back(header);
+    else if (mdig_ == 2)
+      for (const auto &header : mcdata_priority_headers("imminent_peril")) headers.push_back(header);
+  }
   mcdata_session_group_ = group ? target : std::string{};
   mcdata_session_adhoc_ = adhoc;
   mcdata_media_session_ = true;
@@ -171,6 +179,7 @@ void Client::mcdata_session_priority_state(mcdata::Info &info, const std::string
     mcdata_session_emergency_ = true;
     mcdata_emergency_ = true;
   } else if (emergency) {
+    mcdata_priority_group_ = target;
     // TS 24.282 clause 6.2.8.1.1: an emergency group communication, with the MCData emergency state set.
     info.emergency = true;
     info.alert = with_alert; // TS 24.282 clause 6.2.8.1.1 step 3a or step 4
@@ -185,6 +194,7 @@ void Client::mcdata_session_priority_state(mcdata::Info &info, const std::string
       mcdata_alert_group_ = target;
     }
   } else if (imminent) {
+    mcdata_priority_group_ = target;
     // TS 24.282 clause 6.2.8.1.9: an imminent peril group communication; no MCData emergency state.
     info.imminent_peril = true;
     mdigc_ = 2;
@@ -379,7 +389,21 @@ void Client::mcdata_group_priority(bool emergency, bool enable) {
         mcdata_media_result_["priority_status"] = response.status_code;
         mcdata_media_result_["priority_warning"] = std::string(get_header(response.headers, "Warning"));
         if (response.status_code >= 300) {
-          mcdata_priority_response(response); // TS 24.282 clause 6.2.8.1.5
+          if (enable) {
+            mcdata_priority_response(response); // TS 24.282 clause 6.2.8.1.5
+          } else {
+            // TS 24.282 clauses 6.2.7.2 and 6.2.7.3 (4xx, 5xx, 6xx): the cancel was refused.
+            std::optional<mcdata::Info> body;
+            for (const auto &part : response.parts)
+              if (part.content_type == mcdata::info_mime) body = mcdata::parse_info(part.body);
+            if (emergency) {
+              mdeg_ = 2;                                                 // 6.2.7.2 4xx 1)
+              if (body && body->alert == true && mdea_ == 4) mdea_ = 3;  // 2): the own alert stays
+              else if (mdea_ == 4 && (!body || !body->alert)) mdea_ = 3; // 3): neither: as before the cancel
+            } else if (!body || body->imminent_peril == true) {
+              mdig_ = 2; // 6.2.7.3 4xx
+            }
+          }
           failure("group priority: " + std::to_string(response.status_code));
           return;
         }

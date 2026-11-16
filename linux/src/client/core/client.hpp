@@ -1977,6 +1977,7 @@ private:
   void mcdata_group_fd_allowed(const std::string &group, std::uint64_t size);
   void mcdata_alert_authorised(const std::string &group);
   void mcdata_regroup_command(std::istringstream &words);
+  std::string mcdata_media_current_sdp() const;
   void mcdata_fa_binding(bool bind, const std::string &alias, const std::vector<std::string> &groups);
   Json mcdata_fa_binding_result_ = nullptr; // TS 24.282 clause 22.4.2.1: the outcome of the last binding request
   std::optional<SipResponse> mcdata_regroup_received(const std::vector<BodyPart> &parts);
@@ -2164,6 +2165,7 @@ private:
   // communication states of this client (MDEGC annex G.4.5, MDIGC annex G.4.8) and the in-progress states of the
   // group itself as this client knows them (MDEG annex G.4.3, MDIG annex G.4.6).
   int mdegc_ = 1, mdeg_ = 1, mdigc_ = 1, mdig_ = 1;
+  std::string mcdata_priority_group_; // the group MDEG and MDIG are the states of (empty: none known)
   bool mcdata_session_imminent_ = false;
   std::string mcdata_session_group_;  // the group of an open group SDS session
   bool mcdata_session_adhoc_ = false; // that group is an ad hoc group (clause 24)

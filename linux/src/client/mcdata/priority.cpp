@@ -123,6 +123,7 @@ void Client::mcdata_priority_info(const mcdata::Info &info) {
 // TS 24.282 clause 9.2.4.2.4 steps 4A and 4B: the in-progress states carried by a received
 // INVITE or re-INVITE of a group session.
 void Client::mcdata_group_priority_received(const mcdata::Info &info, bool in_session) {
+  if (info.emergency.has_value() || info.imminent_peril.has_value()) mcdata_priority_group_ = info.calling_group;
   if (info.emergency == true) {
     mdeg_ = 2;
     mdig_ = 1;
