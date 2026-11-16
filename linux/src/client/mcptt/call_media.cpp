@@ -49,6 +49,8 @@ void Client::check_remote(const MediaDescription &media, bool private_call) {
 MediaDescription Client::negotiated_media(MediaDescription media) const {
   media.queueing = client_rules::answer_parameter_kept(media.queueing, local_.queueing);
   media.implicit_request = client_rules::answer_parameter_kept(media.implicit_request, implicit_offered_);
+  // TS 24.380 clause 14.3.4: "mc_granted" in the answer grants the floor only when this client's offer had it.
+  media.granted = client_rules::answer_parameter_kept(media.granted, granted_offered_);
   return media;
 }
 
@@ -81,13 +83,17 @@ void Client::invite_with_implicit(bool implicit, bool own, const std::function<v
   early_floor_.clear();
   call_answered_ = false;
   local_.implicit_request = implicit;
+  // TS 24.380 clause 14.2.4: "mc_granted" in the offer of the initial INVITE when this client accepts the grant in the
+  // 200 (OK) (mcptt.offer_granted, default false), with its own implicit floor request.
+  local_.granted = implicit && own && cfg_.at("mcptt").value("offer_granted", false);
   try {
     invite();
   } catch (...) {
-    local_.implicit_request = implicit_offered_ = false;
+    local_.implicit_request = implicit_offered_ = local_.granted = granted_offered_ = false;
     throw;
   }
-  local_.implicit_request = false;
+  granted_offered_ = local_.granted;
+  local_.implicit_request = local_.granted = false;
   implicit_offered_ = implicit && own;
   // The outcome of the last implicit floor request: "offered", then "accepted" or "not accepted".
   if (implicit_offered_) status_["implicit_floor_request"] = "offered";
@@ -106,6 +112,7 @@ bool Client::upgrade_implicit_begin() {
   if (no_floor()) throw std::runtime_error("an implicit floor request needs floor control in the call");
   if (talking_ || requesting_) throw std::runtime_error("the floor is already held or requested");
   prepare_implicit_speech(*choice);
+  granted_offered_ = false; // TS 24.380 clause 14.5: no "mc_granted" in a later offer
   early_floor_.clear();
   call_answered_ = false;
   implicit_offered_ = true;
@@ -154,6 +161,20 @@ void Client::implicit_floor_answered() {
   floor_timers_.expect_implicit_grant(floor_message(FloorType::Request), monotonic_ms());
   requesting_ = true;
   status_["implicit_floor_request"] = "accepted";
+  // TS 24.380 clause 14.3.4 and the "mc_granted" semantics of clause 12.1 (NOTE 3): the answer's "mc_granted" grants
+  // the floor; the participant has permission as on a Floor Granted (clause 6.2.4.3.2), with the answer's "mc_ssrc".
+  if (remote_->granted) {
+    FloorPacket granted;
+    granted.type = FloorType::Granted;
+    granted.ssrc = remote_->floor_ssrc;
+    floor_timers_.receive(granted, monotonic_ms());
+    audio_ssrc_ = remote_->granted_audio_ssrc ? remote_->granted_audio_ssrc : local_.audio_ssrc;
+    talking_ = true;
+    requesting_ = false;
+    next_audio_ = monotonic_ms();
+    status_["implicit_floor_request"] = "granted";
+    event("floor_granted", {{"by", "mc_granted"}});
+  }
   event("implicit_floor_request_accepted", {{"dialog", dialog_}, {"stored_floor_messages", stored.size()}});
   for (const auto &datagram : stored) {
     try {
@@ -295,7 +316,7 @@ void Client::clear_call_state() {
   }
   local_.direction = "sendrecv";
   local_.implicit_request = false;
-  implicit_offered_ = call_answered_ = false;
+  implicit_offered_ = call_answered_ = granted_offered_ = false;
   early_floor_.clear();
   local_.control = MediaControl::floor;
   local_.no_floor_control = false;

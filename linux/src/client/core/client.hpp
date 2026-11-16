@@ -400,6 +400,8 @@ class Client {
   // TS 24.380 clause 6.2.4.3.5: a floor priority for the next Floor Request in place of the configured one (the
   // emergency priority of a triggered request, clause 18.1.1.2 6)).
   std::optional<std::uint8_t> next_floor_priority_;
+  // TS 24.380 clause 14.2.4: the INVITE of the call being set up offered "mc_granted".
+  bool granted_offered_ = false;
   // TS 24.379 clause 11.1.1.2.1.2 step 3b: MEPP saved when invited to an emergency first-to-answer
   // call, restored if this client is cancelled or released as not selected.
   std::optional<int> saved_mepp_;
