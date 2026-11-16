@@ -539,10 +539,9 @@ void Client::mcdata_fa_binding(bool bind, const std::string &alias, const std::v
   info.client_id = client_id();
   if (!mcdata_alias_in_use_.empty() && mcdata_aliases_active_.contains(mcdata_alias_in_use_))
     info.functional_alias = mcdata_alias_in_use_;
-  const std::string icsi = mcdata::icsi;
+  const std::string icsi = mcdata::icsi; // P-Preferred-Service: mcdata_request
   const std::vector<SipHeader> headers{{"Accept-Contact", "*;+g.3gpp.mcdata;require;explicit"},
-                                       {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(icsi) + "\";require;explicit"},
-                                       {"P-Preferred-Service", icsi}};
+                                       {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(icsi) + "\";require;explicit"}};
   mcdata_fa_binding_result_ = {{"bind", bind}, {"alias", alias}, {"groups", groups}, {"status", 0}};
   mcdata_request(
       "", {{mcdata::info_mime, mcdata::info_xml(info)}, {resource_lists_mime, resource_list_xml(groups)}}, headers,
@@ -553,6 +552,78 @@ void Client::mcdata_fa_binding(bool bind, const std::string &alias, const std::v
       },
       "MESSAGE");
   event("mcdata_fa_binding_requested", {{"bind", bind}, {"alias", alias}, {"groups", groups}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 6.2.7.5: cancel the in-progress emergency state of a group (and the user's own emergency alert) when
+// no communication is ongoing on it: a SIP MESSAGE to the participating function with <mcdata-request-uri> the group,
+// <emergency-ind> false and, cancelling the alert, <alert-ind> false (MDEA 4). The result comes in the SS's MESSAGE
+// with <emergency-ind-rcvd> true (mcdata_emergency_cancel_received). The clause does not have the request carry
+// <mcdata-client-id> but matches the reply by it: it is included.
+void Client::mcdata_emergency_cancel_command(std::istringstream &words) {
+  if (!mcdata_authorized_) throw std::runtime_error("cancelling an emergency requires MCData service authorisation");
+  std::string group, word;
+  words >> group;
+  bool alert = false;
+  while (words >> word) alert = alert || word == "alert";
+  if (group.empty()) throw std::runtime_error("usage: mcdata-emergency-cancel <group> [alert]");
+  if (mcdata_media_ && mcdata_session_group_ == group)
+    throw std::runtime_error("a communication is ongoing on the group: cancel it in the session (6.2.7.2)");
+  if (mdeg_ != 2) throw std::runtime_error("the group is not in an emergency state");
+  if (alert) require_mcdata_profile({"allow-cancel-emergency-alert"}); // TS 24.282 clause 6.2.8.1.6
+  mcdata::Info info;
+  info.request_uri = group;
+  info.emergency = false;
+  info.client_id = client_id();
+  if (alert) {
+    info.alert = false;
+    mdea_ = 4; // TS 24.282 clause 6.2.7.5 8)
+  }
+  mcdata_emergency_cancel_ = {{"group", group}, {"alert", alert}, {"client_id", info.client_id}, {"status", 0}};
+  const std::string icsi = mcdata::icsi;
+  mcdata_request(
+      "", {{mcdata::info_mime, mcdata::info_xml(info)}},
+      {{"Accept-Contact", "*;+g.3gpp.icsi-ref=\"" + url_encode(icsi) + "\";require;explicit"}},
+      [this, alert](const SipResponse &response) {
+        mcdata_emergency_cancel_["status"] = response.status_code;
+        if (response.status_code >= 300) {
+          // TS 24.282 clause 6.2.7.5 (4xx, 5xx, 6xx): <alert-ind> true in the response: the alert stays.
+          for (const auto &part : response.parts)
+            if (part.content_type == mcdata::info_mime && mcdata::parse_info(part.body).alert == true && mdea_ == 4)
+              mdea_ = 3;
+          if (alert && mdea_ == 4) mdea_ = 3;
+          failure("emergency cancel: " + std::to_string(response.status_code));
+        }
+        event("mcdata_emergency_cancel_answered", {{"status", response.status_code}});
+      },
+      "MESSAGE");
+  event("mcdata_emergency_cancel_sent", {{"group", group}, {"alert", alert}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 6.2.7.5: the controlling function's SIP MESSAGE with <emergency-ind-rcvd> true and the
+// <mcdata-client-id> of this client's cancel: <emergency-ind> false: MDEG 1; <alert-ind> true (MDEA 4, the alert was to
+// be cancelled): MDEA 3; false: MDEA 1 and the MCData emergency state cleared. 200 (OK).
+SipResponse Client::mcdata_emergency_cancel_received(const mcdata::Info &info) {
+  SipResponse response;
+  response.status_code = 200;
+  if (!mcdata_emergency_cancel_.is_object() || info.client_id != mcdata_emergency_cancel_.value("client_id", "")) {
+    event("mcdata_emergency_receipt_ignored", {{"client_id", info.client_id}});
+    return response;
+  }
+  if (info.emergency == false) {
+    mdeg_ = 1;
+    mdegc_ = 1;
+  }
+  if (mdea_ == 4 && info.alert == true) mdea_ = 3;
+  if (mdea_ == 4 && info.alert == false) {
+    mdea_ = 1;
+    mcdata_emergency_ = false;
+  }
+  mcdata_emergency_cancel_["receipt"] = true;
+  event("mcdata_emergency_cancel_confirmed",
+        {{"group", mcdata_emergency_cancel_.value("group", "")}, {"state", mdeg_name(mdeg_)}});
+  return response;
 }
 
 } // namespace mcx

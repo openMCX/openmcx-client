@@ -124,6 +124,11 @@ void Client::mcdata_priority_info(const mcdata::Info &info) {
 // INVITE or re-INVITE of a group session.
 void Client::mcdata_group_priority_received(const mcdata::Info &info, bool in_session) {
   if (info.emergency.has_value() || info.imminent_peril.has_value()) mcdata_priority_group_ = info.calling_group;
+  // TS 24.282 clause 6.2.7.4 1) / 3): the originator of an emergency alert another user started on the group
+  if (info.emergency == true && info.alert == true && info.calling_user != mcdata_user())
+    mcdata_group_alert_originator_ = info.calling_user;
+  else if (info.emergency == false || info.alert == false)
+    mcdata_group_alert_originator_.clear();
   if (info.emergency == true) {
     mdeg_ = 2;
     mdig_ = 1;

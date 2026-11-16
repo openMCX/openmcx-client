@@ -1978,6 +1978,8 @@ private:
   void mcdata_alert_authorised(const std::string &group);
   void mcdata_regroup_command(std::istringstream &words);
   std::string mcdata_media_current_sdp() const;
+  void mcdata_emergency_cancel_command(std::istringstream &words);
+  SipResponse mcdata_emergency_cancel_received(const mcdata::Info &info);
   void mcdata_fa_binding(bool bind, const std::string &alias, const std::vector<std::string> &groups);
   Json mcdata_fa_binding_result_ = nullptr; // TS 24.282 clause 22.4.2.1: the outcome of the last binding request
   std::optional<SipResponse> mcdata_regroup_received(const std::vector<BodyPart> &parts);
@@ -2160,12 +2162,17 @@ private:
   // MCData emergency private communication state (TS 24.282 annex G.4.11) of the open session, and
   // whether this client asked for the emergency condition.
   int mdepc_ = 1;
+  int mdepp_ = 1; // TS 24.282 annex G.4.10: the MCData emergency private priority state (MDEPP) of the session
   bool mcdata_session_emergency_ = false;
   // The priority states of a group SDS session (TS 24.282 annex G.4): the emergency and imminent peril group
   // communication states of this client (MDEGC annex G.4.5, MDIGC annex G.4.8) and the in-progress states of the
   // group itself as this client knows them (MDEG annex G.4.3, MDIG annex G.4.6).
   int mdegc_ = 1, mdeg_ = 1, mdigc_ = 1, mdig_ = 1;
   std::string mcdata_priority_group_; // the group MDEG and MDIG are the states of (empty: none known)
+  // the MCData ID of the user whose emergency alert a received priority request announced (6.2.7.4 1), 6.2.8.4.2 1)):
+  // the <originated-by> of a third-party cancel (6.2.8.1.14, 6.2.8.3.8)
+  std::string mcdata_group_alert_originator_, mcdata_private_alert_originator_;
+  Json mcdata_emergency_cancel_ = nullptr; // TS 24.282 clause 6.2.7.5: the pending cancel {group, alert, client_id}
   bool mcdata_session_imminent_ = false;
   std::string mcdata_session_group_;  // the group of an open group SDS session
   bool mcdata_session_adhoc_ = false; // that group is an ad hoc group (clause 24)
@@ -2234,9 +2241,9 @@ private:
 
   void mcdata_media_answered(const SipResponse &raw, const char *what);
 
-  void mcdata_session_priority(bool emergency, bool enable);
+  void mcdata_session_priority(bool emergency, bool enable, bool with_alert = false);
 
-  void mcdata_group_priority(bool emergency, bool enable);
+  void mcdata_group_priority(bool emergency, bool enable, bool with_alert = false);
 
   void mcdata_session_send(const std::string &text, mcdata::DispositionRequest disposition);
 

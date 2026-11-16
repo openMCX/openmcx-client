@@ -269,14 +269,14 @@ void Client::mcdata_session_answered(const SipResponse &raw) {
 // A re-INVITE inside an open session changes its priority: TS 24.282 clauses 6.2.8.4.4 and 6.2.8.4.3
 // for a one-to-one communication, clauses 6.2.8.1.1, 6.2.8.1.3, 6.2.8.1.9 and 6.2.8.1.11
 // for the emergency and imminent peril states of a group.
-void Client::mcdata_session_priority(bool emergency, bool enable) {
+void Client::mcdata_session_priority(bool emergency, bool enable, bool with_alert) {
   if (!mcdata_media_ || !mcdata_media_session_ || mcdata_media_dialog_.empty())
     throw std::runtime_error("no MCData SDS session is open");
   const bool group = !mcdata_session_group_.empty();
   if (mcdata_session_adhoc_)
     throw std::runtime_error("ad hoc group emergency and imminent peril communications are not implemented");
   if (!emergency && !group) throw std::runtime_error("imminent peril applies to group communications");
-  if (group) return mcdata_group_priority(emergency, enable);
+  if (group) return mcdata_group_priority(emergency, enable, with_alert);
   if (enable)
     require_mcdata_profile({"allow-emergency-private-call"}); // TS 24.282 clause 6.2.8.3.1.1
   else
@@ -292,6 +292,17 @@ void Client::mcdata_session_priority(bool emergency, bool enable) {
   if (enable) {
     mdepc_ = 2;
     mcdata_emergency_ = true;
+  } else if (mdepc_ != 3 && !mcdata_private_alert_originator_.empty()) {
+    // TS 24.282 clause 6.2.8.4.3 2) -> 6.2.8.3.8: the peer's emergency (and its alert) cancelled by this user
+    info.alert.reset();
+    mdepp_ = 3;
+    if (with_alert) {
+      require_mcdata_profile({"allow-cancel-emergency-alert"}); // TS 24.282 clause 6.2.8.3.1.3
+      info.alert = false;
+      info.originated_by = mcdata_private_alert_originator_;
+    }
+  } else {
+    mdepp_ = 3; // TS 24.282 clause 6.2.8.3.6
   }
   auto headers = mcdata_media_headers();
 
@@ -332,7 +343,7 @@ void Client::mcdata_session_priority(bool emergency, bool enable) {
 //------------------------------------------------------------------------------
 // TS 24.282 clauses 6.2.8.1.1, 6.2.8.1.3, 6.2.8.1.9 and 6.2.8.1.11: the group counterpart: the in-progress emergency
 // or imminent peril state of the group of this session is raised or cancelled with a re-INVITE.
-void Client::mcdata_group_priority(bool emergency, bool enable) {
+void Client::mcdata_group_priority(bool emergency, bool enable, bool with_alert) {
   if (emergency && enable) require_mcdata_profile({"allow-emergency-group-call"}); // TS 24.282 clause 6.2.8.1.8
   // TS 24.282 clause 6.2.8.1.7: cancelling the group's emergency state is left to local policy (no profile right).
   if (!emergency && enable) require_mcdata_profile({"allow-imminent-peril-call"});    // TS 24.282 clause 6.2.8.1.8
@@ -352,6 +363,15 @@ void Client::mcdata_group_priority(bool emergency, bool enable) {
       mdegc_ = 2;
       if (mdeg_ != 2) mdeg_ = 4;
       mcdata_emergency_ = true;
+    } else if (mdegc_ != 3 && !mcdata_group_alert_originator_.empty()) {
+      // TS 24.282 clause 6.2.7.2 3) -> 6.2.8.1.14: another user's emergency (and alert) cancelled by this user
+      mdeg_ = 3;
+      info.alert.reset();
+      if (with_alert) {
+        require_mcdata_profile({"allow-cancel-emergency-alert"}); // TS 24.282 clause 6.2.8.1.6
+        info.alert = false;
+        info.originated_by = mcdata_group_alert_originator_;
+      }
     } else { // TS 24.282 clause 6.2.8.1.3
       mdeg_ = 3;
       mcdata_emergency_ = false;

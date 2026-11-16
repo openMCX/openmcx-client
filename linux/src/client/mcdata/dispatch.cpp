@@ -87,6 +87,8 @@ std::optional<SipResponse> Client::mcdata_group_state_received(const std::vector
   for (const auto &part : parts)
     if (part.content_type == mcdata::info_mime) {
       const auto alert_info = mcdata::parse_info(part.body);
+      // TS 24.282 clause 6.2.7.5: the receipt of this client's cancel of a group's emergency.
+      if (alert_info.emergency_received == true) return mcdata_emergency_cancel_received(alert_info);
       // TS 24.282 clause 6.3.7.1.2: the in-progress emergency or imminent peril state of a group,
       // sent to its affiliated members that are not participating.
       if (!alert_info.calling_group.empty() && (alert_info.emergency || alert_info.imminent_peril)) {
@@ -571,6 +573,7 @@ void Client::mcdata_command(const std::string &cmd) {
     return mcdata_media_file_answer(word);
   }
   if (verb == "mcdata-regroup") return mcdata_regroup_command(words);
+  if (verb == "mcdata-emergency-cancel") return mcdata_emergency_cancel_command(words);
   if (verb == "fd-deferred") {
     // fd-deferred list   (TS 24.282 clause 11.3.2.1)
     std::string word;
@@ -678,9 +681,11 @@ void Client::mcdata_sds_session_command(std::istringstream &words) {
     return mcdata_media_close();
   }
   if (word == "emergency" || word == "imminent") {
-    std::string action;
-    words >> action;
-    return mcdata_session_priority(word == "emergency", action != "cancel");
+    std::string action, extra;
+    words >> action >> extra;
+    // "emergency cancel alert": the emergency alert is cancelled as well (the user's own, 6.2.8.1.3 c) / 6.2.8.3.6 c),
+    // or another user's, 6.2.8.1.14 / 6.2.8.3.8)
+    return mcdata_session_priority(word == "emergency", action != "cancel", extra == "alert");
   }
   if (word.empty())
     throw std::runtime_error("usage: sds-session <MCData ID|group=<id>> [emergency|imminent] | send ... | "
@@ -1162,6 +1167,7 @@ void Client::mcdata_status() {
   status_["mcdata_functional_alias_in_use"] = mcdata_alias_in_use_;
   status_["mcdata_fa_last_result"] = mcdata_fa_last_result_;
   status_["mcdata_fa_binding_result"] = mcdata_fa_binding_result_;
+  status_["mcdata_emergency_cancel"] = mcdata_emergency_cancel_;
   status_["mcdata_functional_alias_subscription_result"] = mcdata_alias_subscription_result_;
   status_["mcdata_functional_aliases_take_over_possible"] = mcdata_takeover_possible_;
   status_["mcdata_alert_state"] = mdea_name(mdea_);

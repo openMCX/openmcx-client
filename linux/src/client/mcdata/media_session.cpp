@@ -135,7 +135,12 @@ SipResponse Client::mcdata_media_reinvite(const mcdata::Info &info) {
   }
   const bool emergency = info.emergency == true;
   mcdata_session_emergency_ = emergency;
-  mdepc_ = emergency ? 3 : 1;
+  // TS 24.282 clause 6.2.8.4.2 1)-2): the peer's upgrade (MDEPP 2; its alert's originator kept for a cancel,
+  // 6.2.8.3.8) or cancel (MDEPP 1; MDEPC 3 -> 1).
+  mdepp_ = emergency ? 2 : 1;
+  if (emergency && info.alert == true) mcdata_private_alert_originator_ = info.calling_user;
+  if (!emergency) mcdata_private_alert_originator_.clear();
+  mdepc_ = emergency ? (mdepc_ == 3 ? 3 : 1) : 1;
   if (emergency) mcdata_emergency_ = true;
   if (mcdata_media_result_.is_object()) mcdata_media_result_["emergency"] = emergency;
   event("mcdata_session_emergency_received", {{"from", info.calling_user}, {"emergency", emergency}});
