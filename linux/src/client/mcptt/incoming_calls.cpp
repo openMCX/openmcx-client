@@ -224,6 +224,8 @@ SipResponse Client::adhoc_alert_message(const SipMessage &message, const McpttIn
     } else if (ah_mea_ == 4) {
       ah_mea_ = 1;
       own_alert_group_.clear();
+      // TS 24.379 annex G.1: "MCPTT adhoc emergency alert cancelled (by initiator)" clears the MCPTT emergency state.
+      emergency_state_ = false;
     }
   } else if (*info.adhoc_alert) {
     received_adhoc_alerts_[info.calling_group] = {{"initiator", info.calling_user},

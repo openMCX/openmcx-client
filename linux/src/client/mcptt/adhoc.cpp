@@ -203,6 +203,8 @@ void Client::adhoc_alert(const std::string &arguments) {
         if (response.parts.empty() && !response.body.empty())
           own_alert_group_ = parse_mcptt_info(response.body).calling_group;
         ah_mea_ = 3;
+        // TS 24.379 annex G.1: "MCPTT adhoc emergency alert initiated" sets the MCPTT emergency state.
+        emergency_state_ = true;
       });
   event("adhoc_alert_requested", {{"cancel", cancel}, {"criteria", info.participant_criteria}});
 }
