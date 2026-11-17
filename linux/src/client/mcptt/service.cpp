@@ -22,7 +22,12 @@ bool Client::conference_service_from(std::string_view uri) const {
 
 //------------------------------------------------------------------------------
 // TS 24.380 clause 11.1.1 and clause 11.2.1: the on-network floor participant's timers and counters, from the
-// configuration.
+// configuration (mcptt.*): T100 floor_release_retry_ms, T101 floor_request_retry_ms, T103 floor_media_idle_ms (0: not
+// used), T104 floor_queue_retry_ms, T132 floor_queued_grant_action_ms, T134 floor_queued_requests_ms (default 2 s);
+// the upper limits of C100 floor_release_transmissions, C101 floor_request_transmissions, C104
+// floor_queue_transmissions, each by default floor_transmissions (3). The participant knows its MCPTT ID (a Floor
+// Release Multi Talker naming it, clause 6.2.4.6.9) and, once the call's type is known, whether it is a broadcast
+// group call (clause 6.2.4.6.4; floor_message).
 FloorParticipantTimers Client::participant_timers() const {
   const auto &settings = cfg_.at("mcptt");
   FloorParticipantTimerOptions options;
@@ -32,7 +37,14 @@ FloorParticipantTimers Client::participant_timers() const {
   options.media_idle_ms = settings.value("floor_media_idle_ms", 4000u);
   options.queued_grant_action_ms = settings.value("floor_queued_grant_action_ms", 2000u);
   options.max_transmissions = settings.value("floor_transmissions", 3u);
-  return FloorParticipantTimers(options);
+  options.queued_requests_ms = settings.value("floor_queued_requests_ms", 2000u);
+  options.release_transmissions = settings.value("floor_release_transmissions", 0u);
+  options.request_transmissions = settings.value("floor_request_transmissions", 0u);
+  options.queue_transmissions = settings.value("floor_queue_transmissions", 0u);
+  options.broadcast = broadcast_session();
+  FloorParticipantTimers timers(options);
+  timers.set_user_id(user());
+  return timers;
 }
 
 //------------------------------------------------------------------------------
