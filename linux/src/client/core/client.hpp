@@ -404,6 +404,9 @@ class Client {
   std::vector<std::string> incoming_forwarding_others_;
   // TS 24.380 clause 6.2.4.5.8 step 1b: "an indication that the participant is overridden without revoke".
   bool floor_overridden_ = false;
+  // TS 24.380 clause 6.2.4.4.2 step 4: "an indication that the participant is overriding without revoke", stored on a
+  // Floor Granted with the G-bit; removed by clauses 6.2.4.5.3 step 2 and 6.2.4.5.7 step 1b.
+  bool floor_overriding_ = false;
   bool talking_ = false, requesting_ = false, registered_ = false, authorized_ = false, affiliated_ = false,
        desired_affiliation_ = true;
   bool emergency_ = false, imminent_ = false, priority_pending_ = false;
@@ -2731,6 +2734,7 @@ private:
   FloorPacket floor_message(FloorType type) const;
 
   void release();
+  void has_permission_floor_idle(const FloorPacket &packet);
 
   void save_audio();
 

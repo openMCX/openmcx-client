@@ -302,6 +302,24 @@ inline std::string_view floor_message_name(std::uint8_t type) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.380 table 8.2.3.15-2: bit G (Dual floor) of the Floor Indicator.
+inline constexpr std::uint16_t floor_indicator_dual_floor = 0x0200;
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 6.2.4.5.7: what a Floor Idle does in 'U: has permission' ([indicator] its Floor Indicator, 0
+// without one). Item 1: with the indication that the participant is overriding without revoke stored, that indication
+// is removed (EndOverriding); item 2: with the G-bit set and the indication that it is overridden without revoke
+// stored, that one is removed (EndOverridden). In both the participant "shall remain in the 'U: has permission'
+// state". Without either no procedure applies, and clause 6.2.4.1 has the message discarded and the state kept
+// (Discard). No case gives up the permission to send media.
+enum class HasPermissionIdle { Discard, EndOverriding, EndOverridden };
+inline HasPermissionIdle has_permission_floor_idle(bool overriding, bool overridden, std::uint16_t indicator) {
+  if (overriding) return HasPermissionIdle::EndOverriding;
+  if ((indicator & floor_indicator_dual_floor) != 0 && overridden) return HasPermissionIdle::EndOverridden;
+  return HasPermissionIdle::Discard;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.380 clause 6.2.4.5.8 with TS 24.481 clause 7.2.4.2 (<audio-mixing-entity> "UE"): one mixing step over the
 // frame queues of the talkers that send: when every queue has a frame, or one holds wait_frames or more (a talker
 // paused), or flush, the first frame of each non-empty queue is taken and the frames are summed, saturated to 16 bits;

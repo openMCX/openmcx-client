@@ -357,6 +357,7 @@ void Client::floor_and_priority_status() {
   talkers_status();
   status_["media_flow"] = media_flow_stopped_ ? "stopped" : "flowing";
   status_["floor_overridden"] = floor_overridden_;
+  status_["floor_overriding"] = floor_overriding_;
   status_["queued_requests_pending"] = floor_timers_.queued_requests_pending();
   for (const auto *counter : {"floor_request_timeouts", "floor_unavailable"})
     if (!status_.contains(counter)) status_[counter] = 0;

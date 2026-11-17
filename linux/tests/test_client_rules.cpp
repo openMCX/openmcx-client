@@ -225,6 +225,24 @@ void test_floor_and_audio() {
     while (mcx::client_rules::mix_step(queues, true)) ++flushed;
     check(flushed == 4 && a.empty(), "flush mixes what waits");
   }
+  {
+    // TS 24.380 6.2.4.5.7 and 6.2.4.1: a Floor Idle in 'U: has permission' never releases the floor.
+    using mcx::client_rules::has_permission_floor_idle;
+    using mcx::client_rules::HasPermissionIdle;
+    constexpr std::uint16_t normal = 0x8000, dual = 0x8200;
+    check(has_permission_floor_idle(false, false, normal) == HasPermissionIdle::Discard,
+          "6.2.4.1: no override indication, the Floor Idle is discarded");
+    check(has_permission_floor_idle(false, false, dual) == HasPermissionIdle::Discard,
+          "6.2.4.1: the G-bit without an override indication is discarded");
+    check(has_permission_floor_idle(false, true, normal) == HasPermissionIdle::Discard,
+          "6.2.4.5.7 2: overridden, without the G-bit: discarded");
+    check(has_permission_floor_idle(false, true, dual) == HasPermissionIdle::EndOverridden,
+          "6.2.4.5.7 2: overridden, with the G-bit: the overridden indication removed");
+    check(has_permission_floor_idle(true, false, normal) == HasPermissionIdle::EndOverriding &&
+              has_permission_floor_idle(true, false, 0) == HasPermissionIdle::EndOverriding &&
+              has_permission_floor_idle(true, false, dual) == HasPermissionIdle::EndOverriding,
+          "6.2.4.5.7 1: overriding, with or without the G-bit: the overriding indication removed");
+  }
   check(floor_message_name(12) == "unknown", "an unassigned type");
   check(audio_overflow(100, 100, 16) == 0, "at the limit nothing is dropped");
   check(audio_overflow(116, 100, 16) == 0, "within a second past the limit nothing is dropped");

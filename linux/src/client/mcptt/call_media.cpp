@@ -318,7 +318,7 @@ void Client::clear_call_state() {
   talking_ = requesting_ = false;
   mix_talkers(true);
   talkers_.clear();
-  media_flow_stopped_ = floor_overridden_ = false;
+  media_flow_stopped_ = floor_overridden_ = floor_overriding_ = false;
   if (status_.value("media_rendering", false)) {
     status_["media_rendering"] = false;
     event("media_rendering", {{"on", false}});
@@ -417,7 +417,7 @@ void Client::release() {
   const bool send_release = (talking_ || requesting_) && !no_floor();
   next_floor_priority_.reset();
   talking_ = requesting_ = false;
-  floor_overridden_ = false;
+  floor_overridden_ = floor_overriding_ = false; // clause 6.2.4.5.3 steps 2 and 3
   live_talk_ = false;
   live_in_.clear();
   transmit_.clear();
@@ -474,6 +474,13 @@ bool Client::from_server_address(const sockaddr_in &source, const std::string &a
 std::string Client::server_target(const std::string &address, std::uint16_t port) const {
   const auto source = server_sources_.find(port);
   return source == server_sources_.end() ? address : source->second;
+}
+
+//------------------------------------------------------------------------------
+// Helper: the Floor Indicator value of a message, 0 without one.
+static std::uint16_t indicator_of(const FloorPacket &packet) {
+  const auto *field = find_floor_field(packet, FloorFieldId::FloorIndicator);
+  return field ? read_floor_indicator(*field) : 0;
 }
 
 //------------------------------------------------------------------------------
@@ -549,8 +556,10 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     talking_ = true;
     requesting_ = false;
     floor_overridden_ = false;
+    // TS 24.380 clause 6.2.4.4.2 step 4: the G-bit (Dual floor) stores the overriding without revoke indication.
+    floor_overriding_ = (indicator_of(packet) & client_rules::floor_indicator_dual_floor) != 0;
     next_audio_ = monotonic_ms();
-    floor_event("floor_granted");
+    floor_event("floor_granted", {{"overriding", floor_overriding_}});
   } else if (packet.type == FloorType::QueuePositionInfo) {
     status_["floor_queue_info_received"] = status_.value("floor_queue_info_received", 0u) + 1;
     for (const auto &field : packet.fields)
@@ -570,9 +579,13 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     release();
     floor_event("floor_revoked");
   } else if (packet.type == FloorType::Idle) {
-    // TS 24.380 clause 6.2.4.4: 'U: has permission' takes no Floor Idle. One over the subchannel can be a T7
-    // repetition sent before the server granted this user's request, overtaken by the unicast Floor Granted.
-    if (talking_ && !multicast) release();
+    // TS 24.380 clause 6.2.4.5.7: in 'U: has permission' a Floor Idle never ends the permission to send media (one
+    // over the MBMS subchannel neither: it can be a T7 repetition sent before the grant). The Floor Ack, when asked,
+    // was sent above (steps 1a and 2a).
+    if (talking_ || state_before == FloorParticipantState::HasPermission) {
+      has_permission_floor_idle(packet);
+      return;
+    }
     status_["floor_owner"] = "";
     receive_ssrc_ = 0;
     // The floor is idle: no talker remains, nor an override (TS 24.380 clauses 6.2.4.3.2, 6.2.4.6.4).
@@ -609,16 +622,33 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
 }
 
 //------------------------------------------------------------------------------
-// The session was initiated as a broadcast group call (TS 24.379 clause 6.2.8.2; an ad hoc broadcast call too).
-bool Client::broadcast_session() const {
-  return call_type_ == "broadcast" || (call_type_ == "adhoc" && adhoc_broadcast_);
+// TS 24.380 clause 6.2.4.5.7 (client_rules::has_permission_floor_idle): a Floor Idle in 'U: has permission'. Step 1:
+// the overriding participant removes its overriding without revoke indication (the overridden talker has released);
+// step 2: with the G-bit, the overridden participant removes its overridden without revoke indication (the
+// overriding talker has released). Either way the other talker's audio ends here, and the participant remains in
+// 'U: has permission', sending media. Otherwise clause 6.2.4.1: the message is discarded and nothing changes.
+void Client::has_permission_floor_idle(const FloorPacket &packet) {
+  const auto outcome =
+      client_rules::has_permission_floor_idle(floor_overriding_, floor_overridden_, indicator_of(packet));
+  if (outcome == client_rules::HasPermissionIdle::Discard) {
+    status_["floor_ignored_messages"] = status_.value("floor_ignored_messages", 0u) + 1;
+    return;
+  }
+  const bool overriding = outcome == client_rules::HasPermissionIdle::EndOverriding;
+  (overriding ? floor_overriding_ : floor_overridden_) = false;
+  status_["floor_owner"] = "";
+  receive_ssrc_ = 0;
+  mix_talkers(true);
+  talkers_.clear();
+  status_["dual_floor"] = false;
+  talkers_status();
+  floor_event("dual_floor_ended", {{"role", overriding ? "overriding" : "overridden"}});
 }
 
 //------------------------------------------------------------------------------
-// Helper: the Floor Indicator value of a message, 0 without one.
-static std::uint16_t indicator_of(const FloorPacket &packet) {
-  const auto *field = find_floor_field(packet, FloorFieldId::FloorIndicator);
-  return field ? read_floor_indicator(*field) : 0;
+// The session was initiated as a broadcast group call (TS 24.379 clause 6.2.8.2; an ad hoc broadcast call too).
+bool Client::broadcast_session() const {
+  return call_type_ == "broadcast" || (call_type_ == "adhoc" && adhoc_broadcast_);
 }
 
 // TS 24.380 table 8.2.3.15-2: bit G (dual floor) and bit I (multi-talker) of the Floor Indicator.
