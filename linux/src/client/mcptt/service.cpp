@@ -138,9 +138,11 @@ std::pair<std::string, std::string> Client::publish_body(bool affiliation) {
 // answer mode in <am-settings> (mcptt.answer_mode, changed by "answer-mode"; RFC 4354 "automatic" or "manual"), b)
 // <selected-user-profile-index> set to the "user-profile-index" of the selected MCPTT user profile (TS 24.484 clause
 // 8.3.2.1: that of the profile document read, else the configured mcptt.profile_index) and c) <multiplex-support>
-// (clause 7.4.1.2.2; "false": this client does not multiplex, clause 6.2.10).
+// (clause 7.4.1.2.2): this client's own multiplex support (mcptt.multiplex_support, clause 6.2.10), the same value that
+// decides whether its offers carry "mc_floor_ssrc" (TS 24.380 14.2.7).
 std::string Client::mcptt_poc_settings() const {
-  return poc_settings_xml(client_id(), profile_index_, cfg_.at("mcptt").value("answer_mode", std::string("auto")) == "manual");
+  return poc_settings_xml(client_id(), profile_index_,
+                          cfg_.at("mcptt").value("answer_mode", std::string("auto")) == "manual", multiplex_supported());
 }
 
 //------------------------------------------------------------------------------
