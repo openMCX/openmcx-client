@@ -502,6 +502,42 @@ void test_floor_multiplexing() {
   const auto no_channel = answer_floor_parameters(false, 11, true, false, 0, std::nullopt);
   check(!no_channel.queueing && !no_channel.floor_priority && no_channel.floor_ssrc == 0,
         "an offer without the media plane control channel: no fmtp parameter (TS 24.379 6.2.2, TS 24.380 14.3.1)");
+
+  // TS 24.380 14.2.7: mc_floor_ssrc in an offer only if multiplexing is supported.
+  check(offer_floor_ssrc(11, true) == 11, "multiplexing supported: the offer has this client's mc_floor_ssrc");
+  check(offer_floor_ssrc(11, false) == 0, "multiplexing not supported: the offer has no mc_floor_ssrc (14.2.7)");
+  // TS 24.380 14.3.8: in an answer only if multiplexing is supported and the offer had one.
+  check(answer_floor_ssrc(11, 22, false) == 0, "multiplexing not supported: an offer's mc_floor_ssrc unanswered");
+  check(answer_floor_ssrc(11, 22, true) == 11 && answer_floor_ssrc(11, 0, true) == 0,
+        "multiplexing supported: answered with mc_floor_ssrc only when offered");
+  const auto unmultiplexed = answer_floor_parameters(true, 11, true, false, 22, std::uint8_t{3}, false);
+  check(unmultiplexed.floor_ssrc == 0 && unmultiplexed.queueing && unmultiplexed.floor_priority == 3,
+        "multiplexing not supported: the answer's other parameters as with it, no mc_floor_ssrc (14.3.8)");
+  // TS 24.380 14.4, TS 24.379 6.2.10: the server's mc_floor_ssrc used only with this client's support.
+  check(negotiated_floor_ssrc(22, true) == 22 && negotiated_floor_ssrc(0, true) == 0,
+        "multiplexing supported: the server's mc_floor_ssrc, if any, kept");
+  check(negotiated_floor_ssrc(22, false) == 0,
+        "multiplexing not supported: an answer's mc_floor_ssrc the offer lacked is discarded (14.4)");
+
+  // The offering side (CO) without multiplexing, end to end: offer without mc_floor_ssrc, the server's answer
+  // with none (or one, discarded): the floor control messages go with this client's own SSRC and the server's,
+  // carrying its own SSRC, are taken by its address and port (TS 24.380 8.2.4).
+  for (const std::uint32_t answered : {0u, 22u}) {
+    const std::uint32_t own = 11;
+    const auto offered = offer_floor_ssrc(own, false);
+    const auto remote = negotiated_floor_ssrc(answered, false);
+    check(offered == 0 && floor_ssrc_to_send(own, remote) == own,
+          "CO, not multiplexed: Floor Request and Release with this client's own SSRC");
+    check(floor_ssrc_received(33, own, remote), "CO, not multiplexed: the server's Floor Granted with its SSRC taken");
+  }
+  // The offering side (CO) with multiplexing, the server answering without mc_floor_ssrc (14.3.8): not multiplexed.
+  check(floor_ssrc_to_send(11, negotiated_floor_ssrc(0, true)) == 11 &&
+            floor_ssrc_received(33, 11, negotiated_floor_ssrc(0, true)),
+        "CO, multiplexing supported, answer without mc_floor_ssrc: not multiplexed");
+  // The default (multiplexing supported, the server answering with mc_floor_ssrc) unchanged.
+  check(floor_ssrc_to_send(11, negotiated_floor_ssrc(22, true)) == 22 &&
+            !floor_ssrc_received(33, 11, negotiated_floor_ssrc(22, true)),
+        "CO, multiplexed: the server's mc_floor_ssrc sent, only this client's taken");
 }
 
 //------------------------------------------------------------------------------

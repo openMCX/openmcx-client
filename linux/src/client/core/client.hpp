@@ -206,22 +206,36 @@ class Client {
 
   // TS 24.380 clauses 14.2.7, 14.3.8 and 8.2 (client_rules::floor_ssrc_to_send, floor_ssrc_received): the SSRC of
   // the floor control messages this client sends in the call, and whether a received one's SSRC is this call's.
-  // Multiplexed only when the server's SDP has "mc_floor_ssrc".
+  // Multiplexed only when the server's SDP has "mc_floor_ssrc" and this client supports multiplexing (remote_ holds
+  // the negotiated one, negotiated_media).
   std::uint32_t floor_ssrc_to_send() const {
     return client_rules::floor_ssrc_to_send(local_.floor_ssrc, remote_ ? remote_->floor_ssrc : 0);
   }
   bool floor_ssrc_received(std::uint32_t ssrc) const {
     return client_rules::floor_ssrc_received(ssrc, local_.floor_ssrc, remote_ ? remote_->floor_ssrc : 0);
   }
+  // TS 24.379 clause 6.2.10: whether this MCPTT client supports multiplexing, mcptt.multiplex_support (default
+  // true: its offers have "mc_floor_ssrc"). A capability of the client, not of the MCPTT user profile (TS 24.484 has
+  // none).
+  bool multiplex_supported() const { return cfg_.at("mcptt").value("multiplex_support", true); }
+  // TS 24.380 clause 14.2.7: this client's media in an SDP offer (an INVITE, a re-INVITE): "mc_floor_ssrc" only when
+  // multiplexing is supported (client_rules::offer_floor_ssrc). local_.floor_ssrc stays the SSRC this client sends
+  // with when the session is not multiplexed (floor_ssrc_to_send).
+  MediaDescription offer_media() const {
+    auto offer = local_;
+    offer.floor_ssrc = client_rules::offer_floor_ssrc(local_.floor_ssrc, multiplex_supported());
+    return offer;
+  }
   // TS 24.380 clause 14.3: this client's media in its answer to [offer], its fmtp parameters item by item
   // (client_rules::answer_floor_parameters): "mc_queueing" when queueing is supported (mcptt.floor_queue), the offer's
-  // "mc_priority", "mc_floor_ssrc" only when the offer had it; no "mc_granted", "mc_implicit_request" or "mc_ssrc".
-  // local_.floor_ssrc stays the SSRC this client sends with.
+  // "mc_priority", "mc_floor_ssrc" only when the offer had it and multiplexing is supported; no "mc_granted",
+  // "mc_implicit_request" or "mc_ssrc". local_.floor_ssrc stays the SSRC this client sends with.
   MediaDescription answer_media(const MediaDescription &offer) const {
     auto answer = local_;
     const auto parameters = client_rules::answer_floor_parameters(
-        offer.control != MediaControl::none && local_.control != MediaControl::none, local_.floor_ssrc, cfg_.at("mcptt").value("floor_queue", false), local_.no_floor_control, offer.floor_ssrc,
-        offer.floor_priority);
+        offer.control != MediaControl::none && local_.control != MediaControl::none, local_.floor_ssrc,
+        cfg_.at("mcptt").value("floor_queue", false), local_.no_floor_control, offer.floor_ssrc, offer.floor_priority,
+        multiplex_supported());
     answer.floor_ssrc = parameters.floor_ssrc;
     answer.queueing = parameters.queueing;
     answer.floor_priority = parameters.floor_priority;

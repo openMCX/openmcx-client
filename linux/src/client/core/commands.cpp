@@ -236,7 +236,7 @@ void Client::run_command(const std::string &cmd) {
     if (dialog_.empty()) {
       failure("refresh-reinvite: no call");
     } else {
-      auto offer = local_;
+      auto offer = offer_media();
       std::istringstream words(cmd.substr(std::string_view("refresh-reinvite").size()));
       for (std::string word; words >> word;) {
         if (word == "hold") {
@@ -667,7 +667,7 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
   const bool emergency_request = info.emergency == true, imminent_request = info.imminent_peril == true;
   invite_with_implicit(implicit.requested, true, [&] {
     dialog_ = sip_.invite(
-        cmd == "rejoin" ? session_uri_ : service(), local_, with_talking_location(parts, implicit.requested),
+        cmd == "rejoin" ? session_uri_ : service(), offer_media(), with_talking_location(parts, implicit.requested),
         [this, emergency_request, imminent_request](const SipResponse &response) {
           // TS 24.379 clauses 6.2.8.1.4 and 6.2.8.1.5: the alert sent with the call is initiated ("MEA 3") on a 2xx,
           // and back to "MEA 1: no-alert" on a refusal.
@@ -743,7 +743,7 @@ void Client::chat_join_command(const std::string &cmd) {
   floor_timers_ = participant_timers();
   status_["last_call_failure"] = nullptr;
   dialog_ = sip_.invite(
-      service(), local_, info_parts(info),
+      service(), offer_media(), info_parts(info),
       [this](const SipResponse &response) {
         if (response.status_code >= 300) {
           status_["last_call_failure"] = {{"status", response.status_code},

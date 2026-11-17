@@ -599,14 +599,32 @@ inline std::uint32_t floor_ssrc_to_send(std::uint32_t local, std::uint32_t remot
 inline bool floor_ssrc_received(std::uint32_t ssrc, std::uint32_t local, std::uint32_t remote) {
   return !remote || ssrc == local;
 }
-// The "mc_floor_ssrc" of this client's answer to an offer with [offered] (TS 24.380 clauses 14.3.1, 14.3.8).
-inline std::uint32_t answer_floor_ssrc(std::uint32_t local, std::uint32_t offered) { return offered ? local : 0; }
+// Whether this client supports multiplexing ([multiplexing], mcptt.multiplex_support) is its own capability (TS 24.379
+// clause 6.2.10; announced in the <multiplex-support> of its poc-settings, clause 7.4.1.2.2; TS 24.484 has no
+// configuration of it).
+// The "mc_floor_ssrc" of this client's offer (TS 24.380 clause 14.2.7: "in SDP offers if multiplexing is
+// supported"): its own SSRC [local], else none.
+inline std::uint32_t offer_floor_ssrc(std::uint32_t local, bool multiplexing) { return multiplexing ? local : 0; }
+// The "mc_floor_ssrc" of this client's answer to an offer with [offered] (TS 24.380 clauses 14.3.1, 14.3.8: "if
+// multiplexing is supported and that the "mc_floor_ssrc" fmtp attribute was received in the SDP offers").
+inline std::uint32_t answer_floor_ssrc(std::uint32_t local, std::uint32_t offered, bool multiplexing = true) {
+  return offered && multiplexing ? local : 0;
+}
+// The server's "mc_floor_ssrc" [remote] (of its answer or its offer) this client goes by. A client that does not
+// support multiplexing has offered none (clause 14.2.7), so an answer's is discarded ("attribute parameters that were
+// not present in the associated offer", clause 14.4), and it answers an offer's without one (clause 14.3.8): no
+// multiplexing without both endpoints' support (TS 24.379 clause 6.2.10), the session's floor control messages are
+// told apart by the server's address and port (floor_ssrc_to_send, floor_ssrc_received with 0).
+inline std::uint32_t negotiated_floor_ssrc(std::uint32_t remote, bool multiplexing) {
+  return multiplexing ? remote : 0;
+}
 
 //------------------------------------------------------------------------------
 // TS 24.380 clause 14.3: the media plane control fmtp parameters of this client's SDP answer, each by its own item.
 // 14.3.2: "mc_queueing" when this client supports queueing of floor requests ([queueing_supported]), whatever the
 // offer (the offer conditions only the controlling and non-controlling functions). 14.3.3: "mc_priority" returns the
-// offer's value. 14.3.8: "mc_floor_ssrc" (this client's, [local_floor_ssrc]) only when the offer had one. 14.3.4 to
+// offer's value. 14.3.8: "mc_floor_ssrc" (this client's, [local_floor_ssrc]) only when the offer had one and this
+// client supports multiplexing ([multiplexing]). 14.3.4 to
 // 14.3.6 ("mc_granted", "mc_implicit_request", "mc_ssrc") are the server's: never in this client's answer. 14.3.7 and
 // 14.2.6: with "mc_no_floor_ctrl" no floor control related parameter is written. An offer without the media plane
 // control channel ([control_channel] false: a private call without floor control, TS 24.379 clauses 6.2.2 and 11.1.2)
@@ -619,10 +637,11 @@ struct AnswerFloorParameters {
 inline AnswerFloorParameters answer_floor_parameters(bool control_channel, std::uint32_t local_floor_ssrc,
                                                      bool queueing_supported, bool no_floor_control,
                                                      std::uint32_t offered_floor_ssrc,
-                                                     std::optional<std::uint8_t> offered_priority) {
+                                                     std::optional<std::uint8_t> offered_priority,
+                                                     bool multiplexing = true) {
   AnswerFloorParameters answer;
   if (!control_channel) return answer;
-  answer.floor_ssrc = answer_floor_ssrc(local_floor_ssrc, offered_floor_ssrc);
+  answer.floor_ssrc = answer_floor_ssrc(local_floor_ssrc, offered_floor_ssrc, multiplexing);
   if (no_floor_control) return answer;
   answer.queueing = queueing_supported;
   answer.floor_priority = offered_priority;

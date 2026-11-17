@@ -750,7 +750,8 @@ SipResponse Client::private_call_reinvite(const SipMessage &message) {
     return response;
   }
   check_remote(*message.remote_media);
-  if (message.remote_media->floor_ssrc != remote_->floor_ssrc ||
+  if (client_rules::negotiated_floor_ssrc(message.remote_media->floor_ssrc, multiplex_supported()) !=
+          remote_->floor_ssrc ||
       message.remote_media->audio_port != remote_->audio_port ||
       message.remote_media->floor_port != remote_->floor_port ||
       message.remote_media->payload_type != remote_->payload_type) {
@@ -778,7 +779,8 @@ SipResponse Client::group_call_reinvite(const SipMessage &message) {
     return response;
   }
   check_remote(*message.remote_media);
-  if (message.remote_media->floor_ssrc != remote_->floor_ssrc ||
+  if (client_rules::negotiated_floor_ssrc(message.remote_media->floor_ssrc, multiplex_supported()) !=
+          remote_->floor_ssrc ||
       message.remote_media->audio_port != remote_->audio_port ||
       message.remote_media->floor_port != remote_->floor_port ||
       message.remote_media->payload_type != remote_->payload_type ||

@@ -347,7 +347,7 @@ void Client::change_private_priority(bool enable, bool with_alert, const std::st
   priority_pending_ = true;
   try {
     sip_.reinvite(
-        dialog_, local_, parts,
+        dialog_, offer_media(), parts,
         [this, enable, previous_mpea, implicit](const SipResponse &response) {
           if (response.status_code < 200) return;
           if (implicit) schedule([this, code = response.status_code] { upgrade_implicit_answered(code); });
@@ -474,7 +474,7 @@ void Client::change_priority(bool emergency, bool enabled, const std::string &ot
       })
                            : std::function<void(const SipResponse &)>(completed);
       try {
-        sip_.reinvite(dialog_, local_, info_parts(info), done, headers);
+        sip_.reinvite(dialog_, offer_media(), info_parts(info), done, headers);
       } catch (...) {
         if (implicit) upgrade_implicit_answered(500);
         local_.implicit_request = false;

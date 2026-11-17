@@ -252,7 +252,7 @@ void Client::announced_transfer(const std::string &target, const std::string &ac
     if (call_type_ != "private" || private_peer_.empty() || status_.value("call_state", "") != "active" || !remote_)
       throw std::runtime_error("an announced transfer requires an active private call");
     if (target == private_peer_ || target == user()) throw std::runtime_error("transfer target must be a third user");
-    auto media = local_;
+    auto media = offer_media();
     media.direction = "sendonly";
     McpttInfo hold;
     hold.session_type = "private";
@@ -315,7 +315,7 @@ void Client::resume_held() {
   local_.direction = "sendrecv";
   McpttInfo resume;
   resume.session_type = "private";
-  sip_.reinvite(dialog_, local_, info_parts(resume));
+  sip_.reinvite(dialog_, offer_media(), info_parts(resume));
   event("private_call_resumed", {{"dialog", dialog_}});
 }
 

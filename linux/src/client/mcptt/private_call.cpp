@@ -139,7 +139,7 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
   } else {
     invite_with_implicit(implicit.requested, true, [&] {
       dialog_ = sip_.invite(
-          service(), local_, with_talking_location(parts, implicit.requested),
+          service(), offer_media(), with_talking_location(parts, implicit.requested),
           [this, target](const SipResponse &response) { private_call_response(target, response); }, headers);
     });
   }
@@ -437,7 +437,7 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
   }
   invite_with_implicit(implicit.requested, true, [&] {
     dialog_ = sip_.invite(
-        service(), local_, with_talking_location(parts, implicit.requested),
+        service(), offer_media(), with_talking_location(parts, implicit.requested),
         [this](const SipResponse &response) {
           if (response.status_code == 183 && status_.value("call_state", "") == "calling")
             status_["call_state"] = "progress";
@@ -521,7 +521,7 @@ void Client::ambient_call(const std::string &arguments) {
   // the floor to the invited user (remote-init, not this client's own floor request).
   invite_with_implicit(true, !listening, [&] {
     dialog_ = sip_.invite(
-        service(), local_, parts,
+        service(), offer_media(), parts,
         [this](const SipResponse &response) {
           if (response.status_code >= 300) {
             status_["last_call_failure"] = {{"status", response.status_code},

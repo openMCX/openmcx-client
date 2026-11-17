@@ -25,9 +25,10 @@ void Client::check_remote(const MediaDescription &media, bool private_call) {
   // client's own or, under the CSK, one already used for another stream, also of the held call that has carried no
   // packet yet (mcx::floor_ssrc_refused, mcptt_floor_streams; RFC 7714 section 8.4, RFC 3711 section 9.1); the call's
   // own SSRC again (a re-INVITE, a refresh) is the stream going on.
+  // Without multiplexing the server's "mc_floor_ssrc" is not used (negotiated_media): nothing to refuse.
   if (!no_floor() &&
-      floor_ssrc_refused(media.floor_ssrc, local_.floor_ssrc,
-                         remote_ ? std::optional(remote_->floor_ssrc) : std::nullopt,
+      floor_ssrc_refused(client_rules::negotiated_floor_ssrc(media.floor_ssrc, multiplex_supported()),
+                         local_.floor_ssrc, remote_ ? std::optional(remote_->floor_ssrc) : std::nullopt,
                          protected_floor() ? &protection_ : nullptr, mcptt_floor_streams()))
     throw std::runtime_error("directional floor SSRC collision");
   if (media.protected_media != protected_media()) throw std::runtime_error("unsupported media profile");
@@ -55,8 +56,11 @@ void Client::floor_event(std::string_view kind, const Json &detail) {
 // offer, the offerer shall discard those attribute parameters": "mc_queueing" without this client's, and
 // "mc_implicit_request" unless this client's INVITE requested the floor with it (implicit_offered_). The "mc_ssrc"
 // is kept: the offerer "shall use the returned value [...] even if the "mc_ssrc" attribute was not present in the
-// associated offer". For a server's offer this is the negotiated outcome as well (clause 14.3.2).
+// associated offer". For a server's offer this is the negotiated outcome as well (clause 14.3.2). The
+// "mc_floor_ssrc" only when this client supports multiplexing (client_rules::negotiated_floor_ssrc): its offer had
+// none (clause 14.2.7), so an answer's is discarded, and its answer to an offer has none (clause 14.3.8).
 MediaDescription Client::negotiated_media(MediaDescription media) const {
+  media.floor_ssrc = client_rules::negotiated_floor_ssrc(media.floor_ssrc, multiplex_supported());
   media.queueing = client_rules::answer_parameter_kept(media.queueing, local_.queueing);
   media.implicit_request = client_rules::answer_parameter_kept(media.implicit_request, implicit_offered_);
   // TS 24.380 clause 14.3.4: "mc_granted" in the answer grants the floor only when this client's offer had it.
