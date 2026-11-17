@@ -603,6 +603,29 @@ inline bool floor_ssrc_received(std::uint32_t ssrc, std::uint32_t local, std::ui
 inline std::uint32_t answer_floor_ssrc(std::uint32_t local, std::uint32_t offered) { return offered ? local : 0; }
 
 //------------------------------------------------------------------------------
+// TS 24.380 clause 14.3: the media plane control fmtp parameters of this client's SDP answer, each by its own item.
+// 14.3.2: "mc_queueing" when this client supports queueing of floor requests ([queueing_supported]), whatever the
+// offer (the offer conditions only the controlling and non-controlling functions). 14.3.3: "mc_priority" returns the
+// offer's value. 14.3.8: "mc_floor_ssrc" (this client's, [local_floor_ssrc]) only when the offer had one. 14.3.4 to
+// 14.3.6 ("mc_granted", "mc_implicit_request", "mc_ssrc") are the server's: never in this client's answer. 14.3.7 and
+// 14.2.6: with "mc_no_floor_ctrl" no floor control related parameter is written.
+struct AnswerFloorParameters {
+  std::uint32_t floor_ssrc = 0;
+  bool queueing = false;
+  std::optional<std::uint8_t> floor_priority;
+};
+inline AnswerFloorParameters answer_floor_parameters(std::uint32_t local_floor_ssrc, bool queueing_supported,
+                                                     bool no_floor_control, std::uint32_t offered_floor_ssrc,
+                                                     std::optional<std::uint8_t> offered_priority) {
+  AnswerFloorParameters answer;
+  answer.floor_ssrc = answer_floor_ssrc(local_floor_ssrc, offered_floor_ssrc);
+  if (no_floor_control) return answer;
+  answer.queueing = queueing_supported;
+  answer.floor_priority = offered_priority;
+  return answer;
+}
+
+//------------------------------------------------------------------------------
 // RFC 3711 section 3.4 (TS 33.180 clauses 9.4.7 and 9.4.8): "after a re-key, the SRTCP index MUST NOT be reset to zero
 // again". The floor (or transmission) control streams of the call under way that go on under a new CSK
 // (ProtectedCall::set_floor), in both directions (TS 24.380 and TS 24.581 clause 4.3.3.1: each side allocates the
