@@ -684,6 +684,37 @@ inline std::string contact_address(std::string_view uri) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.229 clauses 5.1.1.5A and 5.1.1.7: whether a reginfo <contact> is this client's own binding, the one "that the UE
+// registered" ("belonging to this UE"): its <uri> has this client's contact address (contact_address) and, when both
+// are known, its callid (RFC 3680 section 5.1: the Call-ID of the REGISTER that created or last refreshed the binding)
+// is the Call-ID of this client's current registration. A client restarted at the same address registers with a new
+// Call-ID, so the binding of an earlier registration there (the one its log-off removed, still listed "terminated")
+// is not its own. Without a callid in the document (or before a registration) the address decides alone.
+inline bool own_reg_contact(std::string_view contact_uri, std::string_view contact_callid,
+                            std::string_view own_contact_uri, std::string_view registration_call_id) {
+  if (contact_address(contact_uri) != contact_address(own_contact_uri)) return false;
+  return contact_callid.empty() || registration_call_id.empty() || contact_callid == registration_call_id;
+}
+
+//------------------------------------------------------------------------------
+// RFC 6665 sections 4.1.3 and 8.2.1: what a received NOTIFY is to the reg event subscription (TS 24.229 clause
+// 5.1.1.3): not of the reg event package (the Event header field's event type, without parameters, is not "reg");
+// of this client's current subscription (its dialog, non-empty); or of a subscription the client does not know (a
+// dialog of an earlier process at the same address, or one already replaced), which "MUST return a 481 (Subscription
+// does not exist)" and changes nothing (TS 24.229 clause 5.1.1.7 acts on NOTIFYs "on any dialog which was generated
+// during the subscription to the reg event package as described in subclause 5.1.1.3", that is this client's).
+// A subscription the client is ending is told apart before (its final NOTIFY, section 4.1.2.3).
+enum class RegNotify { other_package, current, unknown };
+inline RegNotify classify_reg_notify(std::string_view event_header, std::string_view dialog_id,
+                                     std::string_view subscription) {
+  auto type = event_header.substr(0, event_header.find(';'));
+  while (!type.empty() && (type.front() == ' ' || type.front() == '\t')) type.remove_prefix(1);
+  while (!type.empty() && (type.back() == ' ' || type.back() == '\t')) type.remove_suffix(1);
+  if (type != "reg") return RegNotify::other_package;
+  return !dialog_id.empty() && dialog_id == subscription ? RegNotify::current : RegNotify::unknown;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.581 clauses 14.2.3 and 14.2.6: the "mc_priority" / "mc_reception_priority" value offered for a configured
 // priority (TS 24.484 clause 9.3.2.1 item 8 e) v), 0 to 255): none for the default priority 0; the SDP syntax has at
 // most two digits (clause 12.1.2.3), so a higher value asks for 99.

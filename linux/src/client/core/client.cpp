@@ -732,6 +732,9 @@ void Client::registration_answered(const SipResponse &response) {
     return;
   }
   registered_ = true;
+  // RFC 3261 section 10.2.4: refreshes keep the Call-ID; a new registration (another process, or after a network
+  // deregistration, SipEngine::registration_ended) has its own. The response's dialog ID is its Call-ID.
+  if (!response.dialog_id.empty()) registration_call_id_ = response.dialog_id;
   // TS 24.229 clause 5.1.1.4.1: the duration of this registration, for the reregistration time of a shortened one
   // (core/reg_event.cpp): the expires parameter of the Contact or the Expires header field of the 200 (OK).
   {

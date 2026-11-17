@@ -398,10 +398,22 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
     ok.status_code = 200;
     return ok;
   }
-  // TS 24.229 clause 5.1.1.3: this client's own reg event subscription.
-  if (get_header(message.headers, "Event") == "reg" && !message.dialog_id.empty() &&
-      message.dialog_id == reg_subscription_)
+  // TS 24.229 clause 5.1.1.3: this client's own reg event subscription. A reg NOTIFY on any other dialog (that of an
+  // earlier process at this address, whose log-off left it with the S-CSCF) changes nothing: 481 (RFC 6665 section
+  // 4.1.3), which also ends that subscription at the notifier (section 4.2.2).
+  switch (client_rules::classify_reg_notify(get_header(message.headers, "Event"), message.dialog_id,
+                                            reg_subscription_)) {
+  case client_rules::RegNotify::current:
     return reg_notify(message);
+  case client_rules::RegNotify::unknown: {
+    event("reg_notify_rejected", {{"reason", "no subscription"}, {"call_id", message.call_id}});
+    SipResponse unknown;
+    unknown.status_code = 481;
+    return unknown;
+  }
+  case client_rules::RegNotify::other_package:
+    break;
+  }
   if (get_header(message.headers, "Event") == "xcap-diff")
     if (auto handled = group_document_notify(message)) return *handled;
   if (get_header(message.headers, "Event") == "xcap-diff" && !config_subscription_.empty() &&

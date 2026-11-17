@@ -564,6 +564,35 @@ void test_reg_event_rules() {
         "contact address from a Contact value");
   check(contact_address("sips:alice@192.0.2.1:5061;ob") == "alice@192.0.2.1:5061", "contact address of a SIPS URI");
   check(contact_address("sip:alice@[2001:db8::1]:5064") == "alice@[2001:db8::1]:5064", "contact address with IPv6");
+
+  // TS 24.229 clauses 5.1.1.5A and 5.1.1.7 with RFC 3680 section 5.1: the contact "belonging to this UE" by address and
+  // the Call-ID of the current registration (BR-01: a restarted client at client-c:5060 reading the binding its log-off
+  // removed).
+  using mcx::client_rules::own_reg_contact;
+  const auto self = "sip:client-c@client-c:5060;transport=tcp";
+  check(own_reg_contact("sip:client-c@client-c:5060;transport=tcp", "new-call", self, "new-call"),
+        "own contact: same address and Call-ID");
+  check(!own_reg_contact("sip:client-c@client-c:5060;transport=tcp", "old-call", self, "new-call"),
+        "an earlier registration at the same address is not this client's");
+  check(own_reg_contact("<sip:client-c@client-c:5060>", "", self, "new-call"),
+        "a contact without callid matches by address");
+  check(own_reg_contact("sip:client-c@client-c:5060", "old-call", self, ""),
+        "before a registration's Call-ID is known the address decides");
+  check(!own_reg_contact("sip:client-c@client-d:5060", "new-call", self, "new-call"),
+        "another address is not this client's whatever its callid");
+
+  // RFC 6665 section 4.1.3: a reg NOTIFY on a dialog other than the current subscription's is answered 481.
+  using mcx::client_rules::classify_reg_notify;
+  using mcx::client_rules::RegNotify;
+  check(classify_reg_notify("reg", "sub-1", "sub-1") == RegNotify::current, "reg NOTIFY of the current subscription");
+  check(classify_reg_notify(" reg ;id=7", "sub-1", "sub-1") == RegNotify::current, "Event parameters are ignored");
+  check(classify_reg_notify("reg", "old-sub", "sub-1") == RegNotify::unknown,
+        "reg NOTIFY of an earlier process's subscription");
+  check(classify_reg_notify("reg", "old-sub", "") == RegNotify::unknown, "reg NOTIFY with no subscription");
+  check(classify_reg_notify("reg", "", "") == RegNotify::unknown, "reg NOTIFY without a dialog");
+  check(classify_reg_notify("presence", "sub-1", "sub-1") == RegNotify::other_package, "another event package");
+  check(classify_reg_notify("registration", "sub-1", "sub-1") == RegNotify::other_package,
+        "an event type that only begins with reg");
 }
 
 //------------------------------------------------------------------------------

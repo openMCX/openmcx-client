@@ -1771,6 +1771,9 @@ private:
   // clause 5.1.1.3); the duration of the previous registration (clause 5.1.1.4.1), from its 200 (OK).
   std::uint64_t reg_duration_s_ = 0, registration_duration_s_ = 0;
   bool reg_notify_expiry_ = false;
+  // The Call-ID of this client's current registration (its REGISTER's, from the 200 (OK)): a reginfo <contact> with
+  // another callid (RFC 3680 section 5.1) is not "belonging to this UE" (TS 24.229 clause 5.1.1.7).
+  std::string registration_call_id_;
   // Emergency alerts (TS 24.281 clause 11.2): this user's, and those received by origin.
   bool mcvideo_alerting_ = false;
   Json mcvideo_alerts_ = Json::object(), mcvideo_alert_result_;
