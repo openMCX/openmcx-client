@@ -56,6 +56,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -76,6 +77,13 @@ inline SipConfig client_sip_config(const Json &cfg, bool disable_tls) {
   auto config = sip_config(cfg, disable_tls);
   // TS 24.379 clause 6.2.3.1.1 step 5: the 200 (OK) to an incoming INVITE says refresher=uas.
   config.uas_refresher = true;
+  // TS 24.379 clause 6.2.3.1.1 step 2 (automatic commencement; clause 6.2.3.1.2 for group calls, clauses 6.2.3.2.1
+  // and 6.2.3.2.2 for the 200 (OK) in manual commencement) and clause 6.2.3.2.1 step 2 (the 180 (Ringing)): the
+  // option tag "timer" in a Require header field of the answers to an initial INVITE. Steps 3 and 4 (the
+  // g.3gpp.mcptt tag and the MCPTT ICSI in Contact) are the engine's service tags; step 5 (Session-Expires,
+  // refresher=uas) its session timer with uas_refresher.
+  config.invite_provisional_headers.push_back({"Require", "timer"});
+  config.invite_success_headers.push_back({"Require", "timer"});
   // TS 24.379 clause 7.2.1AA and TS 24.282 clause 7.2.1AA: the REGISTER Contact names each service the
   // client uses, MCData with its SDS, FD and IPCONN services, and their ICSIs. registration_features, when set,
   // is the whole REGISTER Contact (SipEngine::register_account): other_services below then only adds MCVideo to the
@@ -192,7 +200,49 @@ class Client {
 
   // A private call without floor control (TS 24.379 clause 11.1.2): the SDP has no
   // m=application, both parties speak at once and no floor message is exchanged.
-  bool no_floor() const { return local_.control == MediaControl::none; }
+  // No floor control in the call: no media plane control channel (TS 24.379 clause 11.1.2), or one with
+  // "mc_no_floor_ctrl" (TS 24.380 clauses 14.2.6, 14.3.7).
+  bool no_floor() const { return local_.control == MediaControl::none || local_.no_floor_control; }
+
+  // TS 24.380 clauses 14.2.7, 14.3.8 and 8.2 (client_rules::floor_ssrc_to_send, floor_ssrc_received): the SSRC of
+  // the floor control messages this client sends in the call, and whether a received one's SSRC is this call's.
+  // Multiplexed only when the server's SDP has "mc_floor_ssrc" and this client supports multiplexing (remote_ holds
+  // the negotiated one, negotiated_media).
+  std::uint32_t floor_ssrc_to_send() const {
+    return client_rules::floor_ssrc_to_send(local_.floor_ssrc, remote_ ? remote_->floor_ssrc : 0);
+  }
+  bool floor_ssrc_received(std::uint32_t ssrc) const {
+    return client_rules::floor_ssrc_received(ssrc, local_.floor_ssrc, remote_ ? remote_->floor_ssrc : 0);
+  }
+  // TS 24.379 clause 6.2.10: whether this MCPTT client supports multiplexing, mcptt.multiplex_support (default
+  // true: its offers have "mc_floor_ssrc"). A capability of the client, not of the MCPTT user profile (TS 24.484 has
+  // none).
+  bool multiplex_supported() const { return cfg_.at("mcptt").value("multiplex_support", true); }
+  // TS 24.380 clause 14.2.7: this client's media in an SDP offer (an INVITE, a re-INVITE): "mc_floor_ssrc" only when
+  // multiplexing is supported (client_rules::offer_floor_ssrc). local_.floor_ssrc stays the SSRC this client sends
+  // with when the session is not multiplexed (floor_ssrc_to_send).
+  MediaDescription offer_media() const {
+    auto offer = local_;
+    offer.floor_ssrc = client_rules::offer_floor_ssrc(local_.floor_ssrc, multiplex_supported());
+    return offer;
+  }
+  // TS 24.380 clause 14.3: this client's media in its answer to [offer], its fmtp parameters item by item
+  // (client_rules::answer_floor_parameters): "mc_queueing" when queueing is supported (mcptt.floor_queue), the offer's
+  // "mc_priority", "mc_floor_ssrc" only when the offer had it and multiplexing is supported; no "mc_granted",
+  // "mc_implicit_request" or "mc_ssrc". local_.floor_ssrc stays the SSRC this client sends with.
+  MediaDescription answer_media(const MediaDescription &offer) const {
+    auto answer = local_;
+    const auto parameters = client_rules::answer_floor_parameters(
+        offer.control != MediaControl::none && local_.control != MediaControl::none, local_.floor_ssrc,
+        cfg_.at("mcptt").value("floor_queue", false), local_.no_floor_control, offer.floor_ssrc, offer.floor_priority,
+        multiplex_supported());
+    answer.floor_ssrc = parameters.floor_ssrc;
+    answer.queueing = parameters.queueing;
+    answer.floor_priority = parameters.floor_priority;
+    answer.granted = answer.implicit_request = false;
+    answer.granted_audio_ssrc = 0;
+    return answer;
+  }
 
   // A private or ambient listening call is protected by its PCK, a group call by the GMK.
   bool media_key_ready() const { return private_media() ? protection_.private_ready() : protection_.group_ready(); }
@@ -372,6 +422,34 @@ class Client {
   size_t transmit_offset_ = 0;
   std::uint16_t sequence_ = 0;
   std::uint32_t timestamp_ = 0, audio_ssrc_ = 0, receive_ssrc_ = 0;
+  // TS 24.380 clauses 8.2.9 and 6.2.4.5.8: the granted users whose media this client receives in a multi-talker
+  // group call (Floor Taken with the I-bit: List of Granted Users, List of SSRCs, List of Functional Aliases, List of
+  // Locations) or a dual floor (Floor Taken with the G-bit: the overriding talker next to the overridden one). Each
+  // talker's audio is decoded with its own decoder and mixed (mcptt/live_audio.cpp); status "talkers".
+  struct Talker {
+    std::string user, functional_alias;
+    std::uint32_t ssrc = 0;
+    Json location;
+    std::uint64_t packets = 0;
+    std::unique_ptr<AmrWbCodec> codec;
+    std::deque<std::vector<std::int16_t>> frames;
+  };
+  std::vector<Talker> talkers_;
+  // TS 24.380 clauses 6.2.4.3.8 and 6.2.4.3.9: the user asked the server to stop the unicast media (status
+  // "media_flow" "stopped"), or to resume it ("flowing").
+  bool media_flow_stopped_ = false;
+  // TS 24.379 clause 11.1.9.2.1: of the incoming private call this client may forward, the <mcptt-request-uri> (the
+  // <forwarded-by-mcptt-id>, step 2) d) i) E)) and the <forwarding-other-list> entries (step 1A).
+  std::string incoming_request_uri_;
+  std::vector<std::string> incoming_forwarding_others_;
+  // TS 24.380 clause 6.2.4.5.8 step 1b: "an indication that the participant is overridden without revoke".
+  bool floor_overridden_ = false;
+  // TS 24.380 clause 6.2.4.4.2 step 4: "an indication that the participant is overriding without revoke", stored on a
+  // Floor Granted with the G-bit; removed by clauses 6.2.4.5.3 step 2 and 6.2.4.5.7 step 1b.
+  bool floor_overriding_ = false;
+  // TS 24.380 clause 6.2.4.5.3 step 1c: the Floor Granted included the G-bit (Dual floor); and whether the Floor
+  // Release being sent carries it (client_rules::release_dual_floor, read by floor_message).
+  bool granted_dual_ = false, release_dual_ = false;
   bool talking_ = false, requesting_ = false, registered_ = false, authorized_ = false, affiliated_ = false,
        desired_affiliation_ = true;
   bool emergency_ = false, imminent_ = false, priority_pending_ = false;
@@ -383,12 +461,33 @@ class Client {
   // private call, annex G.11), MEPP (emergency private priority of this call, annex G.10)
   // and MPEA (private emergency alert, annex G.12), each held as its state number.
   int mepc_ = 1, mepp_ = 1, mpea_ = 1;
+  // TS 24.379 annex G.1: the MCPTT emergency state (MES) of this client, set by originating an emergency group or
+  // private call or an emergency alert, cleared by the user's cancellation of them.
+  bool emergency_state_ = false;
+  // TS 24.379 clause 18.1.1: this user's last emergency remote floor request trigger (sent) and the last received.
+  Json remote_floor_ = {{"sent", nullptr}, {"received", nullptr}};
+  // TS 24.380 clause 6.2.4.3.5: a floor priority for the next Floor Request in place of the configured one (the
+  // emergency priority of a triggered request, clause 18.1.1.2 6)).
+  std::optional<std::uint8_t> next_floor_priority_;
+  // TS 24.380 clause 14.2.4: the INVITE of the call being set up offered "mc_granted".
+  bool granted_offered_ = false;
   // TS 24.379 clause 11.1.1.2.1.2 step 3b: MEPP saved when invited to an emergency first-to-answer
   // call, restored if this client is cancelled or released as not selected.
   std::optional<int> saved_mepp_;
   bool fta_not_selected_ = false;
   // Ad hoc group call priority learned at setup: "normal", "emergency" or "imminent".
   std::string adhoc_priority_ = "normal";
+  // TS 24.379 clauses 17.1, 17.2.2.1.1 (2xx step 3) and 17.2.2.1.2 step 7: the preconfigured groups whose security
+  // related information (GMK, TS 33.180 clause 5.7) protects ad hoc group calls: those configured
+  // (mcptt.adhoc_security_groups) and those named by a <preconfigured-group-id>; their GMKs are subscribed to
+  // (update_key_subscriptions). adhoc_security_group_: the one of the ad hoc call in progress.
+  std::set<std::string> adhoc_security_groups_;
+  std::string adhoc_security_group_;
+
+  bool use_adhoc_security(const std::string &preconfigured);
+
+  // TS 24.379 clause 17.2.7.1: the ad hoc group call redirections notified ({group, partner_id, primary_id, in_call}).
+  Json adhoc_redirections_ = Json::array();
   // TS 24.379 clause 17.2.6.1.1 step 1: the participant criteria of the ad hoc call this client originated (or last
   // set), sent again with a change of its participant list.
   std::string adhoc_criteria_;
@@ -482,6 +581,7 @@ class Client {
 
   // This client is being listened to on its current dialog. TS 24.379 clause 11.1.6.2.0: its
   // user is given no indication of the call, so it presents as idle.
+  void floor_event(std::string_view kind, const Json &detail = Json::object());
   bool ambient_hidden() const { return ambient_listened_to() && !dialog_.empty() && dialog_ == ambient_->dialog; }
 
   std::vector<std::int16_t> ambient_audio() const;
@@ -534,8 +634,23 @@ class Client {
   // The Resource-Priority a remotely initiated call request asked the next call to carry
   // (<ric-app-level-priority>, TS 24.379 clause 10.1.5.2.2 step 2b, clause 11.1.7.2.2 step 3b).
   std::string next_call_priority_;
-  // The forwarding target of a forward request and its <PrivateCallKMSURI>.
+  // The KMS URI given for the next PCK to a target: the <PrivateCallKMSURI> of a forwarding request, the receiver KMS
+  // selected after a KMS Redirect Response (TS 33.180 clause 5.2.8.2.5) or the private call command's kms= test aid;
+  // forwarded_kms_source_ says which ("forwarding-request", "kms-redirect" or "command").
   std::pair<std::string, std::string> forwarded_kms_;
+  std::string forwarded_kms_source_;
+  // TS 24.484 clause 8.3.2.1 item 8 d) i) and clause 8.3.2.7: the <PrivateCallKMSURI> of each private call target of
+  // the MCPTT user profile (parse_profile_private_call_kms; empty: none given), for TS 24.379 clause 6.2.8.3.9.
+  std::map<std::string, std::string> private_call_kms_;
+  // TS 24.379 clause 6.2.8.3.9 (on network): the KMS URI associated with an MCPTT ID, and where it came from
+  // ("user-profile" or "initial-configuration").
+  std::pair<std::string, std::string> private_call_target_kms(const std::string &target) const;
+  // Clause 6.2.8.3.9 of TS 24.379, TS 24.281 and TS 24.282 (on network), shared by the MCPTT, MCVideo and MCData
+  // clients: the KMS URI the user profile lists for the target (listed: by MC service ID) when not empty, else the
+  // <kms> of the initial configuration, the KMS that serves this client's keys; with "user-profile" or
+  // "initial-configuration".
+  static std::pair<std::string, std::string> profile_target_kms(const std::map<std::string, std::string> &listed,
+                                                                const KeyClient &keys, const std::string &target);
   // KMS Redirect Responses followed for the current private call (at most one), and
   // the KRR a response carries (TS 33.180 annex D.4).
   int krr_retries_ = 0;
@@ -557,6 +672,11 @@ class Client {
   // held_ is the transferred user's call with the requester, kept during a transfer (TS 24.379 clause 11.1.8.2.2).
   bool transfer_kept_ = false;
   std::string announced_target_, announced_replaces_, next_call_replaces_;
+  // TS 24.379 clause 11.1.1.2.1.1 14A) a), 14C) a), a1): the answer mode ("Auto" or "Manual") and the
+  // <forwarding-sequence-number> of the latest private call, which a transfer or forwarding of it carries on in its
+  // Priv-Answer-Mode and increments; next_priv_answer_mode_ is that Priv-Answer-Mode for the call being placed.
+  std::string private_answer_mode_ = "Auto", next_priv_answer_mode_;
+  unsigned private_forwarding_sequence_ = 0;
   bool replacing_call_ = false;
   // RFC 3891 (TS 24.379 clauses 6.3.2.2.5.3 step 1 and 6.3.2.2.6.3 step 1): the dialog of an incoming call whose
   // Replaces names the pre-established session; once it is confirmed the session is ended with a BYE.
@@ -635,6 +755,12 @@ class Client {
   // alerts of each monitored group (clause 12.1.1.3), kept apart from the selected group's. During a call on a
   // monitored group the call's state is the live one and the selected group's waits in selected_priority_.
   std::vector<std::string> monitored_groups_;
+  // TS 24.379 clause 9.2.1.5 3) b): the user is no longer interested in the selected group at this client (a
+  // negotiated-mode de-affiliation accepted while other groups stay): it is left out of the affiliation PUBLISH until
+  // the user affiliates or selects a group again.
+  bool left_selected_ = false;
+  // TS 24.379 clause 9.2.1.5 3) with clause 9.2.1.2 (mcptt/service.cpp).
+  bool mcptt_change_affiliation(const std::vector<std::string> &affiliate, const std::vector<std::string> &leave);
   Json affiliation_statuses_ = Json::object(), monitored_state_ = Json::object();
   std::optional<Json> selected_priority_;
 
@@ -680,9 +806,49 @@ class Client {
 
   std::vector<SipHeader> priority_headers(const McpttInfo &info) const;
 
-  void change_private_priority(bool enable, bool with_alert);
+  void change_private_priority(bool enable, bool with_alert, const std::string &other_alert = {});
 
-  void change_priority(bool emergency, bool enabled);
+  // TS 24.379 clauses 6.2.8.1.14 and 6.2.8.3.8: "emergency cancel-other [alert [<originator>]]", the cancel of
+  // another user's emergency in the call (and of that user's alert).
+  void third_party_cancel(bool with_alert, std::string originator);
+
+  // The private call in progress was offered as an emergency private call (TS 24.379 clause 6.2.8.3.8 applies).
+  bool private_emergency_offered_ = false;
+
+  void change_priority(bool emergency, bool enabled, const std::string &other_alert = {}, bool third_party = false);
+
+  void require_priority_right(const std::string &request, const std::string &target) const;
+  bool private_alert_authorised(const std::string &target);
+
+  bool upgrade_implicit_begin();
+
+  void upgrade_implicit_answered(int status_code);
+
+  void remote_floor_command(const std::string &target, const std::string &group);
+
+  SipResponse remote_floor_received(const SipMessage &message, const McpttInfo &info);
+
+  // TS 24.379 clauses 10.1.1.2.1.1, 10.1.1.2.2.1 and 10.1.2.2.1.1: <preconfigured-group-use-only> of each group
+  // document read (TS 24.481 clause 7.2.4.2), true for a group on which this user may not call.
+  std::map<std::string, bool> preconfigured_use_only_;
+
+  void note_group_document(const std::string &group, const std::string &document);
+  // TS 24.481 clause 7.2.4.2: the floor settings (<multi-talker-control>, <mcptt-on-network-audio-cut-in>, ...) of
+  // each group document read; status "group_floor_settings".
+  std::map<std::string, GroupFloorSettings> group_floor_settings_;
+  // The floor settings of the call's group (the selected group, or the call's other group): nullptr when unknown.
+  const GroupFloorSettings *call_group_floor_settings() const;
+
+  bool calls_allowed_on(const std::string &group);
+
+  void call_failure(const std::string &reason, const Json &details);
+
+  // TS 24.379 clause 10.1.6.2: the MCPTT imminent peril group state of each group whose in-progress imminent peril
+  // state was cancelled outside a call, by this user (10.1.6.2.1) or notified (10.1.6.2.2): "MIG 1: no-imminent-peril",
+  // "MIG 2: in-progress" or "MIG 3: cancel-pending" (annex G).
+  Json imminent_group_states_ = Json::object();
+
+  void imminent_state_cancel(const std::string &group);
 
   void change_alert(bool enabled, const std::string &origin = {}, const std::string &shown_group = {});
 
@@ -744,13 +910,67 @@ class Client {
   }
 
   std::pair<std::string, std::string> publish_body(bool affiliation);
+  // TS 24.379 clauses 7.2.2 6) and 7.2.3 4): the poc-settings of this MCPTT client.
+  std::string mcptt_poc_settings() const;
 
   std::pair<std::string, std::string> affiliation_subscribe_body();
+
+  // ---- Service settings and the affiliation procedures towards other users, one implementation for MCPTT and MCVideo
+  // (core/settings_affiliation.cpp): the settings-only PUBLISH and the settings subscription (TS 24.379 clauses 7.2.3
+  // and 7.2.4, TS 24.281 clauses 7.2.3 and 7.2.4), the affiliation status determination of another user (TS 24.379
+  // clause 9.2.1.3, TS 24.281 clause 8.2.1.3), the change for another user in mandatory mode (clauses 9.2.1.2 /
+  // 8.2.1.2) and in negotiated mode (sending: clauses 9.2.1.4 / 8.2.1.4, receiving: 9.2.1.5 / 8.2.1.5), and the
+  // subscription to group dynamic data (clauses 9.2.1.6 / 8.2.1.6). The state of one service:
+  struct ServiceProcedures {
+    std::string settings_subscription;                      // the poc-settings subscription's dialog (clause 7.2.4)
+    Json service_settings = Json::object();                 // client ID -> settings last notified (clause 7.2.4)
+    Json settings_result = nullptr;                         // the outcome of the last settings-only PUBLISH (7.2.3)
+    std::map<std::string, std::string> extra_subscriptions; // dialog -> "poc-settings", "gdd:<group>" or a user's ID
+    std::map<std::string, Affiliation> target_affiliations; // user's ID -> its client and groups last notified
+    Json affiliation_command = nullptr;                     // a negotiated-mode request awaiting the user (9.2.1.5)
+    std::map<std::string, std::string> gdd_dialogs;         // group -> its dynamic data subscription (9.2.1.6)
+    Json gdd = Json::object();                              // group -> dynamic data last notified
+    // The remote change of a selected group (TS 24.379 clause 10.1.4.2, TS 24.281 clause 9.2.4.2):
+    // selection_result: this user's last request and its outcome; selection: the last request received, while it is
+    // handled and after; selection_pending: the affiliation it waits for (the group and the PUBLISH's p-id).
+    Json selection_result = nullptr, selection = nullptr, selection_pending = nullptr;
+    unsigned selection_requests = 0;
+  };
+  ServiceProcedures mcptt_procedures_, mcvideo_procedures_;
+  ServiceProcedures &procedures(const ServiceProfile &service);
+  std::string service_key(const ServiceProfile &service, const std::string &name) const;
+  std::string service_verb(const ServiceProfile &service, const std::string &verb) const;
+  std::string service_user(const ServiceProfile &service) const;
+  std::string service_psi(const ServiceProfile &service) const;
+  bool service_authorized(const ServiceProfile &service) const;
+  std::string service_poc_settings(const ServiceProfile &service);
+  std::string &settings_etag(const ServiceProfile &service);
+  bool change_affiliation(const ServiceProfile &service, const std::vector<std::string> &affiliate,
+                          const std::vector<std::string> &leave);
+  std::string client_filter_xml(const ServiceProfile &service) const;
+  void service_publish(const ServiceProfile &service, const std::string &event_name, const std::vector<BodyPart> &parts,
+                       std::vector<SipHeader> headers, std::function<void(const SipResponse &)> done);
+  void settings_publish(const ServiceProfile &service, bool remove);
+  SipResponse settings_notify(const ServiceProfile &service, const SipMessage &message);
+  void settings_command(const ServiceProfile &service, const std::string &verb, std::istringstream &words);
+  void target_affiliation_command(const ServiceProfile &service, const std::string &verb, std::istringstream &words);
+  void gdd_command(const ServiceProfile &service, const std::string &verb, std::istringstream &words);
+  SipResponse gdd_notify(const ServiceProfile &service, const SipMessage &message, const std::string &group);
+  SipResponse extra_notify(const ServiceProfile &service, const SipMessage &message);
+  static bool carries_affiliation_command(const ServiceProfile &service, const SipMessage &message);
+  SipResponse affiliation_command_message(const ServiceProfile &service, const SipMessage &message);
+  void affiliation_command_answer(const ServiceProfile &service, bool accept, const std::set<std::string> &only = {});
+  // The commands of these procedures by verb without the service's prefix ("settings-publish", "gdd-subscribe", ...);
+  // false for another verb.
+  bool procedures_command(const ServiceProfile &service, const std::string &verb, std::istringstream &words);
+  void procedures_status(const ServiceProfile &service);
 
   void authorize();
   // TS 24.379 clause 7.2.1: the service authorisation in a REGISTER instead of the PUBLISH of clause 7.2.2, when
   // mcptt.authorise_by_register is set; the SIP core passes it to the server in a third-party REGISTER.
   [[nodiscard]] bool authorise_by_register() const;
+  // TS 24.379 clauses 5.6, 7.2.1 and 7.2.2: <gw-mcptt-usage> of the service authorisation (mcptt.via_gateway_ue).
+  [[nodiscard]] std::optional<bool> mcptt_gateway_usage() const;
   [[nodiscard]] std::pair<std::string, std::string> register_body();
   void register_authorization(std::function<void(const SipResponse &)> handler);
   // TS 24.282 and TS 24.281 clause 7.2.1: each MC service authorises in a REGISTER of its own on the one registration,
@@ -809,6 +1029,8 @@ class Client {
   void affiliate();
 
   void subscribe_conference(bool force = false);
+
+  void unsubscribe_conference();
 
   // ---- MCPTT XML integrity protection, core/xml_protection.cpp (TS 24.379 clause 6.6.3; TS 33.180 clause 9.3.5) ----
   static constexpr const char *signed_mime = "application/vnd.3gpp.mcptt-signed+xml";
@@ -940,6 +1162,12 @@ class Client {
   // The groups of the user profile, <OnNetwork>/<MCPTTGroupInfo> (TS 24.484 clause 8.3.2): groups the user may
   // select besides the configured ones (the dispatcher's group picker).
   std::vector<std::string> profile_groups_;
+  // TS 24.484 clause 8.3.2 (TS 24.379 clause 10.1.4.2.1 step 1): the users whose selected group this user may change,
+  // the <uri-entry> values of <RemoteGroupSelectionURIList> of the user profile.
+  std::vector<std::string> remote_selection_targets_;
+  // The MCPTT user profile document last read (TS 24.484 clause 8.3.2), for the priority rights of TS 24.379 clause
+  // 6.2.8 (require_priority_right).
+  std::string profile_body_;
 
   void take_profile_groups(const std::string &profile);
 
@@ -1198,7 +1426,9 @@ private:
                           const std::set<std::string> &listed, const std::string &expires, bool take_over);
   std::vector<std::string> settle_alias_outcomes(Json &last, const std::map<std::string, std::string> &statuses,
                                                  bool handled, std::set<std::string> &wanted);
-  void alias_status_subscribe();
+  void alias_status_subscribe(bool fetch = false);
+
+  void alias_status_command(const std::string &action, const std::vector<std::string> &arguments);
   SipResponse alias_status_notify(const SipMessage &message);
 
   void send_service_message(const std::string &target, McpttInfo info,
@@ -1541,6 +1771,9 @@ private:
   // clause 5.1.1.3); the duration of the previous registration (clause 5.1.1.4.1), from its 200 (OK).
   std::uint64_t reg_duration_s_ = 0, registration_duration_s_ = 0;
   bool reg_notify_expiry_ = false;
+  // The Call-ID of this client's current registration (its REGISTER's, from the 200 (OK)): a reginfo <contact> with
+  // another callid (RFC 3680 section 5.1) is not "belonging to this UE" (TS 24.229 clause 5.1.1.7).
+  std::string registration_call_id_;
   // Emergency alerts (TS 24.281 clause 11.2): this user's, and those received by origin.
   bool mcvideo_alerting_ = false;
   Json mcvideo_alerts_ = Json::object(), mcvideo_alert_result_;
@@ -1711,19 +1944,28 @@ private:
 
   Json mcvideo_location_status() const;
 
-  // ---- Remote change of the selected group, mcvideo/group_selection.cpp (TS 24.281 clause 9.2.4).
-  // mcvideo_selection_result_: this user's last request and its outcome; mcvideo_selection_: the last request
-  // received, while it is handled and after; mcvideo_selection_pending_: the affiliation it waits for.
-  Json mcvideo_selection_result_ = nullptr, mcvideo_selection_ = nullptr, mcvideo_selection_pending_ = nullptr;
-  unsigned mcvideo_selection_requests_ = 0;
+  // ---- Remote change of the selected group, core/group_selection.cpp (TS 24.379 clause 10.1.4.2, TS 24.281 clause
+  // 9.2.4.2), one implementation for MCPTT and MCVideo; the state is the service's ServiceProcedures.
+  std::vector<SipHeader> service_message_headers(const ServiceProfile &service) const;
 
-  void mcvideo_select_remote(const std::string &target, const std::string &group);
+  void select_remote(const ServiceProfile &service, const std::string &target, const std::string &group);
 
-  void mcvideo_selection_requested(const McpttInfo &info);
+  void selection_requested(const ServiceProfile &service, const McpttInfo &info);
 
-  void mcvideo_selection_affiliated(bool affiliated);
+  void selection_outcome(const ServiceProfile &service, const McpttInfo &info);
 
-  void mcvideo_selection_answer(bool success);
+  void selection_affiliated(const ServiceProfile &service, bool affiliated);
+
+  void selection_answer(const ServiceProfile &service, bool success);
+
+  bool selection_affiliate(const ServiceProfile &service, const std::string &group);
+
+  bool selection_apply(const ServiceProfile &service, const std::string &group);
+
+  void selection_affiliation_notified(const ServiceProfile &service, const std::string &publication_id,
+                                      bool group_affiliated);
+
+  std::string mcptt_sent_pid_; // the p-id of this client's last MCPTT affiliation PUBLISH (clause 9.2.1.2)
 
   // TS 24.281 clauses 20.4.2.1.2 and 20.4.2.1.3: a SIP MESSAGE with <request-type> "fa-group-binding-req",
   // <binding-ind>, the alias in <binding-fa-uri> or <unbinding-fa-uri>, and the groups
@@ -1758,34 +2000,9 @@ private:
   // TS 24.281 clauses 9.2.1.2.4.1 and 22.2.5.1.1: the last group or ad hoc group session this user left (its session
   // identity, group and type), for a re-join.
   std::string mcvideo_rejoin_uri_, mcvideo_rejoin_group_, mcvideo_rejoin_type_, mcvideo_rejoin_target_;
-  // TS 24.281 clauses 7.2.4 and 8.2.1.2 to 8.2.1.5 (mcvideo/settings_affiliation.cpp): the settings subscription, the
-  // subscriptions to other users' affiliation (dialog -> MCVideo ID, or "poc-settings"), their last notified
-  // affiliation, and a received negotiated-mode request awaiting the user.
-  std::string mcvideo_settings_subscription_;
-  // TS 24.281 clause 7.2.4: the cached MCVideo service settings of each MCVideo client of this user (by client ID:
-  // answer mode, active user profile index, multiplex support), from the last poc-settings NOTIFY; and the outcome
-  // of the last settings-only PUBLISH (clause 7.2.3).
-  Json mcvideo_service_settings_ = Json::object();
-  Json mcvideo_settings_result_;
+  // TS 24.281 clauses 7.2.2 6) and 7.2.3 4) (mcvideo/settings_affiliation.cpp): the poc-settings of this MCVideo
+  // client. The settings and other-user affiliation procedures are mcvideo_procedures_ (core/settings_affiliation.cpp).
   std::string mcvideo_poc_settings();
-  void mcvideo_settings_publish(bool remove);
-  SipResponse mcvideo_settings_notify(const SipMessage &message);
-  std::map<std::string, std::string> mcvideo_extra_subscriptions_;
-  std::map<std::string, Affiliation> mcvideo_target_affiliations_;
-  Json mcvideo_affiliation_command_;
-  void mcvideo_settings_command(const std::string &verb, std::istringstream &words);
-  void mcvideo_target_affiliation_command(const std::string &verb, std::istringstream &words);
-  // TS 24.281 clause 8.2.1.6: the subscriptions to group dynamic data, by group (their dialogs are entries
-  // "gdd:<group>" of mcvideo_extra_subscriptions_), and the dynamic data last notified per group:
-  //   mcvideo-gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]
-  //   mcvideo-gdd-resubscribe <group>   mcvideo-gdd-unsubscribe <group>
-  std::map<std::string, std::string> mcvideo_gdd_dialogs_;
-  Json mcvideo_gdd_ = Json::object();
-  void mcvideo_gdd_command(const std::string &verb, std::istringstream &words);
-  SipResponse mcvideo_gdd_notify(const SipMessage &message, const std::string &group);
-  SipResponse mcvideo_extra_notify(const SipMessage &message);
-  SipResponse mcvideo_affiliation_command_message(const SipMessage &message);
-  void mcvideo_affiliation_command_answer(bool accept, const std::set<std::string> &only = {});
   std::string mcvideo_client_filter();
   void mcvideo_rejoin_call();
   void mcvideo_group_call(bool implicit = false, const std::string &chat_group = {}, const std::string &priority = {},
@@ -2542,10 +2759,28 @@ private:
   void clear_call_state();
 
   void send_floor(FloorType type);
+  // TS 24.380 clauses 6.2.4.7.4, 6.2.4.3.8 to 6.2.4.3.10: the verbs "queued-requests [<MCPTT ID>...]",
+  // "media-stop", "media-resume" and "revoke-request <MCPTT ID>" (mcptt/call_media.cpp).
+  void queued_requests_command(const std::string &arguments);
+  void media_flow_command(bool resume);
+  void revoke_request_command(const std::string &user);
+  // The session was initiated as a broadcast group call (TS 24.380 clause 6.2.4.6.4 step 6).
+  bool broadcast_session() const;
+  // TS 24.380 clauses 8.2.9, 6.2.4.5.8: the talkers of a Floor Taken; clauses 6.2.4.x.7/9/10/14: Floor Release Multi
+  // Talker; clauses 6.2.4.7.6, 6.2.4.9.15: Queued Floor Requests.
+  void floor_taken_talkers(const FloorPacket &packet, const std::string &previous_owner, std::uint32_t previous_ssrc);
+  void floor_release_multi_talker(const FloorPacket &packet);
+  void queued_floor_requests_received(const FloorPacket &packet, FloorParticipantState state_before);
+  void talkers_status();
+  // A received talker's 20 ms frame, mixed with the other talkers' (mcptt/live_audio.cpp); flush: mix what is there.
+  void mix_talkers(bool flush);
+  // Received audio (one talker's, or the mix): to the live output or the received audio buffer.
+  void deliver_received_audio(const std::vector<std::int16_t> &pcm);
   // The Floor Request, Floor Release or Floor Queue Position Request that send_floor() sends.
   FloorPacket floor_message(FloorType type) const;
 
-  void release();
+  void release(std::optional<std::uint16_t> revoke_indicator = std::nullopt);
+  void has_permission_floor_idle(const FloorPacket &packet);
 
   void save_audio();
 
@@ -2761,6 +2996,8 @@ private:
   void ptt_command(const std::string &cmd);
   // "hangup": release the call.
   void hangup_command();
+  void adhoc_release();
+  void adhoc_alert_modify(const std::string &arguments);
   // "deaffiliate": end the call and withdraw the affiliation (TS 24.379 clause 9.2.1.2).
   void deaffiliate_command();
   // "options <SIP URI>": reachability probe (RFC 3261 section 11).

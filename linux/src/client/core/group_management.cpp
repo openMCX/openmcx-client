@@ -393,9 +393,21 @@ void Client::group_management_command(const std::string &cmd) {
 }
 
 //------------------------------------------------------------------------------
-// Helper: keep the groups of the MCPTT user profile (TS 24.484 clause 8.3.2), and show them in the status file.
+// Helper: keep the groups and the private call targets' KMS URIs of the MCPTT user profile (TS 24.484 clause 8.3.2),
+// and show them in the status file.
 void Client::take_profile_groups(const std::string &profile) {
   profile_groups_ = client_rules::parse_profile_groups(profile);
+  remote_selection_targets_ = client_rules::parse_profile_uri_entries(profile, "RemoteGroupSelectionURIList");
+  // TS 24.379 clause 6.2.8.3.9 1): the <PrivateCallKMSURI> of the private call targets (TS 24.484 clause 8.3.2.7); a
+  // profile that cannot be read for them leaves none (the KMS of the initial configuration, 1)b)).
+  try {
+    private_call_kms_ = parse_profile_private_call_kms(profile);
+  } catch (const std::exception &error) {
+    private_call_kms_.clear();
+    event("profile_warning", {{"reason", std::string("PrivateCallKMSURI: ") + error.what()}});
+  }
+  status_["profile_private_call_kms"] = private_call_kms_;
+  profile_body_ = profile;
   status_["profile_groups"] = profile_groups_;
 }
 
@@ -614,6 +626,7 @@ std::optional<SipResponse> Client::group_document_notify(const SipMessage &messa
                                             {{"Authorization", bearer()}});
         auto &document = group_documents_[group];
         document["fetch_status"] = response.status;
+        if (response.status == 200) note_group_document(group, response.body); // TS 24.379 clause 10.1.1.2.1.1
         if (response.status == 200)
           event("document_retrieved",
                 {{"resource", "/org.openmobilealliance.groups/global/byGroupID/" + xcap_segment(group)},

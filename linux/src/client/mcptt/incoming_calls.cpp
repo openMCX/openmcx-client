@@ -90,11 +90,49 @@ SipResponse Client::incoming_clear_message(const SipMessage &message) {
     if (auto handled = mcdata_location_incoming(message)) return *handled;
     return mcdata_incoming(message);
   }
+  // TS 24.379 clause 9.2.1.5: a MESSAGE with 1) the MCPTT ICSI in P-Asserted-Service and 2) an
+  // application/vnd.3gpp.mcptt-affiliation-command+xml body: a negotiated-mode affiliation status change request.
+  if (get_header(message.headers, "P-Asserted-Service") == mcptt_service.icsi &&
+      carries_affiliation_command(mcptt_service, message))
+    return affiliation_command_message(mcptt_service, message);
   // TS 24.379 clause 16.2.1.3 and clause 16.2.1.4: the regroup this user's group has been put into.
   if (body_of(message, regroup_mime)) return regroup_message(message);
   const auto info = message_info(message);
+  // TS 24.379 clause 6.2.0.1 and 18.1.1.2: a "SIP MESSAGE request for emergency remote floor request trigger for
+  // terminating client".
+  if (info.service.contains("req-type") && info.service.at("req-type") == "emergency-remote-floor-request-trigger")
+    return remote_floor_received(message, info);
+  // TS 24.379 clause 17.2.7.1: a "SIP MESSAGE request with notification of ad hoc group call redirection" (clause
+  // 6.2.0.1: <forwarding-reason> "migrated"; clause 6.3.3.1.26: the ad hoc group in <mcptt-calling-group-id>, the
+  // migrated user's <partner-mcptt-id> and <primary-mcptt-id>): 1) the user is notified (event adhoc_call_redirected,
+  // status adhoc_redirections), 2) the 200 (OK).
+  if (const auto reason = info.service.find("forwarding-reason");
+      reason != info.service.end() && reason->second == "migrated" && !info.service.contains("request-type")) {
+    // Step 2) is unconditional: the request comes from the trusted core (incoming_clear), whatever its From.
+    SipResponse response;
+    response.status_code = 200;
+    Json entry{{"group", info.calling_group},
+               {"partner_id", info.partner_mcvideo_id},
+               {"primary_id", info.primary_mcvideo_id},
+               {"in_call", call_type_ == "adhoc" && call_group_ == info.calling_group}};
+    adhoc_redirections_.push_back(entry);
+    event("adhoc_call_redirected", entry);
+    return response;
+  }
   if (info.service.contains("request-type") || info.service.contains("response-type"))
     return private_service_received(message, info);
+  // TS 24.379 clause 12.1A.1.6: the "SIP MESSAGE request for participant criteria modification response for ad hoc
+  // group emergency alert": 1) the ad hoc group identity (<mcptt-calling-group-id>) and the criteria are stored, 2)
+  // shown (status adhoc_alert_criteria, event), 3) answered 200 (OK).
+  if (const auto resp = info.service.find("resp-type");
+      resp != info.service.end() && resp->second == "ad-hoc-emergency-alert-participant-criteria-modification") {
+    SipResponse response;
+    response.status_code = 200;
+    if (!info.calling_group.empty()) own_alert_group_ = info.calling_group;
+    status_["adhoc_alert_criteria"] = {{"group", info.calling_group}, {"criteria", info.participant_criteria}};
+    event("adhoc_alert_criteria_modified", status_["adhoc_alert_criteria"]);
+    return response;
+  }
   // TS 24.379 clause 12.1A.1.3: alert notification (or the receipt of our own alert).
   if (info.adhoc_alert) return adhoc_alert_message(message, info);
   return priority_notice(message);
@@ -186,6 +224,8 @@ SipResponse Client::adhoc_alert_message(const SipMessage &message, const McpttIn
     } else if (ah_mea_ == 4) {
       ah_mea_ = 1;
       own_alert_group_.clear();
+      // TS 24.379 annex G.1: "MCPTT adhoc emergency alert cancelled (by initiator)" clears the MCPTT emergency state.
+      emergency_state_ = false;
     }
   } else if (*info.adhoc_alert) {
     received_adhoc_alerts_[info.calling_group] = {{"initiator", info.calling_user},
@@ -203,13 +243,20 @@ SipResponse Client::adhoc_alert_message(const SipMessage &message, const McpttIn
 SipResponse Client::priority_notice(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
-  if (message.from_uri != service() || asserted_identity(message) != service() ||
-      (message.method == "INFO" &&
-       (message.dialog_id != dialog_ || get_header(message.headers, "Info-Package") != "g.3gpp.mcptt-info"))) {
+  // TS 24.379 clause 6.2.8.1.13: an INFO in the group call's dialog (From: the dialog's remote party) with the
+  // mcptt-info of clause 6.3.3.1.18 3) (only the priority indications, no <mcptt-request-uri> nor group) is about the
+  // call's group; a MESSAGE comes from the participating function's PSI.
+  const bool in_call_info = message.method == "INFO";
+  if (in_call_info ? (message.dialog_id != dialog_ || get_header(message.headers, "Info-Package") != "g.3gpp.mcptt-info")
+                   : (message.from_uri != service() || asserted_identity(message) != service())) {
     response.status_code = 403;
     return response;
   }
-  const auto info = message_info(message);
+  auto info = message_info(message);
+  if (in_call_info) {
+    if (info.calling_group.empty()) info.calling_group = selected_priority_ ? call_group_ : group();
+    if (info.request_uri.empty()) info.request_uri = user();
+  }
   // The selected group's notices update the live state, or, during a call on a monitored group, that call's; the
   // selected group's then waits in selected_priority_, and other monitored groups keep their own.
   const bool monitored_call = selected_priority_.has_value();
@@ -227,6 +274,16 @@ SipResponse Client::priority_notice(const SipMessage &message) {
   if ((info.alert_received == true || info.emergency_received == true) && info.client_id != client_id()) {
     response.status_code = 403;
     return response;
+  }
+  // TS 24.379 clause 10.1.6.2.2: a cancellation of the group's in-progress imminent peril state (a MESSAGE with
+  // <imminentperil-ind> "false"): a) shown to the user with the group and the cancelling user (event and status
+  // imminent_cancel_notification), b) the state "MIG 1: no-imminent-peril"; the 200 (OK) answers it.
+  if (message.method == "MESSAGE" && info.imminent_peril == false && info.emergency != true) {
+    imminent_group_states_[info.calling_group] = "MIG 1: no-imminent-peril";
+    status_["imminent_cancel_notification"] = {{"group", info.calling_group}, {"from", info.calling_user}};
+    event("imminent_cancel_notification", status_["imminent_cancel_notification"]);
+  } else if (info.imminent_peril == true && info.emergency != true) {
+    imminent_group_states_[info.calling_group] = "MIG 2: in-progress";
   }
   // TS 24.379 clause 12.1.1.2: the receipt completes the pending alert request of its group, whichever state the
   // group's notices update.
@@ -309,16 +366,14 @@ SipResponse Client::mcvideo_call_info(const SipMessage &message) {
 SipResponse Client::private_priority_info(const SipMessage &message) {
   SipResponse response;
   response.status_code = 200;
-  if (message.from_uri != service() || asserted_identity(message) != service() || message.dialog_id != dialog_ ||
-      get_header(message.headers, "Info-Package") != "g.3gpp.mcptt-info") {
+  // The INFO comes in the call's dialog (from the trusted core, incoming_clear); its From is the dialog's remote party,
+  // not necessarily the server's PSI. TS 24.379 clause 6.3.3.1.18 3): its mcptt-info carries only <emergency-ind>,
+  // <alert-ind> and <imminentperil-ind> (no <mcptt-request-uri>); RFC 6086 section 4.2.2: answered 200 (OK).
+  if (message.dialog_id != dialog_ || get_header(message.headers, "Info-Package") != "g.3gpp.mcptt-info") {
     response.status_code = 403;
     return response;
   }
   const auto info = message_info(message);
-  if (info.request_uri != user() || !info.calling_group.empty()) {
-    response.status_code = 403;
-    return response;
-  }
   if (info.alert && (mpea_ == 2 || mpea_ == 4)) {
     mpea_ = *info.alert ? 3 : 1;
     if (*info.alert)
@@ -345,10 +400,22 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
     ok.status_code = 200;
     return ok;
   }
-  // TS 24.229 clause 5.1.1.3: this client's own reg event subscription.
-  if (get_header(message.headers, "Event") == "reg" && !message.dialog_id.empty() &&
-      message.dialog_id == reg_subscription_)
+  // TS 24.229 clause 5.1.1.3: this client's own reg event subscription. A reg NOTIFY on any other dialog (that of an
+  // earlier process at this address, whose log-off left it with the S-CSCF) changes nothing: 481 (RFC 6665 section
+  // 4.1.3), which also ends that subscription at the notifier (section 4.2.2).
+  switch (client_rules::classify_reg_notify(get_header(message.headers, "Event"), message.dialog_id,
+                                            reg_subscription_)) {
+  case client_rules::RegNotify::current:
     return reg_notify(message);
+  case client_rules::RegNotify::unknown: {
+    event("reg_notify_rejected", {{"reason", "no subscription"}, {"call_id", message.call_id}});
+    SipResponse unknown;
+    unknown.status_code = 481;
+    return unknown;
+  }
+  case client_rules::RegNotify::other_package:
+    break;
+  }
   if (get_header(message.headers, "Event") == "xcap-diff")
     if (auto handled = group_document_notify(message)) return *handled;
   if (get_header(message.headers, "Event") == "xcap-diff" && !config_subscription_.empty() &&
@@ -401,10 +468,15 @@ SipResponse Client::incoming_clear_notify(const SipMessage &message) {
   if (mcvideo_enabled() && !message.dialog_id.empty() && message.dialog_id == mcvideo_subscription_)
     return mcvideo_affiliation_notify(message);
   // TS 24.281 clauses 7.2.4 and 8.2.1.3: the settings subscription and those to other users' affiliation.
-  if (mcvideo_enabled() && !message.dialog_id.empty() && mcvideo_extra_subscriptions_.contains(message.dialog_id))
-    return mcvideo_extra_notify(message);
+  if (mcvideo_enabled() && !message.dialog_id.empty() &&
+      mcvideo_procedures_.extra_subscriptions.contains(message.dialog_id))
+    return extra_notify(mcvideo_service, message);
   if (mcvideo_enabled() && !message.dialog_id.empty() && mcvideo_alias_dialogs_.contains(message.dialog_id))
     return mcvideo_alias_notify(message);
+  // TS 24.379 clauses 7.2.4, 9.2.1.3 and 9.2.1.6: the MCPTT settings subscription, those to other users' affiliation
+  // and to group dynamic data (core/settings_affiliation.cpp).
+  if (!message.dialog_id.empty() && mcptt_procedures_.extra_subscriptions.contains(message.dialog_id))
+    return extra_notify(mcptt_service, message);
   return affiliation_notify(message);
 }
 
@@ -603,6 +675,13 @@ SipResponse Client::affiliation_notify(const SipMessage &message) {
     if (affiliation.groups[index] == group() && client_rules::counts_as_affiliated(state)) affiliated_ = true;
   }
   event("affiliation_status", {{"affiliated", affiliated_}});
+  // TS 24.379 clause 10.1.4.2.2 step 1 c): the NOTIFY for the affiliation a remote group selection asked for.
+  if (const auto &pending = mcptt_procedures_.selection_pending;
+      pending.is_object() && !affiliation.publication_id.empty()) {
+    const auto group = pending.value("group", std::string{});
+    selection_affiliation_notified(mcptt_service, affiliation.publication_id,
+                                   client_rules::counts_as_affiliated(affiliation_statuses_.value(group, "")));
+  }
   return response;
 }
 
@@ -685,7 +764,8 @@ SipResponse Client::private_call_reinvite(const SipMessage &message) {
     return response;
   }
   check_remote(*message.remote_media);
-  if (message.remote_media->floor_ssrc != remote_->floor_ssrc ||
+  if (client_rules::negotiated_floor_ssrc(message.remote_media->floor_ssrc, multiplex_supported()) !=
+          remote_->floor_ssrc ||
       message.remote_media->audio_port != remote_->audio_port ||
       message.remote_media->floor_port != remote_->floor_port ||
       message.remote_media->payload_type != remote_->payload_type) {
@@ -693,7 +773,7 @@ SipResponse Client::private_call_reinvite(const SipMessage &message) {
     return response;
   }
   update_private_priority(info);
-  response.local_media = local_;
+  response.local_media = answer_media(*message.remote_media);
   name_transfer_dialog(response, message, info);
   return response;
 }
@@ -713,7 +793,8 @@ SipResponse Client::group_call_reinvite(const SipMessage &message) {
     return response;
   }
   check_remote(*message.remote_media);
-  if (message.remote_media->floor_ssrc != remote_->floor_ssrc ||
+  if (client_rules::negotiated_floor_ssrc(message.remote_media->floor_ssrc, multiplex_supported()) !=
+          remote_->floor_ssrc ||
       message.remote_media->audio_port != remote_->audio_port ||
       message.remote_media->floor_port != remote_->floor_port ||
       message.remote_media->payload_type != remote_->payload_type ||
@@ -724,7 +805,7 @@ SipResponse Client::group_call_reinvite(const SipMessage &message) {
   }
   local_.floor_priority = message.remote_media->floor_priority;
   update_priority(info, message_location(message));
-  response.local_media = local_;
+  response.local_media = answer_media(*message.remote_media);
   return response;
 }
 
@@ -782,7 +863,7 @@ SipResponse Client::incoming_group(const SipMessage &message) {
   call_type_ = info.session_type == "chat" ? "chat" : info.broadcast == true ? "broadcast" : "prearranged";
   call_group_ = via_hierarchy || via_regroup || via_monitor ? info.calling_group : std::string{};
   status_["calling_functional_alias"] = info.functional_alias;
-  response.local_media = local_;
+  response.local_media = answer_media(*message.remote_media);
   remember_session(message.headers);
   if (mode == "Manual" || cfg_.at("mcptt").value("answer_mode", "auto") == "manual") {
     pending_answer_ = response;
@@ -853,6 +934,10 @@ SipResponse Client::incoming_private(const SipMessage &message, const McpttInfo 
   // TS 24.379 clause 11.1.2.2: an offer without a media-floor control section is a private call
   // without floor control, answered without one.
   local_.control = message.remote_media->control == MediaControl::none ? MediaControl::none : MediaControl::floor;
+  // TS 24.380 clauses 14.2.6 and 14.3.7: an offer with "mc_no_floor_ctrl" is a call without floor control too; the
+  // answer keeps the control channel and says "mc_no_floor_ctrl" (no floor control attributes).
+  local_.no_floor_control = message.remote_media->no_floor_control;
+  if (local_.no_floor_control) local_.floor_priority.reset();
   if (no_floor()) {
     local_.queueing = false;
     local_.audio_ssrc = random_ssrc();
@@ -861,6 +946,7 @@ SipResponse Client::incoming_private(const SipMessage &message, const McpttInfo 
     check_remote(*message.remote_media, true);
   } catch (...) {
     local_.control = MediaControl::floor;
+    local_.no_floor_control = false;
     throw;
   }
   // Step 4: a protected private call carries the PCK in the offer. A first-to-answer
@@ -881,7 +967,15 @@ SipResponse Client::incoming_private(const SipMessage &message, const McpttInfo 
     }
   }
   adopt_incoming_private(message, info, key, first_to_answer);
-  response.local_media = local_;
+  // TS 24.379 clause 11.1.1.2.1.1 14A) a), 14C) a): the answer mode and forwarding count of this call, for a transfer
+  // or forwarding of it.
+  private_answer_mode_ = !priv.empty() ? priv : !mode.empty() ? mode : "Auto";
+  {
+    const auto sequence = info.service.find("forwarding-sequence-number");
+    private_forwarding_sequence_ =
+        sequence == info.service.end() ? 0 : static_cast<unsigned>(std::stoul(sequence->second));
+  }
+  response.local_media = answer_media(*message.remote_media);
   name_transfer_dialog(response, message, info);
   remember_session(message.headers);
 
@@ -923,9 +1017,12 @@ void Client::adopt_incoming_private(const SipMessage &message, const McpttInfo &
   fta_not_selected_ = false;
   status_.erase("private_priority_restored");
   if (first_to_answer && info.emergency == true) saved_mepp_ = mepp_;
+  private_emergency_offered_ = info.emergency == true;
   update_private_priority(info); // an emergency private call is in progress (MEPP 2)
   status_["calling_functional_alias"] = info.functional_alias;
   status_["called_functional_alias"] = info.called_functional_alias;
+  incoming_request_uri_ = info.request_uri;
+  incoming_forwarding_others_ = info.forwarding_other_list;
   // TS 24.379 clause 11.1.5.2.3: a call from the user we asked to call back fulfils the request.
   if (pccb_requesting_.value(info.calling_user, "") == "PCCB-I3: confirmed") pccb_requesting_.erase(info.calling_user);
 }
@@ -939,8 +1036,9 @@ void Client::name_transfer_dialog(SipResponse &response, const SipMessage &messa
     response.parts.clear();
     response.dialog_parts = [call_id = message.call_id](std::string_view local, std::string_view remote) {
       McpttInfo named;
-      named.service["replaces-header-value"] =
-          call_id + ";to-tag=" + std::string(local) + ";from-tag=" + std::string(remote);
+      // TS 24.379 annex F.1.3 ad): "the Call-ID [...], the from-tag, and the to-tag [...] The delimiter [...] is the
+      // semicolon (;)".
+      named.service["replaces-header-value"] = call_id + ";" + std::string(remote) + ";" + std::string(local);
       return info_parts(named);
     };
   }
@@ -1018,7 +1116,7 @@ SipResponse Client::incoming_ambient(const SipMessage &message, const McpttInfo 
                       std::string_view::npos,
                   get_header(message.headers, "Alert-Info") == "<file:///dev/null>",
                   ""};
-  response.local_media = local_;
+  response.local_media = answer_media(*message.remote_media);
   status_["call_state"] = listened_to ? "idle" : "answering";
   event(listened_to ? "ambient_listened_to" : "ambient_listening_incoming",
         {{"calling_user", info.calling_user}, {"type", type}, {"null_alert", ambient_->null_alert}});
@@ -1046,11 +1144,13 @@ SipResponse Client::incoming_adhoc(const SipMessage &message, const McpttInfo &i
   status_["adhoc_broadcast"] = adhoc_broadcast_;
   status_["calling_functional_alias"] = info.functional_alias;
   status_["called_functional_alias"] = info.called_functional_alias;
-  if (protected_media() || protected_floor()) {
+  // TS 24.379 clause 17.2.2.1.2 step 7: with a <preconfigured-group-id>, the security related information of that
+  // group's configuration (its GMK) protects the call; a protected call without it cannot be keyed (488).
+  call_group_ = info.calling_group;
+  if (protected_media() && !use_adhoc_security(info.preconfigured_group_id)) {
+    call_group_.clear();
+    restore_group_key();
     response.status_code = 488;
-    response.headers = {
-        {"Warning",
-         "399 mcx \"100 function not allowed due to end-to-end security for adhoc group call not implemented\""}};
     return response;
   }
   // RFC 5373 section 2: an answer-mode value other than Auto and Manual is ignored.
@@ -1067,7 +1167,7 @@ SipResponse Client::incoming_adhoc(const SipMessage &message, const McpttInfo &i
   dialog_ = message.dialog_id;
   call_type_ = "adhoc";
   call_group_ = info.calling_group;
-  response.local_media = local_;
+  response.local_media = answer_media(*message.remote_media);
   remember_session(message.headers);
   const bool manual = mode == "Manual" || cfg_.at("mcptt").value("answer_mode", "auto") == "manual";
   if (manual) {

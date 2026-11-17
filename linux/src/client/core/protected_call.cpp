@@ -17,12 +17,51 @@ std::optional<keying::KeyMessage> Client::offer_private_key(const std::string &t
   local_.key_mgmt.clear();
   if (!protected_media()) return std::nullopt;
   if (!keys_) throw std::runtime_error("key management client unavailable");
-  // TS 24.379 clause 6.2.8.3.9: a KMS URI given for this target (<PrivateCallKMSURI>) keys the PCK.
-  const auto kms = target == forwarded_kms_.first ? std::exchange(forwarded_kms_, {}).second : std::string{};
-  auto [key, message] = keys_->make_pck(target, kms);
+  // Step 11 d): "shall encrypt the PCK to a UID associated to the MCPTT client using the MCPTT ID and KMS URI of the
+  // invited user as determined by the procedures of clause 6.2.8.3.9": the KMS URI keys the PCK (IDRkmsr, TS 33.180
+  // annex E.2) with that KMS's certificate (its own, or an External KMS's from the Home KMS, TS 33.180 clause 5.2.8.3).
+  // A KMS URI given for this target (a forwarding request's <PrivateCallKMSURI>, the receiver KMS selected after a KMS
+  // Redirect Response, TS 33.180 clause 5.2.8.2.5) takes its place.
+  std::pair<std::string, std::string> given;
+  if (target == forwarded_kms_.first)
+    given = {std::exchange(forwarded_kms_, {}).second, std::exchange(forwarded_kms_source_, {})};
+  auto [kms, source] = given.first.empty() ? private_call_target_kms(target) : given;
+  // The KMS of the initial configuration is the one this client is provisioned by (make_pck with no KMS URI).
+  const bool own = source == "initial-configuration";
+  if (!own && !keys_->knows_kms(kms)) {
+    status_["private_call_kms"] = {{"target", target}, {"kms_uri", kms}, {"source", source}, {"known", false}};
+    throw std::runtime_error("no KMS certificate for the KMS URI of " + target + ": " + kms);
+  }
+  auto [key, message] = keys_->make_pck(target, own ? std::string{} : kms);
   local_.key_mgmt = std::move(message);
-  if (!kms.empty()) event("private_call_kms_selected", {{"target", target}, {"kms_uri", kms}});
+  status_["private_call_kms"] = {{"target", target}, {"kms_uri", kms}, {"source", source}, {"known", true}};
+  event("private_call_kms", status_["private_call_kms"]);
   return key;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 6.2.8.3.9, on network operation: "1) shall search for the <entry> element of the <PrivateCallURI>
+// element of the <PrivateCallList> element entry of the <Common> element of the MCPTT user profile document ...
+// containing the identified MCPTT ID; a) if the identified MCPTT ID is found and if the <entry> element of the
+// <PrivateCallKMSURI> element of the <anyExt> element of the <PrivateCallList> element entry identified is not empty,
+// shall retrieve the KMS URI contained therein; or b) if the identified MCPTT ID is not found or the <entry> element of
+// the <PrivateCallKMSURI> element is empty, shall retrieve the <kms> element of the <App-Server-Info> element of the
+// <on-network> element of the MCPTT UE initial configuration document". Per TS 24.484 clause 8.3.2.7 the target's
+// own <PrivateCallKMSURI> (in the <anyExt> of its <PrivateCallURI>) is present when it differs from the list's (in the
+// <anyExt> of the <PrivateCallList>); private_call_kms_ holds whichever applies.
+std::pair<std::string, std::string> Client::private_call_target_kms(const std::string &target) const {
+  return profile_target_kms(private_call_kms_, *keys_, target);
+}
+
+//------------------------------------------------------------------------------
+// Clause 6.2.8.3.9 1)a) and 1)b) of TS 24.379, TS 24.281 and TS 24.282 (on network): the user profile's KMS URI of
+// the target when it is listed and not empty, else the <kms> of the initial configuration: this client's KMS URI
+// (security.kms_id, else security.kms_uri, the KMS it is provisioned by).
+std::pair<std::string, std::string> Client::profile_target_kms(const std::map<std::string, std::string> &listed,
+                                                               const KeyClient &keys, const std::string &target) {
+  if (const auto found = listed.find(target); found != listed.end() && !found->second.empty())
+    return {found->second, "user-profile"};
+  return {keys.kms_uri_of(target), "initial-configuration"};
 }
 
 //------------------------------------------------------------------------------
@@ -180,6 +219,29 @@ bool Client::select_call_key(const std::string &call_group) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 17.2.2.1.1 (on the 2xx, step 3) and clause 17.2.2.1.2 step 7: "if the <preconfigured-group-id>
+// element received [...], shall use the security related information from the group configuration associated with the
+// received preconfigured group identity": the ad hoc call's media is keyed with that group's GMK (TS 33.180 clause
+// 5.7). False when this client does not hold it; the group's GMK is then subscribed to for later calls.
+bool Client::use_adhoc_security(const std::string &preconfigured) {
+  adhoc_security_group_ = preconfigured;
+  if (preconfigured.empty()) {
+    event("adhoc_security_unavailable", {{"reason", "no preconfigured-group-id"}});
+    return false;
+  }
+  if (adhoc_security_groups_.insert(preconfigured).second) update_key_subscriptions();
+  try {
+    protection_.set_group(gmk_for(preconfigured));
+  } catch (const std::exception &error) {
+    event("group_call_key_unavailable",
+          {{"group_id", call_group_}, {"key_group", preconfigured}, {"reason", error.what()}});
+    return false;
+  }
+  event("adhoc_security", {{"group_id", call_group_}, {"key_group", preconfigured}});
+  return true;
+}
+
+//------------------------------------------------------------------------------
 // Helper: after a call keyed with another group's GMK, the selected group's GMK (if held) is selected again; the
 // other epochs keep their replay state (ProtectedCall).
 void Client::restore_group_key() {
@@ -208,6 +270,10 @@ void Client::update_key_subscriptions() {
   for (const auto &[tgi, regroup] : mcdata_regroups_.items())
     if (const auto preconfigured = regroup.value("preconfigured", std::string{}); !preconfigured.empty())
       wanted.insert(preconfigured);
+  // TS 24.379 clause 17.1: the preconfigured groups providing the security of ad hoc group calls.
+  for (const auto &configured : cfg_.at("mcptt").value("adhoc_security_groups", std::vector<std::string>{}))
+    wanted.insert(configured);
+  wanted.insert(adhoc_security_groups_.begin(), adhoc_security_groups_.end());
   wanted.erase(key_group_of(group()));
   for (auto it = extra_key_subscriptions_.begin(); it != extra_key_subscriptions_.end();) {
     if (wanted.contains(it->first)) {

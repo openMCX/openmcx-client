@@ -51,6 +51,14 @@ has it: the lab scenarios run each server feature through this client.
 - Location reporting and requests, emergency alert areas and group geographic areas, SEAL location reporting
   (TS 24.545)
 - End-to-end protection: media and floor control (GMK, PCK), XML signalling confidentiality and integrity
+- Service settings (TS 24.379 clauses 7.2.3, 7.2.4): the poc-settings with the answer mode and the selected user
+  profile's index, the settings-only PUBLISH (`settings-publish [remove]`, also on `answer-mode`), the settings
+  subscription (`settings-subscribe|resubscribe|unsubscribe [fetch]`, status `service_settings`)
+- Affiliation of other users (clauses 9.2.1.2 to 9.2.1.5): `affiliation-subscribe|unsubscribe <MCPTT ID>`,
+  `affiliate-remote <MCPTT ID> <group> affiliate|deaffiliate mandatory|negotiated`, a received negotiated-mode request
+  answered with `affiliation-accept [<group>...]` or `affiliation-decline` (status `affiliation_command`)
+- Subscription to group dynamic data (`gdd-subscribe|resubscribe|unsubscribe <group>`, clause 9.2.1.6)
+- `<gw-mcptt-usage>` in the service authorisation when configured (`mcptt.via_gateway_ue`, clause 5.6)
 
 ### MCData (TS 24.282, TS 24.582)
 

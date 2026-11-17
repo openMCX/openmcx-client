@@ -32,6 +32,10 @@ void Client::functional_alias_command(const std::string &arguments) {
     functional_alias_ = aliases.front() == "none" ? std::string{} : aliases.front();
     return;
   }
+  // TS 24.379 clause 9A.2.1.3: "fa subscribe [fetch]" (re-)subscribes to this user's functional alias status (an
+  // initial SUBSCRIBE without a subscription, Expires 0 with fetch; else the in-dialog re-subscription),
+  // "fa unsubscribe" ends it (in-dialog, Expires 0).
+  if (action == "subscribe" || action == "unsubscribe") return alias_status_command(action, aliases);
   if (action == "bind" || action == "unbind") {
     if (aliases.size() != 2 || !authorized_)
       throw std::runtime_error("usage: fa bind|unbind <alias> <group>[,<group>...]");
@@ -134,24 +138,51 @@ void Client::send_alias_publish(const std::string &action, const std::vector<std
 // TS 24.379 clause 9A.2.1.3 steps 1 to 4: subscribe to this user's functional alias status: the mcptt-info body names
 // the user with <request-type> "functional-alias-status-determination", Expires 4294967295 for the state and its
 // changes. The status changes held back wait for the answer; a refusal lets them go without it.
-void Client::alias_status_subscribe() {
+void Client::alias_status_subscribe(bool fetch) {
   McpttInfo info;
   info.request_uri = user();
   info.client_id = client_id();
   info.service["request-type"] = "functional-alias-status-determination";
   const auto part = info_parts(info).front();
   alias_status_dialog_ = sip_.subscribe(
-      service(), "presence", 4294967295u, {{"P-Preferred-Service", mcptt_icsi}, {"Accept", "application/pidf+xml"}},
-      [this](const SipResponse &response) {
+      service(), "presence", fetch ? 0u : 4294967295u,
+      {{"P-Preferred-Service", mcptt_icsi}, {"Accept", "application/pidf+xml"}},
+      [this, fetch](const SipResponse &response) {
         if (response.status_code < 200) return;
         status_["functional_alias_subscription_result"] = response.status_code;
-        if (response.status_code >= 300) alias_status_dialog_.clear();
+        if (response.status_code >= 300 || fetch) alias_status_dialog_.clear();
         alias_status_answered_ = true;
         for (const auto &pending : std::exchange(pending_alias_commands_, {}))
           schedule([this, pending] { functional_alias_command(pending); });
       },
       part.content_type, part.body);
-  event("functional_alias_subscription_requested");
+  event("functional_alias_subscription_requested", {{"fetch", fetch}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 9A.2.1.3: the functional alias status determination on the user's request. "subscribe": with no
+// subscription, the initial SUBSCRIBE of steps 1 to 7 (alias_status_subscribe; Expires 0 to fetch the current state
+// only, step 5); with one, the in-dialog re-subscription (1) Expires 4294967295, 3) Event presence, 4) Accept
+// application/pidf+xml). "unsubscribe": the in-dialog de-subscription (2) Expires 0); the NOTIFY with
+// Subscription-State terminated ends the dialog (alias_status_notify). Deviation: step 2b (an
+// application/simple-filter+xml body "indicating per-functional alias restrictions") is left out, as the client's
+// own subscription after the authorisation does: clause 9.3.2 defines no per-functional alias filter.
+void Client::alias_status_command(const std::string &action, const std::vector<std::string> &arguments) {
+  if (!authorized_) throw std::runtime_error("functional alias status determination requires MCPTT authorisation");
+  const bool fetch = !arguments.empty() && arguments.front() == "fetch";
+  if (action == "subscribe" && alias_status_dialog_.empty()) return alias_status_subscribe(fetch);
+  if (alias_status_dialog_.empty()) throw std::runtime_error("no functional alias status subscription");
+  const bool resubscribe = action == "subscribe";
+  sip_.request_in_dialog(alias_status_dialog_, "SUBSCRIBE", "", "",
+                         {{"Event", "presence"},
+                          {"Accept", "application/pidf+xml"},
+                          {"Expires", resubscribe && !fetch ? "4294967295" : "0"}},
+                         [this, resubscribe](const SipResponse &response) {
+                           if (response.status_code < 200) return;
+                           status_["functional_alias_subscription_result"] = response.status_code;
+                           event(resubscribe ? "functional_alias_resubscribed" : "functional_alias_unsubscribed",
+                                 {{"status", response.status_code}});
+                         });
 }
 
 //------------------------------------------------------------------------------

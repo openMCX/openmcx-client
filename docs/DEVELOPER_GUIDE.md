@@ -344,6 +344,10 @@ sequenceDiagram
   information (session type, emergency, imminent peril, broadcast, functional alias, `<associated-group-id>` for a
   regroup) and the Resource-Priority headers (`priority_headers`), then `invite_group_call` sets the floor priority,
   floor SSRC and queueing and sends the INVITE (TS 24.379 clauses 10.1.1.2.1.1 and 10.1.2.2.1.1).
+- Multiplexing (TS 24.379 clause 6.2.10) is the client's `mcptt.multiplex_support` (default `true`). Every MCPTT
+  INVITE and re-INVITE offers `offer_media()` (`core/client.hpp`): with `false` it has no `mc_floor_ssrc` (TS 24.380
+  clause 14.2.7), answers have none (14.3.8), and `negotiated_media` drops the server's (14.4), so the floor control
+  messages go with the client's own SSRC and the server's are told apart by its address and port (clause 8.2.4).
 - `ptt_command` sends Floor Request through `send_floor` (TS 24.380 clause 6.2.4.3.5). `floor_packet` validates
   each floor message (source address and port, SSRC, SRTCP when `security.protect_floor`), acknowledges it when asked,
   filters duplicates (`FloorSequenceTracker`), feeds `FloorParticipantTimers::receive` and acts on Floor Granted,
@@ -371,6 +375,9 @@ sequenceDiagram
   call's dialog, or, outside a call, a SIP MESSAGE that cancels the emergency state of an affiliated user; the
   Resource-Priority comes from the service configuration document (TS 24.379 clauses 10.1.1.2.1.3 to 10.1.1.2.1.5).
   The answer is handled in `priority_response`.
+- `emergency clear`: the user clears the MCPTT emergency state locally, without signalling (TS 24.379 annex G.1
+  "MCPTT user manually clears the state"); while it is set, an ad hoc group call the user places is an emergency one
+  (clause 17.2.2.1.1 step 15).
 - `alert on|off [<user>]` → `change_alert`: the emergency alert and its cancellation by an authorised user (TS 24.379
   clauses 12.1.1.1, 12.1.1.2).
 - In a private call, `emergency on alert` → `change_private_priority`, which moves MEPC, MEPP and MPEA (section 3).

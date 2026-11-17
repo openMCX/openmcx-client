@@ -216,14 +216,17 @@ SipResponse Client::reg_notify(const SipMessage &message) {
 //   expired if the previous registration was for 1200 seconds or less") for the adjusted expiration time;
 // - this client's <contact> "terminated" with the event "unregistered", "rejected" or "deactivated" (clause 5.1.1.7
 //   items 1 and 2; other events are not a deregistration of this clause): network_deregistration().
+// This client's <contact> is the one "that the UE registered" ("belonging to this UE"): its contact address and, when
+// the document gives it, the callid of this client's current registration (client_rules::own_reg_contact, RFC 3680
+// section 5.1); an earlier registration at the same address (a restarted process, after its log-off) is another's.
 // Nothing during the client's own log-off, whose de-REGISTER ends the registration.
 void Client::reg_event_document(const RegInfo &info) {
   if (logged_off_) return;
-  const auto own = client_rules::contact_address(sip_.contact_target());
+  const auto own = sip_.contact_target();
   for (const auto &registration : info.registrations) {
     if (registration.aor != sip_identity()) continue;
     for (const auto &contact : registration.contacts) {
-      if (client_rules::contact_address(contact.uri) != own) continue;
+      if (!client_rules::own_reg_contact(contact.uri, contact.callid, own, registration_call_id_)) continue;
       if (registration.state == "active" && contact.state == "active" && contact.event == "shortened" &&
           contact.expires) {
         const auto delay = client_rules::refresh_delay_s(registration_duration_s_, *contact.expires);

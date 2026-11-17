@@ -101,12 +101,42 @@ void Client::tick() {
 // end of received media, and the end of this user's transmission once the floor is lost.
 void Client::floor_participant_tick(std::uint64_t now) {
   const bool receiving = floor_timers_.remote_media_active();
+  const bool awaiting_confirmation = floor_timers_.awaiting_user_confirmation();
   for (const auto &packet : floor_timers_.tick(now)) transmit_floor(packet);
-  for (const auto type : floor_timers_.take_failed())
+  // TS 24.380 clause 6.2.4.9.13: T132 expired: the Floor Release is sent and "may indicate to the user that the floor
+  // is no more available".
+  if (awaiting_confirmation && !floor_timers_.awaiting_user_confirmation()) {
+    status_["floor_unavailable"] = status_.value("floor_unavailable", 0u) + 1;
+    floor_event("floor_unavailable");
+  }
+  for (const auto type : floor_timers_.take_failed()) {
+    if (type == FloorType::QueuedFloorRequests) {
+      // TS 24.380 clause 6.2.4.7.5: "shall provide a Queued Floor Requests timeout to the MCPTT client".
+      auto &queued = status_["queued_requests"];
+      if (!queued.is_object()) queued = Json::object();
+      queued["state"] = "timeout";
+      queued["timeouts"] = queued.value("timeouts", 0u) + 1;
+      floor_event("queued_requests_timeout");
+      continue;
+    }
+    if (type == FloorType::Request) {
+      // TS 24.380 clause 6.2.4.4.6 step 1: "shall provide a floor request timeout notification to the user".
+      status_["floor_request_timeouts"] = status_.value("floor_request_timeouts", 0u) + 1;
+      floor_event("floor_request_timeout");
+    }
     failure("floor procedure timeout for type " + std::to_string(static_cast<unsigned>(type)));
+  }
   if (receiving && !floor_timers_.remote_media_active()) {
-    receive_ssrc_ = 0;
-    status_["floor_owner"] = "";
+    // TS 24.380 clause 11.1.1: T103 expired, the RTP media "has completed".
+    if (talkers_.size() <= 1) {
+      receive_ssrc_ = 0;
+      status_["floor_owner"] = "";
+    }
+    mix_talkers(true);
+    if (status_.value("media_rendering", false)) {
+      status_["media_rendering"] = false;
+      event("media_rendering", {{"on", false}});
+    }
   }
   const auto state = floor_timers_.state();
   if (state == FloorParticipantState::NoPermission || state == FloorParticipantState::PendingRelease) {
@@ -116,10 +146,15 @@ void Client::floor_participant_tick(std::uint64_t now) {
       const Json loss{{"state", state == FloorParticipantState::NoPermission ? "NoPermission" : "PendingRelease"},
                       {"last_message", last_floor_message_}};
       status_["last_floor_loss"] = loss;
-      event("floor_lost", loss);
+      floor_event("floor_lost", loss);
     }
+    // The talk burst staged for an implicit floor request still waiting for its answer (upgrade_implicit_begin: an
+    // upgrade's re-INVITE with "mc_implicit_request") is kept: the participant stays in 'U: has no permission' until
+    // the answer (TS 24.380 clause 6.2.4.2.2 step 4) and, once granted, sends it in 'U: has permission' until the
+    // user releases (clauses 6.2.4.5.2, 6.2.4.5.3). Dropping it here made the grant end at once with Floor Release.
+    const bool staged = implicit_offered_ && !talking_ && !requesting_;
     talking_ = requesting_ = false;
-    transmit_.clear();
+    if (!staged) transmit_.clear();
   }
 }
 
@@ -223,7 +258,10 @@ void Client::save_status(std::uint64_t now) {
                                         {"null_alert", ambient_->null_alert},
                                         {"attached", !dialog_.empty() && dialog_ == ambient_->dialog},
                                         {"transmitting", hidden && talking_},
-                                        {"connected", hidden && remote_.has_value()}};
+                                        {"connected", hidden && remote_.has_value()},
+                                        // The floor participant state of the hidden call (protocol state only).
+                                        {"floor_state", hidden ? status_.value("floor_state", "") : ""},
+                                        {"floor_owner", hidden ? status_.value("floor_owner", "") : ""}};
   status_["last_ambient"] = last_ambient_;
   status_["first_to_answer"] = first_to_answer_;
   status_["private_emergency_state"] = mepc_name(mepc_);
@@ -283,9 +321,24 @@ void Client::save_status(std::uint64_t now) {
   status_["talking"] = talking_ && !hidden;
   status_["requesting_floor"] = requesting_;
   status_["received_samples"] = received_.size();
+  // TS 24.379 clauses 7.2.3, 7.2.4, 9.2.1.3, 9.2.1.5 and 9.2.1.6: service_settings, settings_publication,
+  // affiliation_command, group_dynamic_data and target_affiliations (core/settings_affiliation.cpp).
+  procedures_status(mcptt_service);
   if (mcdata_enabled()) mcdata_status();
   if (mcvideo_enabled()) mcvideo_status();
-  write_status(cfg_, status_);
+  if (hidden) {
+    // TS 24.379 clauses 11.1.6.2.0 and 11.1.6.2.1.2 6): the listened-to user is not shown the call nor its floor; the
+    // floor participant state goes on (TS 24.380 clause 6.2.4) and is reported under "ambient" only.
+    auto shown = status_;
+    shown["floor_state"] = "NoPermission";
+    shown["floor_owner"] = "";
+    shown["requesting_floor"] = false;
+    shown["queued"] = false;
+    shown["pending_floor_confirmation"] = false;
+    write_status(cfg_, shown);
+  } else {
+    write_status(cfg_, status_);
+  }
   save_audio();
   last_save_ = now;
 }
@@ -299,7 +352,17 @@ void Client::floor_and_priority_status() {
   case FloorParticipantState::HasPermission: status_["floor_state"] = "HasPermission"; break;
   case FloorParticipantState::PendingRelease: status_["floor_state"] = "PendingRelease"; break;
   case FloorParticipantState::Queued: status_["floor_state"] = "Queued"; break;
+  case FloorParticipantState::Releasing: status_["floor_state"] = "Releasing"; break;
   }
+  talkers_status();
+  status_["media_flow"] = media_flow_stopped_ ? "stopped" : "flowing";
+  status_["floor_overridden"] = floor_overridden_;
+  status_["floor_overriding"] = floor_overriding_;
+  status_["queued_requests_pending"] = floor_timers_.queued_requests_pending();
+  for (const auto *counter : {"floor_request_timeouts", "floor_unavailable"})
+    if (!status_.contains(counter)) status_[counter] = 0;
+  if (!status_.contains("media_rendering")) status_["media_rendering"] = false;
+  if (!status_.contains("queued_requests")) status_["queued_requests"] = Json::object();
   status_["priority"] = emergency_ ? "emergency" : imminent_ ? "imminent" : "normal";
   status_["alerts"] = alerts_;
   // The group whose emergency alerts "alerts" lists: during a call on a monitored group that call's, else the
@@ -311,6 +374,24 @@ void Client::floor_and_priority_status() {
       remote_ && remote_->floor_priority ? Json(*remote_->floor_priority) : Json(nullptr);
   status_["answer_mode"] = cfg_.at("mcptt").value("answer_mode", "auto");
   status_["group_id"] = group();
+  status_["group"] = group();
+  status_["imminent_group_state"] = imminent_group_states_;
+  status_["emergency_state"] = emergency_state_; // TS 24.379 annex G.1
+  status_["adhoc_redirections"] = adhoc_redirections_; // TS 24.379 clause 17.2.7.1
+  // TS 24.379 clause 17.2.2.1: the preconfigured group keying the ad hoc call, and those whose GMKs are wanted.
+  status_["adhoc_security_group"] = adhoc_security_group_;
+  status_["adhoc_security_groups"] = adhoc_security_groups_;
+  // TS 24.379 clause 18.1.1: "sent" {target, group, status, warning, outcome, request} of this user's last trigger,
+  // "received" {from, group, status, warning, floor_requested} of the last one received.
+  status_["remote_floor"] = remote_floor_;
+  // TS 24.379 clause 9A.2.1.3: whether this user's functional alias status subscription is in place ("active" from
+  // its SUBSCRIBE until a NOTIFY ends it, else "none"); its last answer in functional_alias_subscription_result.
+  status_["functional_alias_subscription"] = alias_status_dialog_.empty() ? "none" : "active"; // group -> MIG state (TS 24.379 clause 10.1.6.2) // the selected group (TS 24.379 clauses 9.2.1.2, 10.1.4.2.2 step 2)
+  // TS 24.379 clause 10.1.4.2: "sent", this user's last remote group selection request and its outcome
+  // ({target, group, status, warning, outcome, request[, from]}); "received", the last request received
+  // ({from, group, affiliation_required, outcome}).
+  status_["remote_selection"] = {{"sent", mcptt_procedures_.selection_result},
+                                 {"received", mcptt_procedures_.selection}};
 }
 
 //------------------------------------------------------------------------------
@@ -651,6 +732,9 @@ void Client::registration_answered(const SipResponse &response) {
     return;
   }
   registered_ = true;
+  // RFC 3261 section 10.2.4: refreshes keep the Call-ID; a new registration (another process, or after a network
+  // deregistration, SipEngine::registration_ended) has its own. The response's dialog ID is its Call-ID.
+  if (!response.dialog_id.empty()) registration_call_id_ = response.dialog_id;
   // TS 24.229 clause 5.1.1.4.1: the duration of this registration, for the reregistration time of a shortened one
   // (core/reg_event.cpp): the expires parameter of the Contact or the Expires header field of the 200 (OK).
   {
@@ -761,7 +845,9 @@ void Client::load_user_documents() {
   // A user may belong to no group (an account activated without one): then there
   // is no group document to read and nothing to affiliate to.
   if (!group().empty())
-    retrieve(gms_xcap_root(), "/org.openmobilealliance.groups/global/byGroupID/" + xcap_segment(group()));
+    note_group_document(group(), retrieve(gms_xcap_root(), "/org.openmobilealliance.groups/global/byGroupID/" +
+                                                              xcap_segment(group()))
+                                     .body);
 }
 
 //------------------------------------------------------------------------------

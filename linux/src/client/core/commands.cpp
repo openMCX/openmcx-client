@@ -13,6 +13,14 @@
 
 namespace mcx {
 
+namespace {
+// The MCPTT commands of the procedures shared with MCVideo (core/settings_affiliation.cpp, procedures_command).
+const std::set<std::string> mcptt_procedure_verbs{
+    "settings-publish",      "settings-subscribe", "settings-resubscribe", "settings-unsubscribe",
+    "affiliation-subscribe", "affiliation-unsubscribe", "affiliate-remote", "affiliation-accept",
+    "affiliation-decline",   "gdd-subscribe",      "gdd-resubscribe",      "gdd-unsubscribe"};
+} // namespace
+
 //------------------------------------------------------------------------------
 // TS 24.380 clause 14.2.5 (an implementation option): a call command ("call ...", "chat ...", "private ...",
 // "private-fa ...", "first-to-answer[-fa] ...", "adhoc ...") may end in "implicit" or "implicit=<WAV>" (the INVITE
@@ -53,7 +61,7 @@ void Client::command(const std::string &command_line) {
 
 //------------------------------------------------------------------------------
 // Command: run one control command:
-//   emergency|imminent on|off, emergency on|off alert, alert on|off [<user>]: priority changes and emergency alerts
+//   emergency|imminent on|off, imminent off <group>, emergency on|off alert, alert on|off [<user>]: priority changes and emergency alerts
 //     (TS 24.379 clause 10.1.1.2.1.3 to clause 10.1.1.2.1.5, clause 11.1.1.2.1.4, clause 11.1.1.2.1.5, clause 12.1.1.1,
 //     clause 12.1.1.2);
 //   regroup create|users|remove: regroup using a preconfigured group (clause 16.2.1.1, clause 16.3.1.1,
@@ -61,9 +69,11 @@ void Client::command(const std::string &command_line) {
 //   priority <0..99>, answer-mode auto|manual, ambient-source <wav>|none: local settings;
 //   group <group> [from=<group>]: select and affiliate to a group (clause 9.2.1.2), fetching its group document;
 //   floor-confirm, queue-status, ptt <wav>, release: floor control (TS 24.380 clause 6.2.4.9.12, clause 6.2.4.9.9,
-//     clause 6.2.4.3.5, clause 6.2.4.5.3);
+//     clause 6.2.4.3.5, clause 6.2.4.5.3); queued-requests [<MCPTT ID>...], media-stop, media-resume,
+//     revoke-request <MCPTT ID>: queued floor request cancellation, unicast media flow control, floor revoke request
+//     (clauses 6.2.4.7.4, 6.2.4.3.8, 6.2.4.3.9, 6.2.4.3.10);
 //   answer, reject: answer a call in manual commencement mode (TS 24.379 clause 6.2.3.2);
-//   call [broadcast] [emergency|imminent], chat [emergency|imminent], rejoin, call force: prearranged group call
+//   call [broadcast] [emergency [alert]|imminent], chat [emergency [alert]|imminent], rejoin, call force: group call
 //     (clause 10.1.1.2.1.1), chat group call (clause 10.1.2.2.1.1), rejoin by session identity; a call command may
 //     end in implicit[=<WAV>] or no-implicit (take_implicit_choice);
 //   pre-establish [implicit], pre-session-modify [implicit|explicit] [update], pre-session-release: the
@@ -71,18 +81,45 @@ void Client::command(const std::string &command_line) {
 //   chat-join <group>: test aid for the server's refusals;
 //   hangup: release the call (clause 10.1.1.2.3.1, clause 11.1.3.1.1.1, ambient clause 11.1.6.2.1.3);
 //   affiliate, deaffiliate: affiliation status change (clause 9.2.1.2);
+//   settings-publish [remove]: the PUBLISH for the MCPTT service settings only (clause 7.2.3);
+//   settings-subscribe [fetch], settings-resubscribe, settings-unsubscribe: the MCPTT service settings (clause 7.2.4);
+//   affiliation-subscribe <MCPTT ID> [fetch], affiliation-unsubscribe <MCPTT ID>: the affiliation status of another
+//     user (clause 9.2.1.3); affiliate-remote <MCPTT ID> <group> affiliate|deaffiliate mandatory|negotiated: a change
+//     for another user (clauses 9.2.1.2, 9.2.1.4); affiliation-accept [<group>...], affiliation-decline: the user's
+//     answer to a negotiated-mode request (clause 9.2.1.5);
+//   gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated], gdd-resubscribe <group>,
+//     gdd-unsubscribe <group>: the subscription to group dynamic data (clause 9.2.1.6);
 //   options <SIP URI>: reachability probe (RFC 3261 section 11);
 //   log-off, log-on: log off every MC service (clause 7.2.1A step 4 and NOTE 3) and de-register, then back;
 //   quit; the other words go to the private call service, ad hoc, functional alias, MCData, MCVideo, SEAL, location,
 //   profile and group management commands.
 void Client::run_command(const std::string &cmd) {
-  if (cmd == "emergency on alert" || cmd == "emergency off alert") {
+  const auto verb = cmd.substr(0, cmd.find(' '));
+  if (mcptt_procedure_verbs.contains(verb)) {
+    // TS 24.379 clauses 7.2.3, 7.2.4, 9.2.1.2 to 9.2.1.6 (core/settings_affiliation.cpp).
+    std::istringstream words(cmd.substr(verb.size()));
+    procedures_command(mcptt_service, verb, words);
+  } else if (cmd == "emergency on alert" || cmd == "emergency off alert") {
     if (call_type_ != "private") throw std::runtime_error("use 'alert on|off' for group emergency alerts");
     change_private_priority(cmd.starts_with("emergency on"), true);
+  } else if (cmd == "emergency cancel-other" || cmd.starts_with("emergency cancel-other ")) {
+    // TS 24.379 clauses 6.2.8.1.14, 6.2.8.3.8: emergency cancel-other [alert [<originator>]].
+    std::istringstream words(cmd.substr(22));
+    std::string word, originator;
+    words >> word >> originator;
+    if (!word.empty() && word != "alert") throw std::runtime_error("usage: emergency cancel-other [alert [<user>]]");
+    third_party_cancel(word == "alert", originator);
+  } else if (cmd == "emergency clear") {
+    // TS 24.379 annex G.1, state-clearing event "MCPTT user manually clears the state": no signalling; an outstanding
+    // emergency alert is cancelled with "alert off" / "adhoc-alert cancel", an emergency call by "emergency off".
+    emergency_state_ = false;
+    event("emergency_state_cleared", {{"by", "user"}});
   } else if (cmd == "emergency on" || cmd == "emergency off") {
     change_priority(true, cmd.ends_with("on"));
   } else if (cmd == "imminent on" || cmd == "imminent off") {
     change_priority(false, cmd.ends_with("on"));
+  } else if (cmd.starts_with("imminent off ")) {
+    imminent_state_cancel(cmd.substr(13)); // TS 24.379 clause 10.1.6.2.1, a named group with no call ongoing
   } else if (cmd == "alert on" || cmd == "alert off" || cmd.starts_with("alert off ")) {
     // alert off [<user> [<group>]]: the group the alert was shown for (the selected group or a monitored one).
     std::istringstream words(cmd.size() > 10 ? cmd.substr(10) : std::string{});
@@ -95,6 +132,20 @@ void Client::run_command(const std::string &cmd) {
     floor_priority_command(cmd);
   } else if (cmd.starts_with("answer-mode ")) {
     answer_mode_command(cmd);
+  } else if (cmd.starts_with("remote-floor ")) {
+    // TS 24.379 clause 18.1.1.1: remote-floor <MCPTT ID> [<group>] (no group: the emergency private call).
+    std::istringstream words(cmd.substr(13));
+    std::string target, called;
+    words >> target >> called;
+    if (target.empty()) throw std::runtime_error("usage: remote-floor <MCPTT ID> [<group>]");
+    remote_floor_command(target, called);
+  } else if (cmd.starts_with("remote-select ")) {
+    // TS 24.379 clause 10.1.4.2.1: remote-select <MCPTT ID> <group>.
+    std::istringstream words(cmd.substr(14));
+    std::string target, selected;
+    words >> target >> selected;
+    if (target.empty() || selected.empty()) throw std::runtime_error("usage: remote-select <MCPTT ID> <group>");
+    select_remote(mcptt_service, target, selected);
   } else if (cmd.starts_with("group ")) {
     select_group(cmd);
   } else if (cmd == "floor-confirm") {
@@ -104,11 +155,18 @@ void Client::run_command(const std::string &cmd) {
     next_audio_ = monotonic_ms();
   } else if (cmd == "queue-status") {
     send_floor(FloorType::QueuePositionRequest);
+  } else if (cmd == "queued-requests" || cmd.starts_with("queued-requests ")) {
+    queued_requests_command(cmd.substr(std::string_view("queued-requests").size())); // TS 24.380 clause 6.2.4.7.4
+  } else if (cmd == "media-stop" || cmd == "media-resume") {
+    media_flow_command(cmd == "media-resume"); // TS 24.380 clauses 6.2.4.3.8, 6.2.4.3.9
+  } else if (cmd.starts_with("revoke-request ")) {
+    revoke_request_command(cmd.substr(15)); // TS 24.380 clause 6.2.4.3.10
   } else if (cmd == "answer" || cmd == "reject") {
     answer_command(cmd);
   } else if (cmd == "call" || cmd == "rejoin" || cmd == "call emergency" || cmd == "call imminent" ||
              cmd == "call broadcast" || cmd == "call broadcast emergency" || cmd == "call broadcast imminent" ||
-             cmd == "chat" || cmd == "chat emergency" || cmd == "chat imminent" || cmd == "call force") {
+             cmd == "chat" || cmd == "chat emergency" || cmd == "chat imminent" || cmd == "call force" ||
+             cmd == "call emergency alert" || cmd == "call broadcast emergency alert" || cmd == "chat emergency alert") {
     group_call_command(cmd);
   } else if (cmd == "pre-establish" || cmd.starts_with("pre-establish ")) {
     pre_establish_command(cmd);
@@ -120,6 +178,8 @@ void Client::run_command(const std::string &cmd) {
     chat_join_command(cmd);
   } else if (cmd == "conference-subscribe") {
     subscribe_conference(true);
+  } else if (cmd == "conference-unsubscribe") {
+    unsubscribe_conference();
   } else if (cmd.starts_with("callback ") || cmd.starts_with("callback-cancel ") ||
              cmd.starts_with("callback-fulfil ") || cmd.starts_with("remote-call ") ||
              cmd.starts_with("remote-group-call ") || cmd.starts_with("transfer ") || cmd.starts_with("forward ")) {
@@ -135,6 +195,8 @@ void Client::run_command(const std::string &cmd) {
     mcdata_command(cmd);
   } else if (cmd.starts_with("adhoc-alert ")) {
     adhoc_alert(cmd.substr(12));
+  } else if (cmd == "adhoc-release") {
+    adhoc_release();
   } else if (cmd.starts_with("adhoc-modify ")) {
     adhoc_modify(cmd.substr(13));
   } else if (cmd.starts_with("adhoc ")) {
@@ -179,7 +241,7 @@ void Client::run_command(const std::string &cmd) {
     if (dialog_.empty()) {
       failure("refresh-reinvite: no call");
     } else {
-      auto offer = local_;
+      auto offer = offer_media();
       std::istringstream words(cmd.substr(std::string_view("refresh-reinvite").size()));
       for (std::string word; words >> word;) {
         if (word == "hold") {
@@ -227,6 +289,7 @@ void Client::run_command(const std::string &cmd) {
   } else if (cmd == "affiliate") {
     if (!authorized_) throw std::runtime_error("authorization required");
     desired_affiliation_ = true;
+    left_selected_ = false;
     affiliate();
   } else if (cmd == "deaffiliate") {
     deaffiliate_command();
@@ -270,12 +333,16 @@ void Client::floor_priority_command(const std::string &cmd) {
 }
 
 //------------------------------------------------------------------------------
-// Local setting: "answer-mode auto|manual", the commencement mode of incoming calls (TS 24.379 clause 6.2.3.2).
+// "answer-mode auto|manual": the commencement mode of incoming calls (TS 24.379 clause 6.2.3.2), an MCPTT service
+// setting: once authorised, the new setting is sent to the server with the PUBLISH for the MCPTT service settings only
+// (clause 7.2.3, "to ... update ... the MCPTT service settings"; item 4) a) the current answer mode).
 void Client::answer_mode_command(const std::string &cmd) {
   if (!dialog_.empty()) throw std::runtime_error("answer mode requires idle state");
   const auto mode = cmd.substr(12);
   if (mode != "auto" && mode != "manual") throw std::runtime_error("answer mode must be auto or manual");
   cfg_["mcptt"]["answer_mode"] = mode;
+  event("answer_mode", {{"mode", mode}});
+  if (authorized_) settings_publish(mcptt_service, false);
 }
 
 //------------------------------------------------------------------------------
@@ -349,6 +416,7 @@ void Client::select_group(const std::string &cmd) {
                     groups_xcap() + "/global/byGroupID/" + xcap_segment(authorising),
                     {}, {{"Authorization", bearer()}});
   if (document.status != 200) throw std::runtime_error("group authorization retrieval failed");
+  if (!regroup) note_group_document(selected, document.body);
   cfg_["mcptt"]["group_id"] = selected;
   // A monitored group selected is affiliated as the selected group from now on.
   std::erase(monitored_groups_, selected);
@@ -358,6 +426,7 @@ void Client::select_group(const std::string &cmd) {
   alert_pending_.clear();
   status_["alert_locations"] = Json::object();
   desired_affiliation_ = true;
+  left_selected_ = false;
   affiliated_ = false;
   session_uri_.clear();
   status_["session_uri"] = "";
@@ -373,15 +442,12 @@ void Client::answer_command(const std::string &cmd) {
   auto response = *pending_answer_;
   pending_answer_.reset();
   if (cmd == "reject") {
-    if (call_type_ == "private" || call_type_ == "adhoc") {
-      // TS 24.379 clause 6.2.3.2.1: a declined private call invitation.
-      response = {};
-      response.status_code = 480;
-      response.headers = {{"Warning", "399 mcx \"110 user declined the call invitation\""}};
-    } else {
-      response.status_code = 486;
-      response.reason = "Busy Here";
-    }
+    // TS 24.379 clause 6.2.3.2.1 1) (private call) and clause 6.2.3.2.2 2) (group call: prearranged, chat, broadcast,
+    // ad hoc): a declined invitation is answered 480 (Temporarily Unavailable) with the warning text "110 user
+    // declined the call invitation" (clause 4.4).
+    response = {};
+    response.status_code = 480;
+    response.headers = {{"Warning", "399 mcx \"110 user declined the call invitation\""}};
     // TS 24.379 clause 10.1.1.2.2.2: a call offered in the pre-established session is answered by its re-INVITE
     // transaction; declined, the session stays without a call.
     if (auto transaction = std::exchange(pre_session_reinvite_, std::nullopt)) {
@@ -408,9 +474,10 @@ void Client::answer_command(const std::string &cmd) {
 }
 
 //------------------------------------------------------------------------------
-// TS 24.379 clause 10.1.1.2.1.1 and clause 10.1.2.2.1.1: "call [broadcast] [emergency|imminent]", "chat
-// [emergency|imminent]", "rejoin" or "call force": build the MCPTT information and priority headers of a
-// prearranged or chat group call, then invite.
+// TS 24.379 clause 10.1.1.2.1.1 and clause 10.1.2.2.1.1: "call [broadcast] [emergency [alert]|imminent]", "chat
+// [emergency [alert]|imminent]", "rejoin" or "call force": build the MCPTT information and priority headers of a
+// prearranged or chat group call, then invite. "emergency alert" also requests the emergency alert (clause 6.2.8.1.1
+// 3)).
 void Client::group_call_command(const std::string &cmd) {
   const bool chat = cmd.starts_with("chat");
   // Test aid: "call force" sends a normal call even while unaffiliated, to
@@ -420,12 +487,23 @@ void Client::group_call_command(const std::string &cmd) {
   // Chat joins and emergency or imminent peril calls may affiliate implicitly
   // (TS 24.379 clause 9.2.2.3.6); the server decides eligibility and rejects others with 120.
   const bool broadcast = cmd.starts_with("call broadcast");
-  const bool emergency = cmd.ends_with(" emergency"), imminent = cmd.ends_with(" imminent");
+  const bool with_alert = cmd.ends_with(" emergency alert");
+  const bool emergency = cmd.ends_with(" emergency") || with_alert, imminent = cmd.ends_with(" imminent");
+  // TS 24.379 clause 10.1.1.2.1.1 (6.2.8.1.1, 6.2.8.1.9 with clause 6.2.8.1.8): the priority call rights.
+  if (emergency) require_priority_right("emergency-group", group());
+  if (imminent) require_priority_right("imminent-group", group());
   const bool may_affiliate_implicitly = chat || emergency || imminent;
   if (!authorized_ ||
       (!affiliated_ && !may_affiliate_implicitly && !force && !(cmd == "rejoin" && last_call_type_ == "adhoc")) ||
       !dialog_.empty())
     throw std::runtime_error("call requires affiliation and idle state");
+  // TS 24.379 clause 10.1.1.2.1.1 (prearranged; clause 10.1.1.2.2.1 over a pre-established session) and clause
+  // 10.1.2.2.1.1 (chat): on a group whose document says <preconfigured-group-use-only> "true", 1) the user is told
+  // that calls are not allowed (last_call_failure) and 2) nothing is sent. An ad hoc rejoin names no group document.
+  if (!(cmd == "rejoin" && last_call_type_ == "adhoc") && !calls_allowed_on(group())) {
+    call_failure("calls are not allowed on the preconfigured group", {{"group", group()}, {"command", cmd}});
+    throw std::runtime_error("calls are not allowed on the preconfigured group " + group());
+  }
   McpttInfo info;
 
   // TS 24.379 clause 10.1.2.2.1.1: initiating and joining a chat group call use the
@@ -439,12 +517,32 @@ void Client::group_call_command(const std::string &cmd) {
   // function in <mcptt-calling-group-id>.
   if (regroups_.contains(group())) info.associated_group = calling_constituent_;
   info.functional_alias = functional_alias_;
+  // TS 24.379 clause 10.1.1.2.1.1 14) g): a call placed for a remotely initiated group call request (clause
+  // 10.1.5.2.2).
+  if (followup_ && !followup_->reported && followup_->kind == "remote-group" && followup_->target == group())
+    info.remotely_initiated_call_request = true;
   // TS 24.379 clause 10.1.2.2.1.1: a chat join may carry emergency or imminent peril.
   if (emergency || (!chat && alerts_.contains(user()))) {
     info.emergency = true;
     info.alert = false;
+    emergency_state_ = true; // TS 24.379 clause 6.2.8.1.1 1): the MCPTT emergency state
   }
   if (imminent && !info.emergency) info.imminent_peril = true;
+  // TS 24.379 clause 6.2.8.1.1 3): the emergency alert requested with the call, when authorised (clause 6.2.8.1.6) and
+  // with no alert of this user's outstanding ("MEA 1: no-alert"): <alert-ind> true, "MEA 2:
+  // emergency-alert-confirm-pending" (alert_pending_ "call") and the location of clause 6.2.9.1 (invite_group_call).
+  // An unauthorised alert is left out and the call goes on (step 4: <alert-ind> false).
+  if (with_alert) {
+    try {
+      require_priority_right("alert", group());
+      if (alerts_.contains(user()) || !alert_pending_.empty())
+        throw std::runtime_error("an emergency alert of this user is already outstanding");
+      info.alert = true;
+    } catch (const std::runtime_error &error) {
+      status_["emergency_alert_not_sent"] = error.what();
+      event("emergency_alert_not_sent", {{"group", group()}, {"reason", error.what()}});
+    }
+  }
 
   // TS 24.379 clause 6.2.8.2: <broadcast-ind> true on an on-demand prearranged call,
   // optionally an emergency or imminent-peril one (local policy).
@@ -461,6 +559,67 @@ void Client::group_call_command(const std::string &cmd) {
   // a regroup); without one, the answer is refused as before (check_remote).
   if (protected_media()) select_call_key(group());
   invite_group_call(cmd, chat, info, headers);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.481 clause 7.2.4.2: keep <preconfigured-group-use-only> of a group document read (TS 24.379 clauses
+// 10.1.1.2.1.1, 10.1.2.2.1.1).
+void Client::note_group_document(const std::string &group, const std::string &document) {
+  try {
+    preconfigured_use_only_[group] = group_preconfigured_use_only(document);
+  } catch (const std::exception &) {
+    preconfigured_use_only_.erase(group);
+  }
+  // TS 24.481 clause 7.2.4.2: <multi-talker-control>, <mcptt-on-network-audio-cut-in> and their companions.
+  try {
+    const auto settings = parse_group_floor_settings(document);
+    group_floor_settings_[group] = settings;
+    status_["group_floor_settings"][group] = {{"multi_talker", settings.multi_talker},
+                                              {"max_talkers", settings.max_talkers},
+                                              {"audio_mixing_entity", settings.mixing_entity},
+                                              {"audio_cut_in", settings.audio_cut_in},
+                                              {"multi_talker_allowed", std::ranges::find(settings.multi_talker_allowed,
+                                                                                         user()) !=
+                                                                           settings.multi_talker_allowed.end()}};
+  } catch (const std::exception &) {
+    group_floor_settings_.erase(group);
+  }
+}
+
+//------------------------------------------------------------------------------
+// The floor settings of the group of the call (the call's other group, else the selected group): nullptr for a
+// private call or a group whose document was not read.
+const GroupFloorSettings *Client::call_group_floor_settings() const {
+  if (call_type_ == "private" || call_type_ == "ambient") return nullptr;
+  const auto found = group_floor_settings_.find(call_group_.empty() ? group() : call_group_);
+  return found == group_floor_settings_.end() ? nullptr : &found->second;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clauses 10.1.1.2.1.1 and 10.1.2.2.1.1: "the MCPTT client shall determine whether the group document
+// contains a <list-service> element that contains a <preconfigured-group-use-only> element" set to "true": from the
+// document last read, else read now. A regroup (TS 24.379 clause 16.1) has no document of its own; a document this
+// user cannot read leaves the decision to the server (warning 167).
+bool Client::calls_allowed_on(const std::string &group) {
+  if (group.empty() || regroups_.contains(group)) return true;
+  if (!preconfigured_use_only_.contains(group)) {
+    const auto document = http_.request("GET", groups_xcap() + "/global/byGroupID/" + xcap_segment(group), {},
+                                        {{"Authorization", bearer()}});
+    if (document.status != 200) return true;
+    note_group_document(group, document.body);
+  }
+  return !preconfigured_use_only_.contains(group) || !preconfigured_use_only_.at(group);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 (e.g. clause 10.1.1.2.1.1 1) "should indicate to the MCPTT user"): a call of this user's that the client
+// did not place, with the reason: status and event last_call_failure {reason, ...details, time_ms}.
+void Client::call_failure(const std::string &reason, const Json &details) {
+  Json failure = details.is_object() ? details : Json::object();
+  failure["reason"] = reason;
+  failure["time_ms"] = monotonic_ms();
+  status_["last_call_failure"] = failure;
+  event("last_call_failure", failure);
 }
 
 //------------------------------------------------------------------------------
@@ -495,23 +654,49 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
   floor_timers_ = participant_timers();
   call_type_ = adhoc_rejoin ? "adhoc" : chat ? "chat" : info.broadcast == true ? "broadcast" : "prearranged";
   call_group_ = adhoc_rejoin ? last_call_group_ : std::string{};
+  auto parts = info_parts(info);
+  // TS 24.379 clause 6.2.8.1.1 3) b): an emergency alert with the call carries the location of clause 6.2.9.1.
+  const bool with_alert = info.alert == true;
+  if (with_alert) parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
   // TS 24.379 clauses 10.1.1.2.2.1 and 10.1.2.2.2.1: with an established pre-established session not in use (and
   // mcptt.calls_over_pre_established, by default true), the call is set up over it with a REFER.
   if (cmd != "rejoin" && !adhoc_rejoin && pre_session_usable()) {
     invite_with_implicit(implicit.requested, true, [&] {
-      dialog_ = pre_session_refer_call({info.request_uri}, with_talking_location(info_parts(info), implicit.requested),
+      dialog_ = pre_session_refer_call({info.request_uri}, with_talking_location(parts, implicit.requested),
                                        refer_accept_contacts(), headers, local_.implicit_request);
     });
     status_["last_call_failure"] = nullptr;
     status_["call_state"] = "calling";
     return;
   }
+  const bool emergency_request = info.emergency == true, imminent_request = info.imminent_peril == true;
   invite_with_implicit(implicit.requested, true, [&] {
     dialog_ = sip_.invite(
-        cmd == "rejoin" ? session_uri_ : service(), local_, with_talking_location(info_parts(info), implicit.requested),
-        [this](const SipResponse &response) {
+        cmd == "rejoin" ? session_uri_ : service(), offer_media(), with_talking_location(parts, implicit.requested),
+        [this, emergency_request, imminent_request](const SipResponse &response) {
+          // TS 24.379 clauses 6.2.8.1.4 and 6.2.8.1.5: the alert sent with the call is initiated ("MEA 3") on a 2xx,
+          // and back to "MEA 1: no-alert" on a refusal.
+          if (response.status_code >= 200 && alert_pending_ == "call") {
+            alert_pending_.clear();
+            if (response.status_code < 300) alerts_.insert(user());
+          }
           if (response.status_code >= 200 && response.status_code < 300) {
             remember_session(response.headers);
+            // TS 24.379 clause 6.2.8.1.4: a 2xx to the request for an emergency group call ("MEGC 2") sets 1)a) the
+            // group's emergency state "MEG 2: in-progress" and 1)d) no imminent peril; to an imminent peril group call
+            // without warning 149, 2)b) "MIG 2: in-progress". Whatever the response's mcptt-info says, which follows
+            // (priority_response).
+            if (emergency_request || (imminent_request && get_header(response.headers, "Warning").find("\"149 ") ==
+                                                              std::string_view::npos)) {
+              McpttInfo granted;
+              if (emergency_request)
+                granted.emergency = true;
+              else
+                granted.imminent_peril = true;
+              update_priority(granted, std::nullopt);
+              imminent_group_states_[active_group()] =
+                  emergency_request ? "MIG 1: no-imminent-peril" : "MIG 2: in-progress";
+            }
             priority_response(response);
           } else if (response.status_code >= 300) {
             status_["last_call_failure"] = {{"status", response.status_code},
@@ -524,6 +709,10 @@ void Client::invite_group_call(const std::string &cmd, bool chat, McpttInfo &inf
         },
         headers);
   });
+  if (with_alert) {
+    alert_pending_ = "call";
+    alert_pending_group_ = info.request_uri;
+  }
   status_["last_call_failure"] = nullptr;
   status_["call_state"] = "calling";
 }
@@ -559,7 +748,7 @@ void Client::chat_join_command(const std::string &cmd) {
   floor_timers_ = participant_timers();
   status_["last_call_failure"] = nullptr;
   dialog_ = sip_.invite(
-      service(), local_, info_parts(info),
+      service(), offer_media(), info_parts(info),
       [this](const SipResponse &response) {
         if (response.status_code >= 300) {
           status_["last_call_failure"] = {{"status", response.status_code},

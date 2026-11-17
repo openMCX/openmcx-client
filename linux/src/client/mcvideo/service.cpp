@@ -57,11 +57,9 @@ std::optional<keying::KeyMessage> Client::mcvideo_offer_pck(const std::string &t
 // configuration document": this client's KMS URI (security.kms_id, else security.kms_uri, the KMS it is provisioned
 // by).
 std::pair<std::string, std::string> Client::mcvideo_target_kms(const std::string &target) const {
-  const auto listed = mcvideo_profile_.value("private_call_kms", Json::object());
-  if (const auto found = listed.find(target);
-      found != listed.end() && found->is_string() && !found->get<std::string>().empty())
-    return {found->get<std::string>(), "user-profile"};
-  return {mcvideo_keys_->kms_uri_of(target), "initial-configuration"};
+  return profile_target_kms(
+      mcvideo_profile_.value("private_call_kms", Json::object()).get<std::map<std::string, std::string>>(),
+      *mcvideo_keys_, target);
 }
 
 //------------------------------------------------------------------------------
@@ -419,7 +417,7 @@ void Client::mcvideo_authorize(const std::string &token) {
     // Authorised by REGISTER (clause 7.2.1), which carries no service settings: the client sets them with the PUBLISH
     // for the MCVideo service settings only (clause 7.2.3; TS 37.579-1 table 5.3.2.5.1-1 step 1a1).
     if (by_register) schedule([this] {
-      if (mcvideo_authorized_) mcvideo_settings_publish(false);
+      if (mcvideo_authorized_) settings_publish(mcvideo_service, false);
     });
     // TS 24.281 clause 18.3.4.1: the initial log-on trigger, once a configuration is held.
     mcvideo_location_logon_pending_ = !mcvideo_location_.configured();
@@ -439,20 +437,6 @@ void Client::mcvideo_authorize(const std::string &token) {
   } else {
     mcvideo_request("poc-settings", parts, headers, answered);
   }
-}
-
-//------------------------------------------------------------------------------
-// TS 24.281 clause 8.3.2.2 (RFC 4661): the simple-filter restricting presence notifications to this MCVideo client:
-// the "pidf" and "mcvideoPI10" bindings and one <filter> (an id, no uri) including this client's tuple.
-std::string Client::mcvideo_client_filter() {
-  return "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
-         "<filter-set xmlns=\"urn:ietf:params:xml:ns:simple-filter\"><ns-bindings>"
-         "<ns-binding prefix=\"pidf\" urn=\"urn:ietf:params:xml:ns:pidf\"/>"
-         "<ns-binding prefix=\"mcvideoPI10\" urn=\"urn:3gpp:ns:mcvideoPresInfo:1.0\"/>"
-         "</ns-bindings><filter id=\"" +
-         random_id().substr(0, 12) +
-         "\"><what><include>//pidf:presence/pidf:tuple[@id=&quot;" + xml_escape(client_id()) +
-         "&quot;]</include></what></filter></filter-set>";
 }
 
 //------------------------------------------------------------------------------
@@ -528,11 +512,10 @@ SipResponse Client::mcvideo_affiliation_notify(const SipMessage &message) {
   if (!affiliation.publication_id.empty()) mcvideo_received_pid_ = affiliation.publication_id;
 
   // TS 24.281 clause 9.2.4.2.2 step 1 c): the NOTIFY for the affiliation a group selection change asked for.
-  if (mcvideo_selection_pending_.is_object() && !affiliation.publication_id.empty() &&
-      affiliation.publication_id == mcvideo_selection_pending_.value("p_id", std::string{})) {
-    const std::string group = mcvideo_selection_pending_.at("group");
-    schedule([this, ok = groups.contains(group)] { mcvideo_selection_affiliated(ok); });
-  }
+  if (const auto &pending = mcvideo_procedures_.selection_pending;
+      pending.is_object() && !affiliation.publication_id.empty())
+    selection_affiliation_notified(mcvideo_service, affiliation.publication_id,
+                                   groups.contains(pending.value("group", std::string{})));
   event("mcvideo_affiliation_status", {{"groups", groups}, {"terminated", terminated}});
   schedule([this] { mcvideo_update_key_subscriptions(); });
   if (terminated) {
@@ -607,9 +590,9 @@ void Client::mcvideo_publish_affiliation(bool affiliate, const std::vector<std::
                           if (mcvideo_authorized_) mcvideo_publish_affiliation(affiliate, added, group);
                         });
                       }
-                      if (mcvideo_selection_pending_.is_object() &&
-                          mcvideo_selection_pending_.value("group", std::string{}) == group)
-                        schedule([this] { mcvideo_selection_affiliated(false); });
+                      if (mcvideo_procedures_.selection_pending.is_object() &&
+                          mcvideo_procedures_.selection_pending.value("group", std::string{}) == group)
+                        selection_affiliation_notified(mcvideo_service, {}, false);
                       return;
                     }
                     for (const auto &each : added) {
@@ -740,7 +723,7 @@ void Client::mcvideo_command(const std::string &cmd) {
     std::string group;
     words >> group;
     if (argument.empty() || group.empty()) throw std::runtime_error("mcvideo-select-remote <MCVideo ID> <group>");
-    return mcvideo_select_remote(argument, group);
+    return select_remote(mcvideo_service, argument, group);
   }
   // TS 24.281 clauses 20.4.2.1.2 and 20.4.2.1.3: bind an alias to groups, or unbind it.
   if (verb == "mcvideo-fa-bind" || verb == "mcvideo-fa-unbind")
@@ -822,19 +805,11 @@ void Client::mcvideo_command(const std::string &cmd) {
     event("mcvideo_answer_mode", {{"mode", argument}});
     return;
   }
-  // TS 24.281 clause 7.2.4 and clauses 8.2.1.2 to 8.2.1.5 (mcvideo/settings_affiliation.cpp).
-  if (verb.starts_with("mcvideo-settings-")) {
+  // TS 24.281 clauses 7.2.3, 7.2.4 and 8.2.1.2 to 8.2.1.6 (core/settings_affiliation.cpp): mcvideo-settings-*,
+  // mcvideo-affiliation-*, mcvideo-affiliate-remote and mcvideo-gdd-*.
+  {
     std::istringstream rest(cmd.substr(verb.size()));
-    return mcvideo_settings_command(verb, rest);
-  }
-  if (verb == "mcvideo-gdd-subscribe" || verb == "mcvideo-gdd-resubscribe" || verb == "mcvideo-gdd-unsubscribe") {
-    std::istringstream rest(cmd.substr(verb.size()));
-    return mcvideo_gdd_command(verb, rest);
-  }
-  if (verb == "mcvideo-affiliation-subscribe" || verb == "mcvideo-affiliation-unsubscribe" ||
-      verb == "mcvideo-affiliate-remote" || verb == "mcvideo-affiliation-accept" || verb == "mcvideo-affiliation-decline") {
-    std::istringstream rest(cmd.substr(verb.size()));
-    return mcvideo_target_affiliation_command(verb, rest);
+    if (procedures_command(mcvideo_service, verb.substr(8), rest)) return;
   }
   throw std::runtime_error("unknown MCVideo command");
 }
@@ -1068,8 +1043,7 @@ void Client::mcvideo_status() {
   status_["mcvideo_affiliation_subscribed"] = !mcvideo_subscription_.empty();
   status_["mcvideo_affiliation_p_id"] = {{"sent", mcvideo_sent_pid_}, {"received", mcvideo_received_pid_}};
   status_["mcvideo_last_result"] = mcvideo_last_result_;
-  status_["mcvideo_service_settings"] = mcvideo_service_settings_;
-  status_["mcvideo_settings_publication"] = mcvideo_settings_result_;
+  procedures_status(mcvideo_service);
   status_["mcvideo_functional_aliases"] = mcvideo_aliases_;
   status_["mcvideo_takeover_possible_aliases"] = mcvideo_takeover_possible_;
   status_["mcvideo_functional_alias_in_use"] = mcvideo_alias_in_use_;
@@ -1083,8 +1057,8 @@ void Client::mcvideo_status() {
   status_["mcvideo_adhoc_alert_group"] = mcvideo_adhoc_alert_group_;
   status_["mcvideo_received_adhoc_alerts"] = mcvideo_adhoc_alerts_;
   status_["mcvideo_adhoc_alert_result"] = mcvideo_adhoc_alert_result_;
-  status_["mcvideo_group_selection_result"] = mcvideo_selection_result_;
-  status_["mcvideo_group_selection"] = mcvideo_selection_;
+  status_["mcvideo_group_selection_result"] = mcvideo_procedures_.selection_result;
+  status_["mcvideo_group_selection"] = mcvideo_procedures_.selection;
   status_["mcvideo_alias_users"] = mcvideo_alias_users_;
   status_["mcvideo_functional_alias_notified"] = mcvideo_fa_notified_;
   {

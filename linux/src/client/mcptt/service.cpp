@@ -22,7 +22,12 @@ bool Client::conference_service_from(std::string_view uri) const {
 
 //------------------------------------------------------------------------------
 // TS 24.380 clause 11.1.1 and clause 11.2.1: the on-network floor participant's timers and counters, from the
-// configuration.
+// configuration (mcptt.*): T100 floor_release_retry_ms, T101 floor_request_retry_ms, T103 floor_media_idle_ms (0: not
+// used), T104 floor_queue_retry_ms, T132 floor_queued_grant_action_ms, T134 floor_queued_requests_ms (default 2 s);
+// the upper limits of C100 floor_release_transmissions, C101 floor_request_transmissions, C104
+// floor_queue_transmissions, each by default floor_transmissions (3). The participant knows its MCPTT ID (a Floor
+// Release Multi Talker naming it, clause 6.2.4.6.9) and, once the call's type is known, whether it is a broadcast
+// group call (clause 6.2.4.6.4; floor_message).
 FloorParticipantTimers Client::participant_timers() const {
   const auto &settings = cfg_.at("mcptt");
   FloorParticipantTimerOptions options;
@@ -32,7 +37,14 @@ FloorParticipantTimers Client::participant_timers() const {
   options.media_idle_ms = settings.value("floor_media_idle_ms", 4000u);
   options.queued_grant_action_ms = settings.value("floor_queued_grant_action_ms", 2000u);
   options.max_transmissions = settings.value("floor_transmissions", 3u);
-  return FloorParticipantTimers(options);
+  options.queued_requests_ms = settings.value("floor_queued_requests_ms", 2000u);
+  options.release_transmissions = settings.value("floor_release_transmissions", 0u);
+  options.request_transmissions = settings.value("floor_request_transmissions", 0u);
+  options.queue_transmissions = settings.value("floor_queue_transmissions", 0u);
+  options.broadcast = broadcast_session();
+  FloorParticipantTimers timers(options);
+  timers.set_user_id(user());
+  return timers;
 }
 
 //------------------------------------------------------------------------------
@@ -100,17 +112,37 @@ std::pair<std::string, std::string> Client::publish_body(bool affiliation) {
   if (affiliation) {
     info.request_uri = user();
     parts = info_parts(info);
-    // TS 24.379 clause 9.2.1.2: the selected group and the groups monitored besides it.
-    std::vector<std::string> groups{group()};
+    // TS 24.379 clause 9.2.1.2: the selected group (unless the user is no longer interested in it, left_selected_)
+    // and the groups monitored besides it.
+    std::vector<std::string> groups;
+    if (!left_selected_) groups.push_back(group());
     groups.insert(groups.end(), monitored_groups_.begin(), monitored_groups_.end());
     Affiliation request{user(), client_id(), random_id(), groups, {}};
+    mcptt_sent_pid_ = request.publication_id; // TS 24.379 clause 10.1.4.2.2 step 1 c): the NOTIFY naming it
     parts.push_back({"application/pidf+xml", affiliation_xml(request, false)});
   } else {
-    parts.push_back({"application/poc-settings+xml", poc_settings_xml(client_id())});
+    // TS 24.379 clause 7.2.2 4)c) / 5)c): <gw-mcptt-usage> "true" when this client reaches the MCPTT system through an
+    // MCPTT gateway UE (mcptt_gateway_usage).
+    info.gateway_usage = mcptt_gateway_usage();
+    parts = info_parts(info);
+    // TS 24.379 clause 7.2.2 6): the current answer mode and the selected user profile's index (mcptt_poc_settings).
+    parts.push_back({"application/poc-settings+xml", mcptt_poc_settings()});
     if (!csk_upload_.empty()) parts.push_back({"application/mikey", csk_upload_});
   }
   auto boundary = "mcx-" + random_id();
   return {"multipart/mixed; boundary=" + boundary, multipart_body(parts, boundary)};
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clauses 7.2.2 6) and 7.2.3 4): the application/poc-settings+xml of this MCPTT client: a) the current
+// answer mode in <am-settings> (mcptt.answer_mode, changed by "answer-mode"; RFC 4354 "automatic" or "manual"), b)
+// <selected-user-profile-index> set to the "user-profile-index" of the selected MCPTT user profile (TS 24.484 clause
+// 8.3.2.1: that of the profile document read, else the configured mcptt.profile_index) and c) <multiplex-support>
+// (clause 7.4.1.2.2): this client's own multiplex support (mcptt.multiplex_support, clause 6.2.10), the same value that
+// decides whether its offers carry "mc_floor_ssrc" (TS 24.380 14.2.7).
+std::string Client::mcptt_poc_settings() const {
+  return poc_settings_xml(client_id(), profile_index_,
+                          cfg_.at("mcptt").value("answer_mode", std::string("auto")) == "manual", multiplex_supported());
 }
 
 //------------------------------------------------------------------------------
@@ -205,10 +237,25 @@ void Client::service_authorized() {
   location_signal(location::Event::InitialLogOn);
   if (mcdata_enabled()) schedule([this] { mcdata_authorize(); });
   if (mcvideo_enabled()) schedule([this] { mcvideo_authorize(); });
+  // Authorised by REGISTER (clause 7.2.1), which carries no service settings: the client sets them with the PUBLISH
+  // for the MCPTT service settings only (clause 7.2.3, "to set ... the MCPTT service settings").
+  if (authorise_by_register()) schedule([this] {
+    if (authorized_) settings_publish(mcptt_service, false);
+  });
   if (config_subscription_.empty() && cfg_.at("mcptt").value("subscribe_configuration", true))
     schedule([this] { subscribe_configuration(); });
   schedule([this] { subscribe_own_group_documents(); });
   schedule([this] { subscribe_affiliation(true); });
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 5.6 (5.6.3: "the MCPTT client shall additionally inform the MCPTT system that the MCPTT client uses
+// a MCPTT gateway UE"): mcptt.via_gateway_ue, a deployment setting (as mcvideo.via_gateway_ue and
+// mcdata.via_gateway_ue), is true when this client reaches the MCPTT system through an MCPTT gateway UE; the service
+// authorisation then carries <gw-mcptt-usage> "true" (clauses 7.2.1 and 7.2.2). Unset otherwise (no element).
+std::optional<bool> Client::mcptt_gateway_usage() const {
+  if (cfg_.at("mcptt").value("via_gateway_ue", false)) return true;
+  return std::nullopt;
 }
 
 //------------------------------------------------------------------------------
@@ -222,6 +269,8 @@ std::pair<std::string, std::string> Client::register_body() {
   McpttInfo info;
   info.client_id = client_id();
   info.access_token = token_;
+  // Clause 7.2.1 3) (and 2)c), 3)c) with protection): <gw-mcptt-usage> "true" through an MCPTT gateway UE.
+  info.gateway_usage = mcptt_gateway_usage();
   std::vector<BodyPart> parts = info_parts(info);
   if (!csk_upload_.empty()) parts.push_back({"application/mikey", csk_upload_});
   auto boundary = "mcx-" + random_id();
@@ -354,6 +403,8 @@ void Client::affiliate() {
     if (response.status_code < 200) return;
     if (response.status_code != 200) {
       failure("affiliation publication: " + std::to_string(response.status_code));
+      // TS 24.379 clause 10.1.4.2.2 step 1 c): a refused affiliation fails a remote group selection awaiting it.
+      if (response.status_code != 412) selection_affiliation_notified(mcptt_service, {}, false);
       // RFC 3903 section 5: after a 412 to a refresh, discard the entity-tag and publish anew.
       if (refresh && response.status_code == 412) {
         affiliation_etag_.clear();
@@ -367,10 +418,66 @@ void Client::affiliate() {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 9.2.1.5 3) with clause 9.2.1.2: one PUBLISH with the affiliation changed: a) the groups of
+// `affiliate` the client is not affiliated to join it, b) the groups of `leave` it is affiliated to leave it; the other
+// groups stay (clause 9.2.1.2 5) c): the request names all the groups the user is interested in at the client).
+// Affiliated: a group of this client's interest (the selected group while wanted, the monitored groups) or one
+// notified affiliated (clause 9.2.1.3). A group joined besides the selected one is monitored (monitor_command); the
+// selected group left is left out of every PUBLISH (left_selected_) until it is affiliated again. No group left: the
+// de-affiliation of clause 9.2.1.2 4) (Expires 0). False when nothing changes.
+bool Client::mcptt_change_affiliation(const std::vector<std::string> &affiliate, const std::vector<std::string> &leave) {
+  if (!authorized_) throw std::runtime_error("MCPTT affiliation requires MCPTT service authorisation");
+  const bool selected_wanted = desired_affiliation_ && !left_selected_ && !group().empty();
+  std::set<std::string> current(monitored_groups_.begin(), monitored_groups_.end());
+  if (selected_wanted) current.insert(group());
+  const auto affiliated = [&](const std::string &candidate) {
+    return current.contains(candidate) ||
+           (affiliation_statuses_.contains(candidate) &&
+            client_rules::counts_as_affiliated(affiliation_statuses_.value(candidate, std::string{})));
+  };
+  const auto [added, removed] = client_rules::affiliation_change(affiliate, leave, affiliated);
+  if (selected_priority_ && std::find(removed.begin(), removed.end(), call_group_) != removed.end())
+    throw std::runtime_error("the call's group stays monitored until the call ends");
+  event("affiliation_change", {{"affiliate", added}, {"de-affiliate", removed}});
+  if (added.empty() && removed.empty()) return false;
+  // The selected group: wanted again when affiliated to, or left; a group of interest before stays one.
+  bool keep_selected = selected_wanted;
+  for (const auto &candidate : removed) {
+    if (candidate == group()) {
+      keep_selected = false;
+      continue;
+    }
+    std::erase(monitored_groups_, candidate);
+    monitored_state_.erase(candidate);
+  }
+  for (const auto &candidate : added) {
+    if (candidate == group())
+      keep_selected = true;
+    else
+      monitored_groups_.push_back(candidate);
+  }
+  event("monitored_groups", {{"groups", monitored_groups_}});
+  if (!keep_selected && monitored_groups_.empty()) {
+    deaffiliate_command(); // clause 9.2.1.2 4): no group of interest left
+    return true;
+  }
+  left_selected_ = !keep_selected;
+  desired_affiliation_ = true;
+  // With protected media, each monitored group's GMK (TS 33.180 clause 7.4.2), as in monitor_command.
+  update_key_subscriptions();
+  this->affiliate();
+  return true;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.379 clause 10.1.3.2: subscribe to the conference event package of the active group session.
-// force: diagnostic override used to exercise the server's broadcast rejection.
+// force: the user's request ("conference-subscribe"), made whatever the automatic subscription setting, and also in
+// a broadcast group call (to exercise the server's rejection). Without force, the automatic subscription once a call
+// is set up (clause 10.1.1.2.1.1: "may subscribe"), with mcptt.conference_auto_subscribe (default: the older
+// mcptt.conference_notifications, default true).
 void Client::subscribe_conference(bool force) {
-  if (!cfg_.at("mcptt").value("conference_notifications", true)) {
+  const auto &mcptt = cfg_.at("mcptt");
+  if (!force && !mcptt.value("conference_auto_subscribe", mcptt.value("conference_notifications", true))) {
     status_["conference_wait_reason"] = "disabled";
     return;
   }
@@ -420,6 +527,29 @@ void Client::subscribe_conference(bool force) {
         }
       },
       "application/vnd.3gpp.mcptt-info+xml", mcptt_info_xml(info));
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 10.1.3.2 with RFC 6665 section 4.1.2.3: "conference-unsubscribe" ends the conference event
+// subscription by an in-dialog SUBSCRIBE with Expires 0; the final NOTIFY is still answered (retired_conferences_).
+void Client::unsubscribe_conference() {
+  if (conference_subscription_.empty()) throw std::runtime_error("no conference event subscription");
+  const auto dialog = conference_subscription_;
+  sip_.request_in_dialog(dialog, "SUBSCRIBE", {}, {},
+                         {{"Event", "conference"},
+                          {"Expires", "0"},
+                          {"Accept", "application/conference-info+xml"},
+                          {"P-Preferred-Service", "urn:urn-7:3gpp-service.ims.icsi.mcptt"}},
+                         [this](const SipResponse &response) {
+                           if (response.status_code >= 200)
+                             event("conference_unsubscribed", {{"status", response.status_code}});
+                         });
+  if (retired_conferences_.size() >= 32) retired_conferences_.erase(retired_conferences_.begin());
+  retired_conferences_[dialog] = session_uri_;
+  conference_subscription_.clear();
+  ++conference_generation_;
+  status_["conference_active"] = false;
+  status_["conference_wait_reason"] = "unsubscribed";
 }
 
 } // namespace mcx

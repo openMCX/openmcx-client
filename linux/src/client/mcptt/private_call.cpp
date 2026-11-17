@@ -9,6 +9,8 @@
 
 #include "client.hpp"
 
+#include "mcx/refer.hpp"
+
 namespace mcx {
 
 //------------------------------------------------------------------------------
@@ -53,8 +55,12 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
   require_profile({"allow-private-call", mode == "auto"     ? "allow-automatic-commencement"
                                          : mode == "manual" ? "allow-manual-commencement"
                                                             : "allow-force-auto-answer"});
-  if (emergency) require_profile({"allow-emergency-private-call"});
-  if (to_alias && emergency) throw std::runtime_error("emergency calls to a functional alias are not implemented");
+  // TS 24.379 clause 11.1.1.2.1.1 with clauses 6.2.8.3.1.1 and 6.2.8.3.1.3: the emergency private call and alert rights.
+  if (emergency) require_priority_right("emergency-private", target);
+  // TS 24.379 clause 6.2.8.3.2 3): an unauthorised alert does not refuse the call; it is sent without the alert.
+  if (alert && emergency) alert = private_alert_authorised(target);
+  // TS 24.379 clause 11.1.1.2.1.1 14c) with clause 6.2.8.3.2: an emergency private call to a functional alias is the
+  // emergency call of a user target with <call-to-functional-alias-ind>; the server resolves the alias.
   mode_for_redirect_ = mode;
   std::vector<SipHeader> headers;
   if (mode == "auto")
@@ -65,13 +71,21 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
     headers = {{"Priv-Answer-Mode", "Auto"}};
   else
     throw std::runtime_error("private call mode must be auto, manual or force-auto");
+  // TS 24.379 clause 11.1.1.2.1.1 14A) a) (transfer) and 14C) a) (forwarding): "a Priv-Answer-Mode header field with
+  // the same value as in the MCPTT call to be transferred" (or forwarded), in place of the mode above.
+  if (auto priv = std::exchange(next_priv_answer_mode_, {}); !priv.empty()) headers = {{"Priv-Answer-Mode", priv}};
+  private_answer_mode_ = headers.front().value;
   // Set only once the request is accepted, so that a refused command leaves no override for the next call.
-  if (!kms.empty()) forwarded_kms_ = {target, kms};
+  if (!kms.empty()) {
+    forwarded_kms_ = {target, kms};
+    forwarded_kms_source_ = "command";
+  }
   auto parts = private_call_parts(target, to_alias, emergency, alert, headers);
   if (emergency) {
     mepc_ = 2;
     mepp_ = 4;
     if (alert) mpea_ = 2;
+    emergency_state_ = true; // TS 24.379 annex G.1: set by originating an emergency private call
   }
   // TS 24.379 clause 11.1.1.2.1.1 step 13: "if implicit floor control is required"; a call without floor control
   // has no floor control parameters (TS 24.380 clause 14.2.6).
@@ -125,7 +139,7 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
   } else {
     invite_with_implicit(implicit.requested, true, [&] {
       dialog_ = sip_.invite(
-          service(), local_, with_talking_location(parts, implicit.requested),
+          service(), offer_media(), with_talking_location(parts, implicit.requested),
           [this, target](const SipResponse &response) { private_call_response(target, response); }, headers);
     });
   }
@@ -145,7 +159,20 @@ std::vector<BodyPart> Client::private_call_parts(const std::string &target, bool
   info.functional_alias = functional_alias_;
   if (to_alias) info.call_to_functional_alias = true; // TS 24.379 clause 11.1.1.2.1.1 step 14c-ii-A
   info.called_functional_alias = std::exchange(pending_called_alias_, std::string{});
+  // TS 24.379 clause 11.1.1.2.1.1 14A) D): a call placed for a remotely initiated private call request.
+  if (followup_ && !followup_->reported && followup_->kind == "remote" && followup_->target == target)
+    info.remotely_initiated_call_request = true;
   info.service = std::exchange(next_call_service_, {});
+  const bool service_call = followup_ && !followup_->reported && followup_->target == target;
+  if (info.service.contains("call-forwarding-ind")) {
+    // TS 24.379 clause 11.1.1.2.1.1 14C) a2): a forwarded call names an MCPTT ID, not a functional alias.
+    info.call_to_functional_alias = false;
+  } else if (!service_call) {
+    // TS 24.379 clause 11.1.1.2.1.1 14B) a): a private call on the user's own request is not forwarded (yet).
+    info.service["forwarding-sequence-number"] = "0";
+  }
+  if (const auto sequence = info.service.find("forwarding-sequence-number"); sequence != info.service.end())
+    private_forwarding_sequence_ = static_cast<unsigned>(std::stoul(sequence->second));
   if (emergency) {
     // TS 24.379 clause 6.2.8.3.2: emergency-ind true, alert-ind true or false, Resource-Priority.
     info.emergency = true;
@@ -155,9 +182,11 @@ std::vector<BodyPart> Client::private_call_parts(const std::string &target, bool
     headers.push_back({"Resource-Priority", priority});
     event("ric_priority_applied", {{"target", target}, {"resource_priority", priority}});
   }
-  // TS 24.379 clause 11.1.1.2.1.1 step 14b1: a transfer call replaces the requester's call with the target.
+  // TS 24.379 clause 11.1.1.2.1.1 step 14b1: a transfer call replaces the requester's call with the target. The
+  // <replaces-header-value> ("Call-ID;from-tag;to-tag", annex F.1.3 ad), or the RFC 3891 form) becomes an RFC 3891
+  // Replaces value whose to-tag is the target's (RFC 3891 section 3).
   if (auto replaces = std::exchange(next_call_replaces_, {}); !replaces.empty())
-    headers.push_back({"Replaces", replaces});
+    headers.push_back({"Replaces", replaces_value(parse_replaces_header_value(replaces))});
   auto parts = info_parts(info);
   parts.push_back({resource_lists_mime, private_call_resource_list(target)});
   if (alert) parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
@@ -170,9 +199,11 @@ std::vector<BodyPart> Client::private_call_parts(const std::string &target, bool
 // forwarding request (clause 11.1.8.2.2, clause 11.1.9.2.2).
 void Client::private_call_response(const std::string &target, const SipResponse &response) {
   if (followup_ && followup_->target == target && response.status_code > 100) {
-    // TS 24.379 clause 11.1.8.2.2 and clause 11.1.9.2.2: ringing, progress, 2xx or 480/175 mean success.
-    const bool forwarded =
-        response.status_code == 480 && client_rules::has_warning(get_header(response.headers, "Warning"), 175);
+    // TS 24.379 clause 11.1.8.2.2 and clause 11.1.9.2.2: ringing, progress, 2xx, 480 with "175 call is forwarded" or
+    // 480 with "191 call forwarding due to migration" mean success.
+    const auto warning = get_header(response.headers, "Warning");
+    const bool forwarded = response.status_code == 480 &&
+                           (client_rules::has_warning(warning, 175) || client_rules::has_warning(warning, 191));
     if (response.status_code < 300 || forwarded)
       report_followup(true);
     else
@@ -283,6 +314,7 @@ void Client::private_call_kms_redirect(const std::string &target, const SipRespo
     schedule([this, target, kms = *chosen, mode = mode_for_redirect_] {
       if (!dialog_.empty()) return;
       forwarded_kms_ = {target, kms};
+      forwarded_kms_source_ = "kms-redirect";
       try {
         next_implicit_ = redirect_implicit_;
         private_call(target + " " + mode);
@@ -333,7 +365,15 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
   info.functional_alias = functional_alias_;
   if (to_alias) info.call_to_functional_alias = true;
   if (alert && !emergency) throw std::runtime_error("alert requires an emergency first-to-answer call");
-  if (to_alias && emergency) throw std::runtime_error("emergency calls to a functional alias are not implemented");
+  // TS 24.379 clause 11.1.1.2.1.1 14c) with clause 6.2.8.3.2: an emergency private call to a functional alias is the
+  // emergency call of a user target with <call-to-functional-alias-ind>; the server resolves the alias.
+  // TS 24.379 clauses 6.2.8.3.1.1 and 6.2.8.3.1.3: the emergency private call and alert rights, for each invitee.
+  for (const auto &invitee : targets)
+    if (emergency) require_priority_right("emergency-private", invitee);
+  // TS 24.379 clause 6.2.8.3.2 3): an alert not authorised for every invitee is left out; the call goes on.
+  if (alert)
+    for (const auto &invitee : targets)
+      if (alert && !private_alert_authorised(invitee)) alert = false;
   std::vector<SipHeader> headers;
   if (emergency) {
     info.emergency = true;
@@ -347,6 +387,7 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
     mepc_ = 2;
     mepp_ = 4;
     if (alert) mpea_ = 2;
+    emergency_state_ = true; // TS 24.379 annex G.1: set by originating an emergency private call
   }
   // TS 24.379 clause 11.1.1.2.1.1 step 13 (the first-to-answer call's INVITE as well): "if implicit floor control
   // is required".
@@ -396,7 +437,7 @@ void Client::first_to_answer_call(const std::string &arguments, bool to_alias) {
   }
   invite_with_implicit(implicit.requested, true, [&] {
     dialog_ = sip_.invite(
-        service(), local_, with_talking_location(parts, implicit.requested),
+        service(), offer_media(), with_talking_location(parts, implicit.requested),
         [this](const SipResponse &response) {
           if (response.status_code == 183 && status_.value("call_state", "") == "calling")
             status_["call_state"] = "progress";
@@ -480,7 +521,7 @@ void Client::ambient_call(const std::string &arguments) {
   // the floor to the invited user (remote-init, not this client's own floor request).
   invite_with_implicit(true, !listening, [&] {
     dialog_ = sip_.invite(
-        service(), local_, parts,
+        service(), offer_media(), parts,
         [this](const SipResponse &response) {
           if (response.status_code >= 300) {
             status_["last_call_failure"] = {{"status", response.status_code},

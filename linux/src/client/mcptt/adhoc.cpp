@@ -16,9 +16,6 @@ namespace mcx {
 // alert (step 10 NOTE 1), optionally broadcast (step 9), emergency (step 15) or imminent peril (step 16).
 void Client::adhoc_call(const std::string &arguments) {
   if (!authorized_ || !dialog_.empty()) throw std::runtime_error("ad hoc call requires authorized idle state");
-  if (protected_media() || protected_floor())
-    throw std::runtime_error(
-        "end-to-end security for ad hoc group calls is not implemented; use a clear-media profile");
   // adhoc [broadcast] [emergency|imminent] <MCPTT ID or functional alias>...
   //   or adhoc [emergency|imminent] criteria <criteria>
   bool info_broadcast = false, alert_group = false;
@@ -40,6 +37,15 @@ void Client::adhoc_call(const std::string &arguments) {
   }
   require_profile({"allow-adhoc-group-call"});
   if (priority == "emergency") require_profile({"allow-emergency-adhoc-group-call"});
+  // TS 24.379 clause 17.2.2.1.1 15): "or is originating an MCPTT adhoc group call and the MCPTT emergency state is
+  // already set" the call is an emergency ad hoc group call (clause 6.2.8.1.21), when authorised (clause 6.2.8.1.24);
+  // the state stays set until the user cancels it (annex G.1; clause 6.2.8.1.27 clears only the ad hoc call and group
+  // states).
+  if (priority == "normal" && emergency_state_) try {
+      require_profile({"allow-emergency-adhoc-group-call"});
+      priority = "emergency";
+    } catch (const std::runtime_error &) {
+    }
   if (priority == "imminent") require_profile({"allow-imminent-peril-adhoc-group-call"});
 
   // TS 24.379 clause 17.2.2.1.1 step 10 NOTE 1: a call following an ad hoc emergency alert names the alert's group.
@@ -69,6 +75,7 @@ void Client::adhoc_call(const std::string &arguments) {
     if (priority == "emergency") {
       info.adhoc_emergency = true;
       level.emergency = true;
+      emergency_state_ = true; // TS 24.379 clause 6.2.8.1.21 1)
     } else {
       info.imminent_peril = true;
       level.imminent_peril = true;
@@ -78,6 +85,10 @@ void Client::adhoc_call(const std::string &arguments) {
   adhoc_priority_ = priority;
   adhoc_criteria_ = criteria;
   info.participant_criteria = criteria; // TS 24.379 clause 17.2.2.1.1 step 12
+  // TS 24.379 clause 17.2.2.1.1 step 10 c) iii): with protected media, end-to-end security is requested; the 2xx names
+  // the preconfigured group whose security related information keys the call (clause 17.4.2.2 11)).
+  if (protected_media()) info.end_to_end_security = true;
+  adhoc_security_group_.clear();
   auto parts = info_parts(info);
   if (!targets.empty()) parts.push_back({resource_lists_mime, resource_list_xml(targets)});
   // TS 24.379 clause 17.2.2.1.1 step 14: "if an implicit floor request is required".
@@ -93,13 +104,26 @@ void Client::adhoc_call(const std::string &arguments) {
   status_["last_call_failure"] = nullptr;
   invite_with_implicit(implicit.requested, true, [&] {
     dialog_ = sip_.invite(
-        service(), local_, with_talking_location(parts, implicit.requested),
+        service(), offer_media(), with_talking_location(parts, implicit.requested),
         [this](const SipResponse &response) {
           if (response.status_code >= 200 && response.status_code < 300) {
             // The server returns the generated ad hoc group identity (TS 24.379 clause 17.2.2.1.1, 2xx step 4).
+            std::string preconfigured;
             for (const auto &part : response.parts)
-              if (part.content_type == mcptt_mime) call_group_ = parse_mcptt_info(part.body).calling_group;
+              if (part.content_type == mcptt_mime) {
+                const auto answer = parse_mcptt_info(part.body);
+                call_group_ = answer.calling_group;
+                preconfigured = answer.preconfigured_group_id;
+              }
             remember_session(response.headers);
+            // 2xx step 3: the security related information of the <preconfigured-group-id>; without it (or its GMK)
+            // the protected call cannot be keyed and ends.
+            if (protected_media() && !use_adhoc_security(preconfigured)) {
+              call_failure(preconfigured.empty() ? "no preconfigured group for the end-to-end security of the ad hoc call"
+                                                 : "no GMK of the ad hoc call's preconfigured group " + preconfigured,
+                           {{"group", call_group_}, {"command", "adhoc"}});
+              stop_protected_call("ad hoc group call without its group key");
+            }
           } else if (response.status_code >= 300) {
             status_["last_call_failure"] = {{"status", response.status_code},
                                             {"warning", std::string(get_header(response.headers, "Warning"))}};
@@ -114,11 +138,27 @@ void Client::adhoc_call(const std::string &arguments) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.379 clause 17.2.3.1.1: the user releases the ad hoc group call (on-demand session) for all, as against
+// leaving it ("hangup"): the BYE of clause 6.2.5.1 carries "a Reason SIP header according to IETF RFC 3326 [...] with
+// the protocol set to SIP, the cause value set to 200 and the reason-text set to "User requested release"" (step 1);
+// the priority conditions of clause 6.2.8.1.27 follow the call's end (end_call). Command: adhoc-release
+void Client::adhoc_release() {
+  if (call_type_ != "adhoc" || dialog_.empty()) throw std::runtime_error("no ad hoc group call to release");
+  if (call_over_pre_session())
+    throw std::runtime_error("the release of an ad hoc group call over a pre-established session is not supported");
+  const auto dialog = dialog_;
+  release();
+  sip_.bye(dialog, {}, {{"Reason", "SIP;cause=200;text=\"User requested release\""}});
+  event("adhoc_release_requested", {{"group", call_group_}});
+}
+
+//------------------------------------------------------------------------------
 // TS 24.379 clause 12.1A.1.1 and clause 12.1A.1.2: the MCPTT client originates or cancels an ad hoc group
 // emergency alert (SIP MESSAGE) and tracks the ad hoc emergency alert state (AH-MEA). Command:
-//   adhoc-alert <criteria>   or   adhoc-alert cancel
+//   adhoc-alert <criteria>   or   adhoc-alert cancel   or   adhoc-alert modify <criteria> (adhoc_alert_modify)
 void Client::adhoc_alert(const std::string &arguments) {
   if (!authorized_) throw std::runtime_error("ad hoc alert requires service authorization");
+  if (arguments.starts_with("modify ") || arguments == "modify") return adhoc_alert_modify(arguments.substr(6));
   McpttInfo info;
   info.client_id = client_id();
   const bool cancel = arguments == "cancel";
@@ -163,8 +203,49 @@ void Client::adhoc_alert(const std::string &arguments) {
         if (response.parts.empty() && !response.body.empty())
           own_alert_group_ = parse_mcptt_info(response.body).calling_group;
         ah_mea_ = 3;
+        // TS 24.379 annex G.1: "MCPTT adhoc emergency alert initiated" sets the MCPTT emergency state.
+        emergency_state_ = true;
       });
   event("adhoc_alert_requested", {{"cancel", cancel}, {"criteria", info.participant_criteria}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 12.1A.1.5: a "SIP MESSAGE request to modify participant criteria for ad hoc group emergency alert
+// to participating MCPTT function" (out of dialog) for this user's initiated alert: P-Preferred-Service and
+// Accept-Contact with the MCPTT ICSI (steps 1, 2), the mcptt-info with a) the ad hoc group, b) the client ID, c) i)
+// <adhoc-alert-ind> "true", ii) <req-type> "ad-hoc-emergency-alert-participant-criteria-modification", iii) the
+// functional alias in use, v) the new criteria in <call-participants-criterias>; the location when configured (step
+// 5); to the participating function's PSI (steps 7, 8). The response arrives as a MESSAGE (clause 12.1A.1.6).
+void Client::adhoc_alert_modify(const std::string &arguments) {
+  std::string criteria = arguments;
+  criteria.erase(0, criteria.find_first_not_of(' '));
+  if (criteria.empty()) throw std::runtime_error("usage: adhoc-alert modify <criteria>");
+  if (own_alert_group_.empty() || ah_mea_ != 3)
+    throw std::runtime_error("no initiated ad hoc group emergency alert to modify");
+  McpttInfo info;
+  info.request_uri = own_alert_group_;  // step 4 a)
+  info.client_id = client_id();         // step 4 b)
+  info.adhoc_alert = true;              // step 4 c) i)
+  info.service["req-type"] = "ad-hoc-emergency-alert-participant-criteria-modification"; // step 4 c) ii)
+  info.functional_alias = functional_alias_; // step 4 c) iii)
+  info.participant_criteria = criteria;      // step 4 c) v)
+  auto parts = info_parts(info);
+  if (cfg_.at("mcptt").contains("emergency_location")) // step 5
+    parts.push_back({mcptt_location_mime, emergency_location_xml(configured_emergency_location())});
+  const auto [type, body] = message_body(parts, "mcx-" + random_id());
+  sip_.request(
+      "MESSAGE", service(), type, body,
+      {{"P-Preferred-Service", mcptt_icsi},
+       {"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"},
+       {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt\";require;explicit"}},
+      [this, criteria](const SipResponse &response) {
+        if (response.status_code < 200) return;
+        status_["last_adhoc_alert_modify_result"] = {
+            {"criteria", criteria},
+            {"status", response.status_code},
+            {"warning", std::string(get_header(response.headers, "Warning"))}};
+      });
+  event("adhoc_alert_modify_requested", {{"group", own_alert_group_}, {"criteria", criteria}});
 }
 
 //------------------------------------------------------------------------------
@@ -207,8 +288,8 @@ void Client::adhoc_modify(const std::string &arguments) {
   if (!entries.empty()) parts.push_back({resource_lists_mime, resource_list_xml(entries)});
   priority_pending_ = true;
   try {
-    sip_.reinvite(dialog_, local_, parts, [this, new_criteria, criteria = info.participant_criteria](
-                                              const SipResponse &response) {
+    sip_.reinvite(dialog_, offer_media(), parts, [this, new_criteria, criteria = info.participant_criteria](
+                                                     const SipResponse &response) {
       if (response.status_code < 200) return;
       priority_pending_ = false;
       if (new_criteria && response.status_code < 300) adhoc_criteria_ = criteria;
