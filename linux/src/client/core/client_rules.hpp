@@ -19,6 +19,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <stdexcept>
 #include <iterator>
 #include <optional>
@@ -289,11 +290,41 @@ inline std::string_view floor_message_name(std::uint8_t type) {
   case 4: return "Floor Release";
   case 5: return "Floor Idle";
   case 6: return "Floor Revoke";
+  case 7: return "Floor Revoke Request";
   case 8: return "Floor Queue Position Request";
   case 9: return "Floor Queue Position Info";
   case 10: return "Floor Ack";
+  case 11: return "Unicast Media Flow Control";
+  case 14: return "Queued Floor Requests";
+  case 15: return "Floor Release Multi Talker";
   default: return "unknown";
   }
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 6.2.4.5.8 with TS 24.481 clause 7.2.4.2 (<audio-mixing-entity> "UE"): one mixing step over the
+// frame queues of the talkers that send: when every queue has a frame, or one holds wait_frames or more (a talker
+// paused), or flush, the first frame of each non-empty queue is taken and the frames are summed, saturated to 16 bits;
+// nothing otherwise.
+using FrameQueue = std::deque<std::vector<std::int16_t>>;
+inline std::optional<std::vector<std::int16_t>> mix_step(const std::vector<FrameQueue *> &queues, bool flush,
+                                                         std::size_t wait_frames = 5, std::size_t frame = 320) {
+  std::size_t ready = 0, deepest = 0;
+  for (const auto *queue : queues) {
+    if (!queue->empty()) ++ready;
+    deepest = std::max(deepest, queue->size());
+  }
+  if (!ready || (ready < queues.size() && deepest < wait_frames && !flush)) return std::nullopt;
+  std::vector<std::int32_t> sum(frame, 0);
+  for (auto *queue : queues) {
+    if (queue->empty()) continue;
+    const auto &pcm = queue->front();
+    for (std::size_t i = 0; i < frame && i < pcm.size(); ++i) sum[i] += pcm[i];
+    queue->pop_front();
+  }
+  std::vector<std::int16_t> mixed(frame);
+  for (std::size_t i = 0; i < frame; ++i) mixed[i] = static_cast<std::int16_t>(std::clamp(sum[i], -32768, 32767));
+  return mixed;
 }
 
 //------------------------------------------------------------------------------

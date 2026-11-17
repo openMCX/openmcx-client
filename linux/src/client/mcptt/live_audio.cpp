@@ -86,4 +86,20 @@ void Client::live_speech_tick(std::uint64_t now) {
   send_speech_frame(frame, false, now);
 }
 
+//------------------------------------------------------------------------------
+// TS 24.380 clause 6.2.4.5.8 with TS 24.481 clause 7.2.4.2 (<audio-mixing-entity> "UE": "audio mixing is performed in
+// the UE"): the talkers' 20 ms frames, each decoded with the talker's own decoder, summed (saturated) into one frame
+// once every talker that sends has one; a talker that pauses holds the others back at most 5 frames (100 ms), after
+// which the frames there are mixed without it. flush: mix whatever is waiting (a talker left, the floor ended).
+void Client::mix_talkers(bool flush) {
+  std::vector<std::deque<std::vector<std::int16_t>> *> queues;
+  for (auto &talker : talkers_)
+    if (talker.codec) queues.push_back(&talker.frames);
+  if (queues.empty()) return;
+  while (auto mixed = client_rules::mix_step(queues, flush)) {
+    deliver_received_audio(*mixed);
+    status_["mixed_frames"] = status_.value("mixed_frames", 0ULL) + 1;
+  }
+}
+
 } // namespace mcx

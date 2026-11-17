@@ -101,12 +101,42 @@ void Client::tick() {
 // end of received media, and the end of this user's transmission once the floor is lost.
 void Client::floor_participant_tick(std::uint64_t now) {
   const bool receiving = floor_timers_.remote_media_active();
+  const bool awaiting_confirmation = floor_timers_.awaiting_user_confirmation();
   for (const auto &packet : floor_timers_.tick(now)) transmit_floor(packet);
-  for (const auto type : floor_timers_.take_failed())
+  // TS 24.380 clause 6.2.4.9.13: T132 expired: the Floor Release is sent and "may indicate to the user that the floor
+  // is no more available".
+  if (awaiting_confirmation && !floor_timers_.awaiting_user_confirmation()) {
+    status_["floor_unavailable"] = status_.value("floor_unavailable", 0u) + 1;
+    floor_event("floor_unavailable");
+  }
+  for (const auto type : floor_timers_.take_failed()) {
+    if (type == FloorType::QueuedFloorRequests) {
+      // TS 24.380 clause 6.2.4.7.5: "shall provide a Queued Floor Requests timeout to the MCPTT client".
+      auto &queued = status_["queued_requests"];
+      if (!queued.is_object()) queued = Json::object();
+      queued["state"] = "timeout";
+      queued["timeouts"] = queued.value("timeouts", 0u) + 1;
+      floor_event("queued_requests_timeout");
+      continue;
+    }
+    if (type == FloorType::Request) {
+      // TS 24.380 clause 6.2.4.4.6 step 1: "shall provide a floor request timeout notification to the user".
+      status_["floor_request_timeouts"] = status_.value("floor_request_timeouts", 0u) + 1;
+      floor_event("floor_request_timeout");
+    }
     failure("floor procedure timeout for type " + std::to_string(static_cast<unsigned>(type)));
+  }
   if (receiving && !floor_timers_.remote_media_active()) {
-    receive_ssrc_ = 0;
-    status_["floor_owner"] = "";
+    // TS 24.380 clause 11.1.1: T103 expired, the RTP media "has completed".
+    if (talkers_.size() <= 1) {
+      receive_ssrc_ = 0;
+      status_["floor_owner"] = "";
+    }
+    mix_talkers(true);
+    if (status_.value("media_rendering", false)) {
+      status_["media_rendering"] = false;
+      event("media_rendering", {{"on", false}});
+    }
   }
   const auto state = floor_timers_.state();
   if (state == FloorParticipantState::NoPermission || state == FloorParticipantState::PendingRelease) {
@@ -322,7 +352,16 @@ void Client::floor_and_priority_status() {
   case FloorParticipantState::HasPermission: status_["floor_state"] = "HasPermission"; break;
   case FloorParticipantState::PendingRelease: status_["floor_state"] = "PendingRelease"; break;
   case FloorParticipantState::Queued: status_["floor_state"] = "Queued"; break;
+  case FloorParticipantState::Releasing: status_["floor_state"] = "Releasing"; break;
   }
+  talkers_status();
+  status_["media_flow"] = media_flow_stopped_ ? "stopped" : "flowing";
+  status_["floor_overridden"] = floor_overridden_;
+  status_["queued_requests_pending"] = floor_timers_.queued_requests_pending();
+  for (const auto *counter : {"floor_request_timeouts", "floor_unavailable"})
+    if (!status_.contains(counter)) status_[counter] = 0;
+  if (!status_.contains("media_rendering")) status_["media_rendering"] = false;
+  if (!status_.contains("queued_requests")) status_["queued_requests"] = Json::object();
   status_["priority"] = emergency_ ? "emergency" : imminent_ ? "imminent" : "normal";
   status_["alerts"] = alerts_;
   // The group whose emergency alerts "alerts" lists: during a call on a monitored group that call's, else the

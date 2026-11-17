@@ -10,6 +10,7 @@
 #include "client_rules.hpp"
 
 #include <cstdio>
+#include <deque>
 #include <map>
 #include <optional>
 #include <set>
@@ -201,7 +202,30 @@ void test_floor_and_audio() {
   using mcx::client_rules::floor_message_name;
   check(floor_message_name(6) == "Floor Revoke", "Floor Revoke named");
   check(floor_message_name(5) == "Floor Idle", "Floor Idle named");
-  check(floor_message_name(7) == "unknown", "an unassigned type");
+  check(floor_message_name(15) == "Floor Release Multi Talker" && floor_message_name(14) == "Queued Floor Requests" &&
+            floor_message_name(11) == "Unicast Media Flow Control" && floor_message_name(7) == "Floor Revoke Request",
+        "TS 24.380 8.2.14-8.2.17 named");
+  {
+    // TS 24.380 6.2.4.5.8: two talkers' frames are mixed (summed, saturated) once both have one; a paused talker
+    // holds the other back 5 frames at most; flush mixes what is waiting.
+    using Queue = std::deque<std::vector<std::int16_t>>;
+    Queue a, b;
+    std::vector<Queue *> queues{&a, &b};
+    a.push_back(std::vector<std::int16_t>(320, 1000));
+    check(!mcx::client_rules::mix_step(queues, false), "mixer waits for the other talker");
+    b.push_back(std::vector<std::int16_t>(320, 32000));
+    const auto mixed = mcx::client_rules::mix_step(queues, false);
+    check(mixed && (*mixed)[0] == 32767 && a.empty() && b.empty(), "two frames mixed, saturated");
+    for (int i = 0; i < 4; ++i) a.push_back(std::vector<std::int16_t>(320, 7));
+    check(!mcx::client_rules::mix_step(queues, false), "4 frames wait");
+    a.push_back(std::vector<std::int16_t>(320, 7));
+    const auto alone = mcx::client_rules::mix_step(queues, false);
+    check(alone && (*alone)[319] == 7 && a.size() == 4, "a paused talker holds back 5 frames at most");
+    int flushed = 0;
+    while (mcx::client_rules::mix_step(queues, true)) ++flushed;
+    check(flushed == 4 && a.empty(), "flush mixes what waits");
+  }
+  check(floor_message_name(12) == "unknown", "an unassigned type");
   check(audio_overflow(100, 100, 16) == 0, "at the limit nothing is dropped");
   check(audio_overflow(116, 100, 16) == 0, "within a second past the limit nothing is dropped");
   check(audio_overflow(117, 100, 16) == 17, "past a second the excess is dropped");

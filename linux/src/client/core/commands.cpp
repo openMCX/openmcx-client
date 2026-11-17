@@ -69,7 +69,9 @@ void Client::command(const std::string &command_line) {
 //   priority <0..99>, answer-mode auto|manual, ambient-source <wav>|none: local settings;
 //   group <group> [from=<group>]: select and affiliate to a group (clause 9.2.1.2), fetching its group document;
 //   floor-confirm, queue-status, ptt <wav>, release: floor control (TS 24.380 clause 6.2.4.9.12, clause 6.2.4.9.9,
-//     clause 6.2.4.3.5, clause 6.2.4.5.3);
+//     clause 6.2.4.3.5, clause 6.2.4.5.3); queued-requests [<MCPTT ID>...], media-stop, media-resume,
+//     revoke-request <MCPTT ID>: queued floor request cancellation, unicast media flow control, floor revoke request
+//     (clauses 6.2.4.7.4, 6.2.4.3.8, 6.2.4.3.9, 6.2.4.3.10);
 //   answer, reject: answer a call in manual commencement mode (TS 24.379 clause 6.2.3.2);
 //   call [broadcast] [emergency [alert]|imminent], chat [emergency [alert]|imminent], rejoin, call force: group call
 //     (clause 10.1.1.2.1.1), chat group call (clause 10.1.2.2.1.1), rejoin by session identity; a call command may
@@ -148,6 +150,12 @@ void Client::run_command(const std::string &cmd) {
     next_audio_ = monotonic_ms();
   } else if (cmd == "queue-status") {
     send_floor(FloorType::QueuePositionRequest);
+  } else if (cmd == "queued-requests" || cmd.starts_with("queued-requests ")) {
+    queued_requests_command(cmd.substr(std::string_view("queued-requests").size())); // TS 24.380 clause 6.2.4.7.4
+  } else if (cmd == "media-stop" || cmd == "media-resume") {
+    media_flow_command(cmd == "media-resume"); // TS 24.380 clauses 6.2.4.3.8, 6.2.4.3.9
+  } else if (cmd.starts_with("revoke-request ")) {
+    revoke_request_command(cmd.substr(15)); // TS 24.380 clause 6.2.4.3.10
   } else if (cmd == "answer" || cmd == "reject") {
     answer_command(cmd);
   } else if (cmd == "call" || cmd == "rejoin" || cmd == "call emergency" || cmd == "call imminent" ||
@@ -557,6 +565,29 @@ void Client::note_group_document(const std::string &group, const std::string &do
   } catch (const std::exception &) {
     preconfigured_use_only_.erase(group);
   }
+  // TS 24.481 clause 7.2.4.2: <multi-talker-control>, <mcptt-on-network-audio-cut-in> and their companions.
+  try {
+    const auto settings = parse_group_floor_settings(document);
+    group_floor_settings_[group] = settings;
+    status_["group_floor_settings"][group] = {{"multi_talker", settings.multi_talker},
+                                              {"max_talkers", settings.max_talkers},
+                                              {"audio_mixing_entity", settings.mixing_entity},
+                                              {"audio_cut_in", settings.audio_cut_in},
+                                              {"multi_talker_allowed", std::ranges::find(settings.multi_talker_allowed,
+                                                                                         user()) !=
+                                                                           settings.multi_talker_allowed.end()}};
+  } catch (const std::exception &) {
+    group_floor_settings_.erase(group);
+  }
+}
+
+//------------------------------------------------------------------------------
+// The floor settings of the group of the call (the call's other group, else the selected group): nullptr for a
+// private call or a group whose document was not read.
+const GroupFloorSettings *Client::call_group_floor_settings() const {
+  if (call_type_ == "private" || call_type_ == "ambient") return nullptr;
+  const auto found = group_floor_settings_.find(call_group_.empty() ? group() : call_group_);
+  return found == group_floor_settings_.end() ? nullptr : &found->second;
 }
 
 //------------------------------------------------------------------------------

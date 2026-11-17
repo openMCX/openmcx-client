@@ -56,6 +56,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <sstream>
@@ -381,6 +382,24 @@ class Client {
   size_t transmit_offset_ = 0;
   std::uint16_t sequence_ = 0;
   std::uint32_t timestamp_ = 0, audio_ssrc_ = 0, receive_ssrc_ = 0;
+  // TS 24.380 clauses 8.2.9 and 6.2.4.5.8: the granted users whose media this client receives in a multi-talker
+  // group call (Floor Taken with the I-bit: List of Granted Users, List of SSRCs, List of Functional Aliases, List of
+  // Locations) or a dual floor (Floor Taken with the G-bit: the overriding talker next to the overridden one). Each
+  // talker's audio is decoded with its own decoder and mixed (mcptt/live_audio.cpp); status "talkers".
+  struct Talker {
+    std::string user, functional_alias;
+    std::uint32_t ssrc = 0;
+    Json location;
+    std::uint64_t packets = 0;
+    std::unique_ptr<AmrWbCodec> codec;
+    std::deque<std::vector<std::int16_t>> frames;
+  };
+  std::vector<Talker> talkers_;
+  // TS 24.380 clauses 6.2.4.3.8 and 6.2.4.3.9: the user asked the server to stop the unicast media (status
+  // "media_flow" "stopped"), or to resume it ("flowing").
+  bool media_flow_stopped_ = false;
+  // TS 24.380 clause 6.2.4.5.8 step 1b: "an indication that the participant is overridden without revoke".
+  bool floor_overridden_ = false;
   bool talking_ = false, requesting_ = false, registered_ = false, authorized_ = false, affiliated_ = false,
        desired_affiliation_ = true;
   bool emergency_ = false, imminent_ = false, priority_pending_ = false;
@@ -764,6 +783,11 @@ class Client {
   std::map<std::string, bool> preconfigured_use_only_;
 
   void note_group_document(const std::string &group, const std::string &document);
+  // TS 24.481 clause 7.2.4.2: the floor settings (<multi-talker-control>, <mcptt-on-network-audio-cut-in>, ...) of
+  // each group document read; status "group_floor_settings".
+  std::map<std::string, GroupFloorSettings> group_floor_settings_;
+  // The floor settings of the call's group (the selected group, or the call's other group): nullptr when unknown.
+  const GroupFloorSettings *call_group_floor_settings() const;
 
   bool calls_allowed_on(const std::string &group);
 
@@ -2682,6 +2706,23 @@ private:
   void clear_call_state();
 
   void send_floor(FloorType type);
+  // TS 24.380 clauses 6.2.4.7.4, 6.2.4.3.8 to 6.2.4.3.10: the verbs "queued-requests [<MCPTT ID>...]",
+  // "media-stop", "media-resume" and "revoke-request <MCPTT ID>" (mcptt/call_media.cpp).
+  void queued_requests_command(const std::string &arguments);
+  void media_flow_command(bool resume);
+  void revoke_request_command(const std::string &user);
+  // The session was initiated as a broadcast group call (TS 24.380 clause 6.2.4.6.4 step 6).
+  bool broadcast_session() const;
+  // TS 24.380 clauses 8.2.9, 6.2.4.5.8: the talkers of a Floor Taken; clauses 6.2.4.x.7/9/10/14: Floor Release Multi
+  // Talker; clauses 6.2.4.7.6, 6.2.4.9.15: Queued Floor Requests.
+  void floor_taken_talkers(const FloorPacket &packet, const std::string &previous_owner, std::uint32_t previous_ssrc);
+  void floor_release_multi_talker(const FloorPacket &packet);
+  void queued_floor_requests_received(const FloorPacket &packet, FloorParticipantState state_before);
+  void talkers_status();
+  // A received talker's 20 ms frame, mixed with the other talkers' (mcptt/live_audio.cpp); flush: mix what is there.
+  void mix_talkers(bool flush);
+  // Received audio (one talker's, or the mix): to the live output or the received audio buffer.
+  void deliver_received_audio(const std::vector<std::int16_t> &pcm);
   // The Floor Request, Floor Release or Floor Queue Position Request that send_floor() sends.
   FloorPacket floor_message(FloorType type) const;
 

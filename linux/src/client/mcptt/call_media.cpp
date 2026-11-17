@@ -316,6 +316,13 @@ void Client::clear_call_state() {
   floor_sequence_.reset();
   receive_ssrc_ = audio_ssrc_ = 0;
   talking_ = requesting_ = false;
+  mix_talkers(true);
+  talkers_.clear();
+  media_flow_stopped_ = floor_overridden_ = false;
+  if (status_.value("media_rendering", false)) {
+    status_["media_rendering"] = false;
+    event("media_rendering", {{"on", false}});
+  }
   transmit_.clear();
   multicast_leave(false);
 
@@ -353,7 +360,9 @@ void Client::clear_call_state() {
   adhoc_criteria_.clear();
   adhoc_broadcast_ = false;
   private_alerts_.clear();
-  for (const auto *key : {"permission_to_request", "floor_indicator", "last_floor_reject_cause"}) status_.erase(key);
+  for (const auto *key : {"permission_to_request", "floor_indicator", "last_floor_reject_cause", "multi_talker",
+                          "dual_floor"})
+    status_.erase(key);
   status_["call_state"] = "idle";
   save_audio();
 }
@@ -406,6 +415,7 @@ void Client::release() {
   const bool send_release = (talking_ || requesting_) && !no_floor();
   next_floor_priority_.reset();
   talking_ = requesting_ = false;
+  floor_overridden_ = false;
   live_talk_ = false;
   live_in_.clear();
   transmit_.clear();
@@ -483,9 +493,15 @@ void Client::floor_packet(const Datagram &datagram) {
   if (!remote_ || !sent_by_server(datagram.source, remote_->floor_address, remote_->floor_port)) return;
   if (wire_ssrc(datagram.bytes, true) != local_.floor_ssrc) return;
   auto bytes = protected_floor() ? protection_.unprotect_floor(datagram.bytes) : datagram.bytes;
-  auto packet = decode_floor(bytes);
-  if (packet.ssrc != local_.floor_ssrc) return;
-  floor_message(packet, false);
+  // TS 24.380 clause 8.1.4: a message of an unknown subtype is ignored whole, unspecified fields and syntactically
+  // incorrect fields are ignored.
+  auto packet = decode_floor_received(bytes);
+  if (!packet) {
+    status_["floor_ignored_messages"] = status_.value("floor_ignored_messages", 0u) + 1;
+    return;
+  }
+  if (packet->ssrc != local_.floor_ssrc) return;
+  floor_message(*packet, false);
 }
 
 //------------------------------------------------------------------------------
@@ -507,6 +523,8 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     transmit_floor(ack);
   }
   if (!(multicast ? mbms_floor_sequence_ : floor_sequence_).accept(packet)) return;
+  const auto state_before = floor_timers_.state();
+  floor_timers_.set_broadcast(broadcast_session());
   floor_timers_.receive(packet, monotonic_ms());
   if (packet.type == FloorType::Granted) {
     if (talking_) return;
@@ -528,6 +546,7 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     }
     talking_ = true;
     requesting_ = false;
+    floor_overridden_ = false;
     next_audio_ = monotonic_ms();
     floor_event("floor_granted");
   } else if (packet.type == FloorType::QueuePositionInfo) {
@@ -554,7 +573,19 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     if (talking_ && !multicast) release();
     status_["floor_owner"] = "";
     receive_ssrc_ = 0;
+    // The floor is idle: no talker remains, nor an override (TS 24.380 clauses 6.2.4.3.2, 6.2.4.6.4).
+    mix_talkers(true);
+    talkers_.clear();
+    floor_overridden_ = false;
+    status_["multi_talker"] = status_["dual_floor"] = false;
+    // TS 24.380 clause 6.2.4.6.4 step 6: in a session initiated as a broadcast group call, "shall indicate to the
+    // MCPTT client the media transmission is completed" and enter 'Releasing'.
+    if (state_before == FloorParticipantState::PendingRelease &&
+        floor_timers_.state() == FloorParticipantState::Releasing)
+      floor_event("broadcast_transmission_completed", {{"dialog", dialog_}});
   } else if (packet.type == FloorType::Taken) {
+    const auto previous_owner = status_.value("floor_owner", std::string{});
+    const auto previous_ssrc = receive_ssrc_;
     receive_ssrc_ = 0;
     for (auto &field : packet.fields) {
       if (field.id == static_cast<unsigned>(FloorFieldId::GrantedPartyIdentity))
@@ -564,8 +595,275 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
         status_["permission_to_request"] = read_permission_to_request(field);
       if (field.id == static_cast<unsigned>(FloorFieldId::FloorIndicator))
         status_["floor_indicator"] = read_floor_indicator(field);
+      if (field.id == static_cast<unsigned>(FloorFieldId::FunctionalAlias))
+        status_["floor_owner_functional_alias"] = read_functional_alias(field);
     }
+    floor_taken_talkers(packet, previous_owner, previous_ssrc);
+  } else if (packet.type == FloorType::ReleaseMultiTalker) {
+    floor_release_multi_talker(packet);
+  } else if (packet.type == FloorType::QueuedFloorRequests) {
+    queued_floor_requests_received(packet, state_before);
   }
+}
+
+//------------------------------------------------------------------------------
+// The session was initiated as a broadcast group call (TS 24.379 clause 6.2.8.2; an ad hoc broadcast call too).
+bool Client::broadcast_session() const {
+  return call_type_ == "broadcast" || (call_type_ == "adhoc" && adhoc_broadcast_);
+}
+
+//------------------------------------------------------------------------------
+// Helper: the Floor Indicator value of a message, 0 without one.
+static std::uint16_t indicator_of(const FloorPacket &packet) {
+  const auto *field = find_floor_field(packet, FloorFieldId::FloorIndicator);
+  return field ? read_floor_indicator(*field) : 0;
+}
+
+// TS 24.380 table 8.2.3.15-2: bit G (dual floor) and bit I (multi-talker) of the Floor Indicator.
+constexpr std::uint16_t indicator_dual_floor = 0x0200, indicator_multi_talker = 0x0080;
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 8.2.9 and clauses 6.2.4.3.3, 6.2.4.5.8: the talkers a Floor Taken names. With the I-bit
+// (multi-talker) its List of Granted Users, List of SSRCs, List of Functional Aliases and List of Locations, "in the
+// same order" (they replace the talkers: the server sends the whole list); with the G-bit (dual floor) the overriding
+// talker joins the one already talking; otherwise its single granted party. In 'U: has permission' the G-bit tells the
+// user the call is overridden without revoke (clause 6.2.4.5.8 step 1) and the I-bit gives the type of call and the
+// current talkers (step 2c). A talker's decoder and received audio are kept across the lists.
+void Client::floor_taken_talkers(const FloorPacket &packet, const std::string &previous_owner,
+                                 std::uint32_t previous_ssrc) {
+  const auto indicator = indicator_of(packet);
+  const bool multi = (indicator & indicator_multi_talker) != 0, dual = (indicator & indicator_dual_floor) != 0;
+  std::vector<std::string> users, aliases;
+  std::vector<std::uint32_t> ssrcs;
+  std::vector<FloorLocation> locations;
+  if (const auto *field = find_floor_field(packet, FloorFieldId::ListOfGrantedUsers)) users = read_uri_list(*field);
+  if (const auto *field = find_floor_field(packet, FloorFieldId::ListOfSsrcs)) ssrcs = read_ssrc_list(*field);
+  if (const auto *field = find_floor_field(packet, FloorFieldId::ListOfFunctionalAliases))
+    aliases = read_uri_list(*field);
+  if (const auto *field = find_floor_field(packet, FloorFieldId::ListOfLocations))
+    locations = read_location_list(*field);
+  const auto location_json = [](const FloorLocation &location) {
+    std::string hex;
+    for (const auto octet : location.value) {
+      static constexpr char digits[] = "0123456789abcdef";
+      hex += digits[octet >> 4];
+      hex += digits[octet & 15];
+    }
+    return Json{{"type", location.type}, {"value", hex}};
+  };
+  auto old = std::exchange(talkers_, {});
+  const auto keep = [&](Talker talker) {
+    for (auto &previous : old)
+      if (previous.ssrc && previous.ssrc == talker.ssrc && previous.codec) {
+        talker.codec = std::move(previous.codec);
+        talker.frames = std::move(previous.frames);
+        talker.packets = previous.packets;
+      }
+    talkers_.push_back(std::move(talker));
+  };
+  if (!users.empty() || !ssrcs.empty()) {
+    for (std::size_t i = 0; i < std::max(users.size(), ssrcs.size()); ++i) {
+      Talker talker;
+      if (i < users.size()) talker.user = users[i];
+      if (i < ssrcs.size()) talker.ssrc = ssrcs[i];
+      if (i < aliases.size()) talker.functional_alias = aliases[i];
+      if (i < locations.size()) talker.location = location_json(locations[i]);
+      keep(std::move(talker));
+    }
+  } else {
+    Talker talker;
+    talker.user = status_.value("floor_owner", std::string{});
+    talker.ssrc = receive_ssrc_;
+    talker.functional_alias = status_.value("floor_owner_functional_alias", std::string{});
+    if (const auto *field = find_floor_field(packet, FloorFieldId::Location))
+      talker.location = location_json(read_location(*field));
+    if (dual) {
+      // The overridden talker goes on (TS 24.380 clause 6.3.6): it stays a talker next to the overriding one.
+      for (auto &previous : old)
+        if (previous.ssrc != talker.ssrc) {
+          Talker kept;
+          kept.user = previous.user;
+          kept.ssrc = previous.ssrc;
+          kept.functional_alias = previous.functional_alias;
+          kept.location = previous.location;
+          keep(std::move(kept));
+        }
+      if (talkers_.empty() && previous_ssrc && previous_ssrc != talker.ssrc) {
+        Talker kept;
+        kept.user = previous_owner;
+        kept.ssrc = previous_ssrc;
+        keep(std::move(kept));
+      }
+    }
+    keep(std::move(talker));
+  }
+  status_["multi_talker"] = multi;
+  status_["dual_floor"] = dual;
+  // With several talkers each one's stream is followed by its SSRC (audio_packet), not by receive_ssrc_.
+  if (talkers_.size() > 1) receive_ssrc_ = 0;
+  if (talkers_.size() == 1 && !receive_ssrc_ && talkers_.front().ssrc != audio_ssrc_)
+    receive_ssrc_ = talkers_.front().ssrc;
+  if (dual && talking_ && !floor_overridden_) {
+    floor_overridden_ = true;
+    floor_event("floor_overridden", {{"by", status_.value("floor_owner", std::string{})}});
+  }
+  talkers_status();
+  if (multi || dual) {
+    Json names = Json::array();
+    for (const auto &talker : talkers_) names.push_back(talker.user);
+    floor_event(multi ? "multi_talker_floor_taken" : "dual_floor_taken", {{"talkers", names}});
+  }
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clauses 6.2.4.3.7, 6.2.4.4.10, 6.2.4.5.9, 6.2.4.6.9 and 6.2.4.9.14: Floor Release Multi Talker: "a
+// notification to the user indicating that a participant has released the floor in a multi-talker group"; the talker
+// (its User ID, its SSRC in the Audio SSRC field) leaves the talkers, after the audio it sent has been mixed.
+void Client::floor_release_multi_talker(const FloorPacket &packet) {
+  const auto *user_field = find_floor_field(packet, FloorFieldId::UserId);
+  const auto user_id = user_field ? read_user_id(*user_field) : std::string{};
+  const auto *ssrc_field = find_floor_field(packet, FloorFieldId::AudioSsrc);
+  const auto ssrc = ssrc_field ? read_audio_ssrc(*ssrc_field) : 0;
+  mix_talkers(true);
+  std::erase_if(talkers_, [&](const Talker &talker) {
+    return (!user_id.empty() && talker.user == user_id) || (ssrc && talker.ssrc == ssrc);
+  });
+  if (talkers_.size() == 1) receive_ssrc_ = talkers_.front().ssrc;
+  if (talkers_.empty()) receive_ssrc_ = 0;
+  const Json released{{"user", user_id}, {"ssrc", ssrc}, {"own", user_id == user()}};
+  status_["last_multi_talker_release"] = released;
+  talkers_status();
+  floor_event("floor_release_multi_talker", released);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 6.2.4.7.6 (Cancel Result: "may provide the result ... to the MCPTT user", T134 stopped) and
+// clause 6.2.4.9.15 (Cancel Notification in 'U: queued': "shall provide a queued floor requests cancellation
+// notification to the MCPTT user", "may display the requesting user" from the Requested Party's Identity, T104
+// stopped, 'U: has no permission'). The Floor Ack, when asked, was sent by floor_message. Status "queued_requests".
+void Client::queued_floor_requests_received(const FloorPacket &packet, FloorParticipantState state_before) {
+  const auto purpose =
+      read_queued_requests_purpose(*find_floor_field(packet, FloorFieldId::QueuedFloorRequestsPurpose));
+  auto &queued = status_["queued_requests"];
+  if (!queued.is_object()) queued = Json::object();
+  Json users = Json::array();
+  if (const auto *field = find_floor_field(packet, FloorFieldId::ListOfQueuedUsers))
+    for (const auto &queued_user : read_uri_list(*field)) users.push_back(queued_user);
+  if (purpose == static_cast<std::uint16_t>(QueuedRequestsPurpose::CancelResult)) {
+    const auto *result = find_floor_field(packet, FloorFieldId::QueuedFloorRequestsResult);
+    queued["state"] = "result";
+    queued["result"] = result ? Json(read_queued_requests_result(*result)) : Json();
+    queued["not_removed"] = users; // clause 8.2.15: the users whose queued requests remain
+    queued["results"] = queued.value("results", 0u) + 1;
+    floor_event("queued_requests_result", {{"result", queued["result"]}, {"not_removed", users}});
+  } else if (purpose == static_cast<std::uint16_t>(QueuedRequestsPurpose::CancelNotification)) {
+    const auto *by = find_floor_field(packet, FloorFieldId::UserId);
+    const bool was_queued = state_before == FloorParticipantState::Queued;
+    if (!was_queued) return; // clause 6.2.4.9.15 is the procedure of 'U: queued' only
+    queued["state"] = "cancelled";
+    queued["by"] = by ? read_user_id(*by) : std::string{};
+    queued["notifications"] = queued.value("notifications", 0u) + 1;
+    requesting_ = false;
+    transmit_.clear();
+    status_.erase("queue_position");
+    floor_event("queued_requests_cancelled", {{"by", queued["by"]}});
+  }
+}
+
+//------------------------------------------------------------------------------
+// Status: "talkers", the MCPTT IDs of the granted users of a multi-talker or dual floor call (each change also as a
+// "talkers" event), and "talker_details" with each one's SSRC, functional alias, location and received packets.
+void Client::talkers_status() {
+  Json names = Json::array(), details = Json::array();
+  for (const auto &talker : talkers_) {
+    names.push_back(talker.user);
+    Json detail{{"user", talker.user}, {"ssrc", talker.ssrc}, {"packets", talker.packets}};
+    if (!talker.functional_alias.empty()) detail["functional_alias"] = talker.functional_alias;
+    if (!talker.location.is_null()) detail["location"] = talker.location;
+    details.push_back(detail);
+  }
+  const bool changed = status_.value("talkers", Json::array()) != names;
+  status_["talkers"] = names;
+  if (changed) event("talkers", {{"talkers", names}});
+  status_["talker_details"] = details;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 6.2.4.7.4: the user cancels the queued floor requests of the users given (List of Queued Users),
+// or with none all of them: Queued Floor Requests with the purpose Cancel Request, this user's Functional Alias
+// (clause 8.2.15: included for a participant's cancellation) and identity (Requested Party's Identity, coded as the
+// User ID), T134 started, the state kept. On a group configured for audio cut-in floor control the user is told it is
+// not allowed, and nothing is sent.
+void Client::queued_requests_command(const std::string &arguments) {
+  if (!remote_ || no_floor()) throw std::runtime_error("queued-requests: no call with floor control");
+  if (const auto *settings = call_group_floor_settings(); settings && settings->audio_cut_in) {
+    auto &queued = status_["queued_requests"];
+    if (!queued.is_object()) queued = Json::object();
+    queued["state"] = "not allowed";
+    floor_event("queued_requests_not_allowed", {{"reason", "audio cut-in floor control"}});
+    return;
+  }
+  std::vector<std::string> users;
+  std::istringstream words(arguments);
+  for (std::string word; words >> word;) users.push_back(word);
+  FloorPacket packet;
+  packet.type = FloorType::QueuedFloorRequests;
+  packet.ssrc = remote_->floor_ssrc;
+  packet.fields = {queued_requests_purpose_field(QueuedRequestsPurpose::CancelRequest)};
+  if (!users.empty()) packet.fields.push_back(uri_list_field(FloorFieldId::ListOfQueuedUsers, users));
+  if (!functional_alias_.empty()) packet.fields.push_back(functional_alias_field(functional_alias_));
+  packet.fields.push_back(user_id_field(user()));
+  floor_timers_.send(packet, monotonic_ms());
+  transmit_floor(packet);
+  auto &queued = status_["queued_requests"];
+  if (!queued.is_object()) queued = Json::object();
+  queued["state"] = "requested";
+  queued["users"] = users;
+  queued["requests"] = queued.value("requests", 0u) + 1;
+  event("queued_requests_sent", {{"users", users}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clauses 6.2.4.3.8 and 6.2.4.3.9: in 'U: has no permission', the user asks the server to stop (Media Flow
+// Control Indicator bit A '0') or resume ('1') the unicast media: Unicast Media Flow Control with this user's User ID
+// (clause 8.2.16). Status "media_flow": "stopped" or "flowing".
+void Client::media_flow_command(bool resume) {
+  if (!remote_ || no_floor()) throw std::runtime_error("media-stop/media-resume: no call with floor control");
+  FloorPacket packet;
+  packet.type = FloorType::UnicastMediaFlowControl;
+  packet.ssrc = remote_->floor_ssrc;
+  packet.fields = {user_id_field(user()), media_flow_control_field(resume)};
+  floor_timers_.send(packet, monotonic_ms()); // refused outside 'U: has no permission'
+  transmit_floor(packet);
+  media_flow_stopped_ = !resume;
+  status_["media_flow"] = resume ? "flowing" : "stopped";
+  event("media_flow", {{"media_flow", status_["media_flow"]}});
+}
+
+//------------------------------------------------------------------------------
+// TS 24.380 clause 6.2.4.3.10: in 'U: has no permission', the user asks to revoke the floor of a user: Floor Revoke
+// Request with the Floor Revoke Request User Identity, a Floor Priority when not the normal one (mcptt.floor_priority,
+// not above the negotiated one, clause 14.3.3) and, when known, the talker's Audio SSRC (clause 8.2.17).
+void Client::revoke_request_command(const std::string &target) {
+  if (!remote_ || no_floor()) throw std::runtime_error("revoke-request: no call with floor control");
+  if (target.empty() || target.find(' ') != std::string::npos)
+    throw std::runtime_error("usage: revoke-request <MCPTT ID>");
+  FloorPacket packet;
+  packet.type = FloorType::RevokeRequest;
+  packet.ssrc = remote_->floor_ssrc;
+  const auto priority = std::min<unsigned>(
+      next_floor_priority_ ? *next_floor_priority_ : cfg_.at("mcptt").value("floor_priority", 0u),
+      remote_->floor_priority.value_or(0));
+  if (priority) packet.fields.push_back(priority_field(static_cast<std::uint8_t>(priority)));
+  packet.fields.push_back(revoke_request_user_field(target));
+  std::uint32_t ssrc = 0;
+  for (const auto &talker : talkers_)
+    if (talker.user == target) ssrc = talker.ssrc;
+  if (!ssrc && status_.value("floor_owner", std::string{}) == target) ssrc = receive_ssrc_;
+  if (ssrc) packet.fields.push_back(audio_ssrc_field(ssrc));
+  floor_timers_.send(packet, monotonic_ms()); // refused outside 'U: has no permission'
+  transmit_floor(packet);
+  event("floor_revoke_requested", {{"user", target}, {"ssrc", ssrc}});
 }
 
 //------------------------------------------------------------------------------
@@ -581,16 +879,49 @@ void Client::audio_packet(const Datagram &datagram, bool multicast) {
   // Without floor control no Floor Taken names the sender's SSRC: the first one
   // heard is followed (TS 24.379 clause 11.1.2).
   if (no_floor() && !receive_ssrc_) receive_ssrc_ = wire_ssrc(datagram.bytes, false);
-  if (!receive_ssrc_ || wire_ssrc(datagram.bytes, false) != receive_ssrc_) return;
+  // TS 24.380 clauses 6.2.4.5.8 and 8.2.9: in a multi-talker or dual floor call each granted talker's stream (its SSRC
+  // of the List of SSRCs, or of the Floor Taken of each talker) is received and mixed with the others.
+  const auto ssrc = wire_ssrc(datagram.bytes, false);
+  Talker *talker = nullptr;
+  if (talkers_.size() > 1)
+    for (auto &candidate : talkers_)
+      if (candidate.ssrc && candidate.ssrc == ssrc && candidate.ssrc != audio_ssrc_) talker = &candidate;
+  if (!talker && (!receive_ssrc_ || ssrc != receive_ssrc_)) return;
   if (duplicate_rtp(datagram.bytes, multicast) || hold_rtp(datagram, multicast)) return;
-  const auto sender = no_floor() ? private_peer_ : status_.value("floor_owner", std::string{});
+  const auto sender = talker      ? talker->user
+                      : no_floor() ? private_peer_
+                                   : status_.value("floor_owner", std::string{});
   auto bytes = protected_media() ? protection_.unprotect_media(datagram.bytes, sender) : datagram.bytes;
   auto rtp = decode_rtp(bytes);
-  if (rtp.payload_type != local_.payload_type || !receive_ssrc_ || rtp.ssrc != receive_ssrc_) return;
+  if (rtp.payload_type != local_.payload_type || rtp.ssrc != ssrc) return;
   kept_rtp(datagram.bytes);
   floor_timers_.media_received(monotonic_ms());
+  // TS 24.380 clauses 6.2.4.3.4, 6.2.4.4.7 ...: "request the MCPTT client to start rendering the received RTP media".
+  if (!status_.value("media_rendering", false)) {
+    status_["media_rendering"] = true;
+    event("media_rendering", {{"on", true}});
+  }
+  if (talker) {
+    if (!talker->codec) talker->codec = std::make_unique<AmrWbCodec>();
+    auto pcm = talker->codec->decode(unpack_amr_wb(rtp.payload, local_.octet_aligned));
+    capture_speech(pcm, ssrc, sender, monotonic_ms());
+    ++talker->packets;
+    talker->frames.push_back(std::move(pcm));
+    mix_talkers(false);
+    status_["received_packets"] = status_["received_packets"].get<unsigned>() + 1;
+    return;
+  }
   auto pcm = codec_.decode(unpack_amr_wb(rtp.payload, local_.octet_aligned));
   capture_speech(pcm, receive_ssrc_, sender, monotonic_ms()); // media.speech_dir: for an agent
+  deliver_received_audio(pcm);
+  status_["received_packets"] = status_["received_packets"].get<unsigned>() + 1;
+  if (multicast) status_["multicast_received_packets"] = status_.value("multicast_received_packets", 0ULL) + 1;
+  if (!held_rtp_.empty()) release_held_rtp(monotonic_ms());
+}
+
+//------------------------------------------------------------------------------
+// Received audio: with media.live to the dispatcher's service, else kept for received_wav.
+void Client::deliver_received_audio(const std::vector<std::int16_t> &pcm) {
   if (live_) {
     forward_live_audio(pcm); // live (media.live): to the dispatcher's service, not kept
   } else {
@@ -606,9 +937,6 @@ void Client::audio_packet(const Datagram &datagram, bool multicast) {
       received_unsaved_ = true;
     }
   }
-  status_["received_packets"] = status_["received_packets"].get<unsigned>() + 1;
-  if (multicast) status_["multicast_received_packets"] = status_.value("multicast_received_packets", 0ULL) + 1;
-  if (!held_rtp_.empty()) release_held_rtp(monotonic_ms());
 }
 
 } // namespace mcx
