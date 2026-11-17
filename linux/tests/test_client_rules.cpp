@@ -490,15 +490,18 @@ void test_floor_multiplexing() {
   check(answer_floor_ssrc(11, 22) == 11, "an offer with mc_floor_ssrc is answered with one");
   check(answer_floor_ssrc(11, 0) == 0, "an offer without mc_floor_ssrc is answered without one (14.3.1, 14.3.8)");
   // TS 24.380 14.3.2, 14.3.3, 14.3.7: the answer's fmtp parameters item by item, not a mirror of the offer.
-  const auto plain = answer_floor_parameters(11, true, false, 0, std::uint8_t{3});
+  const auto plain = answer_floor_parameters(true, 11, true, false, 0, std::uint8_t{3});
   check(plain.queueing && plain.floor_priority == 3 && plain.floor_ssrc == 0,
         "offer mc_priority=3 only: answered mc_priority=3;mc_queueing (14.3.2, 14.3.3, 14.3.8)");
-  const auto no_queue = answer_floor_parameters(11, false, false, 22, std::nullopt);
+  const auto no_queue = answer_floor_parameters(true, 11, false, false, 22, std::nullopt);
   check(!no_queue.queueing && !no_queue.floor_priority && no_queue.floor_ssrc == 11,
         "queueing unsupported: no mc_queueing; no offered mc_priority: none returned");
-  const auto uncontrolled = answer_floor_parameters(11, true, true, 22, std::uint8_t{3});
+  const auto uncontrolled = answer_floor_parameters(true, 11, true, true, 22, std::uint8_t{3});
   check(!uncontrolled.queueing && !uncontrolled.floor_priority && uncontrolled.floor_ssrc == 11,
         "mc_no_floor_ctrl: no floor control related parameter (14.2.6, 14.3.7)");
+  const auto no_channel = answer_floor_parameters(false, 11, true, false, 0, std::nullopt);
+  check(!no_channel.queueing && !no_channel.floor_priority && no_channel.floor_ssrc == 0,
+        "an offer without the media plane control channel: no fmtp parameter (TS 24.379 6.2.2, TS 24.380 14.3.1)");
 }
 
 //------------------------------------------------------------------------------

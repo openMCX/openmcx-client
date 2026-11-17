@@ -220,7 +220,7 @@ class Client {
   MediaDescription answer_media(const MediaDescription &offer) const {
     auto answer = local_;
     const auto parameters = client_rules::answer_floor_parameters(
-        local_.floor_ssrc, cfg_.at("mcptt").value("floor_queue", false), local_.no_floor_control, offer.floor_ssrc,
+        offer.control != MediaControl::none && local_.control != MediaControl::none, local_.floor_ssrc, cfg_.at("mcptt").value("floor_queue", false), local_.no_floor_control, offer.floor_ssrc,
         offer.floor_priority);
     answer.floor_ssrc = parameters.floor_ssrc;
     answer.queueing = parameters.queueing;

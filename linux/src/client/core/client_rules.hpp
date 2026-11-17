@@ -608,16 +608,20 @@ inline std::uint32_t answer_floor_ssrc(std::uint32_t local, std::uint32_t offere
 // offer (the offer conditions only the controlling and non-controlling functions). 14.3.3: "mc_priority" returns the
 // offer's value. 14.3.8: "mc_floor_ssrc" (this client's, [local_floor_ssrc]) only when the offer had one. 14.3.4 to
 // 14.3.6 ("mc_granted", "mc_implicit_request", "mc_ssrc") are the server's: never in this client's answer. 14.3.7 and
-// 14.2.6: with "mc_no_floor_ctrl" no floor control related parameter is written.
+// 14.2.6: with "mc_no_floor_ctrl" no floor control related parameter is written. An offer without the media plane
+// control channel ([control_channel] false: a private call without floor control, TS 24.379 clauses 6.2.2 and 11.1.2)
+// is answered without one, so with no fmtp parameter at all (TS 24.380 clause 14.3.1).
 struct AnswerFloorParameters {
   std::uint32_t floor_ssrc = 0;
   bool queueing = false;
   std::optional<std::uint8_t> floor_priority;
 };
-inline AnswerFloorParameters answer_floor_parameters(std::uint32_t local_floor_ssrc, bool queueing_supported,
-                                                     bool no_floor_control, std::uint32_t offered_floor_ssrc,
+inline AnswerFloorParameters answer_floor_parameters(bool control_channel, std::uint32_t local_floor_ssrc,
+                                                     bool queueing_supported, bool no_floor_control,
+                                                     std::uint32_t offered_floor_ssrc,
                                                      std::optional<std::uint8_t> offered_priority) {
   AnswerFloorParameters answer;
+  if (!control_channel) return answer;
   answer.floor_ssrc = answer_floor_ssrc(local_floor_ssrc, offered_floor_ssrc);
   if (no_floor_control) return answer;
   answer.queueing = queueing_supported;
