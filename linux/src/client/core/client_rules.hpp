@@ -588,6 +588,21 @@ inline std::uint64_t data_pck_end(std::uint64_t local_end, std::uint64_t key_exp
 }
 
 //------------------------------------------------------------------------------
+// TS 24.380 clauses 14.2.7 and 14.3.8: "mc_floor_ssrc" is in an offer only when the offerer supports multiplexing,
+// and in the answer only when the offer had it; 0 is none. With the server's (remote, of its offer or answer) the
+// floor control messages are multiplexed: this client sends them with the server's SSRC, and takes those that carry
+// its own (local, the one it allocated, clause 4.3.3.1). Without it there is no multiplexing: the SSRC field is
+// "the SSRC of the floor participant sending" the message (clause 8.2.4 and the other messages of clause 8.2), this
+// client's own, and the server's messages carry the server's, which no SDP tells: they are the session's by the
+// address and port they come from.
+inline std::uint32_t floor_ssrc_to_send(std::uint32_t local, std::uint32_t remote) { return remote ? remote : local; }
+inline bool floor_ssrc_received(std::uint32_t ssrc, std::uint32_t local, std::uint32_t remote) {
+  return !remote || ssrc == local;
+}
+// The "mc_floor_ssrc" of this client's answer to an offer with [offered] (TS 24.380 clauses 14.3.1, 14.3.8).
+inline std::uint32_t answer_floor_ssrc(std::uint32_t local, std::uint32_t offered) { return offered ? local : 0; }
+
+//------------------------------------------------------------------------------
 // RFC 3711 section 3.4 (TS 33.180 clauses 9.4.7 and 9.4.8): "after a re-key, the SRTCP index MUST NOT be reset to zero
 // again". The floor (or transmission) control streams of the call under way that go on under a new CSK
 // (ProtectedCall::set_floor), in both directions (TS 24.380 and TS 24.581 clause 4.3.3.1: each side allocates the

@@ -478,6 +478,20 @@ void test_data_pck_end() {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.380 clauses 14.2.7, 14.3.8 and 8.2.4: the floor control SSRCs with and without multiplexing.
+void test_floor_multiplexing() {
+  using namespace mcx::client_rules;
+  check(floor_ssrc_to_send(11, 22) == 22, "multiplexed: the server's mc_floor_ssrc is sent");
+  check(floor_ssrc_to_send(11, 0) == 11, "not multiplexed: this client's own SSRC is sent");
+  check(floor_ssrc_received(11, 11, 22) && !floor_ssrc_received(33, 11, 22),
+        "multiplexed: only this client's mc_floor_ssrc is taken");
+  check(floor_ssrc_received(33, 11, 0) && floor_ssrc_received(11, 11, 0),
+        "not multiplexed: the server's own SSRC is taken");
+  check(answer_floor_ssrc(11, 22) == 11, "an offer with mc_floor_ssrc is answered with one");
+  check(answer_floor_ssrc(11, 0) == 0, "an offer without mc_floor_ssrc is answered without one (14.3.1, 14.3.8)");
+}
+
+//------------------------------------------------------------------------------
 // RFC 3711 section 3.4: the floor control streams of the call under way, both directions, go on under a new CSK.
 void test_call_floor_ssrcs() {
   using mcx::client_rules::call_floor_ssrcs;
@@ -523,6 +537,7 @@ static void test_sds_payloads() {
 
 int main() {
   test_call_floor_ssrcs();
+  test_floor_multiplexing();
   test_call_key_group();
   test_data_pck_end();
   test_notifiers();

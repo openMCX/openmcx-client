@@ -758,7 +758,7 @@ SipResponse Client::private_call_reinvite(const SipMessage &message) {
     return response;
   }
   update_private_priority(info);
-  response.local_media = local_;
+  response.local_media = answer_media(*message.remote_media);
   name_transfer_dialog(response, message, info);
   return response;
 }
@@ -789,7 +789,7 @@ SipResponse Client::group_call_reinvite(const SipMessage &message) {
   }
   local_.floor_priority = message.remote_media->floor_priority;
   update_priority(info, message_location(message));
-  response.local_media = local_;
+  response.local_media = answer_media(*message.remote_media);
   return response;
 }
 
@@ -847,7 +847,7 @@ SipResponse Client::incoming_group(const SipMessage &message) {
   call_type_ = info.session_type == "chat" ? "chat" : info.broadcast == true ? "broadcast" : "prearranged";
   call_group_ = via_hierarchy || via_regroup || via_monitor ? info.calling_group : std::string{};
   status_["calling_functional_alias"] = info.functional_alias;
-  response.local_media = local_;
+  response.local_media = answer_media(*message.remote_media);
   remember_session(message.headers);
   if (mode == "Manual" || cfg_.at("mcptt").value("answer_mode", "auto") == "manual") {
     pending_answer_ = response;
@@ -959,7 +959,7 @@ SipResponse Client::incoming_private(const SipMessage &message, const McpttInfo 
     private_forwarding_sequence_ =
         sequence == info.service.end() ? 0 : static_cast<unsigned>(std::stoul(sequence->second));
   }
-  response.local_media = local_;
+  response.local_media = answer_media(*message.remote_media);
   name_transfer_dialog(response, message, info);
   remember_session(message.headers);
 
@@ -1100,7 +1100,7 @@ SipResponse Client::incoming_ambient(const SipMessage &message, const McpttInfo 
                       std::string_view::npos,
                   get_header(message.headers, "Alert-Info") == "<file:///dev/null>",
                   ""};
-  response.local_media = local_;
+  response.local_media = answer_media(*message.remote_media);
   status_["call_state"] = listened_to ? "idle" : "answering";
   event(listened_to ? "ambient_listened_to" : "ambient_listening_incoming",
         {{"calling_user", info.calling_user}, {"type", type}, {"null_alert", ambient_->null_alert}});
@@ -1151,7 +1151,7 @@ SipResponse Client::incoming_adhoc(const SipMessage &message, const McpttInfo &i
   dialog_ = message.dialog_id;
   call_type_ = "adhoc";
   call_group_ = info.calling_group;
-  response.local_media = local_;
+  response.local_media = answer_media(*message.remote_media);
   remember_session(message.headers);
   const bool manual = mode == "Manual" || cfg_.at("mcptt").value("answer_mode", "auto") == "manual";
   if (manual) {

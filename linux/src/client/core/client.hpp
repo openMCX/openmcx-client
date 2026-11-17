@@ -204,6 +204,23 @@ class Client {
   // "mc_no_floor_ctrl" (TS 24.380 clauses 14.2.6, 14.3.7).
   bool no_floor() const { return local_.control == MediaControl::none || local_.no_floor_control; }
 
+  // TS 24.380 clauses 14.2.7, 14.3.8 and 8.2 (client_rules::floor_ssrc_to_send, floor_ssrc_received): the SSRC of
+  // the floor control messages this client sends in the call, and whether a received one's SSRC is this call's.
+  // Multiplexed only when the server's SDP has "mc_floor_ssrc".
+  std::uint32_t floor_ssrc_to_send() const {
+    return client_rules::floor_ssrc_to_send(local_.floor_ssrc, remote_ ? remote_->floor_ssrc : 0);
+  }
+  bool floor_ssrc_received(std::uint32_t ssrc) const {
+    return client_rules::floor_ssrc_received(ssrc, local_.floor_ssrc, remote_ ? remote_->floor_ssrc : 0);
+  }
+  // TS 24.380 clauses 14.3.1 and 14.3.8: this client's media in its answer to [offer]: with "mc_floor_ssrc" only when
+  // the offer had it (client_rules::answer_floor_ssrc). local_.floor_ssrc stays the SSRC this client sends with.
+  MediaDescription answer_media(const MediaDescription &offer) const {
+    auto answer = local_;
+    answer.floor_ssrc = client_rules::answer_floor_ssrc(local_.floor_ssrc, offer.floor_ssrc);
+    return answer;
+  }
+
   // A private or ambient listening call is protected by its PCK, a group call by the GMK.
   bool media_key_ready() const { return private_media() ? protection_.private_ready() : protection_.group_ready(); }
 

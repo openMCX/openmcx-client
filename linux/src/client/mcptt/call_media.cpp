@@ -176,7 +176,7 @@ void Client::implicit_floor_answered() {
   if (remote_->granted) {
     FloorPacket granted;
     granted.type = FloorType::Granted;
-    granted.ssrc = remote_->floor_ssrc;
+    granted.ssrc = floor_ssrc_to_send();
     floor_timers_.receive(granted, monotonic_ms());
     audio_ssrc_ = remote_->granted_audio_ssrc ? remote_->granted_audio_ssrc : local_.audio_ssrc;
     talking_ = true;
@@ -385,7 +385,7 @@ void Client::send_floor(FloorType type) {
 FloorPacket Client::floor_message(FloorType type) const {
   FloorPacket packet;
   packet.type = type;
-  packet.ssrc = remote_->floor_ssrc;
+  packet.ssrc = floor_ssrc_to_send();
   packet.ack_required = type == FloorType::Release && cfg_.at("mcptt").value("floor_ack", true);
 
   // TS 24.380 clause 8.2.3.15: the call type of this call, including an emergency
@@ -505,7 +505,7 @@ void Client::floor_packet(const Datagram &datagram) {
     return;
   }
   if (!remote_ || !sent_by_server(datagram.source, remote_->floor_address, remote_->floor_port)) return;
-  if (wire_ssrc(datagram.bytes, true) != local_.floor_ssrc) return;
+  if (!floor_ssrc_received(wire_ssrc(datagram.bytes, true))) return;
   auto bytes = protected_floor() ? protection_.unprotect_floor(datagram.bytes) : datagram.bytes;
   // TS 24.380 clause 8.1.4: a message of an unknown subtype is ignored whole, unspecified fields and syntactically
   // incorrect fields are ignored.
@@ -514,7 +514,7 @@ void Client::floor_packet(const Datagram &datagram) {
     status_["floor_ignored_messages"] = status_.value("floor_ignored_messages", 0u) + 1;
     return;
   }
-  if (packet->ssrc != local_.floor_ssrc) return;
+  if (!floor_ssrc_received(packet->ssrc)) return;
   floor_message(*packet, false);
 }
 
@@ -532,7 +532,7 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
   if (packet.ack_required) {
     FloorPacket ack;
     ack.type = FloorType::Ack;
-    ack.ssrc = remote_->floor_ssrc;
+    ack.ssrc = floor_ssrc_to_send();
     ack.fields = {source_field(0), message_type_field(packet.type)};
     transmit_floor(ack);
   }
@@ -845,7 +845,7 @@ void Client::queued_requests_command(const std::string &arguments) {
   for (std::string word; words >> word;) users.push_back(word);
   FloorPacket packet;
   packet.type = FloorType::QueuedFloorRequests;
-  packet.ssrc = remote_->floor_ssrc;
+  packet.ssrc = floor_ssrc_to_send();
   packet.fields = {queued_requests_purpose_field(QueuedRequestsPurpose::CancelRequest)};
   if (!users.empty()) packet.fields.push_back(uri_list_field(FloorFieldId::ListOfQueuedUsers, users));
   if (!functional_alias_.empty()) packet.fields.push_back(functional_alias_field(functional_alias_));
@@ -868,7 +868,7 @@ void Client::media_flow_command(bool resume) {
   if (!remote_ || no_floor()) throw std::runtime_error("media-stop/media-resume: no call with floor control");
   FloorPacket packet;
   packet.type = FloorType::UnicastMediaFlowControl;
-  packet.ssrc = remote_->floor_ssrc;
+  packet.ssrc = floor_ssrc_to_send();
   packet.fields = {user_id_field(user()), media_flow_control_field(resume)};
   floor_timers_.send(packet, monotonic_ms()); // refused outside 'U: has no permission'
   transmit_floor(packet);
@@ -887,7 +887,7 @@ void Client::revoke_request_command(const std::string &target) {
     throw std::runtime_error("usage: revoke-request <MCPTT ID>");
   FloorPacket packet;
   packet.type = FloorType::RevokeRequest;
-  packet.ssrc = remote_->floor_ssrc;
+  packet.ssrc = floor_ssrc_to_send();
   const auto priority = std::min<unsigned>(
       next_floor_priority_ ? *next_floor_priority_ : cfg_.at("mcptt").value("floor_priority", 0u),
       remote_->floor_priority.value_or(0));
