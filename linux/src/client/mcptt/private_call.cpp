@@ -199,9 +199,11 @@ std::vector<BodyPart> Client::private_call_parts(const std::string &target, bool
 // forwarding request (clause 11.1.8.2.2, clause 11.1.9.2.2).
 void Client::private_call_response(const std::string &target, const SipResponse &response) {
   if (followup_ && followup_->target == target && response.status_code > 100) {
-    // TS 24.379 clause 11.1.8.2.2 and clause 11.1.9.2.2: ringing, progress, 2xx or 480/175 mean success.
-    const bool forwarded =
-        response.status_code == 480 && client_rules::has_warning(get_header(response.headers, "Warning"), 175);
+    // TS 24.379 clause 11.1.8.2.2 and clause 11.1.9.2.2: ringing, progress, 2xx, 480 with "175 call is forwarded" or
+    // 480 with "191 call forwarding due to migration" mean success.
+    const auto warning = get_header(response.headers, "Warning");
+    const bool forwarded = response.status_code == 480 &&
+                           (client_rules::has_warning(warning, 175) || client_rules::has_warning(warning, 191));
     if (response.status_code < 300 || forwarded)
       report_followup(true);
     else

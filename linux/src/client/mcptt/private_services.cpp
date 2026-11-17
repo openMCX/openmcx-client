@@ -213,6 +213,12 @@ void Client::private_call_service_request(const McpttInfo &info, const std::stri
 void Client::service_response_received(const McpttInfo &info, const std::string &type) {
   for (const auto *key : {"remotely-initiated-call-outcome", "transfer-call-outcome", "forwarding-call-outcome"})
     if (info.service.contains(key)) service_outcomes_[type] = info.service.at(key);
+  // TS 24.379 clause 11.1.9.2.1 (on the response) step 2: "should indicate to the requesting MCPTT user the success
+  // or failure of the sent private call forwarding request".
+  if (type == "forward-private-call-response" && info.service.contains("forwarding-call-outcome")) {
+    status_["last_forwarding_request"]["state"] = info.service.at("forwarding-call-outcome");
+    event("private_call_forwarding_result", {{"outcome", info.service.at("forwarding-call-outcome")}});
+  }
   // TS 24.379 clause 11.1.8.2.1: a successful transfer ends the requester's call with the transferred user.
   const bool transferred = type == "transfer-private-call-response" && info.service.contains("transfer-call-outcome") &&
                            info.service.at("transfer-call-outcome") == "success";
@@ -320,7 +326,7 @@ void Client::resume_held() {
 //   callback <id> [low|normal|high] | callback-cancel <id> | callback-fulfil <id>
 //   remote-call <remote id> <target id> [auto|manual|force-auto] [silent] [priority=<namespace.value>]
 //   remote-group-call <remote id> <group id> [silent] [priority=<namespace.value>]
-//   transfer <target id> [announced|complete|cancel] | forward <target id>
+//   transfer <target id> [announced|complete|cancel] | forward <target id> [fa]
 void Client::private_service_command(const std::string &cmd) {
   // priority=<namespace.value>: the <ric-app-level-priority> of a remote request.
   std::string priority, kept, word;
@@ -394,16 +400,40 @@ void Client::private_service_command(const std::string &cmd) {
     info.call_to_functional_alias = false;
     send_service_message(private_peer_, info);
   } else if (verb == "forward") {
+    // TS 24.379 clause 11.1.9.2.1 step 1: <allow-call-fwd-manual-any> of the user profile.
     require_profile({"allow-call-fwd-manual-any"});
-    // TS 24.379 clause 11.1.9.2.1: forward a ringing incoming private call, then decline it with 175.
+    // NOTE 1: forward a ringing incoming private call (manual commencement mode), then decline it with 175.
     if (call_type_ != "private" || !pending_answer_ || private_peer_.empty())
       throw std::runtime_error("forward requires a ringing incoming private call");
-    info.call_to_functional_alias = false;
+    // Step 1A: "if the incoming SIP INVITE request contains a <forwarding-other-list> element with one or more
+    // <entry> elements should indicate to the requesting MCPTT user that the maximum number of allowed forwardings is
+    // exceeded and shall skip the rest of the steps".
+    if (!incoming_forwarding_others_.empty()) {
+      status_["last_forwarding_request"] = {{"target", first}, {"state", "refused"},
+                                            {"reason", "maximum number of forwardings exceeded"}};
+      event("private_call_forwarding_refused",
+            {{"target", first}, {"forwardings", incoming_forwarding_others_.size()}});
+      return;
+    }
+    // Step 2) d) i): B) <call-to-functional-alias-ind> "true" for a target functional alias ("forward <alias> fa"),
+    // D) <forwarded-by-functional-alias> the INVITE's <called-functional-alias-URI>, E) <forwarded-by-mcptt-id> the
+    // MCPTT ID of the INVITE's <mcptt-request-uri>, F) <forwarding-target-orig-id> the target.
+    info.call_to_functional_alias = second == "fa";
     info.service = {{"request-type", "forward-private-call-request"},
                     {"forwarding-reason", "manual-input"},
-                    {"forwarded-by-mcptt-id", user()},
+                    {"forwarded-by-mcptt-id", incoming_request_uri_.empty() ? user() : incoming_request_uri_},
                     {"forwarding-target-orig-id", first}};
+    if (const auto alias = status_.value("called_functional_alias", std::string{}); !alias.empty())
+      info.service["forwarded-by-functional-alias"] = alias;
+    status_["last_forwarding_request"] = {{"target", first}, {"state", "requested"}};
     send_service_message(private_peer_, info, [this](const SipResponse &response) {
+      // "Upon receipt of a SIP 4xx, 5xx or 6xx response [...] should indicate to the requesting MCPTT user the
+      // failure of the sent private call forwarding request".
+      if (response.status_code >= 400) {
+        status_["last_forwarding_request"]["state"] = "failed";
+        status_["last_forwarding_request"]["status"] = response.status_code;
+        event("private_call_forwarding_failed", {{"status", response.status_code}});
+      }
       if (response.status_code >= 300 || !pending_answer_ || dialog_.empty()) return;
       SipResponse declined;
       declined.status_code = 480;

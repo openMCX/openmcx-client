@@ -1005,6 +1005,8 @@ void Client::adopt_incoming_private(const SipMessage &message, const McpttInfo &
   update_private_priority(info); // an emergency private call is in progress (MEPP 2)
   status_["calling_functional_alias"] = info.functional_alias;
   status_["called_functional_alias"] = info.called_functional_alias;
+  incoming_request_uri_ = info.request_uri;
+  incoming_forwarding_others_ = info.forwarding_other_list;
   // TS 24.379 clause 11.1.5.2.3: a call from the user we asked to call back fulfils the request.
   if (pccb_requesting_.value(info.calling_user, "") == "PCCB-I3: confirmed") pccb_requesting_.erase(info.calling_user);
 }

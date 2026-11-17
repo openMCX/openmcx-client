@@ -398,6 +398,10 @@ class Client {
   // TS 24.380 clauses 6.2.4.3.8 and 6.2.4.3.9: the user asked the server to stop the unicast media (status
   // "media_flow" "stopped"), or to resume it ("flowing").
   bool media_flow_stopped_ = false;
+  // TS 24.379 clause 11.1.9.2.1: of the incoming private call this client may forward, the <mcptt-request-uri> (the
+  // <forwarded-by-mcptt-id>, step 2) d) i) E)) and the <forwarding-other-list> entries (step 1A).
+  std::string incoming_request_uri_;
+  std::vector<std::string> incoming_forwarding_others_;
   // TS 24.380 clause 6.2.4.5.8 step 1b: "an indication that the participant is overridden without revoke".
   bool floor_overridden_ = false;
   bool talking_ = false, requesting_ = false, registered_ = false, authorized_ = false, affiliated_ = false,

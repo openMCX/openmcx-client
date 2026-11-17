@@ -346,6 +346,8 @@ void Client::clear_call_state() {
     restore_group_key();
   }
   private_peer_.clear();
+  incoming_request_uri_.clear();
+  incoming_forwarding_others_.clear();
 
   // Cancelled before answering, or released as not selected: restore MEPP.
   if (saved_mepp_ && (fta_not_selected_ || status_.value("call_state", "") != "active")) {
