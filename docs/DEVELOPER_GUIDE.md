@@ -375,6 +375,9 @@ sequenceDiagram
   call's dialog, or, outside a call, a SIP MESSAGE that cancels the emergency state of an affiliated user; the
   Resource-Priority comes from the service configuration document (TS 24.379 clauses 10.1.1.2.1.3 to 10.1.1.2.1.5).
   The answer is handled in `priority_response`.
+- `emergency clear`: the user clears the MCPTT emergency state locally, without signalling (TS 24.379 annex G.1
+  "MCPTT user manually clears the state"); while it is set, an ad hoc group call the user places is an emergency one
+  (clause 17.2.2.1.1 step 15).
 - `alert on|off [<user>]` → `change_alert`: the emergency alert and its cancellation by an authorised user (TS 24.379
   clauses 12.1.1.1, 12.1.1.2).
 - In a private call, `emergency on alert` → `change_private_priority`, which moves MEPC, MEPP and MPEA (section 3).

@@ -109,6 +109,11 @@ void Client::run_command(const std::string &cmd) {
     words >> word >> originator;
     if (!word.empty() && word != "alert") throw std::runtime_error("usage: emergency cancel-other [alert [<user>]]");
     third_party_cancel(word == "alert", originator);
+  } else if (cmd == "emergency clear") {
+    // TS 24.379 annex G.1, state-clearing event "MCPTT user manually clears the state": no signalling; an outstanding
+    // emergency alert is cancelled with "alert off" / "adhoc-alert cancel", an emergency call by "emergency off".
+    emergency_state_ = false;
+    event("emergency_state_cleared", {{"by", "user"}});
   } else if (cmd == "emergency on" || cmd == "emergency off") {
     change_priority(true, cmd.ends_with("on"));
   } else if (cmd == "imminent on" || cmd == "imminent off") {
