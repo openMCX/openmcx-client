@@ -243,6 +243,15 @@ void test_floor_and_audio() {
               has_permission_floor_idle(true, false, dual) == HasPermissionIdle::EndOverriding,
           "6.2.4.5.7 1: overriding, with or without the G-bit: the overriding indication removed");
   }
+  {
+    // TS 24.380 6.2.4.5.4 4a.i / 5a.i and 6.2.4.5.3 1c: the G-bit of the Floor Release.
+    using mcx::client_rules::release_dual_floor;
+    check(release_dual_floor(std::uint16_t{0x8200}, false), "6.2.4.5.4 4a.i: a Floor Revoke with the G-bit");
+    check(!release_dual_floor(std::uint16_t{0x8000}, true), "6.2.4.5.4 5a.i: a Floor Revoke without the G-bit");
+    check(!release_dual_floor(std::uint16_t{0}, true), "6.2.4.5.4 5a.i: a Floor Revoke without a Floor Indicator");
+    check(release_dual_floor(std::nullopt, true), "6.2.4.5.3 1c: granted with the G-bit");
+    check(!release_dual_floor(std::nullopt, false), "6.2.4.5.3 1c: granted without the G-bit");
+  }
   check(floor_message_name(12) == "unknown", "an unassigned type");
   check(audio_overflow(100, 100, 16) == 0, "at the limit nothing is dropped");
   check(audio_overflow(116, 100, 16) == 0, "within a second past the limit nothing is dropped");

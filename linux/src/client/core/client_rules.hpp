@@ -306,6 +306,15 @@ inline std::string_view floor_message_name(std::uint8_t type) {
 inline constexpr std::uint16_t floor_indicator_dual_floor = 0x0200;
 
 //------------------------------------------------------------------------------
+// Whether the Floor Release of 'U: has permission' carries the G-bit (Dual floor) in its Floor Indicator. On a Floor
+// Revoke ([revoke_indicator] its Floor Indicator, 0 without one) TS 24.380 clause 6.2.4.5.4 steps 4a.i and 5a.i copy
+// the Floor Revoke's G-bit; on the user's release clause 6.2.4.5.3 step 1c sets it "if the Floor Granted message
+// included the G-bit" ([granted_dual]).
+inline bool release_dual_floor(std::optional<std::uint16_t> revoke_indicator, bool granted_dual) {
+  return revoke_indicator ? (*revoke_indicator & floor_indicator_dual_floor) != 0 : granted_dual;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.380 clause 6.2.4.5.7: what a Floor Idle does in 'U: has permission' ([indicator] its Floor Indicator, 0
 // without one). Item 1: with the indication that the participant is overriding without revoke stored, that indication
 // is removed (EndOverriding); item 2: with the G-bit set and the indication that it is overridden without revoke

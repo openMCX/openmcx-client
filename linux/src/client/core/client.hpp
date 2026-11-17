@@ -407,6 +407,9 @@ class Client {
   // TS 24.380 clause 6.2.4.4.2 step 4: "an indication that the participant is overriding without revoke", stored on a
   // Floor Granted with the G-bit; removed by clauses 6.2.4.5.3 step 2 and 6.2.4.5.7 step 1b.
   bool floor_overriding_ = false;
+  // TS 24.380 clause 6.2.4.5.3 step 1c: the Floor Granted included the G-bit (Dual floor); and whether the Floor
+  // Release being sent carries it (client_rules::release_dual_floor, read by floor_message).
+  bool granted_dual_ = false, release_dual_ = false;
   bool talking_ = false, requesting_ = false, registered_ = false, authorized_ = false, affiliated_ = false,
        desired_affiliation_ = true;
   bool emergency_ = false, imminent_ = false, priority_pending_ = false;
@@ -2733,7 +2736,7 @@ private:
   // The Floor Request, Floor Release or Floor Queue Position Request that send_floor() sends.
   FloorPacket floor_message(FloorType type) const;
 
-  void release();
+  void release(std::optional<std::uint16_t> revoke_indicator = std::nullopt);
   void has_permission_floor_idle(const FloorPacket &packet);
 
   void save_audio();

@@ -318,7 +318,7 @@ void Client::clear_call_state() {
   talking_ = requesting_ = false;
   mix_talkers(true);
   talkers_.clear();
-  media_flow_stopped_ = floor_overridden_ = floor_overriding_ = false;
+  media_flow_stopped_ = floor_overridden_ = floor_overriding_ = granted_dual_ = release_dual_ = false;
   if (status_.value("media_rendering", false)) {
     status_["media_rendering"] = false;
     event("media_rendering", {{"on", false}});
@@ -401,7 +401,9 @@ FloorPacket Client::floor_message(FloorType type) const {
   // The Floor Indicator is a field of Floor Request and Floor Release (tables 8.2.4-1, 8.2.7-1), not of Floor Queue
   // Position Request (table 8.2.11-1: SSRC, and Track Info with a non-controlling function only).
   if (type != FloorType::QueuePositionRequest)
-    packet.fields = {floor_indicator_field(floor_call_type_bits(broadcast_call, emergency_call, imminent_call))};
+    packet.fields = {floor_indicator_field(static_cast<std::uint16_t>(
+        floor_call_type_bits(broadcast_call, emergency_call, imminent_call) |
+        (type == FloorType::Release && release_dual_ ? client_rules::floor_indicator_dual_floor : 0)))};
   if (type == FloorType::Request) packet.fields.push_back(location_not_provided_field());
   if (type == FloorType::Request)
     packet.fields.push_back(priority_field(static_cast<std::uint8_t>(
@@ -412,9 +414,12 @@ FloorPacket Client::floor_message(FloorType type) const {
 
 //------------------------------------------------------------------------------
 // TS 24.380 clause 6.2.4.4.8 and clause 6.2.4.5.3: the user releases the PTT button: stop transmitting and send
-// Floor Release when the floor was held or requested.
-void Client::release() {
+// Floor Release when the floor was held or requested. Clause 6.2.4.5.4: on a Floor Revoke ([revoke_indicator] its
+// Floor Indicator) the same, the Floor Release with the Floor Revoke's G-bit (client_rules::release_dual_floor).
+void Client::release(std::optional<std::uint16_t> revoke_indicator) {
   const bool send_release = (talking_ || requesting_) && !no_floor();
+  release_dual_ = talking_ && client_rules::release_dual_floor(revoke_indicator, granted_dual_);
+  granted_dual_ = false;
   next_floor_priority_.reset();
   talking_ = requesting_ = false;
   floor_overridden_ = floor_overriding_ = false; // clause 6.2.4.5.3 steps 2 and 3
@@ -557,7 +562,7 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     requesting_ = false;
     floor_overridden_ = false;
     // TS 24.380 clause 6.2.4.4.2 step 4: the G-bit (Dual floor) stores the overriding without revoke indication.
-    floor_overriding_ = (indicator_of(packet) & client_rules::floor_indicator_dual_floor) != 0;
+    floor_overriding_ = granted_dual_ = (indicator_of(packet) & client_rules::floor_indicator_dual_floor) != 0;
     next_audio_ = monotonic_ms();
     floor_event("floor_granted", {{"overriding", floor_overriding_}});
   } else if (packet.type == FloorType::QueuePositionInfo) {
@@ -576,7 +581,7 @@ void Client::floor_message(FloorPacket packet, bool multicast) {
     status_["floor_denials"] = status_["floor_denials"].get<unsigned>() + 1;
     floor_event("floor_denied", {{"reject_cause", status_.value("last_floor_reject_cause", Json())}});
   } else if (packet.type == FloorType::Revoke) {
-    release();
+    release(indicator_of(packet));
     floor_event("floor_revoked");
   } else if (packet.type == FloorType::Idle) {
     // TS 24.380 clause 6.2.4.5.7: in 'U: has permission' a Floor Idle never ends the permission to send media (one
