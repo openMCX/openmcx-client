@@ -39,7 +39,7 @@ import javax.xml.parsers.SAXParserFactory
  * prefix (libxml2 only warns). An empty processing instruction is written "<?pi?>" (SAX does not tell "<?pi ?>").
  * The IS proxy's re-encryption (TS 33.180 clause 11.1.3) is a server function and not here.
  *
- * Specifications: TS 33.180 V19.5.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 24.282 V19.7.0 (Rel-19), TS 24.281
+ * Specifications: TS 33.180 V19.4.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 24.282 V19.7.0 (Rel-19), TS 24.281
  * V19.6.0 (Rel-19), RFC 4648, RFC 5288, RFC 2104, RFC 2392, RFC 3986, RFC 6839, RFC 7303, W3C XML Signature Syntax and
  * Processing (Second Edition) and Version 1.1, W3C Canonical XML 1.0 and 1.1, W3C Exclusive XML Canonicalization 1.0.
  */

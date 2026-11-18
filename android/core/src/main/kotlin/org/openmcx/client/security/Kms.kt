@@ -47,7 +47,7 @@ object KmsDocuments {
     /**
      * The NTP time of an xsd:dateTime (XML Schema Part 2 clause 3.2.7, the type of the Time, ValidFrom and ValidTo
      * elements of TS 33.180 annex D.3.5.1): "YYYY-MM-DDThh:mm:ss", optional fractional seconds (dropped), and the time
-     * zone "Z" or "+hh:mm"/"-hh:mm". A dateTime without a time zone is refused: it names no instant (clause 3.2.7.3), and
+     * zone "Z" or "+hh:mm"/"-hh:mm". A dateTime without a time zone is refused: it names no instant (XML Schema Part 2 clause 3.2.7.3), and
      * TS 33.180 does not say which zone it would be in. As the shared C++ core (key_documents.cpp timevalue).
      */
     internal fun time(text: String): Long {

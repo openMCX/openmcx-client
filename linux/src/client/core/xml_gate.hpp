@@ -6,8 +6,8 @@
 // whether a message's bodies fall under the confidentiality or integrity protection a service requires, and the
 // refusal to send such a message without the service's CSK or past its Expiry time.
 //
-// Specifications: TS 24.379 V19.8.0 (Rel-19), TS 24.281 V19.7.0 (Rel-19), TS 24.282 V19.8.0 (Rel-19),
-// TS 33.180 V19.5.0 (Rel-19).
+// Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.281 V19.6.0 (Rel-19), TS 24.282 V19.7.0 (Rel-19),
+// TS 33.180 V19.4.0 (Rel-19).
 
 #pragma once
 

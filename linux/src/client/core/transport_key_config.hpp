@@ -8,7 +8,7 @@
 // mcx::transport::load (mcx::transport::load_for). Checked here at start; the key management client reads them again
 // for each KMS exchange (signed requests and responses, TrK-wrapped key sets: mcx/key_documents.hpp).
 //
-// Specifications: TS 33.180 V19.5.0 (Rel-19) clauses 5.3.2, 5.3.3 and 5.11.1, annex F.1.4.
+// Specifications: TS 33.180 V19.4.0 (Rel-19) clauses 5.3.2, 5.3.3 and 5.11.1, annex F.1.4.
 #pragma once
 #include "mcx/transport_keys.hpp"
 

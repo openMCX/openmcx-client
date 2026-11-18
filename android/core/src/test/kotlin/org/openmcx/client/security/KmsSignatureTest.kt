@@ -17,7 +17,7 @@ import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
 /**
- * Verification and creation of the XML signature of a signed KMS message (TS 33.180 V19.5.0 annexes D.1, D.2.2, D.3.1
+ * Verification and creation of the XML signature of a signed KMS message (TS 33.180 V19.4.0 annexes D.1, D.2.2, D.3.1
  * and D.3.5.1; XMLDSig Second Edition clauses 3.2, 4.3.3 and 6), at parity with the shared C++ core: every case of the
  * server repository's tests/test_kms_xml_signature.cpp with the same inputs and the same accept/refuse outcome and
  * reason, then cases of this port. As there, the fixtures are written in canonical form by hand, so each digest and

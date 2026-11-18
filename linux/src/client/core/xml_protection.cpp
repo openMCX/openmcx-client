@@ -5,7 +5,7 @@
 // XML integrity and confidentiality protection of SIP bodies under the client-server key (CSK), MCPTT and MCVideo.
 //
 // Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.281 V19.6.0 (Rel-19), TS 24.282 V19.7.0 (Rel-19),
-// TS 33.180 V19.5.0 (Rel-19).
+// TS 33.180 V19.4.0 (Rel-19).
 
 #include "client.hpp"
 #include "xml_gate.hpp"
