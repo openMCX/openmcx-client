@@ -23,8 +23,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * send such a message without the service's CSK or past its Expiry time, and the subscriptions sent without XML
  * protection.
  *
- * Specifications: TS 24.379 V19.8.0 (Rel-19), TS 24.281 V19.7.0 (Rel-19), TS 24.282 V19.8.0 (Rel-19), TS 24.481,
- * TS 24.484, TS 33.180 V19.5.0 (Rel-19).
+ * Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.281 V19.6.0 (Rel-19), TS 24.282 V19.7.0 (Rel-19), TS 24.481,
+ * TS 24.484, TS 33.180 V19.4.0 (Rel-19).
  */
 object XmlGate {
     /**

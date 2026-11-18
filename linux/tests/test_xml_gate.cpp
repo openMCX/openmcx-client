@@ -7,7 +7,7 @@
 // CSK's Expiry time or once revoked (TS 33.180 annexes E.6.9 and E.6.10); a received request naming an XPK-ID the
 // receiver does not hold is refused with 139 or 140 (TS 24.379 clauses 6.6.3.4.2 and 6.6.2.4.2).
 //
-// Specifications: TS 24.379 V19.8.0 (Rel-19), TS 24.282 V19.8.0 (Rel-19), TS 33.180 V19.5.0 (Rel-19).
+// Specifications: TS 24.379 V19.7.0 (Rel-19), TS 24.282 V19.7.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).
 
 #include "xml_gate.hpp"
 

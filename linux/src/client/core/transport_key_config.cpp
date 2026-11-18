@@ -4,7 +4,7 @@
 
 // The pre-provisioned TrK and InK of each MC service user from the local configuration (transport_key_config.hpp).
 //
-// Specifications: TS 33.180 V19.5.0 (Rel-19) clauses 5.3.2 and 5.3.3.
+// Specifications: TS 33.180 V19.4.0 (Rel-19) clauses 5.3.2 and 5.3.3.
 #include "transport_key_config.hpp"
 
 #include <algorithm>
