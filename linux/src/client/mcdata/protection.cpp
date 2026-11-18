@@ -5,7 +5,7 @@
 // MCData payload, signalling and XML protection, MCData client side: PCK, GMK and CSK protected payloads, payload
 // authentication, XML confidentiality and XML integrity (member functions of Client).
 //
-// Specifications: TS 24.282 V19.7.0 (Rel-19), TS 33.180 V19.5.0 (Rel-19).
+// Specifications: TS 24.282 V19.7.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).
 
 #include "client.hpp"
 

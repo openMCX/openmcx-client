@@ -57,7 +57,7 @@ class UserTransportKeys(val trk: XpkKey?, val ink: XpkKey?) {
 
 /**
  * The keys derived from a TrK or InK and the AES key wrap of KMS key material, as the shared C++ core
- * (transport_keys.hpp) and the Linux client do them. Specifications: TS 33.180 V19.5.0 clauses 5.3.2, 9.3.3, 9.3.4.2,
+ * (transport_keys.hpp) and the Linux client do them. Specifications: TS 33.180 V19.4.0 clauses 5.3.2, 9.3.3, 9.3.4.2,
  * annexes D.3.3.2 and F.1.4; TS 33.220 annex B; RFC 3394.
  */
 object TransportKeys {

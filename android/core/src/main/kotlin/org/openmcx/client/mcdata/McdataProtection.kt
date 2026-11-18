@@ -31,7 +31,7 @@ interface PayloadKeys {
  * MCData payload protection, MCData client side: DATA PAYLOADs and files protected end to end under a PCK (one-to-one)
  * or the group's GMK, and payload authentication; a port of the Linux client (mcdata/protection.cpp).
  *
- * Specifications: TS 24.282 V19.7.0 (Rel-19), TS 33.180 V19.5.0 (Rel-19).
+ * Specifications: TS 24.282 V19.7.0 (Rel-19), TS 33.180 V19.4.0 (Rel-19).
  */
 class McdataProtection(
     private val config: ClientConfig.Mcdata,

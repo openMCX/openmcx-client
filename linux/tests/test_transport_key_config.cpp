@@ -6,7 +6,7 @@
 // (src/client/core/transport_key_config.hpp): each identity gets its own entry only, the InK before the TrK for
 // integrity, the TrK alone when no InK is present, nothing without an entry.
 //
-// Specifications: TS 33.180 V19.5.0 (Rel-19) clauses 5.3.2 and 5.3.3, annexes D.2.2 and D.3.1.
+// Specifications: TS 33.180 V19.4.0 (Rel-19) clauses 5.3.2 and 5.3.3, annexes D.2.2 and D.3.1.
 
 #include "transport_key_config.hpp"
 

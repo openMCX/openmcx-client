@@ -6,7 +6,8 @@ to add or fix a procedure. It describes the code as it is; what each client supp
 [Linux client feature list](../linux/docs/FEATURES.md), the [dispatcher README](../dispatcher/README.md) and the
 [Android README](../android/README.md).
 
-Specification versions are those the source file headers cite: TS 24.379 V19.7.0, TS 24.380 V19.2.0, TS 24.282
+Specification versions are those of the single source of truth, openMCX/ssot-specs (branch `v19`), which the source
+file headers cite: TS 24.379 V19.7.0, TS 24.380 V19.2.0, TS 24.282
 V19.7.0, TS 24.582 V19.0.0, TS 24.281 V19.6.0, TS 24.581 V19.2.0, TS 26.281 V19.0.0, TS 33.180 V19.4.0, TS 24.481
 V19.3.0, TS 24.482 V19.1.0, TS 24.484 V19.6.0, TS 24.545 V19.4.0 and TS 23.379 V19.11.0, all Release 19.
 
