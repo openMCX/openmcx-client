@@ -5,8 +5,8 @@
 // The client's subscription to its own registration state, the reg event package (RFC 3680, RFC 6665; TS 24.229
 // clause 5.1.1.3, which TS 24.379, TS 24.281 and TS 24.282 clause 5.2 apply to the MC client as a SIP UA): subscribed
 // after the 200 (OK) to the initial registration, refreshed, cancelled with the de-registration, and its NOTIFYs acted
-// on: a shortened registration is renewed in time (clause 5.1.1.5A, the network-initiated re-authentication) and a
-// deregistration by the network ends the registration (clause 5.1.1.7).
+// on: a shortened registration is renewed in time (TS 24.229 clause 5.1.1.5A, the network-initiated re-authentication) and a
+// deregistration by the network ends the registration (TS 24.229 clause 5.1.1.7).
 //
 // Specifications: TS 24.229 V19.7.0 (Rel-19); RFC 3680; RFC 6665.
 
