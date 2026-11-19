@@ -110,6 +110,19 @@ the published specifications and not re-checked against a local copy; they are m
   - MCData on the media plane (MSRP), file distribution and data streaming
   - end-to-end media and floor protection (TS 33.180 keys)
   - off-network operation
+  - **P-Access-Network-Info (planned).** The client never sends the header. TS 24.229 §5.1.2A.1.1 requires it "if
+    available to the UE" in every request and response except CANCEL (optional in ACK). On a 3GPP access, annexes L
+    (EPS) and U (5GS) say the UE "shall always include" it. The plan:
+    - **When:** the default network is cellular. `NetworkStatus` already tracks the transport through
+      `NetworkCapabilities`.
+    - **Value:** built from the serving cell, `TelephonyManager.getAllCellInfo()`, which needs location permission. It
+      is encoded per TS 24.229 §7.2A.4:
+      - `CellIdentityLte` gives `3GPP-E-UTRAN-FDD|TDD; utran-cell-id-3gpp=<MCC><MNC><TAC 4 hex><ECI 7 hex>`;
+      - `CellIdentityNr` gives `3GPP-NR-FDD|TDD; utran-cell-id-3gpp=<MCC><MNC><TAC 6 hex><NCI 9 hex>`.
+    - **Updates:** refreshed when the cell changes (NOTE 13).
+    - **Otherwise:** on Wi-Fi without EPC/5GC access, a VPN or plain IP, the header is left out, since no annex
+      defines a value there.
+    - **Linux:** the Linux client only has a fixed value from its configuration (`sip.access_network_info`).
 - **Plan changes:**
   - The interactive login follows RFC 8252 directly (Custom Tab and loopback redirect), not through the AppAuth library.
     The core already had the OIDC logic, so the library would have added nothing.
