@@ -392,8 +392,8 @@ FloorPacket Client::floor_message(FloorType type) const {
   packet.ssrc = floor_ssrc_to_send();
   packet.ack_required = type == FloorType::Release && cfg_.at("mcptt").value("floor_ack", true);
 
-  // TS 24.380 clause 8.2.3.15: the call type of this call, including an emergency
-  // private call (MEPP 2) and an emergency or imminent-peril ad hoc call.
+  // TS 24.380 clause 8.2.3.15: the call type of this call, including an emergency private call (MEPP 2) and an
+  // emergency or imminent-peril ad hoc call, with bit F when the call negotiated queueing.
   const bool emergency_call = call_type_ == "private" || call_type_ == "ambient" ? mepp_ == 2
                               : call_type_ == "adhoc"                            ? adhoc_priority_ == "emergency"
                                                                                  : emergency_;
@@ -407,6 +407,7 @@ FloorPacket Client::floor_message(FloorType type) const {
   if (type != FloorType::QueuePositionRequest)
     packet.fields = {floor_indicator_field(static_cast<std::uint16_t>(
         floor_call_type_bits(broadcast_call, emergency_call, imminent_call) |
+        client_rules::floor_queueing_bit(local_.queueing, remote_->queueing) |
         (type == FloorType::Release && release_dual_ ? client_rules::floor_indicator_dual_floor : 0)))};
   if (type == FloorType::Request) packet.fields.push_back(location_not_provided_field());
   if (type == FloorType::Request)

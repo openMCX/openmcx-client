@@ -919,7 +919,9 @@ void Client::mcvideo_private_call(const std::string &target, std::string mode, b
   else if (mode == "manual")
     headers.push_back({"Answer-Mode", "Manual"});
   else if (mode == "force-auto")
-    headers.push_back({"Priv-Answer-Mode", "Auto"});
+    // TS 24.281 clause 10.2.2.2.1 11a) asks for the value "Auto"; the "require" parameter (RFC 5373 section 7) is
+    // what TS 37.579-6 table 6.2.5.3.3-1 expects.
+    headers.push_back({"Priv-Answer-Mode", "Auto;require"});
   else
     throw std::runtime_error("private call mode must be auto, manual or force-auto");
   mcvideo_call_ = new_mcvideo_call();
