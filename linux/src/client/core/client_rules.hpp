@@ -306,6 +306,17 @@ inline std::string_view floor_message_name(std::uint8_t type) {
 inline constexpr std::uint16_t floor_indicator_dual_floor = 0x0200;
 
 //------------------------------------------------------------------------------
+// TS 24.380 table 8.2.3.15-2: bit F (Queueing supported) of the Floor Indicator, set with the call type bit when the
+// call negotiated queueing of floor requests (clause 14: "mc_queueing" in the offer and the answer). Clause 8.2.3.15
+// allows it next to the call type ("more than one bit set ... if the call supports ... Queueing supported"), clause
+// 14.6.2 NOTE has the participants acknowledge queueing in the Floor Indicator, and TS 37.579-1 tables 5.5.6.2-1 and
+// 5.5.6.5-1 expect it in the Floor Request and the Floor Release.
+inline constexpr std::uint16_t floor_indicator_queueing = 0x0400;
+inline constexpr std::uint16_t floor_queueing_bit(bool offered, bool answered) {
+  return offered && answered ? floor_indicator_queueing : std::uint16_t{0};
+}
+
+//------------------------------------------------------------------------------
 // Whether the Floor Release of 'U: has permission' carries the G-bit (Dual floor) in its Floor Indicator. On a Floor
 // Revoke ([revoke_indicator] its Floor Indicator, 0 without one) TS 24.380 clause 6.2.4.5.4 steps 4a.i and 5a.i copy
 // the Floor Revoke's G-bit; on the user's release clause 6.2.4.5.3 step 1c sets it "if the Floor Granted message

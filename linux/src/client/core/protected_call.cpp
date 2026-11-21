@@ -142,7 +142,10 @@ void Client::subscribe_keys() {
     const auto previous = std::exchange(key_subscription_, std::string{});
     try {
       sip_.request_in_dialog(previous, "SUBSCRIBE", "", "",
-                             {{"Event", "xcap-diff"}, {"Expires", "0"}, {"P-Preferred-Service", mcptt_icsi}});
+                             {{"Event", "xcap-diff"},
+                              {"Accept", "application/xcap-diff+xml"},
+                              {"Expires", "0"},
+                              {"P-Preferred-Service", mcptt_icsi}});
     } catch (const std::exception &error) {
       event("group_key_subscription_end_failed", {{"reason", error.what()}});
     }
@@ -159,7 +162,8 @@ void Client::subscribe_keys() {
   const auto boundary = "mcx-" + random_id();
   // TS 24.481 clause 6.3.13.2.1 step e: the ICSI in P-Preferred-Service.
   key_subscription_ = sip_.subscribe(
-      gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
+      gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(),
+      {{"P-Preferred-Service", mcptt_icsi}, {"Accept", "application/xcap-diff+xml"}},
       [this](const SipResponse &response) {
         if (response.status_code < 200) return;
         if (response.status_code >= 300) {
@@ -283,7 +287,10 @@ void Client::update_key_subscriptions() {
     extra_key_refresh_at_.erase(it->second);
     try {
       sip_.request_in_dialog(it->second, "SUBSCRIBE", "", "",
-                             {{"Event", "xcap-diff"}, {"Expires", "0"}, {"P-Preferred-Service", mcptt_icsi}});
+                             {{"Event", "xcap-diff"},
+                              {"Accept", "application/xcap-diff+xml"},
+                              {"Expires", "0"},
+                              {"P-Preferred-Service", mcptt_icsi}});
     } catch (const std::exception &error) {
       event("group_key_subscription_end_failed", {{"group_id", it->first}, {"reason", error.what()}});
     }
@@ -299,7 +306,8 @@ void Client::update_key_subscriptions() {
     parts.push_back({"application/resource-lists+xml", keying::gktp_resource_list(key_group)});
     const auto boundary = "mcx-" + random_id();
     const auto dialog = sip_.subscribe(
-        gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
+        gms_subscription_psi(), "xcap-diff", key_subscription_expires_s(),
+        {{"P-Preferred-Service", mcptt_icsi}, {"Accept", "application/xcap-diff+xml"}},
         [this, key_group](const SipResponse &response) {
           if (response.status_code < 200) return;
           const auto found = extra_key_subscriptions_.find(key_group);
@@ -339,7 +347,9 @@ void Client::refresh_extra_key_subscription(const std::string &dialog) {
   };
   try {
     sip_.request_in_dialog(dialog, "SUBSCRIBE", "application/resource-lists+xml", keying::gktp_resource_list(key_group),
-                           {{"Event", "xcap-diff"}, {"Expires", std::to_string(key_subscription_expires_s())}},
+                           {{"Event", "xcap-diff"},
+                            {"Accept", "application/xcap-diff+xml"},
+                            {"Expires", std::to_string(key_subscription_expires_s())}},
                            [this, dialog, resubscribe](const SipResponse &response) {
                              if (response.status_code < 200 || !extra_key_refresh_at_.contains(dialog)) return;
                              if (response.status_code >= 300) {
@@ -389,7 +399,7 @@ void Client::refresh_key_subscription(bool mcvideo) {
       schedule([this] { subscribe_keys(); });
     }
   };
-  const std::vector<SipHeader> headers{{"Event", "xcap-diff"},
+  const std::vector<SipHeader> headers{{"Event", "xcap-diff"}, {"Accept", "application/xcap-diff+xml"},
                                        {"Expires", std::to_string(key_subscription_expires_s())}};
   try {
     sip_.request_in_dialog(

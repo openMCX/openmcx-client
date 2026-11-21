@@ -110,6 +110,60 @@ the published specifications and not re-checked against a local copy; they are m
   - MCData on the media plane (MSRP), file distribution and data streaming
   - end-to-end media and floor protection (TS 33.180 keys)
   - off-network operation
+  - **P-Access-Network-Info (planned).** The client never sends the header. TS 24.229 §5.1.2A.1.1 requires it "if
+    available to the UE" in every request and response except CANCEL (optional in ACK). On a 3GPP access, annexes L
+    (EPS) and U (5GS) say the UE "shall always include" it. The plan:
+    - **When:** the default network is cellular. `NetworkStatus` already tracks the transport through
+      `NetworkCapabilities`.
+    - **Value:** built from the serving cell, `TelephonyManager.getAllCellInfo()`, which needs location permission. It
+      is encoded per TS 24.229 §7.2A.4:
+      - `CellIdentityLte` gives `3GPP-E-UTRAN-FDD|TDD; utran-cell-id-3gpp=<MCC><MNC><TAC 4 hex><ECI 7 hex>`;
+      - `CellIdentityNr` gives `3GPP-NR-FDD|TDD; utran-cell-id-3gpp=<MCC><MNC><TAC 6 hex><NCI 9 hex>`.
+    - **Updates:** refreshed when the cell changes (NOTE 13).
+    - **Otherwise:** on Wi-Fi without EPC/5GC access, a VPN or plain IP, the header is left out, since no annex
+      defines a value there.
+    - **Linux:** the Linux client only has a fixed value from its configuration (`sip.access_network_info`).
+- **To fix:**
+  - **Answer-Mode / Priv-Answer-Mode with parameters on an incoming call.** The commencement check compares the whole
+    header value with `"Auto"` / `"Manual"` (`McpttService.kt` and `McvideoService.kt`, the `manual` decision on an
+    incoming INVITE). So `Priv-Answer-Mode: Auto;require` is not recognised, and a forced private call rings instead of
+    being answered automatically (TS 24.379 §11.1.1.2.1.2, TS 24.281 §6.2.3). RFC 5373 §2 makes the value the token
+    before any parameter. The fix is to compare that token only, as the Linux client's `answer_mode_value()` does.
+    Today the controlling server sends a plain `Auto` to the callee, but the Linux client now originates
+    `Auto;require` (TS 37.579-2/-6 table 6.2.5.3.3-1), and a server that passes the header on as received would hit
+    this.
+  - **"mc_granted" (floor granted in the SIP 200 (OK)).** The client never offers it, so the floor is only ever granted
+    by a Floor Granted message after the call is set up. TS 37.579-1 table 5.5.3.1.1-1 (INITIAL_SDP_OFFER) expects it,
+    so 6.1.2.7, 6.1.2.9 and the other implicit-request calls get a strict-verdict remark. TS 24.380 makes offering it
+    the client's choice (§14.2.4: "when it is acceptable"). Once it is offered, handling it is required. To do, as the
+    Linux client does when `mcptt.offer_granted` is set (default false):
+    - **Offer:** `mc_granted` only in the SDP offer of the initial INVITE that carries `mc_implicit_request` (§12.1.2.2
+      NOTE 2: it is not a floor request by itself); never in a re-INVITE or other subsequent offer (§14.5).
+    - **Answer:** `mc_granted` in the SIP 200 (OK) answer is the floor grant, handled as a Floor Granted (§6.2.4.4.2:
+      floor granted notification, 'U: has permission'), only when our offer had it; otherwise it is discarded. The
+      server may still send a Floor Granted message afterwards (NOTE to §14.2.4), which must not be treated as a
+      second grant.
+    - **MCVideo:** the same for TS 24.581 §14.2.4 / §14.5.
+  - **Accept on the document unsubscribe.** TS 37.579-1 table 5.5.2.14-1 (CONFIG, GROUPCONFIG) expects
+    `Accept: application/xcap-diff+xml` in every xcap-diff SUBSCRIBE, a re-SUBSCRIBE included. The Android client
+    sends it in the initial document SUBSCRIBE and in all group key (GKTP) SUBSCRIBEs. The SUBSCRIBE with Expires 0
+    that ends the CMS/GMS document subscriptions (`McxClient.kt`, the loop over `configSubscription` and
+    `groupDocSubscriptions`) has no Accept. Add `.add("Accept", DocumentSubscriptions.ACCEPT)` there, as the Linux
+    client now does for all its xcap-diff SUBSCRIBEs. RFC 6665 §7.2 makes Accept optional (the default for xcap-diff is
+    `application/xcap-diff+xml`, RFC 5875), so a missing Accept is a strict-verdict remark only, not a failure. The
+    MCVideo conference unsubscribe (`McvideoService.kt`, Event conference, Expires 0) also lacks Accept
+    (`ConferenceInfo.CONTENT_TYPE`).
+  - **Floor Indicator of the Floor Request and Floor Release.** `FloorParticipant.kt` sends both with the default
+    `FloorIndicator.NORMAL` (0x8000) whatever the call:
+    - **Call type (required):** TS 24.380 §6.2.4.3.5 1.b requires the Floor Request of a broadcast group call, system
+      call, emergency call or imminent peril call to carry the bit of that call type (B, C, D, E of table 8.2.3.15-2).
+      Pass the call's indicator to `FloorMessage.request` / `release` instead of the default.
+    - **Bit F, queueing (template):** when the call negotiated queueing (`mc_queueing` in the SDP offer and answer),
+      also set `FloorIndicator.QUEUEING` (0x0400). TS 37.579-1 tables 5.5.6.2-1 and 5.5.6.5-1 expect it when
+      pc_MCPTT_FloorRequestQueueing is true; TS 24.380 §8.2.3.15 allows it next to the call type, and the §14.6.2
+      NOTE has participants acknowledge queueing in the Floor Indicator. Without it a strict-verdict remark only. The
+      Linux client sets it (`client_rules::floor_queueing_bit`), as the OpenMCX server does in its own messages.
+    - Keep the G-bit (dual floor) on the Floor Release as now.
 - **Plan changes:**
   - The interactive login follows RFC 8252 directly (Custom Tab and loopback redirect), not through the AppAuth library.
     The core already had the OIDC logic, so the library would have added nothing.

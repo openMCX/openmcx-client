@@ -252,6 +252,13 @@ void test_floor_and_audio() {
     check(release_dual_floor(std::nullopt, true), "6.2.4.5.3 1c: granted with the G-bit");
     check(!release_dual_floor(std::nullopt, false), "6.2.4.5.3 1c: granted without the G-bit");
   }
+  {
+    using mcx::client_rules::floor_queueing_bit;
+    check(floor_queueing_bit(true, true) == 0x0400, "8.2.3.15 F: queueing negotiated");
+    check(floor_queueing_bit(true, false) == 0, "8.2.3.15 F: offered, not in the answer");
+    check(floor_queueing_bit(false, true) == 0, "8.2.3.15 F: not offered");
+    check((0x8000 | floor_queueing_bit(true, true)) == 0x8400, "normal call with queueing: A and F (1000010000000000)");
+  }
   check(floor_message_name(12) == "unknown", "an unassigned type");
   check(audio_overflow(100, 100, 16) == 0, "at the limit nothing is dropped");
   check(audio_overflow(116, 100, 16) == 0, "within a second past the limit nothing is dropped");

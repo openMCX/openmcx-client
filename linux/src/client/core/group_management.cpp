@@ -247,7 +247,8 @@ std::string Client::group_documents_subscribe(const std::vector<std::string> &ar
   // (RFC 6665 section 4.1.2.1), so it is not kept for a later re-SUBSCRIBE.
   auto created = std::make_shared<std::string>();
   const auto dialog = sip_.subscribe(
-      gms_subscription_psi(), "xcap-diff", group_documents_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
+      gms_subscription_psi(), "xcap-diff", group_documents_expires_s(),
+      {{"P-Preferred-Service", mcptt_icsi}, {"Accept", "application/xcap-diff+xml"}},
       [this, args, created](const SipResponse &response) {
         if (response.status_code < 200) return;
         status_["group_subscription_result"] = {{"groups", args}, {"status", response.status_code}};
@@ -290,7 +291,9 @@ void Client::group_documents_resubscribe(const std::vector<std::string> &args) {
     const auto dialog = entry.first;
     try {
       sip_.request_in_dialog(dialog, "SUBSCRIBE", resource_lists_mime, xcap_resource_list(entries),
-                             {{"Event", "xcap-diff"}, {"Expires", std::to_string(group_documents_expires_s())}},
+                             {{"Event", "xcap-diff"},
+                              {"Accept", "application/xcap-diff+xml"},
+                              {"Expires", std::to_string(group_documents_expires_s())}},
                              [this, dialog, args](const SipResponse &response) {
                                if (response.status_code < 200) return;
                                status_["group_subscription_result"] = {{"groups", args},
@@ -315,7 +318,9 @@ void Client::group_documents_unsubscribe() {
   for (const auto &entry : group_doc_subscriptions_) {
     const auto dialog = entry.first;
     try {
-      sip_.request_in_dialog(dialog, "SUBSCRIBE", {}, {}, {{"Event", "xcap-diff"}, {"Expires", "0"}},
+      sip_.request_in_dialog(dialog, "SUBSCRIBE", {}, {}, {{"Event", "xcap-diff"},
+                                                           {"Accept", "application/xcap-diff+xml"},
+                                                           {"Expires", "0"}},
                              [this, dialog](const SipResponse &response) {
                                if (response.status_code >= 300)
                                  schedule([this, dialog] { group_doc_subscriptions_.erase(dialog); });
@@ -427,7 +432,8 @@ void Client::subscribe_configuration() {
   parts.push_back({resource_lists_mime, xcap_resource_list(documents)});
   const auto boundary = "mcx-" + random_id();
   config_subscription_ = sip_.subscribe(
-      cms_subscription_psi(), "xcap-diff", configuration_documents_expires_s(), {{"P-Preferred-Service", mcptt_icsi}},
+      cms_subscription_psi(), "xcap-diff", configuration_documents_expires_s(),
+      {{"P-Preferred-Service", mcptt_icsi}, {"Accept", "application/xcap-diff+xml"}},
       [this](const SipResponse &response) {
         if (response.status_code < 200) return;
         status_["configuration"]["subscription_status"] = response.status_code;
@@ -456,7 +462,7 @@ void Client::refresh_configuration_subscription() {
   const auto id = config_subscription_;
   try {
     sip_.request_in_dialog(id, "SUBSCRIBE", {}, {},
-                           {{"Event", "xcap-diff"},
+                           {{"Event", "xcap-diff"}, {"Accept", "application/xcap-diff+xml"},
                             {"Expires", std::to_string(configuration_documents_expires_s())},
                             {"P-Preferred-Service", mcptt_icsi}},
                            [this, id](const SipResponse &response) {

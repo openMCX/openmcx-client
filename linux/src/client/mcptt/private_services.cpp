@@ -349,10 +349,16 @@ void Client::private_service_command(const std::string &cmd) {
     if (cancel && !pccb_requesting_.contains(first)) throw std::runtime_error("no call-back request to cancel");
     if (cancel)
       info.service = {{"request-type", "private-call-call-back-cancel-request"}};
-    else
+    else {
+      // TS 24.379 clause 11.1.5.2.1 a) iii): <time-of-request> in the form of clause F.1.3 19) f) i),
+      // "YYYY-MM-DDThh:mm:ss", which has no time zone designator. The time is UTC; F.1.3 does not say which time
+      // scale the form uses (openmcx-server docs/3GPP_CORRECTION_CANDIDATES.md P34).
+      auto time_of_request = utc_timestamp();
+      if (time_of_request.ends_with('Z')) time_of_request.pop_back();
       info.service = {{"request-type", "private-call-call-back-request"},
                       {"urgency-ind", second.empty() ? "normal" : second},
-                      {"time-of-request", utc_timestamp()}};
+                      {"time-of-request", time_of_request}};
+    }
     pccb_requesting_[first] = cancel ? "PCCB-I4: cancel-pending" : "PCCB-I2: confirm-pending";
     send_service_message(first, info, [this, first, cancel](const SipResponse &response) {
       if (response.status_code >= 300)
