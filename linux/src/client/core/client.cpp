@@ -934,10 +934,35 @@ void Client::provision_identity_keys() {
 }
 
 //------------------------------------------------------------------------------
-// Helper: one pass of the run loop: SIP events, the worker thread's results, due and scheduled tasks, control commands, floor and media packets,
+// openmcx-server prototype/resiprocate/PLAN.md phase 4: the sockets whose packets end the run loop's SIP wait: floor
+// control and audio, the live audio input, the MCVideo call, the multicast, MBMS and MCVideo multicast sockets, the
+// pre-established session's RTCP and the IP connectivity tunnel.
+std::vector<int> Client::wake_sockets() const {
+  std::vector<int> sockets{floor_.fd(), audio_.fd()};
+  const auto add = [&sockets](const std::unique_ptr<UdpSocket> &socket) {
+    if (socket) sockets.push_back(socket->fd());
+  };
+  add(live_);
+  if (mcvideo_call_) {
+    add(mcvideo_call_->audio);
+    add(mcvideo_call_->video);
+    add(mcvideo_call_->control);
+  }
+  add(multicast_socket_);
+  add(mcvideo_multicast_socket_);
+  for (const auto &[tmgi, bearer] : mbms_bearers_) add(bearer.socket);
+  if (pre_session_) add(pre_session_->rtcp);
+  add(ipcon_socket_);
+  if (live_video_fd_ >= 0) sockets.push_back(live_video_fd_);
+  return sockets;
+}
+
+//------------------------------------------------------------------------------
+// Helper: one pass of the run loop: SIP events (the wait ends early for a packet on a media socket, wake_sockets), the worker thread's results, due and scheduled tasks, control commands, floor and media packets,
 // the MCVideo media and the periodic tick.
 void Client::run_once() {
-  sip_.poll(std::chrono::milliseconds(5));
+  const auto sockets = wake_sockets();
+  sip_.poll(std::chrono::milliseconds(5), sockets);
   // The results of the worker thread (token grants) run as scheduled tasks.
   for (auto &task : handoff_.take()) pending_.push_back(std::move(task));
   for (auto due = timed_.begin(); due != timed_.end() && due->first <= monotonic_ms(); due = timed_.erase(due))

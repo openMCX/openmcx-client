@@ -377,6 +377,8 @@ class Client {
   MediaDescription local_;
   std::optional<MediaDescription> remote_;
   UdpSocket audio_, floor_;
+  // The sockets whose readability ends the run loop's SIP wait (client.cpp).
+  std::vector<int> wake_sockets() const;
   // Live audio for the dispatcher (media.live, mcptt/live_audio.cpp; off unless configured): "ptt live" transmits
   // 16 kHz 16-bit mono PCM that arrives on a local UDP port, and every received frame is sent as PCM to another
   // local port; the dispatcher's web service bridges both to the browser. Without media.live the client behaves as

@@ -8,14 +8,19 @@
 # /client and the needed openmcx-server files under /openmcx-server.
 
 ARG DEV_IMAGE=openmcx-dev:0.4
+# The SIP stack of openmcx-server's SIP engine (its MCX_SIP_STACK): pjsip, or resip on a development image with
+# reSIProcate (openmcx-server prototype/resiprocate/PLAN.md).
+ARG MCX_SIP_STACK=pjsip
 ARG RUNTIME_BASE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 
 #------------------------------------------------------------------------------
 # Build: the client and its test; a stripped copy for the runtime image.
 FROM ${DEV_IMAGE} AS build
+ARG MCX_SIP_STACK
 COPY openmcx-server /openmcx-server
 COPY client /client
 RUN cmake -S /client -B /build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DOPENMCX_SERVER_DIR=/openmcx-server \
+        -DMCX_SIP_STACK=${MCX_SIP_STACK} \
     && cmake --build /build --target mcx-client -j4 \
     && python3 /client/tests/test_binary.py /build/mcx-client \
     && strip --strip-debug -o /build/mcx-client.stripped /build/mcx-client
