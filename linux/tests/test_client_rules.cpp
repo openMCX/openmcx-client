@@ -588,6 +588,21 @@ void test_reg_event_rules() {
   check(!own_reg_contact("sip:client-c@client-d:5060", "new-call", self, "new-call"),
         "another address is not this client's whatever its callid");
 
+  // RFC 3680 section 5.1: the binding's state from before the current REGISTER under the same Call-ID (BR-04: the
+  // first NOTIFY after log-on still lists the binding the log-off removed, cseq 2, the registration's CSeq being 6).
+  using mcx::client_rules::stale_reg_contact;
+  check(stale_reg_contact("call", 2, "call", 6), "a lower cseq under the same Call-ID is stale");
+  check(!stale_reg_contact("call", 6, "call", 6), "the current registration's cseq is not stale");
+  check(!stale_reg_contact("call", 7, "call", 6), "a later cseq (a network deregistration) is not stale");
+  check(!stale_reg_contact("other", 2, "call", 6), "CSeq numbers of another Call-ID do not compare");
+  check(!stale_reg_contact("", 2, "call", 6), "without callid the cseq does not compare");
+  check(!stale_reg_contact("call", std::nullopt, "call", 6), "without cseq nothing is stale");
+  check(!stale_reg_contact("call", 2, "call", 0), "before a registration's CSeq is known nothing is stale");
+  using mcx::client_rules::cseq_number;
+  check(cseq_number("6 REGISTER") == 6 && cseq_number(" 28845 REGISTER") == 28845, "CSeq sequence number");
+  check(cseq_number("") == 0 && cseq_number("REGISTER") == 0 && cseq_number("12x REGISTER") == 0,
+        "no sequence number in a malformed CSeq");
+
   // RFC 6665 section 4.1.3: a reg NOTIFY on a dialog other than the current subscription's is answered 481.
   using mcx::client_rules::classify_reg_notify;
   using mcx::client_rules::RegNotify;

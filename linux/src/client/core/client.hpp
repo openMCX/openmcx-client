@@ -1776,6 +1776,9 @@ private:
   // The Call-ID of this client's current registration (its REGISTER's, from the 200 (OK)): a reginfo <contact> with
   // another callid (RFC 3680 section 5.1) is not "belonging to this UE" (TS 24.229 clause 5.1.1.7).
   std::string registration_call_id_;
+  // The CSeq of that REGISTER: a reginfo <contact> of this client's binding with a lower cseq describes an earlier
+  // registration of it (client_rules::stale_reg_contact).
+  std::uint64_t registration_cseq_ = 0;
   // Emergency alerts (TS 24.281 clause 11.2): this user's, and those received by origin.
   bool mcvideo_alerting_ = false;
   Json mcvideo_alerts_ = Json::object(), mcvideo_alert_result_;

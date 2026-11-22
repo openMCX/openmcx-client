@@ -227,6 +227,11 @@ void Client::reg_event_document(const RegInfo &info) {
     if (registration.aor != sip_identity()) continue;
     for (const auto &contact : registration.contacts) {
       if (!client_rules::own_reg_contact(contact.uri, contact.callid, own, registration_call_id_)) continue;
+      if (client_rules::stale_reg_contact(contact.callid, contact.cseq, registration_call_id_, registration_cseq_)) {
+        event("reg_contact_stale", {{"cseq", *contact.cseq}, {"registration_cseq", registration_cseq_},
+                                    {"state", contact.state}, {"contact_event", contact.event}});
+        continue;
+      }
       if (registration.state == "active" && contact.state == "active" && contact.event == "shortened" &&
           contact.expires) {
         const auto delay = client_rules::refresh_delay_s(registration_duration_s_, *contact.expires);

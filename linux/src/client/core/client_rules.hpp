@@ -708,6 +708,31 @@ inline bool own_reg_contact(std::string_view contact_uri, std::string_view conta
 }
 
 //------------------------------------------------------------------------------
+// RFC 3680 section 5.1: a reginfo <contact> of this client's own binding (own_reg_contact) that describes an earlier
+// registration of it: its cseq, "the last CSeq value used to register this contact", is below the CSeq of the REGISTER
+// whose 200 (OK) this client last received, with the same Call-ID (CSeq numbers compare only within one Call-ID, RFC
+// 3261 section 8.1.1.5). A registrar whose reg event state lags the REGISTER it has just accepted (the binding a
+// log-off removed, still "terminated" in the first NOTIFY of the subscription after the log-on's REGISTER under the
+// same Call-ID, RFC 3261 section 10.2) says nothing of the current registration (TS 24.229 clause 5.1.1.7 acts on the
+// state of the binding the UE registered); a network deregistration of the current one carries its CSeq or a later.
+inline bool stale_reg_contact(std::string_view contact_callid, std::optional<std::uint64_t> contact_cseq,
+                              std::string_view registration_call_id, std::uint64_t registration_cseq) {
+  return contact_cseq && registration_cseq && !contact_callid.empty() && contact_callid == registration_call_id &&
+         *contact_cseq < registration_cseq;
+}
+
+//------------------------------------------------------------------------------
+// RFC 3261 section 20.16: the sequence number of a CSeq header field value ("4711 INVITE"); 0 when it has none.
+inline std::uint64_t cseq_number(std::string_view value) {
+  while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
+  std::uint64_t number = 0;
+  std::size_t digits = 0;
+  for (; digits < value.size() && digits < 10 && value[digits] >= '0' && value[digits] <= '9'; ++digits)
+    number = number * 10 + static_cast<std::uint64_t>(value[digits] - '0');
+  return digits && (digits == value.size() || value[digits] == ' ' || value[digits] == '\t') ? number : 0;
+}
+
+//------------------------------------------------------------------------------
 // RFC 6665 sections 4.1.3 and 8.2.1: what a received NOTIFY is to the reg event subscription (TS 24.229 clause
 // 5.1.1.3): not of the reg event package (the Event header field's event type, without parameters, is not "reg");
 // of this client's current subscription (its dialog, non-empty); or of a subscription the client does not know (a
