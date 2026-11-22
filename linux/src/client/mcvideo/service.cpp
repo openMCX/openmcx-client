@@ -88,7 +88,8 @@ void Client::mcvideo_subscribe_keys() {
   const auto boundary = "mcx-" + random_id();
   mcvideo_key_refresh_at_ = 0;
   mcvideo_key_subscription_ = sip_.subscribe(
-      mcvideo_service_uri(), "xcap-diff", key_subscription_expires_s(), {{"P-Preferred-Service", mcvideo_service.icsi}},
+      mcvideo_service_uri(), "xcap-diff", key_subscription_expires_s(),
+      {{"P-Preferred-Service", mcvideo_service.icsi}, {"Accept", "application/xcap-diff+xml"}},
       [this](const SipResponse &response) {
         if (response.status_code < 200) return;
         if (response.status_code >= 300) {
@@ -217,7 +218,10 @@ void Client::mcvideo_update_key_subscriptions() {
     mcvideo_extra_key_refresh_at_.erase(it->second);
     try {
       sip_.request_in_dialog(it->second, "SUBSCRIBE", "", "",
-                             {{"Event", "xcap-diff"}, {"Expires", "0"}, {"P-Preferred-Service", mcvideo_service.icsi}});
+                             {{"Event", "xcap-diff"},
+                              {"Accept", "application/xcap-diff+xml"},
+                              {"Expires", "0"},
+                              {"P-Preferred-Service", mcvideo_service.icsi}});
     } catch (const std::exception &error) {
       event("mcvideo_group_key_subscription_end_failed", {{"group_id", it->first}, {"reason", error.what()}});
     }
@@ -236,7 +240,7 @@ void Client::mcvideo_update_key_subscriptions() {
     const auto boundary = "mcx-" + random_id();
     const auto dialog = sip_.subscribe(
         mcvideo_service_uri(), "xcap-diff", key_subscription_expires_s(),
-        {{"P-Preferred-Service", mcvideo_service.icsi}},
+        {{"P-Preferred-Service", mcvideo_service.icsi}, {"Accept", "application/xcap-diff+xml"}},
         [this, key_group](const SipResponse &response) {
           if (response.status_code < 200) return;
           const auto found = mcvideo_extra_key_subscriptions_.find(key_group);
@@ -279,7 +283,9 @@ void Client::mcvideo_refresh_extra_key_subscription(const std::string &dialog) {
   };
   try {
     sip_.request_in_dialog(dialog, "SUBSCRIBE", "application/resource-lists+xml", keying::gktp_resource_list(key_group),
-                           {{"Event", "xcap-diff"}, {"Expires", std::to_string(key_subscription_expires_s())}},
+                           {{"Event", "xcap-diff"},
+                            {"Accept", "application/xcap-diff+xml"},
+                            {"Expires", std::to_string(key_subscription_expires_s())}},
                            [this, dialog, resubscribe](const SipResponse &response) {
                              if (response.status_code < 200 || !mcvideo_extra_key_refresh_at_.contains(dialog)) return;
                              if (response.status_code >= 300) {

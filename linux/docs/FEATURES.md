@@ -59,6 +59,8 @@ has it: the lab scenarios run each server feature through this client.
   answered with `affiliation-accept [<group>...]` or `affiliation-decline` (status `affiliation_command`)
 - Subscription to group dynamic data (`gdd-subscribe|resubscribe|unsubscribe <group>`, clause 9.2.1.6)
 - `<gw-mcptt-usage>` in the service authorisation when configured (`mcptt.via_gateway_ue`, clause 5.6)
+- `mc_granted` in the initial offer with an implicit floor request (TS 24.380 clause 14.2.4; `mcptt.offer_granted`,
+  default false): the floor granted in the SIP 200 (OK) is taken as a Floor Granted (clause 6.2.4.4.2)
 
 ### MCData (TS 24.282, TS 24.582)
 

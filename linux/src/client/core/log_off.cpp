@@ -75,7 +75,11 @@ void Client::end_service_subscriptions(bool send) {
       return dialog.clear();
     }
     sip_.request_in_dialog(dialog, "SUBSCRIBE", "", "",
-                           {{"Event", event_name}, {"Expires", "0"}, {"P-Preferred-Service", icsi}});
+                           {{"Event", event_name},
+                            {"Accept", event_name == "xcap-diff" ? "application/xcap-diff+xml"
+                                                                  : "application/pidf+xml"},
+                            {"Expires", "0"},
+                            {"P-Preferred-Service", icsi}});
     // RFC 6665 section 4.1.2.3: "a successful unsubscription will also trigger a final NOTIFY request".
     ending_subscriptions_.insert(dialog);
     dialog.clear();

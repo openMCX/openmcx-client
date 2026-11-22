@@ -68,13 +68,17 @@ void Client::private_call(const std::string &arguments, bool to_alias) {
   else if (mode == "manual")
     headers = {{"Answer-Mode", "Manual"}};
   else if (mode == "force-auto")
-    headers = {{"Priv-Answer-Mode", "Auto"}};
+    // TS 24.379 clause 11.1.1.2.1.1 14) a) asks for the value "Auto"; the "require" parameter (RFC 5373 section 7:
+    // the call fails rather than ring if the answer mode cannot be honoured) is what TS 37.579-2 table 6.2.5.3.3-1
+    // expects.
+    headers = {{"Priv-Answer-Mode", "Auto;require"}};
   else
     throw std::runtime_error("private call mode must be auto, manual or force-auto");
   // TS 24.379 clause 11.1.1.2.1.1 14A) a) (transfer) and 14C) a) (forwarding): "a Priv-Answer-Mode header field with
   // the same value as in the MCPTT call to be transferred" (or forwarded), in place of the mode above.
   if (auto priv = std::exchange(next_priv_answer_mode_, {}); !priv.empty()) headers = {{"Priv-Answer-Mode", priv}};
-  private_answer_mode_ = headers.front().value;
+  // The answer-mode-value only ("Auto;require" is "Auto"), as an incoming call stores it.
+  private_answer_mode_ = answer_mode_value(headers.front().value);
   // Set only once the request is accepted, so that a refused command leaves no override for the next call.
   if (!kms.empty()) {
     forwarded_kms_ = {target, kms};
