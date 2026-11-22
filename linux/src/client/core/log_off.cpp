@@ -76,7 +76,7 @@ void Client::end_service_subscriptions(bool send) {
     }
     sip_.request_in_dialog(dialog, "SUBSCRIBE", "", "",
                            {{"Event", event_name},
-                            {"Accept", event_name == "xcap-diff" ? "application/xcap-diff+xml"
+                            {"Accept", std::string_view(event_name) == "xcap-diff" ? "application/xcap-diff+xml"
                                                                   : "application/pidf+xml"},
                             {"Expires", "0"},
                             {"P-Preferred-Service", icsi}});
