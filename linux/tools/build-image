@@ -7,8 +7,7 @@
 #
 #   tools/build-image [-t openmcx-client:0.1] [--server ../../openmcx-server] [--build-arg NAME=VALUE...]
 #
-# --build-arg goes to docker build, for example --build-arg DEV_IMAGE=openmcx-dev:0.4-resip
-# --build-arg MCX_SIP_STACK=resip for the SIP engine on reSIProcate.
+# --build-arg goes to docker build, for example --build-arg DEV_IMAGE=openmcx-dev:0.5-ubuntu26.04.
 #
 # The legacy Docker builder takes one context, so the client sources and the
 # openmcx-server files the build needs (CMakeLists.txt, include, src, the lab

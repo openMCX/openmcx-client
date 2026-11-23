@@ -1729,7 +1729,7 @@ private:
   unsigned live_receive_dropped_ = 0;
   // The dialogs of MCVideo calls this client ended (mcvideo_end_call) before the SIP stack reported their end: they
   // stay the MCVideo service's until it does, so that a late state (the CONFIRMED of an answer refused in its media
-  // callback, which PJSIP reports before the ACK is sent) or media of theirs never reaches the MCPTT call.
+  // callback) or media of theirs never reaches the MCPTT call.
   std::set<std::string> mcvideo_closing_;
 
   // A state or the media of an MCVideo dialog in mcvideo_closing_ is consumed; its DISCONNECTED ends the entry.

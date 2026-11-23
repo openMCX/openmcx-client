@@ -137,7 +137,7 @@ Header rules (the step numbers are from §11.1.1.2.1.1):
   (`private_call.hpp:45-55`). If the header is omitted, the server skips the commencement authorisation and forwards
   nothing, and the callee applies its local setting.
 - **Session timer** (RFC 4028; §10.1.1.2.1.1 steps 8–9 give the same advice for group calls) is `Supported: timer` plus
-  `Session-Expires` without `refresher`. The value must be at least 90, the server's Min-SE (PJSIP default), or the
+  `Session-Expires` without `refresher`. The value must be at least 90, the server's Min-SE (the minimum of RFC 4028 section 5), or the
   server answers 422. Section 7 covers refresh.
 - **Resource-Priority** can be omitted for a normal call. The server accepts only `mcptt.0` there. `mcptt.15` is
   accepted only for an emergency request (`server.cpp:2769`).
@@ -701,13 +701,13 @@ before the server marks the leg active, the server drops it and T101 resends it.
 
 ## 7. Keeping a call up: session timers and server call timers
 
-**SIP session timer** (RFC 4028; the server uses PJSIP with `session_expires` 90 and Min-SE 90, `sip.cpp:1364`,
-`:1724-1732`):
+**SIP session timer** (RFC 4028; the lab configures the server's `sip.session_expires` as 90, its default is 1800,
+with Min-SE 90, openmcx-server `src/sip/dialogs.cpp`):
 
 | Leg | Negotiated | Client obligation |
 |---|---|---|
 | Originating (client is UAC) | Client offers `Session-Expires: 1800` without refresher. The server answers `1800;refresher=uac` with `Require: timer` | Refresh before half the interval (900 s) |
-| Terminating (server is UAC) | Server offers `Session-Expires: 90`, `Require: timer`. The client answers `90;refresher=uas` (§6.2.3.1.1 step 5) | **The client is the refresher every 45 s.** PJSIP BYEs a non-refreshed session at about SE − min(32, SE/3) = 60 s |
+| Terminating (server is UAC) | Server offers `Session-Expires: 90`, `Require: timer`. The client answers `90;refresher=uas` (§6.2.3.1.1 step 5) | **The client is the refresher every 45 s.** The server BYEs a non-refreshed session at SE − min(32, SE/3) = 60 s (RFC 4028 section 10) |
 
 **Refresh with UPDATE and no body.** Captured frames 656–660: `UPDATE <session URI>` with the Route from Record-Route,
 Contact with the feature tags, `Supported: timer` and `Session-Expires: 90;refresher=uac`. The server answers

@@ -7,20 +7,15 @@
 # plus curl and Python for the lab's health checks. Build with tools/build-image, which stages this repository under
 # /client and the needed openmcx-server files under /openmcx-server.
 
-ARG DEV_IMAGE=openmcx-dev:0.4
-# The SIP stack of openmcx-server's SIP engine (its MCX_SIP_STACK): pjsip, or resip on a development image with
-# reSIProcate (openmcx-server prototype/resiprocate/PLAN.md).
-ARG MCX_SIP_STACK=pjsip
+ARG DEV_IMAGE=openmcx-dev:0.5
 ARG RUNTIME_BASE=ubuntu:24.04@sha256:008173c23f95b170204355c12626cb5a965d779a7e1283b09e9cffbb1bf33ca3
 
 #------------------------------------------------------------------------------
 # Build: the client and its test; a stripped copy for the runtime image.
 FROM ${DEV_IMAGE} AS build
-ARG MCX_SIP_STACK
 COPY openmcx-server /openmcx-server
 COPY client /client
 RUN cmake -S /client -B /build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DOPENMCX_SERVER_DIR=/openmcx-server \
-        -DMCX_SIP_STACK=${MCX_SIP_STACK} \
     && cmake --build /build --target mcx-client -j4 \
     && python3 /client/tests/test_binary.py /build/mcx-client \
     && strip --strip-debug -o /build/mcx-client.stripped /build/mcx-client
@@ -40,6 +35,9 @@ COPY openmcx-server/dependencies/hostap/README /usr/share/doc/openmcx-client/hos
 # libsrtp's licence (BSD-3-Clause): the client links the development image's libsrtp, built with OpenMCX's patch
 # (openmcx-server dependencies/libsrtp), statically.
 COPY --from=build /usr/local/share/doc/libsrtp/LICENSE /usr/share/doc/openmcx-client/libsrtp-LICENSE
+# reSIProcate's licences (the Vovida Software License 1.0 and, for its bundled resolver, c-ares's): the client links
+# the development image's rutil, resip and dum statically (openmcx-server dependencies/resiprocate).
+COPY --from=build /opt/resiprocate/share/doc/resiprocate/LICENSE.md /usr/share/doc/openmcx-client/resiprocate-LICENSE.md
 LABEL org.opencontainers.image.licenses="AGPL-3.0-or-later" \
       org.opencontainers.image.source="https://github.com/openMCX/openmcx-client"
 WORKDIR /workspace
