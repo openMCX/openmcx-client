@@ -959,6 +959,23 @@ std::vector<int> Client::wake_sockets() const {
 }
 
 //------------------------------------------------------------------------------
+// Helper: the floor control packets waiting on the floor control socket (up to 32), ICE checks of a pre-established
+// session aside (RFC 7983).
+void Client::floor_poll() {
+  for (int index = 0; index < 32; index++) {
+    auto datagram = floor_.receive();
+    if (!datagram) break;
+    if (pre_session_stun(IceStream::Control, 1, *datagram)) continue;
+    try {
+      floor_packet(*datagram);
+    } catch (const std::exception &error) {
+      status_["floor_rejected_packets"] = status_.value("floor_rejected_packets", 0ULL) + 1;
+      event("floor_rejected", {{"reason", error.what()}});
+    }
+  }
+}
+
+//------------------------------------------------------------------------------
 // Helper: one pass of the run loop: SIP events (the wait ends early for a packet on a media socket, wake_sockets), the worker thread's results, due and scheduled tasks, control commands, floor and media packets,
 // the MCVideo media and the periodic tick.
 void Client::run_once() {
@@ -980,22 +997,15 @@ void Client::run_once() {
     } catch (const std::exception &error) {
       failure(error.what());
     }
-  for (int index = 0; index < 32; index++) {
-    auto datagram = floor_.receive();
-    if (!datagram) break;
-    if (pre_session_stun(IceStream::Control, 1, *datagram)) continue; // RFC 7983: ICE checks of the session
-    try {
-      floor_packet(*datagram);
-    } catch (const std::exception &error) {
-      status_["floor_rejected_packets"] = status_.value("floor_rejected_packets", 0ULL) + 1;
-      event("floor_rejected", {{"reason", error.what()}});
-    }
-  }
+  floor_poll();
   receive_live_audio();
   if (mcvideo_enabled()) receive_live_video();
   multicast_poll();
   mbms_poll();
   mcvideo_multicast_poll();
+  // Again before the speech: a Floor Taken that arrived while the subchannels were served (joining one sends a SIP
+  // request) names the SSRC of the speech behind it, which audio_packet would otherwise drop as unknown.
+  floor_poll();
   for (int index = 0; index < 32; index++) {
     auto datagram = audio_.receive();
     if (!datagram) break;

@@ -3032,6 +3032,8 @@ private:
   void provision_identity_keys();
   // One pass of the run loop.
   void run_once();
+  // The floor control packets waiting (run_once serves them twice a pass).
+  void floor_poll();
 
 public:
   // ---- Construction, start-up (core/client.cpp) ----
