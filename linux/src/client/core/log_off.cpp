@@ -103,6 +103,9 @@ void Client::end_service_subscriptions(bool send) {
   mcvideo_wanted_key_groups_.clear();
   mcvideo_left_selected_ = false;
   mcvideo_alias_area_inside_.clear();
+  mcptt_rule_area_inside_.clear();
+  area_left_groups_.clear();
+  rule_affiliated_groups_.clear();
   mcvideo_aliases_by_location_.clear();
   mcvideo_group_keys_.clear();
   mcvideo_key_wait_.reset();

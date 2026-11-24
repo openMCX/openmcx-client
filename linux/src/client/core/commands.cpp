@@ -288,10 +288,13 @@ void Client::run_command(const std::string &cmd) {
     hangup_command();
   } else if (cmd == "affiliate") {
     if (!authorized_) throw std::runtime_error("authorization required");
+    // TS 24.379 clause 9.2.1.7.3: not outside the group's permitted or mandatory geographic area.
+    if (!affiliation_allowed_here(group())) throw std::runtime_error("outside the group's geographic area");
     desired_affiliation_ = true;
     left_selected_ = false;
     affiliate();
   } else if (cmd == "deaffiliate") {
+    check_manual_deaffiliation({group()}); // TS 24.379 clause 9.2.1.2
     deaffiliate_command();
   } else if (cmd.starts_with("mbms ")) {
     mbms_command(cmd);
@@ -565,6 +568,7 @@ void Client::group_call_command(const std::string &cmd) {
 // TS 24.481 clause 7.2.4.2: keep <preconfigured-group-use-only> of a group document read (TS 24.379 clauses
 // 10.1.1.2.1.1, 10.1.2.2.1.1).
 void Client::note_group_document(const std::string &group, const std::string &document) {
+  note_group_areas(group, document); // TS 24.379 clause 9.2.1.7.3 (mcptt/location_rules.cpp)
   try {
     preconfigured_use_only_[group] = group_preconfigured_use_only(document);
   } catch (const std::exception &) {

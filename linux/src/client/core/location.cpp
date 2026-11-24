@@ -230,6 +230,7 @@ void Client::location_position_command(std::istringstream &in, std::uint64_t now
   mcdata_location_.position(point, now);
   mcvideo_location_.position(point, now);
   mcvideo_alias_location(point);
+  mcptt_location_rules(point);
   status_["location_position"] = {lat, lon};
 }
 
@@ -321,6 +322,7 @@ void Client::location_tick(std::uint64_t now) {
       mcdata_location_.position(point, now);
       mcvideo_location_.position(point, now);
       mcvideo_alias_location(point);
+      mcptt_location_rules(point);
     }
   }
   location_.set_emergency(location_emergency());
