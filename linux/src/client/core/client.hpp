@@ -911,7 +911,8 @@ class Client {
             {"service_routes", status->service_routes}};
   }
 
-  std::pair<std::string, std::string> publish_body(bool affiliation);
+  // withdraw: the affiliation PIDF of the PUBLISH removing the affiliation (Expires 0), with an empty <status>.
+  std::pair<std::string, std::string> publish_body(bool affiliation, bool withdraw = false);
   // TS 24.379 clauses 7.2.2 6) and 7.2.3 4): the poc-settings of this MCPTT client.
   std::string mcptt_poc_settings() const;
 
