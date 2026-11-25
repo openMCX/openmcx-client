@@ -141,6 +141,8 @@ class Call internal constructor(
     @Volatile var service: String? = null
     /** A ringing call declined with this status and warning (manual forwarding, §11.1.9.2.1: 480 with warning 175). */
     internal var declineWith: Pair<Int, String>? = null
+    /** Over the pre-established session (TS 24.379 §8): its media the session's, left by REFER "BYE" ([McpttPreSession]). */
+    @Volatile var preEstablished: Boolean = false
 }
 
 /**
@@ -175,16 +177,16 @@ interface CallListener {
  * session refresh by UPDATE (docs/android/wire/phase2-mcptt.md §7).
  */
 class McpttService(
-    private val client: McxClient,
+    internal val client: McxClient,
     private val codecs: SpeechCodecFactory,
     val audio: AudioDevices,
 ) : ServiceHandler {
-    private val config = client.config.mcptt!!
-    private val ua = client.ua
-    private val scope = client.scope
+    internal val config = client.config.mcptt!!
+    internal val ua = client.ua
+    internal val scope = client.scope
     private val lock = Mutex()
-    private val ids = AtomicInteger()
-    private val _calls = MutableStateFlow<List<Call>>(emptyList())
+    internal val ids = AtomicInteger()
+    internal val _calls = MutableStateFlow<List<Call>>(emptyList())
     val calls: StateFlow<List<Call>> = _calls
     /** Finished calls, newest last, for the status view. */
     val history: MutableList<Call> = CopyOnWriteArrayList()
@@ -208,6 +210,9 @@ class McpttService(
 
     /** Regroups and temporary groups (TS 24.379 §16, TS 24.481 §6.3.14): their notices and the requests for them. */
     val regroups = Regroups(client)
+
+    /** The pre-established session (TS 24.379 §8): calls go over it while it is usable (McpttPreSession.kt). */
+    val preSession = McpttPreSession(this)
 
     init {
         ua.onAck = { ack -> onAck(ack) }
@@ -335,10 +340,10 @@ class McpttService(
             groupKeys.active(group)
         } ?: throw CallError("no group key for $group yet")
 
-    private fun event(text: String) = client.event("mcptt: $text")
-    private fun changed(call: Call) { _calls.value = _calls.value.toList(); listener?.changed(call) }
+    internal fun event(text: String) = client.event("mcptt: $text")
+    internal fun changed(call: Call) { _calls.value = _calls.value.toList(); listener?.changed(call) }
 
-    private fun commonHeaders(request: SipRequest, initialInvite: Boolean = false) {
+    internal fun commonHeaders(request: SipRequest, initialInvite: Boolean = false) {
         request.headers.add("Contact", if (initialInvite) client.sessionContact(McService.MCPTT) else client.contactFor(McService.MCPTT))
             .add("Allow", ALLOW)
             .add("Supported", "timer")
@@ -347,7 +352,7 @@ class McpttService(
             .add("P-Preferred-Service", Icsi.MCPTT)
     }
 
-    private val protectedMedia get() = client.config.security?.protectMedia == true
+    internal val protectedMedia get() = client.config.security?.protectMedia == true
     private val protectedFloor get() = client.config.security?.protectFloor == true
 
     /**
@@ -377,7 +382,7 @@ class McpttService(
         return ports to LocalMedia(address, ports.audioPort, ports.floorPort, McpttSdp.newFloorSsrc(), queueing = client.mcpttFloorQueue)
     }
 
-    private fun newMedia(call: Call, ports: MediaPorts, local: LocalMedia) = MediaSession(scope, ports, local, codecs, audio,
+    internal fun newMedia(call: Call, ports: MediaPorts, local: LocalMedia) = MediaSession(scope, ports, local, codecs, audio,
         client.config.media.amrWbMode) { event("call ${call.id}: $it") }.also { media ->
         media.floorEvents = object : FloorListener {
             override fun granted(mediaSsrc: Long, durationSeconds: Int?) = floor(call, "granted ssrc=%08x %ss".format(mediaSsrc, durationSeconds))
@@ -399,7 +404,7 @@ class McpttService(
      * or private emergency call) or imminent peril, else normal; bit F when the call negotiated queueing.
      * Bit B for a broadcast group call (§6.2.8.2).
      */
-    private fun indicatorOf(call: Call, local: LocalMedia, remote: RemoteMedia): Int = ClientRules.floorIndicator(
+    internal fun indicatorOf(call: Call, local: LocalMedia, remote: RemoteMedia): Int = ClientRules.floorIndicator(
         broadcast = call.broadcast, emergency = call.priority == "emergency", imminent = call.priority == "imminent",
         queueing = local.queueing && remote.queueing)
 
@@ -576,7 +581,11 @@ class McpttService(
         }
         val protection = protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
         _calls.value = _calls.value + call
-        val (ports, bound) = bindMedia()
+        // TS 24.379 §10.1.1.2.2.1, §10.1.2.2.2.1, §11.1.1.2.2.1, §11.1.6.2.2.1: over the pre-established session when
+        // there is one to use (not an ad hoc call, a rejoin, a protected call or a call alongside another).
+        val overPre = preSession.usable && type != CallType.ADHOC && requestUriOverride == null && pck == null && gmk == null &&
+            !protectedMedia && extra?.alongside != true && !toAlias
+        val (ports, bound) = if (overPre) preSession.media() else bindMedia()
         // §11.1.2.2 steps 12-13: no media-floor control section; the speech SSRC is announced instead.
         val floored = if (floorControl) bound else bound.copy(floorControl = false, audioSsrc = McpttSdp.newFloorSsrc())
         // TS 24.380 §14.3.3: a group call offers the floor priority asked for ("mc_priority").
@@ -607,6 +616,7 @@ class McpttService(
         call.grantedOffered = grantedOffer
         val media = newMedia(call, ports, local)
         media.protection = protection
+        if (overPre) { media.keepPorts = true; media.externalFloor = true }
         pck?.let { event("call ${call.id}: PCK %08x for $peer".format(it.first.csbId)) }
         call.media = media
         try {
@@ -646,6 +656,15 @@ class McpttService(
                 associatedGroupId = associated, participantCriteria = criteria,
                 functionalAlias = presented, callToFunctionalAlias = if (toAlias) true else null, calledFunctionalAlias = calledAlias,
                 forwardingSequenceNumber = sequence), priority)
+            if (overPre) {
+                val referTargets = if (groupCall) listOfNotNull(group) else targets.ifEmpty { listOfNotNull(peer) }
+                val connect = preSession.originate(call, referTargets, info, offered, PreSessionEntries.headers(type, privAnswerMode, commencement),
+                    resource ?: extra?.resourcePriority)
+                extra?.outcome?.complete(true)
+                if (implicitRequest && call.ambientRole == null) call.implicitFloorRequest = "accepted"
+                preSession.startCall(call, connect, implicitOffered = implicitRequest, media = media)
+                return call
+            }
             val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(offered, call.origin).toByteArray()),
                 Part(McpttInfo.CONTENT_TYPE, info.encode().toByteArray()))
             if (targets.isNotEmpty()) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(targets).toByteArray())
@@ -766,6 +785,8 @@ class McpttService(
 
     override suspend fun handle(tx: ServerTransaction): Boolean {
         val request = tx.request
+        // TS 24.379 §8.3.1.2, §8.4.1.2, §10.1.1.2.2.2: the requests in the pre-established session's dialog.
+        if (preSession.handle(tx)) return true
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == GroupKeySubscriptions.EVENT) {
             val group = keySubscriptions.group(request.callId) ?: return false
             keyNotify(group, tx)
@@ -914,6 +935,8 @@ class McpttService(
             }
         }
         accept(call, tx, remote)
+        // RFC 3891 with TS 24.379 §6.3.2.2.5.3 step 1: a call replacing the pre-established session ends it once accepted.
+        if (call.state == "established") request.headers["Replaces"]?.let { preSession.replacedBy(it) }
     }
 
     private suspend fun accept(call: Call, tx: ServerTransaction, remote: RemoteMedia) {
@@ -979,7 +1002,7 @@ class McpttService(
         ?: if (priority != "normal") throw CallError("no Resource-Priority for $priority calls: the MCPTT service configuration document was not read") else null
 
     /** Follow the call state in a request from the server: its emergency and imminent peril indications. */
-    private fun notePriority(call: Call, info: McpttInfo, quiet: Boolean = false) {
+    internal fun notePriority(call: Call, info: McpttInfo, quiet: Boolean = false) {
         val next = when {
             info.emergency == true -> "emergency"
             info.imminentPeril == true -> "imminent"
@@ -1071,6 +1094,13 @@ class McpttService(
         call ?: throw CallError("no call")
         // §11.1.6.2.1.3 step 1: an ambient listening call is released only with the release capability (annex D.3).
         if (call.ambientType != null && !call.mayRelease && call.dialog != null) throw CallError("this ambient listening call may not be released here")
+        if (call.preEstablished) {
+            // TS 24.379 §6.2.4.2: a call over the pre-established session is left by REFER "BYE"; the session stays.
+            if (!call.outgoing && call.state == "ringing") { call.answered.complete(false); return }
+            call.media?.let { m -> if (m.isStarted && m.floor.state.value == FloorState.HAS_PERMISSION) m.floor.release() }
+            preSession.leave(call)
+            return
+        }
         val dialog = call.dialog
         if (call.type == CallType.ADHOC && dialog != null) lastAdhoc = call
         when {
@@ -1121,7 +1151,7 @@ class McpttService(
         call?.media?.floor?.release()
     }
 
-    private suspend fun release(call: Call, reason: String) = lock.withLock {
+    internal suspend fun release(call: Call, reason: String) = lock.withLock {
         if (call.state == "released") return@withLock
         call.state = "released"
         call.releaseReason = reason
@@ -1132,15 +1162,18 @@ class McpttService(
         while (history.size > 20) history.removeAt(0)
         event("call ${call.id}: $reason")
         listener?.changed(call)
+        if (call.preEstablished) preSession.free(call)
     }
 
     override suspend fun flowLost() {
+        preSession.flowLost()
         _calls.value.forEach { release(it, "connection lost") }
     }
 
     /** The user logs off: every call is left (BYE, or CANCEL while calling), as by hang-up. */
     override suspend fun logOff() {
         _calls.value.forEach { call -> runCatching { hangup(call) }.onFailure { release(call, "logged off") } }
+        preSession.logOff()
         endGroupKeySubscriptions()
     }
 

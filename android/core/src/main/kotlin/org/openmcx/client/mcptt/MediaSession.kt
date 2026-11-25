@@ -114,6 +114,16 @@ class MediaSession(
     val bursts: MutableList<TalkBurst> = CopyOnWriteArrayList()
     /** When the user last pressed PTT, for the access time (TS 22.179 KPI 1). */
     @Volatile var requestedAt: Long = 0
+    /**
+     * A call over a pre-established session (TS 24.379 §8, TS 24.380 §9.2.2): its ports are the session's and stay
+     * open when the call ends ([stop]); the session's call control messages ("MCPC") on the control channel go to
+     * the session's one reader of the control channel, which hands this call's floor control to [floorPacket]
+     * (TS 24.380 §4.1.2.1).
+     */
+    @Volatile var keepPorts = false
+    @Volatile var externalFloor = false
+    @Volatile private var stopped = false
+
     /** Listener for the call's own floor events (the UI and the service). */
     var floorEvents: FloorListener? = null
     /**
@@ -143,7 +153,7 @@ class MediaSession(
         }
         jobs += scope.launch(Dispatchers.IO) {
             if (implicit) floor.startImplicit(grantedSsrc) else floor.start()
-            receiveFloor()
+            if (!externalFloor) receiveFloor()
         }
     }
 
@@ -155,6 +165,14 @@ class MediaSession(
         kotlinx.coroutines.withContext(Dispatchers.IO) {
             ports.floor.send(DatagramPacket(data, data.size, InetSocketAddress(r.address, r.floorPort)))
         }
+    }
+
+    /** A floor control packet of this call, already opened, from the pre-established session's reader. */
+    suspend fun floorPacket(clear: ByteArray) {
+        if (stopped || !this::floor.isInitialized) return
+        val message = try { FloorMessage.decode(clear) } catch (e: FloorCodecError) { onEvent("floor: bad packet: ${e.message}"); return }
+        onEvent("floor ← $message")
+        floor.receive(message)
     }
 
     private suspend fun receiveFloor() {
@@ -178,7 +196,8 @@ class MediaSession(
         var burst: TalkBurst? = null
         while (scope.isActive) {
             val packet = DatagramPacket(buffer, buffer.size)
-            try { ports.audio.receive(packet) } catch (e: Exception) { return }
+            try { ports.audio.receive(packet) } catch (e: java.net.SocketTimeoutException) { if (stopped) return else continue } catch (e: Exception) { return }
+            if (stopped) return
             val received = protection?.let { it.unprotectRtp(buffer.copyOf(packet.length)) ?: continue }
             val rtp = (if (received != null) RtpPacket.parse(received, received.size) else RtpPacket.parse(buffer, packet.length)) ?: continue
             if (!duplex) {
@@ -314,13 +333,20 @@ class MediaSession(
     override fun queueTimeout() { cancelPrepared(); floorEvents?.queueTimeout() }
 
     suspend fun stop() {
+        stopped = true
         if (this::floor.isInitialized) floor.stop()
         cancelPrepared()
         talking?.cancelAndJoin()
         synchronized(encoderLock) { encoder?.close(); encoder = null }
         playout?.cancel()
         jobs.forEach { it.cancel() }
-        ports.close()
+        if (!keepPorts) ports.close()
+    }
+
+    /** TS 24.380 §8.3, §13.3.2 step 6: a pre-established session call control message on the call's control channel. */
+    suspend fun sendControl(data: ByteArray, address: String, port: Int) {
+        val out = protection?.let { it.protectControl(data) ?: return onEvent("MCPC not sent: no usable floor key") } ?: data
+        kotlinx.coroutines.withContext(Dispatchers.IO) { ports.floor.send(DatagramPacket(out, out.size, InetSocketAddress(address, port))) }
     }
 
     private fun hash(payload: ByteArray): String =

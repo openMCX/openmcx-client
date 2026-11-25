@@ -310,6 +310,9 @@ class SignallingProtection(
      */
     fun mcdataBodies(parts: List<Part>): List<Part> = mcdataOutgoing(parts)
 
+    /** The same for an MCPTT REFER's entry (TS 24.379 §6.6.2.1: the MCPTT-Info inside the hname "body" under the CSK). */
+    fun mcpttBodies(parts: List<Part>): List<Part> = protectOutgoing(McService.MCPTT, parts)
+
     /** TS 24.282 clause 6.6.1: the CSK protecting signalling with the MCData server, once it holds it. */
     fun signallingKey(): KeyMessage? =
         if (config.mcdata?.protectSignalling == true && cskHeld(McService.MCDATA)) csk(McService.MCDATA) else null

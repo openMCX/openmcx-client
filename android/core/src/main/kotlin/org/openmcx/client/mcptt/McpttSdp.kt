@@ -65,6 +65,8 @@ data class RemoteMedia(
     val grantedSsrc: Long? = null,
     /** The speech direction attribute (RFC 3264 §5.1); `sendrecv` without one. */
     val direction: String = "sendrecv",
+    /** "mc_no_floor_ctrl" (TS 24.380 §14.2.6): a call over a pre-established session without floor control. */
+    val noFloorControl: Boolean = false,
 )
 
 /**
@@ -143,7 +145,11 @@ object McpttSdp {
         origin = origin.next(local.address),
         connection = "IN IP4 ${local.address}",
         media = listOfNotNull(audio(local, offer.payloadType, offer.octetAligned),
-            if (offer.floorControl && local.floorControl) floor(local, offer.floorPriority, offer.queueing && local.queueing) else null),
+            // TS 24.380 §14.2.6, §14.3.7: an offer with "mc_no_floor_ctrl" (a call over a pre-established session
+            // without floor control) is answered with it and none of the floor control attributes.
+            if (offer.floorControl && local.floorControl && offer.noFloorControl) MediaDescription("application", local.floorPort, "udp",
+                listOf("MCPTT"), attributes = listOf("fmtp" to "MCPTT mc_no_floor_ctrl"))
+            else if (offer.floorControl && local.floorControl) floor(local, offer.floorPriority, offer.queueing && local.queueing) else null),
         // TS 24.379 §11.1.1.2.1.2 step 5: a first-to-answer invitee's answer carries the PCK it made.
         attributes = listOfNotNull(keyMgmt?.let { "key-mgmt" to "mikey $it" }),
     ).encode()
@@ -167,6 +173,7 @@ object McpttSdp {
             implicitRequest = floor != null && "mc_implicit_request" in floorParams,
             granted = floor != null && "mc_granted" in floorParams,
             grantedSsrc = floorParams["mc_ssrc"]?.toLongOrNull(),
+            noFloorControl = floor != null && "mc_no_floor_ctrl" in floorParams,
             direction = audio.direction,
             keyMgmt = (session.attributes.firstOrNull { it.first == "key-mgmt" }?.second ?: audio.attribute("key-mgmt"))
                 ?.trim()?.takeIf { it.startsWith("mikey ") }?.removePrefix("mikey ")?.trim())
