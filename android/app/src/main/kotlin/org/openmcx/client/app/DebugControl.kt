@@ -311,6 +311,28 @@ class DebugControl(private val context: Context) {
             Engine.deviceLocation?.override = point
             JSONObject().put("position", point?.let { JSONObject().put("lat", it.lat).put("lon", it.lon) })
         }
+        // Location rules (TS 24.379 §9A.2.1.4, §9.2.1.7; TS 24.282 §22.2.1.4, §8.2.6.2): what each service's rules hold.
+        "location-rules" -> locationRulesJson()
+        // affiliate|deaffiliate <group> [mcptt|mcdata|mcvideo]: the user's affiliation status change (§9.2.1.2,
+        // TS 24.282 §8.2.2), refused outside the group's geographic area (§9.2.1.7.3) or while a locking rule holds it.
+        "affiliate", "deaffiliate" -> {
+            val service = serviceOf(args.getOrNull(1))
+            Engine.client!!.locationRules.userAffiliation(service, args[0], cmd == "affiliate")
+            JSONObject().put("affiliations", JSONObject(affiliationsOf(service))).put("rules", locationRulesJson())
+        }
+        // seal start|stop|offline|online|status: the SEAL location management client (TS 24.545 §6.2.2, §6.2.20).
+        "seal" -> {
+            val seal = Engine.client!!.seal
+            when (args.firstOrNull() ?: "status") {
+                "start" -> seal.start()
+                "stop" -> seal.stop()
+                "offline" -> seal.offline()
+                "online" -> seal.online()
+                "status" -> {}
+                else -> throw IllegalArgumentException("usage: seal start|stop|offline|online|status")
+            }
+            sealJson()
+        }
         "video-alerts" -> JSONObject(mcvideo().alerts.value.mapValues { (_, a) ->
             JSONObject().put("group", a.group).put("latitude", a.location?.latitude).put("longitude", a.location?.longitude)
         })
@@ -491,8 +513,48 @@ class DebugControl(private val context: Context) {
         val client = Engine.client ?: throw IllegalStateException("not started")
         val action = args.firstOrNull() ?: throw IllegalArgumentException("usage: activate|takeover|deactivate <alias>... | use <alias>|none")
         if (action == "use") client.useAlias(args.getOrNull(1)?.takeIf { it != "none" }, service)
-        else client.aliasRequest(action, args.drop(1), service)
+        else {
+            // §9A.2.1.2 (TS 24.282 §22.2.1.2, TS 24.281 §20.2.1.2): not an alias a met location criterion holds and locks.
+            if (action == "deactivate") client.locationRules.checkUserDeactivation(service, args.drop(1))
+            client.aliasRequest(action, args.drop(1), service)
+        }
         return aliasJson(service)
+    }
+
+    private fun serviceOf(name: String?) = when (name ?: "mcptt") {
+        "mcptt" -> org.openmcx.client.body.McService.MCPTT
+        "mcdata" -> org.openmcx.client.body.McService.MCDATA
+        "mcvideo", "video" -> org.openmcx.client.body.McService.MCVIDEO
+        else -> throw IllegalArgumentException("service: mcptt, mcdata or mcvideo")
+    }
+
+    private fun affiliationsOf(service: org.openmcx.client.body.McService) = Engine.client!!.status.value.let {
+        when (service) {
+            org.openmcx.client.body.McService.MCPTT -> it.mcptt
+            org.openmcx.client.body.McService.MCDATA -> it.mcdata
+            org.openmcx.client.body.McService.MCVIDEO -> it.mcvideo
+        }.affiliations
+    }
+
+    private fun locationRulesJson(): JSONObject {
+        val rules = Engine.client?.locationRules ?: return JSONObject()
+        val out = JSONObject().put("position", rules.position?.let { JSONObject().put("lat", it.lat).put("lon", it.lon) } ?: JSONObject.NULL)
+        for ((service, v) in rules.state.value) out.put(service.name.lowercase(), JSONObject().put("loaded", v.loaded)
+            .put("functional_aliases", JSONArray(v.aliases)).put("affiliation_rules", v.rules).put("locked", JSONArray(v.locked.toList()))
+            .put("aliases_by_location", JSONArray(v.aliasesByLocation.toList())).put("rule_affiliated", JSONArray(v.ruleAffiliated.toList()))
+            .put("area_left", JSONArray(v.areaLeft.toList())).put("group_areas", JSONArray(v.groupAreas.toList()))
+            .put("notes", JSONArray(v.notes)).put("error", v.error ?: JSONObject.NULL)
+            .put("affiliations", JSONObject(affiliationsOf(service)))
+            .put("active_aliases", JSONArray(Engine.client!!.aliasesOf(service).value.active.toList())))
+        return out
+    }
+
+    private fun sealJson(): JSONObject {
+        val s = Engine.client?.seal?.state?.value ?: return JSONObject()
+        return JSONObject().put("started", s.started).put("offline", s.offline).put("periodic", s.periodic)
+            .put("minimum_interval", s.minimumInterval).put("reports_sent", s.reportsSent).put("stored", s.stored)
+            .put("stored_total", s.storedTotal).put("history_sent", s.historySent).put("last_status", s.lastStatus)
+            .put("report_uri", s.reportUri).put("last_error", s.lastError ?: JSONObject.NULL)
     }
 
     private fun aliasJson(service: org.openmcx.client.body.McService = org.openmcx.client.body.McService.MCPTT): JSONObject {
@@ -612,7 +674,7 @@ class DebugControl(private val context: Context) {
                     .put("adhoc", a.adhoc).put("criteria", a.criteria).put("lat", a.latitude).put("lon", a.longitude)
             }))
             .put("notices", JSONArray(Engine.alertHandlers.flatMap { h -> h.notices.map { n ->
-                JSONObject().put("service", n.service.lower).put("alert_area", n.alertArea).put("entered", n.entered).put("group", n.group).put("alerted", n.alerted)
+                JSONObject().put("service", n.service.lower).put("alert_area", n.alertArea).put("entered", n.entered).put("group", n.group).put("alerted", n.alerted).put("affiliation", n.affiliation).put("at", n.at)
             } }))
             .put("result", Engine.alertResult.value)
             .put("events", JSONArray(Engine.alertHandlers.flatMap { h -> h.events.toList() }))

@@ -31,7 +31,9 @@ import org.openmcx.client.location.Point
  * the cell it is registered on (TelephonyManager), coded as TS 24.379 Annex F.3 has them, fed to every [LocationClient].
  * Both need the location permission; until it is granted they are retried every ten seconds.
  */
-class DeviceLocation(private val context: Context, private val scope: CoroutineScope, private val clients: () -> List<LocationClient>) {
+class DeviceLocation(private val context: Context, private val scope: CoroutineScope, private val clients: () -> List<LocationClient>,
+                     /** Every position also goes here: the location rules (TS 24.379 §9A.2.1.4, §9.2.1.7). */
+                     private val onPosition: (Point) -> Unit = {}) {
     @Volatile var lastFix: Location? = null
         private set
     @Volatile var radio: Map<Dimension, String> = emptyMap()
@@ -43,7 +45,7 @@ class DeviceLocation(private val context: Context, private val scope: CoroutineS
         set(value) {
             field = value
             // Cleared: back to the phone's last fix.
-            (value ?: lastFix?.let(::point))?.let { p -> clients().forEach { it.position(p) } }
+            (value ?: lastFix?.let(::point))?.let { p -> clients().forEach { it.position(p) }; onPosition(p) }
         }
     private var job: Job? = null
     private var listening: LocationListener? = null
@@ -89,6 +91,7 @@ class DeviceLocation(private val context: Context, private val scope: CoroutineS
         if (override != null) return
         val point = point(fix)
         clients().forEach { it.position(point) }
+        onPosition(point)
     }
 
     private fun point(fix: Location) = Point.at(fix.latitude, fix.longitude, if (fix.hasAltitude()) fix.altitude.toInt() else null,

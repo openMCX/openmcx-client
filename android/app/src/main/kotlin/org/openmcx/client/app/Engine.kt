@@ -280,7 +280,7 @@ object Engine {
         }
         services.forEach { c.handlers.add(0, it); it.start() }
         locations = services
-        deviceLocation = org.openmcx.client.app.location.DeviceLocation(context.applicationContext, scope) { locations }.also { it.start() }
+        deviceLocation = org.openmcx.client.app.location.DeviceLocation(context.applicationContext, scope, { locations }) { p -> c.locationRules.position(p) }.also { it.start() }
         // Emergency alerts, ahead of the services too.
         val alertListener = object : org.openmcx.client.alert.AlertListener {
             override fun alert(alert: org.openmcx.client.alert.EmergencyAlert, active: Boolean) = alertsChanged()

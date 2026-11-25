@@ -10,6 +10,7 @@ redroid containers as the MC UEs, each running the Android client.
     lab/androidlab.py up a1                 # servers and Android containers, then install and provision
     lab/androidlab.py install a1            # reinstall the debug APK and reprovision every client
     lab/androidlab.py exec a1 client-a status
+    lab/androidlab.py mock-location a1 client-a 48.03 2.03   # a fused fix (Android's test provider), e.g. into an area
     lab/androidlab.py create --name p1 --phone client-a --phone-ip 192.0.2.23   # phone mode (docs/PHONE.md)
     lab/androidlab.py create --name fd1 --phones-only --fd-max-bytes 100000000 \
         --phone-device client-a:SERIAL:192.0.2.23 --phone-device client-b:SERIAL:192.0.2.24   # two phones, large files
@@ -115,6 +116,8 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
                                                 "jwks_uri") if key in oauth}},
         "cms": ref["endpoints"]["cms"],
         "gms": ref["endpoints"]["gms"],
+        # TS 24.545: the SEAL location management server, behind the HTTP proxy (the fixture's --location).
+        **({"lms": ref["endpoints"]["lms"]} if "lms" in ref["endpoints"] else {}),
         # TS 24.482 annex A.2.1.2: the home HTTP proxy of a forward-mode lab (--http-proxy-mode forward).
         **({"http": ref["http"]} if "proxy" in ref.get("http", {}) else {}),
         "mcptt": {"user_id": mcptt["user_id"], "psi": mcptt["service_uri"], "groups": [mcptt["group_id"]],
@@ -159,6 +162,50 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
         # TS 33.180: the KMS, the Key Parameters wire profile, and what is protected (the fixture's --protected).
         bundle["security"] = {k: security[k] for k in ("kms_uri", "kms_id", "gms_uri", "key_parameter_profile", "protect_media", "protect_floor") if k in security}
     return bundle
+
+
+def square(lat: float, lon: float, half: float) -> list:
+    """A square polygon of [latitude, longitude] corners, half degrees either side of its centre (as the fixture's)."""
+    return [[lat - half, lon - half], [lat - half, lon + half], [lat + half, lon + half], [lat + half, lon - half]]
+
+
+# The areas of --location-rules, away from the fixture's reporting zone (48.01 N 2.0 E), emergency alert area
+# (48.05 N 2.05 E) and group area (48.02 N 2.02 E); every client starts near 48.0 N 2.0 E.
+RULES_ALIAS_AREA = square(48.03, 1.97, 0.003)      # incident-commander activated inside, deactivated on leaving
+RULES_AFFILIATION_AREA = square(48.03, 2.03, 0.003)  # client-a leaves its group inside, affiliates again on leaving
+RULES_MANDATORY_AREA = square(48.02, 2.0, 0.06)      # the group's mandatory geographic area: all the areas above
+
+
+# The fixture's simulated client positions (prepare-prearranged-test.py add_location), given to redroid as fused fixes.
+HOME_POSITIONS = {role: (48.0, 2.0 + 0.01 * i) for i, role in enumerate(("client-a", "client-b", "client-c", "client-d"))}
+
+
+def location_rules(site: dict, generated: Path) -> None:
+    """The location rules of TS 24.379 9A.2.1.4, 9.2.1.7.2 and 9.2.1.7.3 (TS 24.282 22.2.1.4 and 8.2.6.2), in the site
+    form of openmcx-server (services/internal/common: functional_alias_location.go, affiliation_rules.go), as the
+    conformance suite provisions them for TS 37.579-2 5.9 to 5.11:
+    - incident-commander (client-a, MCPTT and MCData) activated on entering RULES_ALIAS_AREA, deactivated on leaving it,
+      the manual deactivation locked meanwhile;
+    - client-a's group (MCPTT, and its MCData group) de-affiliated on entering RULES_AFFILIATION_AREA, affiliated on
+      leaving it, the manual de-affiliation locked while the rule holds the group;
+    - the MCPTT group's <mandatory-geographic-area> RULES_MANDATORY_AREA."""
+    alice = json.loads((generated / "client-a.json").read_text())
+    ptt_group, data_group = alice["mcptt"]["group_id"], (alice.get("mcdata") or {}).get("group_id")
+    for fa in site.get("functional_aliases", []):
+        if fa["id"].startswith("sip:incident-commander."):  # the MCPTT alias (.alias) and the MCData one (.fa)
+            fa["location_activation"] = {"enter": [{"polygon": RULES_ALIAS_AREA}]}
+            fa["location_deactivation"] = {"exit": [{"polygon": RULES_ALIAS_AREA}]}
+            fa["manual_deactivation_locked"] = True
+    rule = lambda: {"deaffiliate": {"enter": [{"polygon": RULES_AFFILIATION_AREA}]},
+                    "affiliate": {"exit": [{"polygon": RULES_AFFILIATION_AREA}]}, "manual_deaffiliation_locked": True}
+    for user in site["users"]:
+        if user["mcptt_id"] == alice["mcptt"]["user_id"]:
+            user["affiliation_rules"] = {ptt_group: rule()}
+            if data_group and "mcdata" in user:
+                user["mcdata"]["affiliation_rules"] = {data_group: rule()}
+    for group in site["groups"]:
+        if group["id"] == ptt_group:
+            group["mandatory_area"] = [{"polygon": RULES_MANDATORY_AREA}]
 
 
 def host_ip() -> str:
@@ -397,6 +444,10 @@ def create(args) -> None:
         for group in site["groups"]:
             if isinstance(group.get("mcvideo"), dict):
                 group["mcvideo"].setdefault("floor_priority_caps", {})[video_id] = int(cap or level)
+    if args.location_rules:
+        if not (args.location and args.functional_alias):
+            sys.exit("--location-rules needs --location and --functional-alias")
+        location_rules(site, generated)
     (generated / "site.json").write_text(json.dumps(site, indent=2) + "\n")
     template = compose["services"]["client-a"]
     for role in ["client-a", "client-b", "client-c", "client-d"]:
@@ -538,7 +589,7 @@ def create(args) -> None:
     for seed, name in enumerate(("alpha", "bravo", "charlie")):
         speech_wav(speech / f"{name}.wav", seed)
     meta_doc = {"openmcx": str(openmcx), "project": f"mcxandroid-{args.name}", "debug_sip": args.debug_sip,
-                "server_image": args.server_image, "mcvideo": args.mcvideo, "protected": args.protected, "transport_keys": args.transport_keys, "location": args.location,
+                "server_image": args.server_image, "mcvideo": args.mcvideo, "protected": args.protected, "transport_keys": args.transport_keys, "location": args.location, "location_rules": args.location_rules,
                 "priority": args.priority, "floor_queue": args.floor_queue, "mcvideo_priority": args.mcvideo_priority or [],
                 "reference_clients": args.reference_client or [], "client_image": args.client_image,
                 "admin": args.admin, "admin_image": args.admin_image, "keycloak": args.keycloak,
@@ -640,6 +691,15 @@ class Device:
         # The lab clients must stay reachable; on a phone the app asks the user for this exemption.
         self.adb("shell", "dumpsys", "deviceidle", "whitelist", f"+{PACKAGE}", check=False)
         self.adb("shell", "am", "start", "-W", "-n", f"{PACKAGE}/.app.MainActivity")
+
+    def mock_location(self, lat: float, lon: float) -> None:
+        """A fix of the platform's fused provider, as a test provider (Android's own mock location): the app's
+        DeviceLocation then reports it and the location rules follow it, as they would a real fix (redroid has none)."""
+        self.adb("shell", "appops", "set", "com.android.shell", "android:mock_location", "allow", check=False)
+        self.adb("shell", "cmd", "location", "providers", "add-test-provider", "fused", check=False)
+        self.adb("shell", "cmd", "location", "providers", "set-test-provider-enabled", "fused", "true")
+        self.adb("shell", "cmd", "location", "providers", "set-test-provider-location", "fused", "--location", f"{lat},{lon}",
+                 "--accuracy", "10")
 
     def control(self, cmd: str, *args: str, timeout: float = 30) -> dict:
         """One request to the debug control endpoint, through an adb port forward."""
@@ -882,6 +942,9 @@ def install(name: str) -> None:
             speech.mkdir()
             for seed, wav in enumerate(("alpha", "bravo", "charlie")):
                 speech_wav(speech / f"{wav}.wav", seed)
+        if meta(name).get("location"):
+            # Each client at the fixture's position (48.0 N, 2.0 + 0.01 i E), so that its log-on report has a coordinate.
+            device.mock_location(*HOME_POSITIONS[client])
         device.install(RUNS / name / "provisioning" / client, speech)
         print(f"{client}: installed on {device.serial}")
 
@@ -918,6 +981,9 @@ def main() -> None:
     c.add_argument("--mcvideo", action="store_true", help="add the MCVideo server and provision MCVideo (video calls)")
     c.add_argument("--location", action="store_true",
                    help="location reporting (TS 24.379 clause 13): configurations, reports, requests and the LMS")
+    c.add_argument("--location-rules", action="store_true",
+                   help="with --location and --functional-alias: location based functional aliases, rules based affiliation and the "
+                        "group's mandatory geographic area (TS 24.379 9A.2.1.4, 9.2.1.7; androidlab.location_rules)")
     c.add_argument("--floor-queue", action="store_true",
                    help="queued floor requests: the server queues a request while the floor is taken (scenario S18)")
     c.add_argument("--monitor-group", action="store_true",
@@ -974,6 +1040,11 @@ def main() -> None:
     q.add_argument("--port", type=int, default=8451, help="host port of the one-time profile server")
     q.add_argument("--apply", action="store_true", help="hand the link to the phone's app too (debug control import-qr)")
     q.add_argument("--timeout", type=float, default=600, help="seconds the link stays open")
+    ml = sub.add_parser("mock-location", help="set a redroid client's fused fix (Android test provider)")
+    ml.add_argument("name")
+    ml.add_argument("client")
+    ml.add_argument("lat", type=float)
+    ml.add_argument("lon", type=float)
     e = sub.add_parser("exec")
     e.add_argument("name")
     e.add_argument("client")
@@ -1016,6 +1087,8 @@ def main() -> None:
         admin_activate(args.name, args.role, args.user, args.qr)
     elif args.action == "qr":
         qr(args.name, args.role, args.port, args.apply, args.timeout)
+    elif args.action == "mock-location":
+        Device(args.name, args.client).mock_location(args.lat, args.lon)
     elif args.action == "exec":
         print(json.dumps(Device(args.name, args.client).control(args.command, *args.args), indent=2))
 

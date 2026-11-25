@@ -212,7 +212,8 @@ class McxClient(
                 "video".takeIf { config.mcvideo != null }),
             if (config.security == null) emptyList()
             else listOfNotNull("ptt".takeIf { config.mcptt != null }, "data".takeIf { config.mcdata != null },
-                "video".takeIf { config.mcvideo != null })),
+                "video".takeIf { config.mcvideo != null }),
+            location = config.lms != null),
         clock = clock, endpoints = config.idms.endpoints)
 
     /**
@@ -295,7 +296,7 @@ class McxClient(
     /** The CSKs go (TS 33.180 9.2.1: a new one with the next service authorisation). */
     private fun dropCsks() { csks.clear(); cskUploads.clear() }
 
-    private val documents = DocumentClient(http, config.cms, config.gms)
+    internal val documents = DocumentClient(http, config.cms, config.gms)
 
     @Volatile var tokens: Tokens? = null
         internal set // set by the module's tests too
@@ -319,6 +320,10 @@ class McxClient(
      * §9.2.1.2 to §9.2.1.6); null without MCPTT. (MCVideo's, TS 24.281, would be another instance.)
      */
     val procedures: ServiceProcedures? by lazy { config.mcptt?.let { ServiceProcedures(this, McService.MCPTT) } }
+    /** Location based functional aliases and rules based affiliation (TS 24.379 §9A.2.1.4, §9.2.1.7; TS 24.282 §22.2.1.4, §8.2.6.2). */
+    val locationRules: LocationRuleProcedures by lazy { LocationRuleProcedures(this) }
+    /** The SEAL location management client (TS 24.545), reporting the position the location rules last had. */
+    val seal: SealLocationClient by lazy { SealLocationClient(this, http, config.lms) { locationRules.position } }
     private var registration: SipRequest? = null
     /** The IMS AKA registration of this life of the client, when it registered with IMS AKA. */
     @Volatile var imsAka: ImsAkaRegistrar? = null
@@ -404,6 +409,7 @@ class McxClient(
 
     /** Start and keep the client up: on any failure, back off and start again. */
     fun start() {
+        locationRules.start()
         scope.launch {
             var backoff = config.recovery.firstRetryMs
             while (isActive) {

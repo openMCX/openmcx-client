@@ -30,7 +30,9 @@ import java.util.UUID
  * "monitored" for one of the user profile affiliated besides them (§9.2.1.2), "available" for one that may be monitored.
  */
 data class GroupItem(val id: String, val affiliated: Boolean, val selected: Boolean, val status: String? = null,
-                     val kind: String = "base") {
+                     val kind: String = "base",
+                     /** Why a location rule changed its affiliation (TS 24.379 §9.2.1.7, §12.1.1.4), or null. */
+                     val rule: String? = null) {
     val monitored: Boolean get() = kind == "monitored"
     val callable: Boolean get() = kind != "available"
 }
@@ -71,7 +73,9 @@ data class CallItem(
  * this user may take it over) or `inactive`; [inUse] when it is presented on this user's outgoing calls.
  */
 /** A functional alias of this user: its status, whether its calls present it, and the outcome of the last change of it. */
-data class AliasItem(val id: String, val status: String, val inUse: Boolean, val service: String = "mcptt", val outcome: String? = null)
+data class AliasItem(val id: String, val status: String, val inUse: Boolean, val service: String = "mcptt", val outcome: String? = null,
+                     /** Activated by a location criterion of the user profile (TS 24.379 §9A.2.1.4). */
+                     val byLocation: Boolean = false)
 
 /** Another user's location, as their report gave it. */
 data class LocatedItem(val name: String, val latitude: Double?, val longitude: Double?, val cell: String?, val at: Long)
@@ -388,9 +392,18 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     // The base groups, then the monitored ones, then those of the user profile that may be monitored.
     val monitored = client.monitoredGroups
     val base = if (client.config.mcptt != null) client.wantedGroups(org.openmcx.client.body.McService.MCPTT).filter { it !in monitored } else emptyList()
-    val groups = (base.map { it to "base" } + monitored.map { it to "monitored" } +
-        client.monitorableGroups.filter { it !in monitored && it !in base }.map { it to "available" }).map { (id, kind) ->
-        GroupItem(id, Affiliation.counts(status.mcptt.affiliations[id]), Engine.selectedGroup.value == id, status.mcptt.affiliations[id], kind)
+    // A base group a location rule or the group's area made this client leave stays listed, as not affiliated.
+    val rules = client.locationRules.state.value[org.openmcx.client.body.McService.MCPTT]
+    val left = if (client.config.mcptt != null) (client.baseGroups(org.openmcx.client.body.McService.MCPTT) + rules?.areaLeft.orEmpty())
+        .filter { it !in base && it !in monitored }.distinct() else emptyList()
+    val groups = ((base + left).map { it to "base" } + monitored.map { it to "monitored" } +
+        client.monitorableGroups.filter { it !in monitored && it !in base && it !in left }.map { it to "available" }).map { (id, kind) ->
+        GroupItem(id, Affiliation.counts(status.mcptt.affiliations[id]), Engine.selectedGroup.value == id, status.mcptt.affiliations[id], kind,
+            when (id) {
+                in rules?.areaLeft.orEmpty() -> "left: outside the group's area"
+                in rules?.ruleAffiliated.orEmpty() -> "by a location rule"
+                else -> null
+            })
     }
     val procedures = client.procedures?.state?.value
     fun item(call: Call): CallItem {
@@ -456,7 +469,8 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         val state = client.aliasesOf(service).value
         state.available.map { a ->
             AliasItem(a, when (a) { in state.active -> "active"; in state.takeOverPossible -> "take-over-possible"; else -> "inactive" },
-                a == state.inUse, service.name.lowercase(), state.lastOutcomes[a])
+                a == state.inUse, service.name.lowercase(), state.lastOutcomes[a],
+                a in client.locationRules.state.value[service]?.aliasesByLocation.orEmpty())
         }
     }
     val aliasNote = aliasState.lastAction?.let { action ->
