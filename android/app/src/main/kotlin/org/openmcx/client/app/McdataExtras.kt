@@ -66,6 +66,23 @@ object McdataExtras {
         return StorageControl.send(c, parts, if (enable) "enable" else "disable").also { storageControl.value = it }
     }
 
+    /** TS 24.282 §9.2.2.2.1 step 3A: an ad hoc group SDS to the participants of [spec] (see [org.openmcx.client.mcdata.AdhocTarget]). */
+    suspend fun adhocSend(spec: String, text: String) {
+        val sds = Engine.mcdata ?: throw IllegalStateException("MCData not provisioned")
+        Engine.sent(sds.send(org.openmcx.client.mcdata.AdhocTarget.PREFIX + spec, text, group = false))
+    }
+
+    /** TS 24.282 §24.2.2.1.1: an ad hoc group SDS session. */
+    suspend fun adhocSession(spec: String) {
+        val media = Engine.mcdataMedia ?: throw IllegalStateException("MCData not provisioned")
+        media.openSession(org.openmcx.client.mcdata.AdhocTarget.PREFIX + spec, group = false)
+    }
+
+    /** What the Messages screen shows of a received message: its text, or the enhanced status it rendered (§14.2.1.2). */
+    fun displayText(message: org.openmcx.client.mcdata.ReceivedSds): String = message.text.ifEmpty {
+        enhancedStatus?.received?.value?.lastOrNull { it.messageId == message.messageId }?.let { "Status: ${it.value}" } ?: ""
+    }
+
     fun stop() {
         store?.stop()
         ipcon = null; enhancedStatus = null; store = null; client = null; storageControl.value = null

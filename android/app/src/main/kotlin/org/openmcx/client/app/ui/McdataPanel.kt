@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import org.openmcx.client.app.Engine
 import org.openmcx.client.app.McdataExtras
 import org.openmcx.client.mcdata.EnhancedStatusValues
 
@@ -63,6 +64,7 @@ internal fun McdataPanel(target: String, isGroup: Boolean, enabled: Boolean) {
             .background(Mcx.Strip, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp).testTag(TAG_IPCON), verticalAlignment = Alignment.CenterVertically) {
             Text("IP link with ${(session.target ?: session.from ?: "").short()} · ${session.sent.get()} sent, ${session.received.get()} received",
                 style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+            TextButton(onClick = { dialog = "ping" }) { Text("Ping") }
             TextButton(onClick = { run("IP link") { ipcon!!.close() } }) { Text("End") }
         }
         Row(Modifier.horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically) {
@@ -70,6 +72,7 @@ internal fun McdataPanel(target: String, isGroup: Boolean, enabled: Boolean) {
                 modifier = Modifier.testTag(TAG_STORE)) { Text("Stored") }
             if (status != null) TextButton(onClick = { dialog = "status" }, enabled = enabled && isGroup,
                 modifier = Modifier.testTag(TAG_SEND_STATUS)) { Text("Status") }
+            if (Engine.mcdata != null) TextButton(onClick = { dialog = "adhoc" }, enabled = enabled, modifier = Modifier.testTag(TAG_ADHOC)) { Text("Ad hoc") }
             if (ipcon?.address != null) TextButton(onClick = { run("IP link") { ipcon.open(target) } },
                 enabled = enabled && !isGroup && target.isNotBlank() && session?.state != "open", modifier = Modifier.testTag(TAG_IPCON_OPEN)) { Text("IP link") }
         }
@@ -78,6 +81,8 @@ internal fun McdataPanel(target: String, isGroup: Boolean, enabled: Boolean) {
     when (dialog) {
         "store" -> if (store != null) StoreDialog(store, ::run) { dialog = null }
         "status" -> if (status != null) StatusDialog(target, ::run) { dialog = null }
+        "adhoc" -> AdhocDialog(::run) { dialog = null }
+        "ping" -> if (ipcon != null) PingDialog(session, { address -> run("Ping $address") { ipcon.ping(address) } }) { dialog = null }
     }
 }
 
@@ -135,6 +140,54 @@ private fun StatusDialog(group: String, run: (String, suspend () -> Any?) -> Uni
     }, confirmButton = { TextButton(onClick = close) { Text("Close") } })
 }
 
+/**
+ * TS 24.282 §9.2.2.2.1 step 3A and §24.2.2.1.1: an ad hoc group of the MCData IDs or functional aliases typed (or
+ * participant criteria): a message (over the media plane when it is long), or an SDS session.
+ */
+@Composable
+private fun AdhocDialog(run: (String, suspend () -> Any?) -> Unit, close: () -> Unit) {
+    var who by remember { mutableStateOf("") }
+    var text by remember { mutableStateOf("") }
+    var criteria by remember { mutableStateOf(false) }
+    val spec = if (criteria) "criteria=${who.trim()}" else who.split(',', ' ', '\n').map { it.trim() }.filter { it.isNotEmpty() }
+        .joinToString(",") { if (it.startsWith("sip:")) it else "sip:$it" }
+    AlertDialog(onDismissRequest = close, title = { Text("Ad hoc group") }, text = {
+        Column {
+            androidx.compose.material3.OutlinedTextField(who, { who = it }, label = { Text(if (criteria) "Participant criteria" else "MCData IDs or aliases") },
+                modifier = Modifier.testTag(TAG_ADHOC_WHO))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.Checkbox(criteria, { criteria = it }); Text("By criteria", style = MaterialTheme.typography.labelMedium)
+            }
+            androidx.compose.material3.OutlinedTextField(text, { text = it }, label = { Text("Message") }, modifier = Modifier.testTag(TAG_ADHOC_TEXT))
+        }
+    }, confirmButton = {
+        Row {
+            TextButton(onClick = { run("Ad hoc session") { McdataExtras.adhocSession(spec) }; close() }, enabled = who.isNotBlank()) { Text("Session") }
+            TextButton(onClick = { run("Ad hoc message") { McdataExtras.adhocSend(spec, text) }; close() },
+                enabled = who.isNotBlank() && text.isNotBlank(), modifier = Modifier.testTag(TAG_ADHOC_SEND)) { Text("Send") }
+        }
+    }, dismissButton = { TextButton(onClick = close) { Text("Cancel") } })
+}
+
+/** TS 24.582 §13.1: the IP application's echo requests to an address in the tunnel, and the replies so far. */
+@Composable
+private fun PingDialog(session: org.openmcx.client.mcdata.IpconSession?, ping: (String) -> Unit, close: () -> Unit) {
+    var address by remember { mutableStateOf(session?.pings?.lastOrNull()?.get("from") as? String ?: "") }
+    AlertDialog(onDismissRequest = close, title = { Text("Ping through the IP link") }, text = {
+        Column {
+            androidx.compose.material3.OutlinedTextField(address, { address = it }, label = { Text("IPv4 address") }, singleLine = true)
+            session?.pings?.takeLast(5)?.forEach { p ->
+                Text("${p["from"]} seq ${p["sequence"]}: ${p["rtt_ms"]} ms", style = MaterialTheme.typography.labelSmall)
+            }
+        }
+    }, confirmButton = { TextButton(onClick = { ping(address.trim()) }, enabled = address.isNotBlank()) { Text("Ping") } },
+        dismissButton = { TextButton(onClick = close) { Text("Close") } })
+}
+
+internal const val TAG_ADHOC = "adhoc-data"
+internal const val TAG_ADHOC_WHO = "adhoc-data-who"
+internal const val TAG_ADHOC_TEXT = "adhoc-data-text"
+internal const val TAG_ADHOC_SEND = "adhoc-data-send"
 internal const val TAG_STATUS = "enhanced-status"
 internal const val TAG_SEND_STATUS = "send-status"
 internal const val TAG_IPCON = "ipcon"

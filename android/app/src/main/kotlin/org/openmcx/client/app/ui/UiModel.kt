@@ -483,7 +483,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     val media = Engine.mcdataMedia?.communications?.value ?: emptyList()
     val messages = buildList {
         mcdata?.inbox?.value?.forEach {
-            add(MessageItem(it.messageId.toString(), true, it.sender, it.group, it.text,
+            add(MessageItem(it.messageId.toString(), true, it.sender, it.group, org.openmcx.client.app.McdataExtras.displayText(it),
                 (if (it.displayed) "read" else "new") + plane(it.plane), it.at, it.displayed))
         }
         mcdata?.outbox?.value?.forEach { m ->
