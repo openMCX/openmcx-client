@@ -536,10 +536,11 @@ class McpttPreSession internal constructor(private val svc: McpttService) {
         local = local!!.copy(floorPriority = offer.floorPriority)
         remote = offer
         control.ssrc = offer.floorSsrc
-        tx.respond(200, body = answer(offer).toByteArray(), contentType = "application/sdp",
-            extra = listOf("Contact" to svc.client.sessionContact(McService.MCPTT)) + timerHeaders)
+        // The modification is recorded before the 200 goes: who sees the answer sees the session's new state.
         modified++
         publish()
+        tx.respond(200, body = answer(offer).toByteArray(), contentType = "application/sdp",
+            extra = listOf("Contact" to svc.client.sessionContact(McService.MCPTT)) + timerHeaders)
         event("modified by the participating function (${request.method}), floor priority ${offer.floorPriority}")
         return true
     }
