@@ -461,6 +461,20 @@ void Client::change_priority(bool emergency, bool enabled, const std::string &ot
         update_priority(upgraded, std::nullopt);
         if (!emergency) imminent_group_states_[active_group()] = "MIG 2: in-progress";
       }
+      // TS 24.379 clauses 10.1.1.2.1.4 2) and 10.1.1.2.1.5 2) (chat: 10.1.2.2.1.4, 10.1.2.2.1.5): a 2xx to the
+      // re-INVITE cancelling the call's emergency or imminent peril sets "MEG 1: no-emergency" or "MIG 1:
+      // no-imminent-peril", whatever the response's mcptt-info says (it need not carry <emergency-ind> or
+      // <imminentperil-ind>). The call is a normal call again, which its Floor Requests and Floor Releases say (TS
+      // 24.380 clause 8.2.3.15). Out of a call (clause 12.1.1.5) the 2xx does not: the server's MESSAGE does.
+      if (active && !enabled && response.status_code < 300) {
+        McpttInfo cancelled;
+        if (emergency)
+          cancelled.emergency = false;
+        else
+          cancelled.imminent_peril = false;
+        update_priority(cancelled, std::nullopt);
+        if (!emergency) imminent_group_states_[active_group()] = "MIG 1: no-imminent-peril";
+      }
       priority_response(response);
       if (response.status_code >= 300) failure("priority update: " + std::to_string(response.status_code));
     };
