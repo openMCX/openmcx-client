@@ -131,7 +131,8 @@ internal object FdMedia {
         if (body.size.toLong() != offer.metadata.size || (offer.metadata.sha256 != null && offer.metadata.sha256 != sha)) {
             s.fail(c, "file ${offer.metadata.name}: ${body.size} octets, hash $sha, not as offered", "corrupt"); return
         }
-        val contents = s.peer.protection?.takeIf { it.protectsPayload }?.let { p ->
+        // An ad hoc group has no group key: its files come in the clear (as they are sent, McdataMediaService.protect).
+        val contents = s.peer.protection?.takeIf { it.protectsPayload && !c.adhoc }?.let { p ->
             try { p.openFile(body, c.peer, c.group) } catch (e: Exception) {
                 p.failures.incrementAndGet()
                 s.fail(c, "file undecryptable: ${e.message}", "undecryptable"); return
