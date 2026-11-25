@@ -191,7 +191,7 @@ class DebugControl(private val context: Context) {
         // MCVideo private calls.
         "video-call" -> videoJson(mcvideo().privateCall(Engine.mcvideoId(args[0]),
             if ("manual" in args) Commencement.MANUAL else Commencement.AUTOMATIC, transmissionControl = "notc" !in args,
-            emergency = "emergency" in args))
+            emergency = "emergency" in args, implicit = "implicit" in args))
         "video-emergency" -> { mcvideo().setPriority(emergency = true, enabled = args.firstOrNull() != "off"); mcvideo().active?.priority ?: "none" }
         "video-imminent" -> { mcvideo().setPriority(emergency = false, enabled = args.firstOrNull() != "off"); mcvideo().active?.priority ?: "none" }
         "video-chat" -> videoJson(mcvideo().joinChat(args.firstOrNull() ?: Engine.client!!.config.mcvideo!!.chatGroups.first()))
@@ -249,7 +249,12 @@ class DebugControl(private val context: Context) {
         "video-remote" -> { mcvideo().remoteTransmission(args[0], args.getOrNull(1) != "stop"); "requested" }
         "video-recordings" -> JSONArray(mcvideo().recordings.value)
         "video-group" -> videoJson(mcvideo().groupCall(args.firstOrNull { it.startsWith("sip:") } ?: Engine.client!!.config.mcvideo!!.groups.first(),
-            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }))
+            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }, implicit = "implicit" in args))
+        // TS 24.581 §6.2.4.9.3 and §6.2.5.5.3: the queue position while queued; stop receiving the current transmission.
+        "video-queue-position" -> JSONObject().put("sent", mcvideo().queuePosition()).put("position", mcvideo().active?.media?.control?.queuePosition)
+        "video-reception-end" -> JSONObject().put("sent", mcvideo().endReception())
+        "video-profile" -> JSONObject().put("priority", mcvideo().configuredPriority)
+            .put("private_call_kms", JSONObject(mcvideo().readProfile()?.privateCallKms ?: emptyMap<String, String>()))
         "video-transmit" -> videoTransmit(args.getOrNull(0)?.toDouble() ?: 5.0)
         "video-release" -> { mcvideo().stopTransmit(); "ok" }
         "video-hangup" -> { mcvideo().hangup(); "released" }
@@ -484,6 +489,11 @@ class DebugControl(private val context: Context) {
             .put("transmission", media?.takeIf { it.isStarted }?.control?.state?.value?.name)
             .put("transmitter", media?.takeIf { it.isStarted }?.control?.transmitter)
             .put("receiving", media?.takeIf { it.isStarted }?.control?.receiving)
+            .put("reception", media?.takeIf { it.isStarted }?.control?.reception?.value?.name)
+            .put("queue_position", media?.takeIf { it.isStarted }?.control?.queuePosition)
+            .put("timeouts", JSONArray(media?.takeIf { it.isStarted }?.control?.timeouts ?: emptyList<String>()))
+            .put("granted_by_sdp", call.grantedBySdp)
+            .put("negotiated_priority", call.negotiatedPriority).put("negotiated_reception_priority", call.negotiatedReceptionPriority)
             .put("events", JSONArray(call.events)).put("participants", JSONObject(call.participants))
             .put("pictures_sent", media?.stats?.picturesSent?.get()).put("pictures_received", media?.stats?.picturesReceived?.get())
             .put("undecoded", media?.stats?.undecoded?.get()).put("skipped_before_key", media?.stats?.skippedBeforeKey?.get())

@@ -80,6 +80,13 @@ class VideoCall internal constructor(
     @Volatile var calledAlias: String? = null
     /** A private call to a functional alias, before the server names who holds it (§10.2.2.2.1, 300). */
     internal var toAlias: Boolean = false
+    /** The user asked to transmit with the call setup: an implicit transmission request (§6.4, TS 24.581 §14.2.5). */
+    internal var implicitAsked: Boolean = false
+    /** The 200 (OK)'s "mc_granted" granted the implicit request (TS 24.581 §12.1.2.2 NOTE 3). */
+    @Volatile var grantedBySdp: Boolean = false
+    /** TS 24.581 §14.3.3, §14.4: the negotiated maximum transmission and reception priorities (null: the default). */
+    @Volatile var negotiatedPriority: Int? = null
+    @Volatile var negotiatedReceptionPriority: Int? = null
     /** Group calls: who is in the call, MC ID to endpoint status, from the conference event package (§9.2.3). */
     @Volatile var participants: Map<String, String> = emptyMap()
     /** RFC 4575 §4.6: the version of the last conference notification applied. */
@@ -147,6 +154,15 @@ class McvideoService(
     /** The groups on which this user's own emergency alert is active. */
     val alerting: StateFlow<Set<String>> = _alerting
 
+    /** The MCVideo user profile (TS 24.484 §9.3), read once the service is authorised. */
+    @Volatile var profile: McvideoProfile? = null
+        private set
+    /**
+     * TS 24.581 §14.2.3 and §14.2.6: the configured transmission and reception priority: provisioned (`mcvideo.priority`),
+     * else the MCVideo user profile's <Priority> (TS 24.484 §9.3.2.1 item 8 e) v)); 0 is the default priority.
+     */
+    val configuredPriority: Int get() = config.priority ?: profile?.priority ?: 0
+
     /** Each group's GMKs (TS 33.180 5.7), their CSB-IDs the GMK-IDs; from the GKTP subscriptions. */
     private val groupKeys = GroupKeys()
     val groupKeyIds: Map<String, Long> get() = groupKeys.ids
@@ -154,6 +170,10 @@ class McvideoService(
     private val keySubscriptions = GroupKeySubscriptions()
 
     init {
+        // TS 24.484 §9.3.1A: the MCVideo user profile, of the profile index in use, once authorised.
+        scope.launch {
+            client.status.map { it.mcvideo.authorised }.distinctUntilChanged().collect { authorised -> if (authorised) readProfile() }
+        }
         // TS 24.281 4.7.1: once authorised, subscribe to each group's GMK at the MCVideo server; each subscription is
         // refreshed in its dialog before it expires (TS 24.481 §6.3.13.2.1 re-SUBSCRIBE, RFC 6665 §4.1.2.2).
         if (client.config.security?.protectMedia == true) scope.launch {
@@ -166,6 +186,16 @@ class McvideoService(
         }
     }
     private var keyRefresh: Job? = null
+
+    /** Read the MCVideo user profile (TS 24.484 §9.3.1A); one of another user is not taken. */
+    suspend fun readProfile(): McvideoProfile? {
+        val index = client.config.mcptt?.profileIndex ?: 1
+        return runCatching { McvideoProfile.parse(client.cmsDocument(McvideoProfile.path(org.openmcx.client.security.KeyClient.xcapSegment(config.userId), index))) }
+            .mapCatching { if (it.userId != null && it.userId != config.userId) throw IllegalStateException("profile of ${it.userId}") else it }
+            .onSuccess { profile = it; event("user profile: priority ${it.priority}, private call KMSs ${it.privateCallKms}") }
+            .onFailure { event("user profile: ${it.message}") }
+            .getOrNull()
+    }
 
     private suspend fun subscribeGroupKeys() {
         val token = client.tokens?.accessToken ?: return
@@ -289,8 +319,13 @@ class McvideoService(
         val ports = VideoPorts.bind(InetAddress.getByName(address), client.config.media.portRange)
         return ports to LocalVideoMedia(address, ports.audio.localPort, ports.video.localPort,
             if (transmissionControl) ports.control.localPort else null,
-            McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), implicitRequest && transmissionControl, direction)
+            McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), implicitRequest && transmissionControl, direction,
+            // TS 24.581 §14.2.2, §14.2.3, §14.2.6 (and §14.5 for later offers): queueing and the configured priorities.
+            priority = TransmissionPriority.offered(configuredPriority).takeIf { transmissionControl },
+            receptionPriority = TransmissionPriority.offered(configuredPriority).takeIf { transmissionControl },
+            queueing = config.queueing && transmissionControl)
     }
+
 
     /** Debug builds: corrupt the next PCK offered, to see the called side refuse it (488, warning 136). */
     @Volatile var tamperNextPck = false
@@ -331,6 +366,9 @@ class McvideoService(
             override fun requestFailed() = note(call, "request failed")
             override fun reception(receiving: Boolean, rejectCause: Int?) = note(call, if (receiving) "receiving" else "reception refused $rejectCause")
             override fun remoteResult(start: Boolean, done: Boolean?) = note(call, "remote ${if (start) "start" else "stop"} ${if (done == true) "done" else "not done"}")
+            override fun queued(position: Int?) = note(call, "queued${position?.let { " at $it" } ?: ""}")
+            override fun timeout(what: String) = note(call, what)
+            override fun ended(byServer: Boolean) = note(call, if (byServer) "ended by the server" else "transmission ended")
         }
     }
 
@@ -340,8 +378,9 @@ class McvideoService(
 
     /** A private call; with [emergency], an emergency private call (§6.2.8.3). */
     suspend fun privateCall(target: String, commencement: Commencement = Commencement.AUTOMATIC, transmissionControl: Boolean = true,
-                            emergency: Boolean = false): VideoCall =
-        originate(VideoCall(ids.incrementAndGet(), true, target, transmissionControl).also { if (emergency) it.priority = "emergency" }, commencement)
+                            emergency: Boolean = false, implicit: Boolean = false): VideoCall =
+        originate(VideoCall(ids.incrementAndGet(), true, target, transmissionControl).also {
+            if (emergency) it.priority = "emergency"; it.implicitAsked = implicit }, commencement)
 
     /**
      * A private call to a functional alias (TS 24.281 §10.2.2.2.1 with §20): the request names the alias with
@@ -363,8 +402,9 @@ class McvideoService(
      * A prearranged group call (§9.2.1.2.1): the server invites the group's affiliated members. With
      * [priority] `emergency` or `imminent`, an emergency or imminent peril group call (§6.2.8.1).
      */
-    suspend fun groupCall(group: String = config.groups.firstOrNull() ?: throw CallError("no MCVideo group"), priority: String = "normal"): VideoCall =
-        originate(VideoCall(ids.incrementAndGet(), true, null, true, group, "prearranged").also { it.priority = priority }, null)
+    suspend fun groupCall(group: String = config.groups.firstOrNull() ?: throw CallError("no MCVideo group"), priority: String = "normal",
+                          implicit: Boolean = false): VideoCall =
+        originate(VideoCall(ids.incrementAndGet(), true, null, true, group, "prearranged").also { it.priority = priority; it.implicitAsked = implicit }, null)
 
     /**
      * Join a chat group's call (§9.2.2.2.1): nobody is invited; the server creates the group's
@@ -431,12 +471,15 @@ class McvideoService(
         val protection = if (call.withServer) null else protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
         _calls.value = _calls.value + call
         val (ports, bound) = bindMedia(transmissionControl,
-            implicitRequest = call.sessionType == PUSH || call.sessionType == PUSH_TO_SERVER || call.ambientType == "local-init",
+            implicitRequest = call.sessionType == PUSH || call.sessionType == PUSH_TO_SERVER || call.ambientType == "local-init" || call.implicitAsked,
             direction = when (call.ambientRole) { "viewing" -> "recvonly"; "viewed-to" -> "sendonly"; else -> "sendrecv" })
         // A test of the called side's check (debug builds): one flipped bit in the I_MESSAGE's signature.
         val offered = pck?.second?.let { if (tamperNextPck) { tamperNextPck = false; tamper(it) } else it }
-        val local = if (pck != null) bound.copy(protected = true, keyMgmt = offered) else if (gmk != null) bound.copy(protected = true) else bound
-        val media = newMedia(call, ports, local)
+        val keyed = if (pck != null) bound.copy(protected = true, keyMgmt = offered) else if (gmk != null) bound.copy(protected = true) else bound
+        // TS 24.581 §14.2.4: "mc_granted" in the initial offer only, with this client's own implicit request
+        // (mcvideo.offer_granted); §14.5: never in a later offer (the media keep the offer without it).
+        val local = keyed.copy(granted = config.offerGranted && keyed.implicitRequest)
+        val media = newMedia(call, ports, keyed)
         media.protection = protection
         pck?.let { call.pckId = it.first.csbId; event("call ${call.id}: PCK %08x for $target".format(it.first.csbId)) }
         call.media = media
@@ -499,7 +542,13 @@ class McvideoService(
             val remote = McvideoSdp.remote(sdp.text)
             if (remote.transmissionControl != transmissionControl) throw CallError("transmission control not negotiated as offered")
             if (remote.protected != local.protected) throw CallError("media protection not negotiated as offered")
-            media.start(remote, McvideoSdp.VIDEO_PT)
+            // TS 24.581 §12.1.2.2 NOTE 3: "mc_granted" in the answer to our offer with it grants the implicit request;
+            // §14.4: in an answer to an offer without it, discarded.
+            call.grantedBySdp = local.granted && remote.granted && remote.implicitRequest
+            call.negotiatedPriority = TransmissionPriority.negotiated(false, local.priority, remote.priority)
+            call.negotiatedReceptionPriority = TransmissionPriority.negotiated(false, local.receptionPriority, remote.receptionPriority)
+            startMedia(call, media, remote, McvideoSdp.VIDEO_PT)
+            if (call.grantedBySdp) note(call, "granted in the 200 (OK)")
             call.sessionUri = response.headers["Contact"]?.let { runCatching { NameAddr.parse(it).uri }.getOrNull() }
             if (call.ambientType != null) call.mayRelease = releaseCapability(response.headers.values("Feature-Caps"))
             call.state = "established"
@@ -614,9 +663,10 @@ class McvideoService(
             else if (call.ambientType != null) "${call.ambientType} ambient viewing call from" else "private video call from"} ${info.callingUserId}")
         val manual = when {
             call.ambientType != null -> false // §15.2.1.2 step 6: always answered automatically
-            request.headers["Priv-Answer-Mode"].equals("Auto", true) -> false
-            request.headers["Answer-Mode"].equals("Manual", true) -> true
-            request.headers["Answer-Mode"].equals("Auto", true) -> answerMode == "manual"
+            // RFC 5373 §2: the token before any parameter ("Auto;require").
+            answerModeToken(request.headers["Priv-Answer-Mode"]) == "auto" -> false
+            answerModeToken(request.headers["Answer-Mode"]) == "manual" -> true
+            answerModeToken(request.headers["Answer-Mode"]) == "auto" -> answerMode == "manual"
             else -> answerMode == "manual"
         }
         if (!call.hidden) listener?.incoming(call)
@@ -659,7 +709,10 @@ class McvideoService(
             "Session-Expires" to "$offered;refresher=uas", "Allow" to ALLOW))
         call.dialog = Dialog.fromRequest(request, tx.localTag)
         call.sessionUri = request.headers["Contact"]?.let { runCatching { NameAddr.parse(it).uri }.getOrNull() }
-        media.start(remote, remote.videoPayloadType)
+        // TS 24.581 §14.3.3: as answerer the offered maxima are returned, and so negotiated.
+        call.negotiatedPriority = TransmissionPriority.negotiated(true, null, remote.priority)
+        call.negotiatedReceptionPriority = TransmissionPriority.negotiated(true, null, remote.receptionPriority)
+        startMedia(call, media, remote, remote.videoPayloadType)
         tx.send(response)
         call.state = "established"
         startRefresh(call)
@@ -718,7 +771,7 @@ class McvideoService(
             ?.let { notePriority(call, it) }
         val sdp = parts.firstOrNull { it.mediaType == "application/sdp" }?.text
         val remote = sdp?.let { runCatching { McvideoSdp.remote(it) }.getOrNull() }
-        val answer = remote?.let { McvideoSdp.answer(it, media.local.copy(keyMgmt = null)) }
+        val answer = remote?.let { McvideoSdp.answer(it, media.local.copy(keyMgmt = null, granted = false)) }
         tx.respond(200, body = answer?.toByteArray() ?: ByteArray(0), contentType = answer?.let { "application/sdp" },
             extra = sessionTimerHeaders(tx.request))
     }
@@ -823,7 +876,7 @@ class McvideoService(
             enabled -> info.copy(imminentPeril = true)
             else -> info.copy(imminentPeril = false)
         }
-        val parts = mutableListOf(Part("application/sdp", McvideoSdp.offer(media.local.copy(keyMgmt = null)).toByteArray()), Part(McvideoInfo.CONTENT_TYPE, info.encode().toByteArray()))
+        val parts = mutableListOf(Part("application/sdp", McvideoSdp.offer(media.local.copy(keyMgmt = null, granted = false)).toByteArray()), Part(McvideoInfo.CONTENT_TYPE, info.encode().toByteArray()))
         if (!call.isGroup) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOfNotNull(call.peer)).toByteArray())
         val request = ua.inDialog(dialog, "INVITE")
         commonHeaders(request)
@@ -866,7 +919,23 @@ class McvideoService(
         }
     }
 
+    /**
+     * Start [call]'s media: the request priorities (TS 24.581 §6.2.4.3.2 step 2a, §6.2.5.3.3 step 1a) from the configured
+     * priority capped by the negotiated ones, the timers of §11.1.1 and §11.2.1, and the grant of the 200 (OK).
+     */
+    private fun startMedia(call: VideoCall, media: VideoMediaSession, remote: RemoteVideoMedia, payloadType: Int) =
+        media.start(remote, payloadType, TransmissionPriority.request(configuredPriority, call.negotiatedPriority),
+            TransmissionPriority.request(configuredPriority, call.negotiatedReceptionPriority), config.timers, call.grantedBySdp)
+
     // User actions.
+
+    /** TS 24.581 §6.2.4.9.3: ask for our queue position while queued; false when not queued. */
+    suspend fun queuePosition(call: VideoCall? = active): Boolean =
+        call?.media?.takeIf { it.isStarted }?.control?.queuePositionRequest() ?: throw CallError("no established video call")
+
+    /** TS 24.581 §6.2.5.5.3: stop receiving the current transmission; false when not receiving. */
+    suspend fun endReception(call: VideoCall? = active): Boolean =
+        call?.media?.takeIf { it.isStarted }?.control?.endReception() ?: throw CallError("no established video call")
 
     fun answer(): Boolean = _calls.value.firstOrNull { it.state == "ringing" && !it.outgoing }?.answered?.complete(true) ?: false
     fun reject(): Boolean = _calls.value.firstOrNull { it.state == "ringing" && !it.outgoing }?.answered?.complete(false) ?: false
@@ -914,7 +983,8 @@ class McvideoService(
             scope.launch {
                 val unsubscribe = ua.inDialog(d, "SUBSCRIBE")
                 commonHeaders(unsubscribe)
-                unsubscribe.headers.add("Event", "conference").add("Expires", "0")
+                // RFC 6665 §7.2 with TS 37.579-1 table 5.5.2.14-1: the Accept of the subscription on its end too.
+                unsubscribe.headers.add("Event", "conference").add("Accept", ConferenceInfo.CONTENT_TYPE).add("Expires", "0")
                 runCatching { withTimeoutOrNull(3_000) { ua.send(unsubscribe, d) } }
             }
         }
@@ -949,5 +1019,11 @@ class McvideoService(
         const val AMBIENT_RELEASE = "g.3gpp.mcvideo.ambient-viewing-call-release"
 
         fun releaseCapability(featureCaps: List<String>) = featureCaps.any { AMBIENT_RELEASE in it }
+
+        /**
+         * RFC 5373 §2: the Answer-Mode and Priv-Answer-Mode value is the token before any parameter ("Auto;require" is
+         * "Auto"), compared without regard to case.
+         */
+        fun answerModeToken(value: String?): String? = value?.substringBefore(';')?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
     }
 }

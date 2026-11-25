@@ -782,6 +782,10 @@ class McxClient(
             .onFailure { event("user profile: ${it.message}") }
     }
 
+    /** A CMS document by its path under the XCAP root, with the current access token (the MCVideo user profile). */
+    suspend fun cmsDocument(path: String): String =
+        documents.cmsDocument(path, tokens?.accessToken ?: throw IllegalStateException("not logged in"))
+
     /** A service configuration document: the floor queue (MCPTT), signalling protection, Resource-Priority values. */
     private suspend fun readServiceConfiguration(service: String, token: String) {
         runCatching { documents.serviceConfiguration(service, token) }
