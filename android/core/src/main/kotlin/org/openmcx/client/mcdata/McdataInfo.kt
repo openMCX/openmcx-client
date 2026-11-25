@@ -44,6 +44,16 @@ data class McdataInfo(
     /** In `<anyExt>` (TS 24.282 Annex D.1): an emergency (§6.2.8.1.1, §6.2.8.3.2) or imminent peril (§6.2.8.1.9) communication. */
     val emergency: Boolean? = null,
     val imminentPeril: Boolean? = null,
+    /**
+     * In `<anyExt>` (TS 24.282 Annex D.1), the control of communications storage (§21.3.2.2): all private, all group
+     * communications, or "enable"/"disable" for the users and groups of the msgstore-ctrl-request body (Annex D.7).
+     */
+    val storeAllPrivate: Boolean? = null,
+    val storeAllGroup: Boolean? = null,
+    val storeSpecificPrivate: String? = null,
+    val storeSpecificGroup: String? = null,
+    /** In `<anyExt>`: the participant criteria of an ad hoc group communication (§9.2.2.2.1 step 3A, §24.2.2.1.1). */
+    val participantCriteria: String? = null,
 ) {
     fun encode(): String = Xml.document("mcdatainfo", NAMESPACE) {
         element("mcdata-Params") {
@@ -59,7 +69,8 @@ data class McdataInfo(
             uri("mcdata-controller-psi", controllerPsi)
             if (emergency != null || imminentPeril != null || alertReceived != null || associatedGroupId != null || userRequestedPriority != null || usedPriority != null ||
                 emergencyAlertArea != null || groupGeoArea != null || callToFunctionalAlias != null || functionalAlias != null ||
-                calledFunctionalAlias != null) element("anyExt") {
+                calledFunctionalAlias != null || storeAllPrivate != null || storeAllGroup != null || storeSpecificPrivate != null ||
+                storeSpecificGroup != null || participantCriteria != null) element("anyExt") {
                 leaf("emergency-ind", emergency?.toString())
                 leaf("imminentperil-ind", imminentPeril?.toString())
                 leaf("alert-ind-rcvd", alertReceived?.toString())
@@ -71,6 +82,11 @@ data class McdataInfo(
                 leaf("call-to-functional-alias-ind", callToFunctionalAlias?.toString())
                 uri("functional-alias-URI", functionalAlias)
                 uri("called-functional-alias-URI", calledFunctionalAlias)
+                leaf("comn-participants-criteria", participantCriteria)
+                leaf("store-all-private-comms-in-msgstore", storeAllPrivate?.toString())
+                leaf("store-all-group-comms-in-msgstore", storeAllGroup?.toString())
+                leaf("store-specific-private-comms-in-msgstore", storeSpecificPrivate)
+                leaf("store-specific-group-comms-in-msgstore", storeSpecificGroup)
             }
         }
     }
@@ -111,6 +127,11 @@ data class McdataInfo(
                 calledFunctionalAlias = ext("called-functional-alias-URI"),
                 emergency = flag("emergency-ind"),
                 imminentPeril = flag("imminentperil-ind"),
+                storeAllPrivate = flag("store-all-private-comms-in-msgstore"),
+                storeAllGroup = flag("store-all-group-comms-in-msgstore"),
+                storeSpecificPrivate = ext("store-specific-private-comms-in-msgstore"),
+                storeSpecificGroup = ext("store-specific-group-comms-in-msgstore"),
+                participantCriteria = ext("comn-participants-criteria"),
             )
         }
     }

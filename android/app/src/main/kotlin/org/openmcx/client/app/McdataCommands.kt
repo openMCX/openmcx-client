@@ -15,7 +15,8 @@ import org.openmcx.client.mcdata.IpconSession
  * reference client's: [DebugControl] hands them every command named in [NAMES].
  */
 internal object McdataCommands {
-    val NAMES = setOf("ipcon", "ipcon-ping", "ipcon-status", "sds-status", "sds-status-values", "sds-status-received")
+    val NAMES = setOf("ipcon", "ipcon-ping", "ipcon-status", "sds-status", "sds-status-values", "sds-status-received",
+        "msgstore-ctrl", "msgstore")
 
     suspend fun execute(cmd: String, args: List<String>): Any = when (cmd) {
         // TS 24.282 §20.2.1: ipcon <MCData ID> | ipcon fa=<functional alias> | ipcon close
@@ -45,8 +46,58 @@ internal object McdataCommands {
         "sds-status-received" -> JSONObject().put("discarded", enhanced().discarded).put("received", JSONArray(enhanced().received.value.map {
             JSONObject().put("message_id", it.messageId.toString()).put("from", it.from).put("group", it.group).put("id", it.id)
                 .put("value", it.value).put("at", it.at) }))
+        // TS 24.282 §21.3.2.2: msgstore-ctrl enable|disable [all-private] [all-group] [private=<ID>,...] [group=<ID>,...]
+        "msgstore-ctrl" -> {
+            require(args.firstOrNull() in setOf("enable", "disable")) { "usage: msgstore-ctrl enable|disable [all-private] [all-group] [private=..] [group=..]" }
+            fun list(prefix: String) = args.filter { it.startsWith(prefix) }.flatMap { it.removePrefix(prefix).split(',') }.filter { it.isNotBlank() }
+            val r = McdataExtras.controlStorage(args[0] == "enable", "all-private" in args, "all-group" in args, list("private="), list("group="))
+            JSONObject().put("action", r.action).put("status", r.status).put("warning", r.warning)
+        }
+        // TS 24.282 §21.2: msgstore <operation> ..., one message store or notification client procedure per operation
+        "msgstore" -> msgstore(args)
         else -> throw IllegalArgumentException("unknown command $cmd")
     }
+
+    private fun store() = McdataExtras.store ?: throw IllegalStateException("no MCData message store is configured")
+
+    private suspend fun msgstore(args: List<String>): Any {
+        val s = store()
+        val rest = args.drop(1)
+        fun need(n: Int) = require(rest.size >= n) { "msgstore ${args.firstOrNull()}: missing arguments" }
+        return when (args.firstOrNull()) {
+            "sync" -> JSONObject().put("objects", s.sync())                                   // §21.2.17.1
+            "get" -> { need(1); storedJson(s.get(rest[0])) }                                  // §21.2.1.1
+            "payload" -> { need(1); JSONObject(s.payload(rest[0], rest.getOrNull(1))) }       // §21.2.1.1
+            "search" -> JSONArray(s.search(rest))                                             // §21.2.2.1
+            "flag", "unflag" -> { need(2); JSONObject().put("status", s.flag(rest[0], rest[1], args[0] == "flag")) } // §21.2.3.1
+            "delete" -> { need(1); JSONObject().put("status", s.delete(rest)) }               // §21.2.4.1
+            "folders" -> JSONObject(s.folders())                                              // §21.2.23.1
+            "folder-create" -> { need(1); JSONObject().put("status", s.createFolder(rest[0], rest.getOrNull(1))) } // §21.2.8.1
+            "folder-delete" -> { need(1); JSONObject().put("status", s.deleteFolder(rest[0])) }                   // §21.2.7.1
+            "move", "copy" -> { need(2); JSONObject().put("status", s.moveOrCopy(args[0] == "move", rest[0], rest.drop(1))) } // §21.2.6.1, §21.2.10.1
+            "subscribe" -> { s.subscribe(); storeJson(s) }                                    // §21.2.19.1, §21.2.12A.1, §21.2.22.1
+            "unsubscribe" -> { s.unsubscribe(); storeJson(s) }                                // §21.2.13A.1, §21.2.20.1
+            "subscription-extend" -> { need(1); JSONObject().put("status", s.extendSubscription(rest[0].toLong())) } // §21.2.14A.1
+            "channel-lifetime" -> { need(1); JSONObject().put("status", s.channelLifetime(rest[0].toLong())) }       // §21.2.21.1
+            null, "status" -> storeJson(s)
+            else -> throw IllegalArgumentException("msgstore sync|get|payload|search|flag|unflag|delete|folders|folder-create|" +
+                "folder-delete|move|copy|subscribe|unsubscribe|subscription-extend|channel-lifetime|status")
+        }
+    }
+
+    private fun storedJson(o: org.openmcx.client.mcdata.StoredObject?): Any = o?.let {
+        JSONObject().put("id", it.id).put("folder", it.folder).put("flags", JSONArray(it.flags)).put("mod_seq", it.modSeq)
+            .put("text", it.text).put("from", it.from).put("direction", it.direction).put("group", it.group).put("date", it.date)
+            .put("parts", it.parts).put("notified", it.notified).put("attributes", JSONObject(it.attributes))
+    } ?: JSONObject.NULL
+
+    private fun storeJson(s: org.openmcx.client.mcdata.MessageStoreClient): JSONObject = JSONObject()
+        .put("box", s.boxUrl).put("subscribed", s.subscribed).put("channel", s.channel).put("subscription", s.subscription)
+        .put("events", s.events).put("cursor", s.creationCursor).put("mod_seq", s.modSeq)
+        .put("last", s.last?.let { JSONObject().put("method", it.first).put("url", it.second).put("status", it.third) })
+        .put("folders", JSONObject(s.folders))
+        .put("objects", JSONArray(s.objects.value.values.map(::storedJson)))
+        .put("control", McdataExtras.storageControl.value?.let { JSONObject().put("action", it.action).put("status", it.status).put("warning", it.warning) })
 
     private fun enhanced() = McdataExtras.enhancedStatus ?: throw IllegalStateException("MCData not provisioned")
 

@@ -81,4 +81,44 @@ def s81_enhanced_status(lab) -> None:
               and "not allowed" in r.get("error", ""), reply=r)
 
 
-SCENARIOS = {"S80": s80_ip_connectivity, "S81": s81_enhanced_status}
+def stored(lab, client: str, text: str):
+    return next((o for o in lab.cmd(client, "msgstore", "status")["objects"] if o["text"] == text), None)
+
+
+def s82_message_store(lab) -> None:
+    """TS 24.282 clause 21.3.2.2: alice enables the storage of her private and group communications (client-c, without
+    <allow-store-comms-in-msgstore>, is refused 403 warning 234); clause 21.2.19.1, 21.2.12A.1 and 21.2.22.1: her
+    notification channel tells her of bob's SDS stored in her box; clause 21.2.1.1, 21.2.3.1, 21.2.4.1 and 21.2.17.1:
+    she reads its attributes and payload, marks it seen and deletes it; then storage is disabled again."""
+    stamp = time.strftime("%H%M%S")
+    r = lab.cmd(A, "msgstore-ctrl", "enable", "all-private", "all-group")
+    lab.check("alice's storage control is accepted (200)", r["status"] == 200, reply=r)
+    if C in lab.devices:
+        r = lab.cmd(C, "msgstore-ctrl", "enable", "all-private")
+        lab.check("client-c may not store (403 warning 234)", r["status"] == 403 and "234" in (r.get("warning") or ""), reply=r)
+    lab.cmd(A, "msgstore", "sync")
+    if not lab.cmd(A, "msgstore", "status")["subscribed"]:
+        lab.cmd(A, "msgstore", "subscribe")
+    st = lab.cmd(A, "msgstore", "status")
+    lab.check("alice's notification channel and subscription exist", st["subscribed"] and st["channel"] and st["subscription"], status=st)
+    text = f"store me {stamp}"
+    lab.cmd(B, "sds", MCDATA[A], text)
+    o = lab.wait("the notification of the stored SDS", lambda: (x := stored(lab, A, text)) and x.get("from") and x, timeout=30)
+    lab.check("alice is notified of bob's SDS stored in her box", o["notified"], obj=o)
+    lab.check("the stored object says from bob, direction In", o["from"] == MCDATA[B] and o["direction"] == "In", obj=o)
+    p = lab.cmd(A, "msgstore", "payload", o["id"])
+    lab.check("its payload is retrieved with the text", p["status"] == 200 and p.get("text") == text, payload={k: p.get(k) for k in ("status", "bytes", "text")})
+    lab.cmd(A, "msgstore", "flag", o["id"], "\\Seen")
+    seen = lab.wait("the \\Seen flag", lambda: (x := stored(lab, A, text)) and "\\Seen" in x["flags"] and x, timeout=15)
+    lab.check("alice marks it seen", "\\Seen" in seen["flags"])
+    found = lab.cmd(A, "msgstore", "search", f"From={MCDATA[B]}")
+    lab.check("a search by sender finds it", o["id"] in found, found=found)
+    lab.cmd(A, "msgstore", "delete", o["id"])
+    lab.cmd(A, "msgstore", "sync")
+    lab.check("deleted, it is gone after a synchronisation", stored(lab, A, text) is None)
+    lab.cmd(A, "msgstore", "unsubscribe")
+    r = lab.cmd(A, "msgstore-ctrl", "disable", "all-private", "all-group")
+    lab.check("alice disables storage again (200)", r["status"] == 200, reply=r)
+
+
+SCENARIOS = {"S80": s80_ip_connectivity, "S81": s81_enhanced_status, "S82": s82_message_store}
