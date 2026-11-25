@@ -120,8 +120,13 @@ class McpttService(
     /** Finished calls, newest last, for the status view. */
     val history: MutableList<Call> = CopyOnWriteArrayList()
     var listener: CallListener? = null
-    /** The local answer mode for calls that do not dictate one. */
-    @Volatile var answerMode: String = config.answerMode
+    /**
+     * The local answer mode for calls that do not dictate one; the client's, so that the service settings carry it
+     * (TS 24.379 §7.2.3 4) a)).
+     */
+    var answerMode: String
+        get() = client.answerModeOf(McService.MCPTT) ?: config.answerMode
+        set(value) = client.setAnswerMode(McService.MCPTT, value)
 
     val active: Call? get() = _calls.value.firstOrNull { it.state != "released" }
 

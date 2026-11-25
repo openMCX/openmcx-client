@@ -103,6 +103,18 @@ internal class FakeSipCore(
             body?.toByteArray() ?: ByteArray(0)).encode())
     }
 
+    /** A MESSAGE from the core to the client's contact, out of any dialog. */
+    fun message(type: String, body: String, from: String = "sip:mcptt@mcx.test", extra: List<Pair<String, String>> = emptyList()) {
+        val headers = Headers()
+            .add("Via", "SIP/2.0/TLS 127.0.0.1:5061;branch=z9hG4bKcorem${cseq.get()}")
+            .add("Max-Forwards", "70")
+            .add("From", "<$from>;tag=corem").add("To", "<sip:alice@mcx.test>")
+            .add("Call-ID", "message${cseq.get()}@core").add("CSeq", "${cseq.getAndIncrement()} MESSAGE")
+            .add("Content-Type", type)
+        extra.forEach { (name, value) -> headers.add(name, value) }
+        toClient.put(SipRequest("MESSAGE", contact(), headers, body.toByteArray()).encode())
+    }
+
     fun regSubscribe(): SipRequest = requests.first { it.method == "SUBSCRIBE" && it.headers["Event"] == "reg" }
 
     /** A reginfo NOTIFY for the client's own contact. */
