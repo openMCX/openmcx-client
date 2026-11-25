@@ -90,7 +90,7 @@ class EmergencyAlerts(
                          val clientId: String? = null, val alert: Boolean? = null, val originatedBy: String? = null,
                          val alertReceived: Boolean? = null, val adhocAlert: Boolean? = null, val adhocAlertReceived: Boolean? = null,
                          val criteria: String? = null, val alertArea: Boolean? = null, val groupArea: Boolean? = null,
-                         val associatedGroup: String? = null)
+                         val associatedGroup: String? = null, val reqType: String? = null)
 
     private val infoType = when (service) {
         LocationService.MCPTT -> McpttInfo.CONTENT_TYPE; LocationService.MCDATA -> McdataInfo.CONTENT_TYPE; LocationService.MCVIDEO -> McvideoInfo.CONTENT_TYPE
@@ -101,7 +101,7 @@ class EmergencyAlerts(
             adhocAlert = f.adhocAlert, participantCriteria = f.criteria).encode()
         LocationService.MCDATA -> McdataInfo(requestUri = f.requestUri, clientId = f.clientId, alert = f.alert, originatedBy = f.originatedBy).encode()
         LocationService.MCVIDEO -> McvideoInfo(requestUri = f.requestUri, clientId = f.clientId, adhocAlert = f.adhocAlert,
-            participantCriteria = f.criteria).encode()
+            participantCriteria = f.criteria, reqType = f.reqType).encode()
     }
 
     private fun decode(text: String): Fields = when (service) {
@@ -166,6 +166,21 @@ class EmergencyAlerts(
             ?.let { runCatching { decode(it.text) }.getOrNull() }?.callingGroup ?: throw AlertError("no ad hoc group in the answer")
         _adhoc.value = OwnAdhocAlert(group, criteria)
         event("ad hoc alert $group to $criteria: ${response.status}")
+    }
+
+    /**
+     * TS 24.281 §12.1A.1.4 (MCVideo): modify the participant criteria of this user's ad hoc group emergency alert: a
+     * MESSAGE with the ad hoc group, <adhoc-alert-ind> "true", <req-type>
+     * "ad-hoc-emergency-alert-participant-criteria-modification" and the new criteria (step 4), with the location (step 5).
+     */
+    suspend fun modifyAdhoc(criteria: String, location: EmergencyLocation?) {
+        check(service == LocationService.MCVIDEO) { "participant criteria modification is the MCVideo procedure here" }
+        val own = _adhoc.value ?: throw AlertError("no ad hoc alert to modify")
+        val response = message(Fields(requestUri = own.group, clientId = client.config.clientId, adhocAlert = true, criteria = criteria,
+            reqType = "ad-hoc-emergency-alert-participant-criteria-modification"), location)
+        if (!response.isSuccess) throw failure("ad hoc alert ${own.group} modification", response)
+        _adhoc.value = OwnAdhocAlert(own.group, criteria)
+        event("ad hoc alert ${own.group} criteria now $criteria: ${response.status}")
     }
 
     /** §12.1A.1.2: cancel this user's ad hoc alert, addressed to the group the server gave it. */

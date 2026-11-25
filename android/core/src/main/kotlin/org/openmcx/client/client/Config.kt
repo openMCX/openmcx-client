@@ -167,6 +167,20 @@ data class ClientConfig(
         val width: Int = 640, val height: Int = 480, val frameRate: Int = 15, val bitrate: Int = 500_000,
         /** The MCVideo functional aliases this user may activate (TS 24.281 §20.2.1), as [Mcptt.functionalAliases]. */
         val functionalAliases: List<String> = emptyList(),
+        /**
+         * TS 24.581 §14.2.4: "mc_granted" in the offer of an initial INVITE with an implicit transmission request
+         * (`offer_granted`, default false: the client's choice, "when it is acceptable").
+         */
+        val offerGranted: Boolean = false,
+        /** TS 24.581 §11.1.1, §11.2.1: T100 to T104 (ms) and C100 to C104 (`transmission_timers`: "t100" ... "c104"). */
+        val timers: org.openmcx.client.mcvideo.TransmissionTimers = org.openmcx.client.mcvideo.TransmissionTimers(),
+        /** TS 24.581 §14.2.2: "mc_queueing" offered (`queueing`, default false). */
+        val queueing: Boolean = false,
+        /**
+         * The transmission and reception priority (TS 24.581 §14.2.3, §14.2.6) when provisioned (`priority`); otherwise
+         * the MCVideo user profile's <Priority> (TS 24.484 §9.3.2.1).
+         */
+        val priority: Int? = null,
     )
 
     /**
@@ -254,7 +268,19 @@ data class ClientConfig(
                     Mcvideo(it.str("user_id"), it.str("psi"), it.strings("groups"), it.optStr("answer_mode") ?: "automatic",
                         it.strings("chat_groups"),
                         it.int("width", 640), it.int("height", 480), it.int("frame_rate", 15), it.int("bitrate", 500_000),
-                        it.strings("functional_aliases"))
+                        it.strings("functional_aliases"), it.bool("offer_granted", false),
+                        (it["transmission_timers"] as? JsonObject)?.let { t ->
+                            val d = org.openmcx.client.mcvideo.TransmissionTimers()
+                            runCatching {
+                                org.openmcx.client.mcvideo.TransmissionTimers(t.count("t100", d.t100Ms, 1), t.count("t101", d.t101Ms, 1),
+                                    t.count("t102", d.t102Ms, 1), t.count("t103", d.t103Ms, 1), t.count("t104", d.t104Ms, 1),
+                                    t.count("c100", d.c100.toLong(), 1).toInt(), t.count("c101", d.c101.toLong(), 1).toInt(),
+                                    t.count("c102", d.c102.toLong(), 1).toInt(), t.count("c103", d.c103.toLong(), 1).toInt(),
+                                    t.count("c104", d.c104.toLong(), 1).toInt())
+                            }.getOrElse { e -> throw ConfigError("mcvideo.transmission_timers: ${e.message}") }
+                        } ?: org.openmcx.client.mcvideo.TransmissionTimers(),
+                        it.bool("queueing", false),
+                        it.optStr("priority")?.let { p -> p.toIntOrNull()?.takeIf { v -> v in 0..255 } ?: throw ConfigError("mcvideo.priority must be 0 to 255") })
                 },
                 security = (root["security"] as? JsonObject)?.let {
                     val profile = it.obj("key_parameter_profile")

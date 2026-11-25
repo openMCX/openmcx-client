@@ -243,8 +243,34 @@ class DebugControl(private val context: Context) {
         // MCVideo private calls.
         "video-call" -> videoJson(mcvideo().privateCall(Engine.mcvideoId(args[0]),
             if ("manual" in args) Commencement.MANUAL else Commencement.AUTOMATIC, transmissionControl = "notc" !in args,
-            emergency = "emergency" in args))
-        "video-emergency" -> { mcvideo().setPriority(emergency = true, enabled = args.firstOrNull() != "off"); mcvideo().active?.priority ?: "none" }
+            emergency = "emergency" in args, implicit = "implicit" in args))
+        // video-emergency on|off [alert=<MCVideo ID>]: with alert=, the cancellation also cancels that user's emergency alert.
+        "video-emergency" -> { mcvideo().setPriority(emergency = true, enabled = args.firstOrNull() != "off",
+            cancelAlertOf = args.firstOrNull { it.startsWith("alert=") }?.removePrefix("alert=")); mcvideo().active?.priority ?: "none" }
+        // TS 24.281 §22.2.2.1.1: video-adhoc <MCVideo ID>... | criteria=<criteria> [emergency|imminent] [implicit]
+        "video-adhoc" -> videoJson(mcvideo().adhocCall(args.filter { it.startsWith("sip:") }.map { Engine.mcvideoId(it) },
+            args.firstOrNull { it.startsWith("criteria=") }?.removePrefix("criteria="),
+            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }, implicit = "implicit" in args))
+        // §22.2.3.1.1: release the ad hoc group call for everyone; video-hangup leaves it (§22.2.4.1.1).
+        "video-adhoc-release" -> { mcvideo().hangup(releaseForAll = true); "released" }
+        "video-rejoin" -> videoJson(mcvideo().rejoin())
+        // TS 24.281 §7.2.3: video-settings-publish [remove]
+        "video-settings-publish" -> JSONObject().put("status", mcvideo().publishSettings(remove = args.firstOrNull() == "remove"))
+        // §8.2.1.6: video-gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated];
+        // video-gdd-resubscribe <group>; video-gdd-unsubscribe <group>; video-gdd [group]
+        "video-gdd-subscribe" -> JSONObject().put("status", mcvideo().subscribeGdd(args[0], "fetch" in args,
+            org.openmcx.client.mcvideo.GroupDynamicData.Item.entries.filter { it.name.lowercase() in args }))
+        "video-gdd-resubscribe" -> JSONObject().put("status", mcvideo().refreshGdd(args[0], resubscribe = true))
+        "video-gdd-unsubscribe" -> JSONObject().put("status", mcvideo().refreshGdd(args[0], resubscribe = false))
+        "video-gdd" -> JSONObject(mcvideo().groupDynamicData.filterKeys { args.isEmpty() || it == args[0] }.mapValues { (_, d) ->
+            JSONObject().put("status", d.status).put("modified_by", d.modifiedBy).put("call_ongoing", d.callOngoing)
+                .put("broadcast_alias", d.broadcastAlias).put("regroup_alias", d.regroupAlias)
+                .put("members", JSONArray(d.members.map { m -> JSONObject().put("id", m.id).put("clients", JSONArray(m.clients)) }))
+        })
+        "video-rejoinable" -> JSONObject().put("session", mcvideo().rejoinable?.first).put("group", mcvideo().rejoinable?.second)
+            .put("type", mcvideo().rejoinable?.third)
+        // §9.2.5.2.1: video-imminent-cancel [group]
+        "video-imminent-cancel" -> JSONObject().put("state", mcvideo().cancelImminent(args.firstOrNull() ?: Engine.client!!.config.mcvideo!!.groups.first()))
         "video-imminent" -> { mcvideo().setPriority(emergency = false, enabled = args.firstOrNull() != "off"); mcvideo().active?.priority ?: "none" }
         "video-chat" -> videoJson(mcvideo().joinChat(args.firstOrNull() ?: Engine.client!!.config.mcvideo!!.chatGroups.first()))
         // video-alert on|off [latitude longitude] [group]: without coordinates the phone's own location is used.
@@ -265,7 +291,13 @@ class DebugControl(private val context: Context) {
         // The emergency alert of the Call tab: alert on|off [mcptt|mcdata|video]
         "alert" -> JSONObject().put("result", Engine.emergencyAlert(args.firstOrNull() != "off", args.getOrNull(1))).put("state", alertState())
         // adhoc-alert <criteria> [mcptt|video]   or   adhoc-alert cancel
-        "adhoc-alert" -> if (args.firstOrNull() == "cancel") {
+        // TS 24.281 §12.1A.1.4: adhoc-alert modify <criteria> (MCVideo)
+        "adhoc-alert" -> if (args.firstOrNull() == "modify") {
+            val video = Engine.alertHandlers.firstOrNull { it.service == org.openmcx.client.location.LocationService.MCVIDEO }
+                ?: throw IllegalStateException("MCVideo not provisioned")
+            video.modifyAdhoc(args[1], Engine.positionOverride ?: Engine.currentLocation(context))
+            JSONObject().put("criteria", args[1]).put("state", alertState())
+        } else if (args.firstOrNull() == "cancel") {
             val done = Engine.alertHandlers.filter { it.adhoc.value != null }.map { h -> h.service.lower to runCatching { h.cancelAdhoc() }.exceptionOrNull()?.message }
             Engine.alertsChanged()
             JSONObject().put("cancelled", JSONObject(done.toMap())).put("state", alertState())
@@ -283,6 +315,9 @@ class DebugControl(private val context: Context) {
             JSONObject().put("group", a.group).put("latitude", a.location?.latitude).put("longitude", a.location?.longitude)
         })
         "video-tamper-pck" -> { mcvideo().tamperNextPck = true; "next PCK tampered" }
+        // TS 33.180 §5.2.8.2: video-pck-kms <KMS URI>: the next PCK names that receiver KMS (the key still under this
+        // client's KMS), to see the server's KMS Redirect Response and the call keyed again.
+        "video-pck-kms" -> { mcvideo().mislabelNextPckKms = args[0]; "next PCK's receiver KMS ${args[0]}" }
         "keys" -> JSONObject().put("kms", Engine.client?.keysOf(org.openmcx.client.body.McService.MCPTT)?.kms?.kmsUri)
             .put("csk_id", Engine.client?.cskOf(org.openmcx.client.body.McService.MCPTT)?.csbId)
             .put("identity", Engine.client?.keysOf(org.openmcx.client.body.McService.MCPTT)?.identity)
@@ -301,7 +336,12 @@ class DebugControl(private val context: Context) {
         "video-remote" -> { mcvideo().remoteTransmission(args[0], args.getOrNull(1) != "stop"); "requested" }
         "video-recordings" -> JSONArray(mcvideo().recordings.value)
         "video-group" -> videoJson(mcvideo().groupCall(args.firstOrNull { it.startsWith("sip:") } ?: Engine.client!!.config.mcvideo!!.groups.first(),
-            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }))
+            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }, implicit = "implicit" in args))
+        // TS 24.581 §6.2.4.9.3 and §6.2.5.5.3: the queue position while queued; stop receiving the current transmission.
+        "video-queue-position" -> JSONObject().put("sent", mcvideo().queuePosition()).put("position", mcvideo().active?.media?.control?.queuePosition)
+        "video-reception-end" -> JSONObject().put("sent", mcvideo().endReception())
+        "video-profile" -> JSONObject().put("priority", mcvideo().configuredPriority)
+            .put("private_call_kms", JSONObject(mcvideo().readProfile()?.privateCallKms ?: emptyMap<String, String>()))
         "video-transmit" -> videoTransmit(args.getOrNull(0)?.toDouble() ?: 5.0)
         "video-release" -> { mcvideo().stopTransmit(); "ok" }
         "video-hangup" -> { mcvideo().hangup(); "released" }
@@ -592,6 +632,15 @@ class DebugControl(private val context: Context) {
             .put("transmission", media?.takeIf { it.isStarted }?.control?.state?.value?.name)
             .put("transmitter", media?.takeIf { it.isStarted }?.control?.transmitter)
             .put("receiving", media?.takeIf { it.isStarted }?.control?.receiving)
+            .put("reception", media?.takeIf { it.isStarted }?.control?.reception?.value?.name)
+            .put("queue_position", media?.takeIf { it.isStarted }?.control?.queuePosition)
+            .put("timeouts", JSONArray(media?.takeIf { it.isStarted }?.control?.timeouts ?: emptyList<String>()))
+            .put("granted_by_sdp", call.grantedBySdp)
+            .put("kms_uri", call.kmsUri).put("kms_source", call.kmsSource)
+            .put("krr", call.krr?.let { JSONObject().put("creator", it.creator).put("receiver_kms", it.receiverKms).put("receiver_list", JSONArray(it.receiverList)) })
+            .put("request_priority", media?.takeIf { it.isStarted }?.control?.priority)
+            .put("request_reception_priority", media?.takeIf { it.isStarted }?.control?.receptionPriority)
+            .put("negotiated_priority", call.negotiatedPriority).put("negotiated_reception_priority", call.negotiatedReceptionPriority)
             .put("events", JSONArray(call.events)).put("participants", JSONObject(call.participants))
             .put("pictures_sent", media?.stats?.picturesSent?.get()).put("pictures_received", media?.stats?.picturesReceived?.get())
             .put("undecoded", media?.stats?.undecoded?.get()).put("skipped_before_key", media?.stats?.skippedBeforeKey?.get())

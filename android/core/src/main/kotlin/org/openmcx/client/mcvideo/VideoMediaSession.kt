@@ -125,17 +125,26 @@ class VideoMediaSession(
     private var videoTsBase = random.nextInt().toLong() and 0xffffffffL
     @Volatile private var sendingVideoSsrc: Long = local.videoSsrc
 
-    fun start(remote: RemoteVideoMedia, ownVideoPayloadType: Int) {
+    /**
+     * Start the media of the negotiated call. [priority] and [receptionPriority] are the Transmission and Reception
+     * Priority fields to request with (TS 24.581 §6.2.4.3.2 step 2a, §6.2.5.3.3 step 1a, [TransmissionPriority]),
+     * [timers] T100 to T104 and C100 to C104; with [grantedInAnswer] the 200 (OK)'s "mc_granted" granted our implicit
+     * request (§12.1.2.2 NOTE 3), the RTP media sent with the answer's "mc_audio_ssrc" and "mc_video_ssrc" (§14.4).
+     */
+    fun start(remote: RemoteVideoMedia, ownVideoPayloadType: Int, priority: Int? = null, receptionPriority: Int? = null,
+              timers: TransmissionTimers = TransmissionTimers(), grantedInAnswer: Boolean = false) {
         val implicit = local.implicitRequest && remote.transmissionControl
         this.remote = remote
         videoPt = ownVideoPayloadType
-        control = TransmissionParticipant(scope, remote.controlSsrc ?: 0, ::sendControl, this, remote.priority)
+        control = TransmissionParticipant(scope, remote.controlSsrc ?: 0, ::sendControl, this, priority,
+            timers = timers, receptionPriority = receptionPriority)
         jobs += scope.launch(Dispatchers.IO) { receiveVideo() }
         jobs += scope.launch(Dispatchers.IO) { receiveAudio() }
         jobs += scope.launch(Dispatchers.IO) {
             // Started before the control port is read: the server may grant at once (a push to it), and a message
             // that finds the participant not yet started is dropped. Meanwhile it waits in the socket's buffer.
             control.start(implicit)
+            if (grantedInAnswer && implicit) control.grantedInAnswer(remote.grantedAudioSsrc, remote.grantedVideoSsrc)
             // Without transmission control each party sends at once, with the SSRCs of its own SDP.
             if (remote.transmissionControl) receiveControl() else granted(null, null, null)
         }
@@ -345,6 +354,9 @@ class VideoMediaSession(
     override fun requestFailed() { events?.requestFailed() }
     override fun reception(receiving: Boolean, rejectCause: Int?) { events?.reception(receiving, rejectCause) }
     override fun remoteResult(start: Boolean, done: Boolean?) { events?.remoteResult(start, done) }
+    override fun queued(position: Int?) { events?.queued(position) }
+    override fun timeout(what: String) { events?.timeout(what) }
+    override fun ended(byServer: Boolean) { events?.ended(byServer) }
 
     companion object {
         /** Pictures of more packets than this are paced. */

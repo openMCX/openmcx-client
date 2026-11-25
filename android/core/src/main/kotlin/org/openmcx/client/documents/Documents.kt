@@ -198,6 +198,9 @@ class DocumentClient(private val http: HttpClient, private val cms: String, priv
     suspend fun userProfile(mcpttId: String, index: Int, token: String): UserProfile =
         UserProfile.parse(fetch("$cms/org.3gpp.mcptt.user-profile/users/${enc(mcpttId)}/mcptt-user-profile-$index.xml", token))
 
+    /** A CMS document by its path under the XCAP root (the MCVideo user profile, TS 24.484 §9.3.1A). */
+    suspend fun cmsDocument(path: String, token: String): String = fetch("$cms/$path", token)
+
     /** TS 24.484 §8.4.2.8 (§9.4.2.8, §10.4.2.8): the service configuration document of `mcptt`, `mcvideo` or `mcdata`. */
     suspend fun serviceConfiguration(service: String, token: String): String =
         fetch("$cms/org.3gpp.$service.service-config/global/service-config.xml", token)

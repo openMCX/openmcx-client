@@ -791,6 +791,10 @@ class McxClient(
             .onFailure { event("user profile: ${it.message}") }
     }
 
+    /** A CMS document by its path under the XCAP root, with the current access token (the MCVideo user profile). */
+    suspend fun cmsDocument(path: String): String =
+        documents.cmsDocument(path, tokens?.accessToken ?: throw IllegalStateException("not logged in"))
+
     /** A service configuration document: the floor queue (MCPTT), signalling protection, Resource-Priority values. */
     private suspend fun readServiceConfiguration(service: String, token: String) {
         runCatching { documents.serviceConfiguration(service, token) }
@@ -1926,7 +1930,8 @@ class McxClient(
         }
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "presence") {
             val subscription = subscriptions.values.firstOrNull { it.request.callId == request.callId }
-            if (subscription == null) { tx.respond(481); return }
+            // Another presence subscription of a service (MCVideo group dynamic data, TS 24.281 §8.2.1.6) is its handler's.
+            if (subscription == null) { for (handler in handlers) if (handler.handle(tx)) return; tx.respond(481); return }
             tx.respond(200)
             if (request.body.isNotEmpty()) {
                 val body = Multipart.parse(request.contentType, request.body).firstOrNull { it.mediaType == Affiliation.CONTENT_TYPE }?.text

@@ -46,6 +46,7 @@ object TxField {
     const val INDICATOR = 13
     const val AUDIO_SSRC = 14
     const val RESULT = 15
+    const val RECEPTION_PRIORITY = 19
     const val FUNCTIONAL_ALIAS = 21
     const val RECEPTION_MODE = 22
     const val VIDEO_SSRC = 23
@@ -76,6 +77,8 @@ data class TransmissionMessage(
     val permissionToRequest: Boolean? get() = u16(TxField.PERMISSION_TO_REQUEST)?.let { it == 1 }
     /** The Transmission Indicator field's bits (§9.2.3.11). */
     val indicator: Int? get() = u16(TxField.INDICATOR)
+    /** The Queue Position Info field's position (§9.2.3.4: the queue position, then the queue priority). */
+    val queuePosition: Int? get() = field(TxField.QUEUE_INFO)?.firstOrNull()?.let { it.toInt() and 0xff }
     /** The Functional Alias of the transmitting user (§9.2.3.21). */
     val functionalAlias: String? get() = field(TxField.FUNCTIONAL_ALIAS)?.let { String(it, Charsets.UTF_8) }
     /** The Reception Mode field: true for '0', the receiver may receive at once (automatic reception, §9.2.3.22). */
@@ -126,12 +129,19 @@ data class TransmissionMessage(
 
         fun release(ssrc: Long) = TransmissionMessage(TxType.RELEASE, ssrc)
 
+        /** Transmission end request (§9.2.20): the participant ends its transmission or withdraws its request (§6.2.4.5.3). */
+        fun endRequest(ssrc: Long) = TransmissionMessage(TxType.END_REQUEST, ssrc)
+
         /** Remote Transmission (cancel) request (§9.2.22, §9.2.24) naming [user]; the Remote ID has no field and is left out. */
         fun remote(ssrc: Long, user: String, start: Boolean) = TransmissionMessage(
             if (start) TxType.REMOTE_REQUEST else TxType.REMOTE_CANCEL_REQUEST, ssrc, fields = listOf(TxField.USER_ID to user.toByteArray()))
 
-        /** Receive Media Request (§9.2.14): accept a notified transmission. */
-        fun receiveMedia(ssrc: Long) = TransmissionMessage(TxType.RECEIVE_MEDIA_REQUEST, ssrc)
+        /**
+         * Receive Media Request (§9.2.14): accept a notified transmission; with a Reception Priority field (§9.2.3.19,
+         * the priority then a spare octet, as the Transmission Priority) when [receptionPriority] is given.
+         */
+        fun receiveMedia(ssrc: Long, receptionPriority: Int? = null) = TransmissionMessage(TxType.RECEIVE_MEDIA_REQUEST, ssrc,
+            fields = listOfNotNull(receptionPriority?.let { TxField.RECEPTION_PRIORITY to byteArrayOf(it.toByte(), 0) }))
 
         /** Transmission control ack (§9.2.29) for [type], from the participant (source 0). */
         fun ack(ssrc: Long, type: TxType) = TransmissionMessage(TxType.ACK, ssrc,

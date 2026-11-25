@@ -42,7 +42,13 @@ transmitting, the **Transmit** button (hold), **Flip** (back or front camera: at
 | Push and pull: `session-type` "one-to-one video push" / "one-to-one video pull" / "one-to-server video push" / "one-from-server video pull" (the pull naming the recording in `<video-pull-url>`); the sending side asks for the transmission implicitly (`mc_implicit_request` in the SDP) and is granted without a Transmission Request; the recording URL of a push to the server arrives in an INFO (`<video-push-url>`) and is kept under "Video recordings" | `McvideoService.push/pull/pushToServer/pullFromServer`, `McvideoSdp.kt`, `McvideoInfo.kt` |
 | Ambient viewing: `session-type` "ambient-viewing" with `<ambient-viewing-type>` (remote-init or local-init) in `<anyExt>`, `Priv-Answer-Mode: Auto`, `recvonly` for the viewing side and `sendonly` for the viewed-to side (a one-way offer answered with the other direction), the viewed-to side's implicit transmission request; released only with the release capability (`Feature-Caps: g.3gpp.mcvideo.ambient-viewing-call-release`, annex D.3); the server's release reason (`<release-reason>` in the BYE) kept as the call's end reason; the viewed-to user of a remote-init call sees nothing (no screen, notification or history entry), and a call of their own ends it | `McvideoService.ambient`, `McvideoSdp.kt`, `McvideoInfo.kt`, `UiModel.kt` |
 | Remote transmission: Remote Transmission (cancel) Request (MCV0 subtypes 7, 8) naming the user, the response's Result field; an unasked grant starts our own transmission, a revoke (cause 5) ends it | `TransmissionParticipant.remote`, `Transmission.kt` |
-| Transmission participant: request, grant (switching to the granted Audio and Video SSRCs), taken, idle, revoke, release; reception control: the Media Transmission Notification (TS 24.581 §6.2.5.3.2: the transmitter's user ID and SSRCs, Reception Mode '0' receives at once, '1' sends a Receive Media Request) and the Media Reception Notification, both accepted automatically | `TransmissionParticipant.kt` |
+| Transmission participant: request, grant (switching to the granted Audio and Video SSRCs), taken, idle, revoke, and the end of a transmission by Transmission end request and its response (§6.2.4.5.3, §6.2.4.6.4; never Transmission Release on-network), the server's end request answered (§6.2.4.5.7), queueing with Queue Position Request (§6.2.4.9; `mc_queueing` with `mcvideo.queueing`); reception control: the Media Transmission Notification (TS 24.581 §6.2.5.3.2: the transmitter's user ID and SSRCs, Reception Mode '0' receives at once, '1' sends a Receive Media Request) and the Media Reception Notification, both accepted automatically, and the Media reception end request (§6.2.5.5.3) | `TransmissionParticipant.kt` |
+| Timers T100 to T104 and counters C100 to C104 (TS 24.581 §11.1.1, §11.2.1; `mcvideo.transmission_timers`, ms and counts, 1 s and 3 by default): T100 for the Transmission Request and the implicit request (§6.2.4.2.2 step 4: started without sending, its expiry sends it), T101 for the end request, T102 for the queue position, T103 for the Receive Media Request, T104 for the reception end; at the limit the timeout is reported and the state follows §6.2.4.4.4, §6.2.4.6.3, §6.2.4.9.8, §6.2.5.4.4, §6.2.5.6.3 | `TransmissionParticipant.kt`, `TransmissionTimers` |
+| Priorities (TS 24.581 §14.2.3, §14.2.6, §14.3.3, §14.4): `mc_priority` and `mc_reception_priority` offered from the MCVideo user profile's `<Priority>` (TS 24.484 §9.3.2.1 item 8 e) v), the profile read from the CMS once authorised) or `mcvideo.priority`; the negotiated maxima (the answer's value, at most the offer's; as answerer the offer's returned); the Transmission Priority and Reception Priority fields of the requests capped by them (§6.2.4.3.2 step 2a, §6.2.5.3.3 step 1a) | `TransmissionPriority`, `McvideoProfile.kt`, `McvideoService.startMedia` |
+| `mc_granted` (TS 24.581 §14.2.4, §14.5): offered only in the initial INVITE with this client's implicit request, behind `mcvideo.offer_granted` (default false); a grant in the 200 (OK) taken as the Transmission Granted (§12.1.2.2 NOTE 3), with the answer's `mc_audio_ssrc`/`mc_video_ssrc`; a later Transmission Granted is not a second grant. Private and group calls may ask to transmit with the setup (`implicit`) | `McvideoSdp.kt`, `TransmissionParticipant.grantedInAnswer` |
+| Ad hoc group calls (TS 24.281 §22): to listed users (resource-lists) or participant criteria, the service configuration's `<allow-adhoc-group-call-support>` checked; the server names the ad hoc group in its 2xx; emergency (`<adhoc-emergency-ind>`, §6.2.8.1.19) and imminent peril (§6.2.8.1.23) ad hoc calls; leaving keeps the session re-joinable, the re-join an INVITE to the session identity (§22.2.4.1.1, §22.2.5.1.1; group sessions too, §9.2.1.2.4.1); released for everyone with Reason "User requested release" (§22.2.3.1.1). Transmission control in the clear, as the server keeps it for ad hoc calls | `McvideoService.adhocCall`, `rejoin`, `hangup(releaseForAll)` |
+| Priority extras: the emergency cancelled together with another user's alert (§6.2.8.1.14 step 3, `<originated-by>`); a group's imminent peril cancelled without a call (§9.2.5.2.1, MESSAGE, MVIG 3 then MVIG 1 or 2); the ad hoc group emergency alert's criteria modified (§12.1A.1.4) | `McvideoService.setPriority`, `cancelImminent`, `EmergencyAlerts.modifyAdhoc` |
+| Service settings and group dynamic data: the settings-only PUBLISH (§7.2.3, its own entity-tag, a 412 published anew); the group dynamic data subscription (§8.2.1.6: SUBSCRIBE Event presence with the simple-filter of §8.3.2.2, re-subscription, de-subscription, the pidf of §8.3.1.2 read) | `McvideoService.publishSettings`, `subscribeGdd`, `GroupDynamicData.kt` |
 | Media session: camera video and speech while transmitting, the transmitter's video decoded from its next key picture, key pictures paced | `VideoMediaSession.kt` |
 | Calls: INVITE to the MCVideo PSI with the MCVideo ICSI and feature tag (private: `session-type` private and a resource-lists target; group: `prearranged` and the group), answer (a group call's invitation too), UPDATE refresh, BYE | `McvideoService.kt` |
 | Registration, service authorisation (PUBLISH poc-settings with the same access token), affiliation | `client/McxClient.kt` |
@@ -50,7 +56,7 @@ transmitting, the **Transmit** button (hold), **Flip** (back or front camera: at
 | Camera (Camera2) into the hardware H.264 encoder's input surface; MediaCodec decoder onto the call screen | `app/…/media/AndroidVideo.kt` |
 | Upright pictures: the SurfaceTexture's transform matrix already turns each camera frame by the sensor orientation (Camera2 sets it on the stream, with a mirror for the front camera); the OpenGL stage turns it further only for the way the phone is held, undoes the front camera's mirror for the encoder and keeps it in the preview; the picture's shape follows the JPEG_ORIENTATION rule; the receiver shows it at its own shape | `app/…/media/CameraGl.kt`, `media/VideoOrientation.kt`, `ui/VideoCallScreen.kt` |
 | Call screen, Call tab entries, camera permission, camera foreground-service type during a call | `app/…/ui/VideoCallScreen.kt`, `Screens.kt`, `MainActivity.kt`, `McxService.kt` |
-| Debug commands `video-call <target> [notc] [manual] [emergency]`, `video-group [group] [emergency\|imminent]`, `video-emergency on\|off`, `video-imminent on\|off`, `video-alert on\|off [lat lon] [for <MCVideo ID>]`, `video-alerts`, `video-chat [group]`, `video-transmit <s>`, `video-release`, `video-status`, `video-hashes`, `video-hangup`, `video-answer`, `video-camera front\|back` | `app/…/DebugControl.kt` |
+| Debug commands `video-call <target> [notc] [manual] [emergency] [implicit]`, `video-group [group] [emergency\|imminent] [implicit]`, `video-adhoc <ID>...\|criteria=<c> [emergency\|imminent]`, `video-adhoc-release`, `video-rejoin`, `video-rejoinable`, `video-queue-position`, `video-reception-end`, `video-profile`, `video-emergency off alert=<ID>`, `video-imminent-cancel [group]`, `video-settings-publish [remove]`, `video-gdd-subscribe <group> [fetch] [items]`, `video-gdd-resubscribe`, `video-gdd-unsubscribe`, `video-gdd`, `video-pck-kms <uri>`, `adhoc-alert modify <criteria>`, `video-emergency on\|off`, `video-imminent on\|off`, `video-alert on\|off [lat lon] [for <MCVideo ID>]`, `video-alerts`, `video-chat [group]`, `video-transmit <s>`, `video-release`, `video-status`, `video-hashes`, `video-hangup`, `video-answer`, `video-camera front\|back` | `app/…/DebugControl.kt` |
 
 Video is 640×480 (or the nearest camera size) turned upright, so 480×640 from a phone held upright and 640×480 from
 one held sideways (chosen when the transmission starts; turning the phone during it keeps the picture upright,
@@ -321,6 +327,49 @@ The runs also found three test problems, now fixed:
 - **First cipher slow on the phone.** Setting up the first AES-GCM cipher could take most of a second, while
   the first packets piled up. The ciphers are now warmed up when a call's keys are set.
 
+### XML signalling protection
+
+MCVideo signalling is XML protected (TS 24.281 §4.8, §6.6; TS 33.180 §9.3) by the shared filters
+(`security/XmlProtection.kt`, `client/SignallingProtection.kt`) under the MCVideo CSK and MCVideo ID, as the
+service configuration document asks: the mcvideo-info, resource-lists, location and conference-info XML encrypted
+and every XML body signed; incoming bodies verified, then decrypted; a failed check is answered 403 with warning 139,
+content that cannot be decrypted 403 with warning 140.
+
+### KMS of a private call
+
+The PCK of a one-to-one call is keyed to the called user's KMS (§6.2.8.3.9): the MCVideo user profile's
+`<PrivateCallKMSURI>`, else this client's own. A 488 with a KMS Redirect Response (TS 33.180 §5.2.8.2.5, annex D.4)
+makes the call again, once, keyed to the first receiver KMS listed that the client holds. Only the client's own KMS
+certificate is held: the KMS CertCache of other KMSs is not fetched yet.
+
+### Signalling on redroid (phase 7)
+
+Redroid has no camera, so these scenarios (`tests/scenarios.py LAB V1 V2 V3 V4 V5`) check the signalling and the
+transmission and reception control, not pictures. Lab `p7-x1`: `--mcvideo --priority --protected --xml-protection
+--integrity-protection --reference-client client-c --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5`,
+server image `openmcx-all:mcdpre-800c657`, reference client `openmcx-client:mcdemerg-ce06d65`. **35/35 checks passed**, and in the same run the MCPTT scenarios S2, S3, S12 and S16 (44/44).
+
+| Scenario | Checks | What |
+|---|---:|---|
+| V1 | 11 | XML protection required and keyed; grant; the end request answered (T101 stopped, no timeout); bob's reception end answered (T104); implicit request with the group call granted; priority 7 offered, capped to 4 by the server, 4 in the request; signalling encrypted, signed, verified and decrypted, nothing refused |
+| V2 | 11 | ad hoc call to bob and the reference client, the ad hoc group named; transmission in the clear; bob leaves and re-joins; alice releases it for everyone; emergency and imminent peril ad hoc calls received as such |
+| V3 | 3 | the emergency cancelled with bob's alert; imminent peril cancelled without a call (MVIG 1) |
+| V4 | 6 | settings-only PUBLISH and its modification; the group dynamic data with members and clients, call ongoing during a call, de-subscription |
+| V5 | 4 | PCK keyed to bob's KMS from the profile; a KMS Redirect Response and the call keyed again |
+
+On an unprotected lab (`p7-u1`, the same without `--protected`), V1 to V4 pass too (29/29; V5 needs protection).
+S16 (MCPTT) then stopped at its imminent peril group call there, and did the same with the APK from before phase 7:
+a matter of that lab's state, not of this change. On the protected lab MCData is not authorised with this server
+image (403, warning 140, "XML content encrypted under another XPK"), with the APK from before phase 7 as well.
+
+The OpenMCX MCVideo server lets an ad hoc call go on without its initiator (TS 24.281 §6.3.8.1 item 3), whatever the
+BYE's Reason, and its ad hoc re-INVITE changes the participants only: an ad hoc call's emergency cannot be cancelled
+in the call there (it ends with the call). `tests/video.py` needs the phones' cameras and was not run on redroid.
+
 ## Not yet
 
-Protection of MCVideo signalling (XML confidentiality and integrity, TS 33.180 9.3; not in the agreed scope).
+- Remote affiliation requests accepted per group and de-affiliation from one group (TS 24.281 §8.2.1.2 to §8.2.1.5):
+  the affiliation lives in `McxClient`, shared with MCPTT (phase 1).
+- The KMS CertCache of other KMSs (TS 33.180 §5.2.8.3): only the client's own KMS can key a PCK.
+- Ad hoc group call participant modification (`mcvideo-adhoc-modify` of the Linux client), protected ad hoc calls.
+- Protected FD (PCK).
