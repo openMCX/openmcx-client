@@ -44,6 +44,14 @@ data class McdataInfo(
     /** In `<anyExt>` (TS 24.282 Annex D.1): an emergency (§6.2.8.1.1, §6.2.8.3.2) or imminent peril (§6.2.8.1.9) communication. */
     val emergency: Boolean? = null,
     val imminentPeril: Boolean? = null,
+    /** In `<anyExt>` (TS 24.282 §18.3.2.1 step 9): the INVITE establishes a pre-established session. */
+    val preEstablishedSession: Boolean? = null,
+    /**
+     * In `<anyExt>` (TS 24.282 §9.2.5.1.2, §9.2.5.1.3): the state the participating function's re-INVITE in a
+     * pre-established session reports: "establish-request", "establish-success", "establish-fail",
+     * "terminate-request", "terminated".
+     */
+    val communicationState: String? = null,
 ) {
     fun encode(): String = Xml.document("mcdatainfo", NAMESPACE) {
         element("mcdata-Params") {
@@ -59,7 +67,7 @@ data class McdataInfo(
             uri("mcdata-controller-psi", controllerPsi)
             if (emergency != null || imminentPeril != null || alertReceived != null || associatedGroupId != null || userRequestedPriority != null || usedPriority != null ||
                 emergencyAlertArea != null || groupGeoArea != null || callToFunctionalAlias != null || functionalAlias != null ||
-                calledFunctionalAlias != null) element("anyExt") {
+                calledFunctionalAlias != null || preEstablishedSession != null || communicationState != null) element("anyExt") {
                 leaf("emergency-ind", emergency?.toString())
                 leaf("imminentperil-ind", imminentPeril?.toString())
                 leaf("alert-ind-rcvd", alertReceived?.toString())
@@ -71,6 +79,8 @@ data class McdataInfo(
                 leaf("call-to-functional-alias-ind", callToFunctionalAlias?.toString())
                 uri("functional-alias-URI", functionalAlias)
                 uri("called-functional-alias-URI", calledFunctionalAlias)
+                leaf("pre-established-session-ind", preEstablishedSession?.toString())
+                leaf("mcdata-communication-state", communicationState)
             }
         }
     }
@@ -82,6 +92,13 @@ data class McdataInfo(
     companion object {
         const val NAMESPACE = "urn:3gpp:ns:mcdataInfo:1.0"
         const val CONTENT_TYPE = "application/vnd.3gpp.mcdata-info+xml"
+
+        /**
+         * The <mcdata-communication-state>, white space trimmed; TS 37.579-7 writes "terminate request" (tables
+         * 6.1.14.3.3-11 and others), read as "terminate-request" (as the Linux client does).
+         */
+        fun communicationState(value: String?): String? =
+            value?.trim()?.ifEmpty { null }?.let { if (it == "terminate request") "terminate-request" else it }
 
         fun parse(text: String): McdataInfo {
             val root = Xml.parse(text)
@@ -111,6 +128,8 @@ data class McdataInfo(
                 calledFunctionalAlias = ext("called-functional-alias-URI"),
                 emergency = flag("emergency-ind"),
                 imminentPeril = flag("imminentperil-ind"),
+                preEstablishedSession = flag("pre-established-session-ind"),
+                communicationState = communicationState(params.descendants("mcdata-communication-state").firstOrNull()?.text()),
             )
         }
     }

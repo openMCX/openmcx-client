@@ -17,9 +17,14 @@ internal class PassiveEndpoint(val refuse: (MsrpMessage) -> Int? = { null }) : A
     val received = LinkedBlockingQueue<MsrpMessage>()
     @Volatile var socket: Socket? = null
     @Volatile var clientUri: MsrpUri? = null
-    private val thread = Thread {
-        val s = runCatching { server.accept() }.getOrNull() ?: return@Thread
+    /** Connections accepted; one after another, the pre-established session's listener (TS 24.582 §12.1). */
+    @Volatile var accepted = 0
+    private val thread = Thread { while (serve()) {} }.also { it.isDaemon = true; it.start() }
+
+    private fun serve(): Boolean {
+        val s = runCatching { server.accept() }.getOrNull() ?: return false
         socket = s
+        accepted++
         val decoder = MsrpDecoder()
         val buffer = ByteArray(8192)
         while (true) {
@@ -34,7 +39,8 @@ internal class PassiveEndpoint(val refuse: (MsrpMessage) -> Int? = { null }) : A
                 }
             }
         }
-    }.also { it.isDaemon = true; it.start() }
+        return true
+    }
 
     @Synchronized fun send(m: MsrpMessage) { socket!!.getOutputStream().apply { write(m.encode()); flush() } }
     fun next(): MsrpMessage = received.poll(5, TimeUnit.SECONDS) ?: throw AssertionError("nothing received")

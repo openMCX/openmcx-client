@@ -60,6 +60,11 @@ interface McdataMediaPeer {
     val protection: McdataProtection? get() = null
     /** A MESSAGE for file distribution (FD NOTIFICATION, TS 24.282 §12.2.1.1); null when not available. */
     suspend fun fdMessage(parts: List<Part>): SipResponse? = null
+    /** A REFER outside a dialog to [uri] (TS 24.282 §9.2.5.2.1.1, §9.2.5.4.1.1), always multipart when it has parts. */
+    suspend fun refer(uri: String, parts: List<Part>, headers: List<Pair<String, String>>): SipResponse =
+        throw SdsError("REFER not available")
+    /** The bodies of a REFER entry's hname "body", protected as the request's own (TS 24.282 §6.5.2.3.1). */
+    fun sealEntry(parts: List<Part>): List<Part> = parts
 }
 
 /** [McdataMediaPeer] on the running [McxClient]. */
@@ -116,6 +121,16 @@ class ClientMediaPeer(private val client: McxClient) : McdataMediaPeer {
     override fun event(text: String) = client.event("mcdata media: $text")
     override val protection get() = client.mcdataProtection
     override suspend fun fdMessage(parts: List<Part>) = ClientFdPeer(client).send(parts)
+    override suspend fun refer(uri: String, parts: List<Part>, headers: List<Pair<String, String>>): SipResponse {
+        val request = ua.newRequest("REFER", uri, NameAddr(uri))
+        headers.forEach { (k, v) -> request.headers.add(k, v) }
+        if (parts.isEmpty()) return ua.send(request)
+        // Multipart even for one part: the Refer-To's Content-ID names its part (RFC 2392).
+        val (type, body) = Multipart.encode(parts)
+        request.headers.add("Content-Type", type)
+        return ua.send(SipRequest(request.method, request.uri, request.headers, body))
+    }
+    override fun sealEntry(parts: List<Part>) = client.protection.mcdataBodies(parts)
 }
 
 /** An incoming INVITE and the means to answer it (a [ServerTransaction], or a test's). */
@@ -150,6 +165,10 @@ class MediaCommunication(
     @Volatile var security: String? = null
     /** The release of TS 24.282 §13.2: the server's notice or request, and this client's answer. */
     @Volatile var release: String? = null
+    /** Over the pre-established session (TS 24.282 §9.2.5): left by a REFER "BYE", not a BYE. */
+    @Volatile var preEstablished = false
+    /** The Resource-Priority the communication was granted with (TS 24.282 §9.2.5.3.1.1 0)b)). */
+    @Volatile var resourcePriority: String? = null
     /** An FD: the file name, size and where it is kept. */
     @Volatile var fileName: String? = null
     @Volatile var fileSize: Long? = null
@@ -197,6 +216,13 @@ class McdataMediaService(
     @Volatile var fileDecision: (MediaCommunication) -> String = { "accept" }
     /** Where received files are kept (TS 24.582 §7.1.3.2); null: not stored, only given to [MediaListener.file]. */
     @Volatile var fileDirectory: java.io.File? = null
+
+    /** Where received emergency alerts take the phone's position from (TS 24.282 §6.2.8.1.1 3)b)); null: none. */
+    @Volatile var alertLocation: () -> org.openmcx.client.mcvideo.EmergencyLocation? = { null }
+
+    internal val internals = Internals()
+    /** The pre-established session (TS 24.282 §18.3); communications go over it while it is usable. */
+    val preSession = McdataPreSession(internals)
 
     /** The open SDS session (the last one opened or received). */
     val session: MediaCommunication? get() = _communications.value.lastOrNull { it.kind == "session" && it.open }
@@ -311,6 +337,36 @@ class McdataMediaService(
     }
 
     /**
+     * The SIP side of the end of a communication: a BYE in its dialog (TS 24.282 §6.2.8.1.17), or over the
+     * pre-established session a REFER "BYE" (§9.2.5.4.1.1), the session staying.
+     */
+    private suspend fun hangUp(c: MediaCommunication, headers: List<Pair<String, String>> = emptyList()) {
+        if (c.preEstablished) preSession.leave(c) else c.dialog?.let { peer.bye(it, headers) }
+    }
+
+    /**
+     * TS 24.282 §9.2.5.2.1.1, §9.2.5.3.1.1: the communication within the pre-established session, its offer the
+     * session's media (TS 24.582 §12.1) with the PCK of a one-to-one communication; then this client connects to the
+     * session's MSRP URI (TS 24.582 §6.1.1.2.1). Returns the MCData-Info of the "establish-success".
+     */
+    private suspend fun establishOverSession(c: MediaCommunication, target: String, group: Boolean, info: McdataInfo, direction: String,
+                                             priority: Boolean = false, extraParts: List<Part> = emptyList(),
+                                             extraHeaders: List<Pair<String, String>> = emptyList()): McdataInfo {
+        val local = protect(c, preSession.media("actpass", direction), target, group)
+        c.localMedia = local
+        val granted = try { preSession.originate(c, target, info, local, extraParts, extraHeaders, priority) }
+            catch (e: SdsError) { fail(c, e.message ?: "refused", if (e.status != null) "refused" else "failed"); throw e }
+        try {
+            connect(c, local.copy(keyMgmt = null), preSession.remote ?: throw SdsError("no MSRP media for the session"))
+        } catch (e: Exception) {
+            fail(c, e.message ?: "media plane failed")
+            preSession.leave(c)
+            throw (e as? SdsError) ?: SdsError(e.message ?: "media plane failed")
+        }
+        return granted
+    }
+
+    /**
      * TS 24.282 §9.2.3.2.3 with TS 24.582 §6.1.1.2: a standalone SDS whose payload goes over the media plane: the INVITE
      * ("a=sendonly", "actpass", §9.2.3.2.1), the MSRP connection, one SEND with the SDS SIGNALLING PAYLOAD and DATA
      * PAYLOAD (§6.1.1.2.4), then on its 200 the BYE with Reason "SIP;cause=200;text=\"transmission succeeded\"".
@@ -319,10 +375,11 @@ class McdataMediaService(
                                conversationId: UUID = UUID.randomUUID(), inReplyTo: UUID? = null): SentSds {
         val c = MediaCommunication(ids.incrementAndGet(), "sds", true, target.takeIf { !group }, target.takeIf { group }, conversationId)
         add(c)
-        val local = protect(c, localMedia("sendonly"), target, group)
         val info = requestInfo(if (group) "group-sds" else "one-to-one-sds", target, group)
         event("communication ${c.id}: standalone SDS of ${text.length} characters to $target over the media plane")
-        establish(c, targetParts(target, group, info, local), headers("sds"), local)
+        // TS 24.282 §9.2.5.2.1.1 and §9.2.5.3.1.1: within the pre-established session when there is one to use.
+        if (preSession.usable) establishOverSession(c, target, group, info, "sendonly")
+        else { val local = protect(c, localMedia("sendonly"), target, group); establish(c, targetParts(target, group, info, local), headers("sds"), local) }
         val signalling = SdsSignalling(clock(), conversationId, UUID.randomUUID(), inReplyTo, disposition = disposition)
         c.messageId = signalling.messageId
         try {
@@ -330,16 +387,16 @@ class McdataMediaService(
                 Part(McdataService.PAYLOAD, payload(c, DataPayload(listOf(Payload.text(text))).encode()))))
         } catch (e: Exception) {
             // TS 24.582 §6.1.1.2.1: the message could not be sent; the SIP session ends.
-            c.dialog?.let { peer.bye(it) }
+            hangUp(c)
             fail(c, "SDS not sent: ${e.message}")
             throw SdsError("SDS not sent: ${e.message}")
         }
         c.state = "delivered"; changed(c)
         c.msrp?.close()
-        c.dialog?.let { peer.bye(it, listOf("Reason" to "SIP;cause=200;text=\"transmission succeeded\"")) }
+        hangUp(c, listOf("Reason" to "SIP;cause=200;text=\"transmission succeeded\""))
         event("communication ${c.id}: SDS ${signalling.messageId} sent, session released")
         return SentSds(signalling.messageId, conversationId, target, group, text, disposition, c.status ?: 200, dppkId = c.key?.csbId,
-            plane = "media").also { sds.recordSent(it) }
+            plane = if (c.preEstablished) "pre-established" else "media").also { sds.recordSent(it) }
     }
 
     /**
@@ -353,14 +410,44 @@ class McdataMediaService(
         val c = MediaCommunication(ids.incrementAndGet(), "session", true, target.takeIf { !group }, target.takeIf { group })
         c.emergency = emergency; c.imminentPeril = imminent
         add(c)
-        val local = protect(c, localMedia("sendrecv"), target, group)
         val info = requestInfo(if (group) "group-sds-session" else "one-to-one-sds-session", target, group, emergency, imminent,
             alert = if (emergency) alert else null)
         event("communication ${c.id}: SDS session with $target${if (priority != "normal") " ($priority)" else ""}")
-        establish(c, targetParts(target, group, info, local),
-            headers("sds", if (emergency) "emergency" else if (imminent) "imminent_peril" else null), local)
+        val level = if (emergency) "emergency" else if (imminent) "imminent_peril" else null
+        // TS 24.282 §6.2.8.1.1 3)b): the location of an emergency alert goes with the request.
+        val location = if (alert) alertLocation()?.let { Part(org.openmcx.client.location.LocationService.MCDATA.mime,
+            it.encode(org.openmcx.client.location.LocationService.MCDATA).toByteArray()) } else null
+        if (preSession.usable) {
+            // TS 24.282 §9.2.5.2.1.1 1a), §9.2.5.3.1.1 3A)-3D): within the pre-established session, a priority one too;
+            // the Resource-Priority for a group (§6.2.8.1.2, §6.2.8.1.12), the alert's location in the REFER's body.
+            val rp = if (group) level?.let { l -> peer.resourcePriority(l)?.let { listOf("Resource-Priority" to it) } } ?: emptyList() else emptyList()
+            val granted = establishOverSession(c, target, group, info, "sendrecv", priority = emergency || imminent,
+                extraParts = listOfNotNull(location), extraHeaders = rp)
+            granted(c, group, granted)
+        } else {
+            val local = protect(c, localMedia("sendrecv"), target, group)
+            val parts = targetParts(target, group, info, local)
+            location?.let { parts += it }
+            establish(c, parts, headers("sds", level), local)
+        }
         c.state = "open"; changed(c)
         return c
+    }
+
+    /**
+     * The grant in the re-INVITE "establish-success" (TS 24.282 §9.2.5.3.1.1 0) -> §6.2.8.1.16 for a group: 1)a) no
+     * <emergency-ind>, or "true", and no <imminentperil-ind>: the emergency granted; 2)a) <imminentperil-ind> "true" or
+     * absent: the imminent peril granted; 2)b) "false" with <emergency-ind> "true": raised to an emergency; §9.2.5.2.1.1
+     * 3)a) for a one-to-one one: the emergency granted).
+     */
+    private fun granted(c: MediaCommunication, group: Boolean, info: McdataInfo) {
+        if (!group) return
+        if (c.emergency && info.emergency == false) c.emergency = false
+        if (c.imminentPeril && info.imminentPeril == false) {
+            c.imminentPeril = false
+            if (info.emergency == true) c.emergency = true
+        }
+        event("communication ${c.id}: granted over the pre-established session: emergency ${c.emergency}, imminent peril ${c.imminentPeril}")
     }
 
     /** TS 24.582 §6.1.2.4: an SDS message in the open session; any participant may send, so the Sender IE names this user. */
@@ -374,7 +461,7 @@ class McdataMediaService(
         event("communication ${s.id}: session SDS ${signalling.messageId} sent")
         val target = s.group ?: s.peer ?: ""
         return SentSds(signalling.messageId, s.conversationId, target, s.group != null, text, disposition, 200, dppkId = s.key?.csbId,
-            plane = "session").also { sds.recordSent(it) }
+            plane = if (s.preEstablished) "pre-established-session" else "session").also { sds.recordSent(it) }
     }
 
     /** TS 24.582 §6.1.2.5.3: an SDS NOTIFICATION in the session, a SEND of the signalling body alone. */
@@ -389,7 +476,7 @@ class McdataMediaService(
         val s = c ?: throw SdsError("no media plane communication is open")
         s.state = "released"; changed(s)
         s.msrp?.close()
-        s.dialog?.let { peer.bye(it, listOfNotNull(reason?.let { r -> "Reason" to r })) }
+        hangUp(s, listOfNotNull(reason?.let { r -> "Reason" to r }))
         event("communication ${s.id}: released")
     }
 
@@ -405,7 +492,8 @@ class McdataMediaService(
         val info = McdataInfo(requestType = if (group) "group-sds-session" else "one-to-one-sds-session", requestUri = s.group,
             clientId = peer.clientId, emergency = if (emergency) enable else null, imminentPeril = if (!emergency) enable else null,
             alert = if (emergency && enable) false else null)
-        val local = (s.localMedia ?: localMedia("sendrecv")).copy(setup = "active")
+        // §6.2.8.4.3 5), §6.2.8.4.4 4) (NOTE): within the pre-established session the offer is the session's media as negotiated.
+        val local = if (s.preEstablished) preSession.media("actpass") else (s.localMedia ?: localMedia("sendrecv")).copy(setup = "active")
         // §6.2.8.1.2, §6.2.8.1.12, §6.2.8.3.3: the priority asked for; a cancellation carries the normal one.
         val level = if (!enable) null else if (emergency) "emergency" else "imminent_peril"
         val headers = buildList {
@@ -437,6 +525,8 @@ class McdataMediaService(
 
     suspend fun handle(tx: MediaInvite): Boolean {
         val request = tx.request
+        // TS 24.282 §9.2.5, §18.3.3.1.2, §18.3.4.1.2: the requests in the pre-established session's dialog.
+        if (preSession.handle(tx)) return true
         val existing = ours(request)
         when (request.method) {
             "BYE" -> {
@@ -488,22 +578,63 @@ class McdataMediaService(
     }
 
     /**
+     * TS 24.282 §9.2.5.2.1.2 and §9.2.5.3.1.2: a communication offered over the pre-established session by the
+     * participating function's re-INVITE "establish-request": 2) the procedures of §9.2.3.2.4 (standalone) or §9.2.4.2.4
+     * (session), the answer the session's media as an answer (TS 24.282 §18.3.1.2: "active", this client connects to the
+     * session's MSRP URI, TS 24.582 §12.1). Null when it was refused (answered already).
+     */
+    private suspend fun offeredOverSession(tx: MediaInvite, parts: List<Part>, info: McdataInfo, sdp: String, pre: McdataPreSession): MediaCommunication? {
+        val offer = try { MsrpMedia.parse(sdp) } catch (e: McdataCodecError) { tx.respond(488); return null }
+        if (offer.setup == "active") { tx.respond(488); event("offer with a=setup:active refused: this client does not listen"); return null }
+        if (info.callingUserId.isNullOrEmpty()) { tx.respond(403); return null }
+        val kind = if (info.requestType?.endsWith("-sds-session") == true) "session" else "sds"
+        val c = MediaCommunication(ids.incrementAndGet(), kind, false, info.callingUserId, info.callingGroupId)
+        c.emergency = info.emergency == true
+        c.imminentPeril = info.imminentPeril == true
+        c.offeredSdp = sdp
+        c.preEstablished = true
+        offer.keyMgmt?.let { key ->
+            try {
+                (peer.protection ?: throw org.openmcx.client.security.KeyError("MCData key management client unavailable"))
+                    .acceptPck(key, info.callingUserId)
+            } catch (e: Exception) {
+                peer.protection?.failures?.incrementAndGet()
+                event("PCK from ${info.callingUserId} refused: ${e.message}")
+                tx.respond(488, extra = listOf("Warning" to McdataProtection.WARNING_136)); return null
+            }
+        }
+        add(c)
+        answer(c, tx, offer, pre)
+        return c
+    }
+
+    /** TS 24.282 §6.2.8.4.2 within the pre-established session: the participating function's priority change. */
+    private fun priorityFromServer(c: MediaCommunication, info: McdataInfo) {
+        info.emergency?.let { c.emergency = it }
+        info.imminentPeril?.let { c.imminentPeril = it }
+        event("communication ${c.id}: priority from the server: emergency ${c.emergency}, imminent peril ${c.imminentPeril}")
+        changed(c)
+    }
+
+    /**
      * TS 24.282 §9.2.3.2.2, §9.2.4.2.2, §10.2.5.2.2: the answer, "active" (RFC 4145; port 9: this endpoint does not
      * accept), "a=sendrecv" for a session else "a=recvonly", then the connection to the offered stream; the 200 (OK) has
      * "timer" in Require and the service's feature tag and ICSI in Contact (§9.2.3.2.4 steps 5, 7, 8).
      */
-    private suspend fun answer(c: MediaCommunication, tx: MediaInvite, offer: MsrpMedia) {
+    private suspend fun answer(c: MediaCommunication, tx: MediaInvite, offer: MsrpMedia, pre: McdataPreSession? = null) {
         val file = c.file
-        var local = localMedia(if (c.kind == "session") "sendrecv" else "recvonly", setup = "active",
+        val direction = if (c.kind == "session") "sendrecv" else "recvonly"
+        var local = pre?.media("active", direction) ?: localMedia(direction, setup = "active",
             acceptTypes = if (file != null) listOf(McdataService.SIGNALLING) else listOf(McdataService.SIGNALLING, McdataService.PAYLOAD))
         if (file != null) local = local.copy(fileSelector = offer.fileSelector, fileTransferId = offer.fileTransferId)
         c.localMedia = local
         val request = tx.request
-        c.dialog = Dialog.fromRequest(request, tx.localTag)
+        c.dialog = pre?.dialog ?: Dialog.fromRequest(request, tx.localTag)
         val expires = request.headers["Session-Expires"]?.substringBefore(';')?.trim()
         tx.respond(200, local.encode(clock()).toByteArray(), "application/sdp", listOfNotNull(
             "Contact" to peer.contact(if (file != null) "fd" else "sds"), "Require" to "timer", "Supported" to "timer",
-            expires?.let { "Session-Expires" to "$it;refresher=uas" }))
+            // Within the pre-established session the session's own timer goes on as the request has it (RFC 4028 §9).
+            if (pre != null) request.headers["Session-Expires"]?.let { "Session-Expires" to it } else expires?.let { "Session-Expires" to "$it;refresher=uas" }))
         c.state = "connecting"; changed(c)
         event("communication ${c.id}: ${c.kind} from ${c.peer}${c.group?.let { " on $it" } ?: ""} answered")
         scope.launch {
@@ -513,7 +644,7 @@ class McdataMediaService(
                 changed(c)
             } catch (e: Exception) {
                 fail(c, "MSRP connection: ${e.message}")
-                c.dialog?.let { peer.bye(it) }
+                hangUp(c)
             }
         }
     }
@@ -592,8 +723,7 @@ class McdataMediaService(
         Release.send(this, c ?: _communications.value.lastOrNull { !it.ended && it.dialog != null } ?: throw SdsError("no communication is open"),
             action, reason, query)
 
-    internal val internals = Internals()
-    /** What the FD and release procedures of this service reach. */
+    /** What the FD, release and pre-established session procedures of this service reach. */
     inner class Internals {
         val peer get() = this@McdataMediaService.peer
         val clock get() = this@McdataMediaService.clock
@@ -611,17 +741,22 @@ class McdataMediaService(
         fun targetParts(target: String, group: Boolean, info: McdataInfo, media: MsrpMedia) = this@McdataMediaService.targetParts(target, group, info, media)
         suspend fun establish(c: MediaCommunication, parts: List<Part>, headers: List<Pair<String, String>>, local: MsrpMedia) =
             this@McdataMediaService.establish(c, parts, headers, local)
+        suspend fun offeredOverSession(tx: MediaInvite, parts: List<Part>, info: McdataInfo, sdp: String, pre: McdataPreSession) =
+            this@McdataMediaService.offeredOverSession(tx, parts, info, sdp, pre)
+        fun priorityFromServer(c: MediaCommunication, info: McdataInfo) = this@McdataMediaService.priorityFromServer(c, info)
         val listener get() = this@McdataMediaService.listener
         val fileDecision get() = this@McdataMediaService.fileDecision
         val scope get() = this@McdataMediaService.scope
     }
 
     override suspend fun flowLost() {
+        preSession.flowLost()
         _communications.value.filter { !it.ended }.forEach { it.msrp?.close(); it.state = "failed"; it.error = "flow lost"; changed(it) }
     }
 
     override suspend fun logOff() {
-        _communications.value.filter { !it.ended }.forEach { runCatching { close(it) } }
+        _communications.value.filter { !it.ended && !it.preEstablished }.forEach { runCatching { close(it) } }
+        preSession.logOff()
     }
 
     companion object {

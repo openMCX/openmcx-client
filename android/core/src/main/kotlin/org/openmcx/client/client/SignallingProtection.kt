@@ -303,6 +303,13 @@ class SignallingProtection(
         return out
     }
 
+    /**
+     * TS 24.282 clauses 9.2.5.2.1.1 3) and 6.5.2.3.1: bodies carried inside another body, the SDP and MCData-Info of
+     * the hname "body" of a REFER's resource list entry over a pre-established session, protected as an MCData
+     * request's own bodies (the entry's "uri" is then encrypted whole with the list by [outgoing]).
+     */
+    fun mcdataBodies(parts: List<Part>): List<Part> = mcdataOutgoing(parts)
+
     /** TS 24.282 clause 6.6.1: the CSK protecting signalling with the MCData server, once it holds it. */
     fun signallingKey(): KeyMessage? =
         if (config.mcdata?.protectSignalling == true && cskHeld(McService.MCDATA)) csk(McService.MCDATA) else null

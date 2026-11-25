@@ -114,7 +114,9 @@ interface ServiceHandler {
  * the epoch) is when the client tries it again on the same registration.
  */
 data class ServiceState(val authorised: Boolean = false, val affiliations: Map<String, String> = emptyMap(),
-    val refused: String? = null, val nextRetryAt: Long? = null)
+    val refused: String? = null, val nextRetryAt: Long? = null,
+    /** Successful service authorisations, so each new one (a new registration's) can be followed (pre-established sessions). */
+    val authorisations: Int = 0)
 
 /** What the client reports: its start-up phase and the state of each service. */
 data class ClientStatus(
@@ -1299,7 +1301,7 @@ class McxClient(
             (response.headers["Warning"]?.let { " ($it)" } ?: ""), response.status, response.headers["Retry-After"])
         response.headers["SIP-ETag"]?.let { authEtags[service] = it }
         cskUploads.remove(service) // the server has the CSK
-        updateService(service) { it.copy(authorised = true, refused = null) }
+        updateService(service) { it.copy(authorised = true, refused = null, authorisations = it.authorisations + 1) }
         event("${service.name} authorised")
         return true
     }

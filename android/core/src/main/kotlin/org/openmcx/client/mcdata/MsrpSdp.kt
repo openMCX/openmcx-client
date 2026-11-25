@@ -24,6 +24,8 @@ data class MsrpMedia(
     val fileTransferId: String? = null,
     val fileDate: String? = null,
     val fileDescription: String? = null,
+    /** ICE attribute lines of the media section, each ending with CRLF (TS 24.282 §18.3.2.1 step 10, RFC 8839). */
+    val ice: String? = null,
 ) {
     val uri: MsrpUri get() = MsrpUri.parse(path)
 
@@ -35,6 +37,7 @@ data class MsrpMedia(
         append("a=setup:$setup\r\n")
         append("a=accept-types:${acceptTypes.joinToString(" ")}\r\n")
         append("a=$direction\r\n")
+        ice?.let { append(it) }
         fileSelector?.let { append("a=file-selector:$it\r\n") }
         fileTransferId?.let { append("a=file-transfer-id:$it\r\n") }
         fileDate?.let { append("a=file-date:$it\r\n") }
