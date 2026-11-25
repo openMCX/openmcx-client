@@ -1124,6 +1124,27 @@ class Lab:
         self.check("alice cancels the group's imminent peril without a call (MVIG 1 on the 2xx)",
                    r.get("ok") and r["result"]["state"] == "MVIG 1: no-imminent-peril", reply=r)
 
+    def v4_settings_and_gdd(self) -> None:
+        """TS 24.281 §7.2.3: the MCVideo settings-only PUBLISH, then its modification (SIP-If-Match); §8.2.1.6: the group
+        dynamic data subscription of the group: its members and their clients, the call ongoing during a group call (a
+        re-subscription brings the full state), and the de-subscription."""
+        self.check("alice publishes her MCVideo service settings", self.cmd(A, "video-settings-publish")["status"] == 200)
+        self.check("and publishes them again, as a modification", self.cmd(A, "video-settings-publish")["status"] == 200)
+        self.check("alice subscribes to the group's dynamic data", self.cmd(A, "video-gdd-subscribe", GROUP)["status"] == 200)
+        gdd = lambda: self.cmd(A, "video-gdd", GROUP).get(GROUP)
+        got = self.wait("the group's dynamic data", lambda: (d := gdd()) and d)
+        ids = {m["id"] for m in got["members"]}
+        self.check("it lists alice and bob with their clients", {"sip:alice.mcvideo@mcx.test", "sip:bob.mcvideo@mcx.test"} <= ids and
+                   all(m["clients"] for m in got["members"]), members=got["members"])
+        self.cmd(B, "video-group", timeout=30)
+        self.wait("alice's call is up", lambda: (v := self.video(A)) and v["state"] == "established")
+        self.cmd(A, "video-gdd-resubscribe", GROUP)
+        self.wait("the group's call is ongoing", lambda: (d := gdd()) and d.get("call_ongoing") is True, timeout=10)
+        self.check("during bob's group call the dynamic data says a call is ongoing", True)
+        self.cmd(B, "video-hangup")
+        self.video_idle([A, B])
+        self.check("alice ends her subscription", self.cmd(A, "video-gdd-unsubscribe", GROUP)["status"] == 200)
+
     SCENARIOS = {"S1": s1_startup, "S2": s2_private_automatic, "S3": s3_private_manual, "S4": s4_group, "S5": s5_adhoc, "S6": s6_sds,
                  "S7": s7_refresh_and_recovery, "S8": s8_lifecycle, "S9": s9_impaired, "S10": s10_latency,
                  "S11": s11_product, "S12": s12_private_no_floor, "S13": s13_location,
@@ -1133,7 +1154,7 @@ class Lab:
                  "S17": s17_functional_aliases,
                  "S18": s18_floor_queue,
                  "S19": s19_reg_event,
-                 "V1": v1_transmission_control, "V2": v2_adhoc, "V3": v3_priority_extras}
+                 "V1": v1_transmission_control, "V2": v2_adhoc, "V3": v3_priority_extras, "V4": v4_settings_and_gdd}
 
 
 def main() -> None:

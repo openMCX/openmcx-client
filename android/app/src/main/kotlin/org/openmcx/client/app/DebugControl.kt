@@ -202,6 +202,19 @@ class DebugControl(private val context: Context) {
         // §22.2.3.1.1: release the ad hoc group call for everyone; video-hangup leaves it (§22.2.4.1.1).
         "video-adhoc-release" -> { mcvideo().hangup(releaseForAll = true); "released" }
         "video-rejoin" -> videoJson(mcvideo().rejoin())
+        // TS 24.281 §7.2.3: video-settings-publish [remove]
+        "video-settings-publish" -> JSONObject().put("status", mcvideo().publishSettings(remove = args.firstOrNull() == "remove"))
+        // §8.2.1.6: video-gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated];
+        // video-gdd-resubscribe <group>; video-gdd-unsubscribe <group>; video-gdd [group]
+        "video-gdd-subscribe" -> JSONObject().put("status", mcvideo().subscribeGdd(args[0], "fetch" in args,
+            org.openmcx.client.mcvideo.GroupDynamicData.Item.entries.filter { it.name.lowercase() in args }))
+        "video-gdd-resubscribe" -> JSONObject().put("status", mcvideo().refreshGdd(args[0], resubscribe = true))
+        "video-gdd-unsubscribe" -> JSONObject().put("status", mcvideo().refreshGdd(args[0], resubscribe = false))
+        "video-gdd" -> JSONObject(mcvideo().groupDynamicData.filterKeys { args.isEmpty() || it == args[0] }.mapValues { (_, d) ->
+            JSONObject().put("status", d.status).put("modified_by", d.modifiedBy).put("call_ongoing", d.callOngoing)
+                .put("broadcast_alias", d.broadcastAlias).put("regroup_alias", d.regroupAlias)
+                .put("members", JSONArray(d.members.map { m -> JSONObject().put("id", m.id).put("clients", JSONArray(m.clients)) }))
+        })
         "video-rejoinable" -> JSONObject().put("session", mcvideo().rejoinable?.first).put("group", mcvideo().rejoinable?.second)
             .put("type", mcvideo().rejoinable?.third)
         // §9.2.5.2.1: video-imminent-cancel [group]

@@ -483,6 +483,97 @@ class McvideoService(
         return adhocSupport(text)
     }
 
+    // Service settings (TS 24.281 §7.2.3) and group dynamic data (§8.2.1.6).
+
+    /** The entity-tag of the settings-only publication (RFC 3903), apart from the service authorisation's. */
+    @Volatile private var settingsEtag: String? = null
+    /** The outcome of the last settings-only PUBLISH: its status. */
+    @Volatile var settingsStatus: Int? = null
+        private set
+
+    /**
+     * TS 24.281 §7.2.3 with §7.2.1A: a SIP PUBLISH for the MCVideo service settings only, to the MCVideo PSI with the
+     * MCVideo ICSI, Event poc-settings, Expires 4294967295 (or 0 with [remove], which logs the client off the service,
+     * §7.2.1A NOTE 3); the mcvideo-info with this user's MCVideo ID and the client ID (steps 2, 3), the poc-settings with
+     * the answer mode, the selected user profile index and <multiplex-support> (step 4). Protection (steps 2 and 5) is
+     * the signalling filter's. A modification names the publication in SIP-If-Match; a 412 publishes anew (RFC 3903 §5).
+     */
+    suspend fun publishSettings(remove: Boolean = false): Int {
+        suspend fun send(etag: String?): org.openmcx.client.sip.SipResponse {
+            val request = ua.newRequest("PUBLISH", config.psi, NameAddr(config.psi))
+            request.headers.add("P-Preferred-Service", Icsi.MCVIDEO).add("Event", "poc-settings")
+                .add("Expires", if (remove) "0" else "4294967295")
+            etag?.let { request.headers.add("SIP-If-Match", it) }
+            val (contentType, body) = Multipart.encode(listOf(
+                Part(McvideoInfo.CONTENT_TYPE, McvideoInfo(requestUri = config.userId, clientId = client.config.clientId).encode().toByteArray()),
+                Part(org.openmcx.client.body.PocSettings.CONTENT_TYPE,
+                    org.openmcx.client.body.PocSettings.encode(client.config.clientId, if (answerMode == "manual") "manual" else "automatic").toByteArray())))
+            request.headers.add("Content-Type", contentType)
+            return ua.send(SipRequest(request.method, request.uri, request.headers, body))
+        }
+        var response = send(settingsEtag)
+        if (response.status == 412 && settingsEtag != null && !remove) { settingsEtag = null; response = send(null) }
+        settingsStatus = response.status
+        if (response.isSuccess) settingsEtag = if (remove) null else response.headers["SIP-ETag"] ?: settingsEtag
+        event("service settings ${if (remove) "removed" else "published"}: ${response.status}")
+        if (!response.isSuccess) throw CallError("${response.status} ${response.reason}${response.headers["Warning"]?.let { " ($it)" } ?: ""}", response.status)
+        return response.status
+    }
+
+    /** Per-group dynamic data (§8.2.1.6), by group, from the NOTIFYs. */
+    val groupDynamicData: MutableMap<String, GroupDynamicData.State> = java.util.concurrent.ConcurrentHashMap()
+    private val gddDialogs = java.util.concurrent.ConcurrentHashMap<String, Dialog>()
+    private val gddCallIds = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * TS 24.281 §8.2.1.6: subscribe to [group]'s dynamic data: SUBSCRIBE (Event presence) to the MCVideo PSI (step 1)
+     * with an mcvideo-info naming the group (step 2), the MCVideo ICSI (step 3), Expires 4294967295 (step 4) or 0 to
+     * fetch the current state only (step 5), Accept application/pidf+xml (step 6) and the simple-filter of the group
+     * (step 7, §8.3.2.2) with the [items] asked for.
+     */
+    suspend fun subscribeGdd(group: String, fetch: Boolean = false, items: Collection<GroupDynamicData.Item> = emptyList()): Int {
+        if (gddDialogs.containsKey(group)) throw CallError("already subscribed to $group")
+        val request = ua.newRequest("SUBSCRIBE", config.psi, NameAddr(config.psi))
+        request.headers.add("Contact", client.contactFor(McService.MCVIDEO)).add("P-Preferred-Service", Icsi.MCVIDEO)
+            .add("Event", GroupDynamicData.EVENT).add("Accept", GroupDynamicData.PIDF_TYPE).add("Expires", if (fetch) "0" else "4294967295")
+        val (contentType, body) = Multipart.encode(listOf(
+            Part(McvideoInfo.CONTENT_TYPE, McvideoInfo(requestUri = group, clientId = client.config.clientId).encode().toByteArray()),
+            Part(GroupDynamicData.FILTER_TYPE, GroupDynamicData.filter(group, "gdd-" + java.util.UUID.randomUUID().toString().take(8), items).toByteArray())))
+        request.headers.add("Content-Type", contentType)
+        val subscribe = SipRequest(request.method, request.uri, request.headers, body)
+        gddCallIds[subscribe.callId] = group // a NOTIFY may beat the 200
+        val response = runCatching { ua.send(subscribe) }.getOrNull()
+        event("group dynamic data of $group${if (fetch) " (fetch)" else ""}: ${response?.status}")
+        if (response == null || !response.isSuccess) { gddCallIds.remove(subscribe.callId); throw CallError("group dynamic data subscription: ${response?.status}") }
+        if (!fetch) Dialog.fromResponse(ua.lastSent[subscribe.callId] ?: subscribe, response).let { gddDialogs[group] = it }
+        return response.status
+    }
+
+    /** §8.2.1.6: re-subscribe ([resubscribe], Expires 4294967295) or de-subscribe (Expires 0) in the subscription's dialog. */
+    suspend fun refreshGdd(group: String, resubscribe: Boolean): Int? {
+        val dialog = gddDialogs[group] ?: throw CallError("no group dynamic data subscription to $group")
+        val request = ua.inDialog(dialog, "SUBSCRIBE")
+        request.headers.add("Contact", client.contactFor(McService.MCVIDEO)).add("Event", GroupDynamicData.EVENT)
+            .add("Accept", GroupDynamicData.PIDF_TYPE).add("Expires", if (resubscribe) "4294967295" else "0")
+        if (!resubscribe) gddDialogs.remove(group)
+        val response = runCatching { ua.send(request, dialog) }.getOrNull()
+        event("group dynamic data of $group ${if (resubscribe) "re-subscribed" else "de-subscribed"}: ${response?.status}")
+        return response?.status
+    }
+
+    /** §8.2.1.6, last paragraph: the per-group dynamic data of a NOTIFY's application/pidf+xml (§8.3.1). */
+    private fun gddNotify(group: String, request: SipRequest) {
+        if (request.headers["Subscription-State"]?.startsWith("terminated") == true) { gddDialogs.remove(group); gddCallIds.remove(request.callId) }
+        val part = Multipart.parse(request.contentType, request.body).firstOrNull { it.mediaType == GroupDynamicData.PIDF_TYPE } ?: return
+        runCatching { GroupDynamicData.parse(part.text) }
+            .onSuccess { state ->
+                if (state.group != null && state.group != group) { event("group dynamic data of another group ${state.group}"); return }
+                groupDynamicData[group] = state
+                event("group dynamic data of $group: status ${state.status}, ${state.members.size} members, call ${state.callOngoing}")
+            }
+            .onFailure { event("group dynamic data of $group unread: ${it.message}") }
+    }
+
     // Video push and pull (§12.2, §13.2): private calls in which one side sends without asking.
 
     /** Push this phone's camera to [target] (§13.2.2.1): it transmits at once (implicit request); they only watch. */
@@ -665,6 +756,12 @@ class McvideoService(
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "xcap-diff") {
             val group = keySubscriptions.group(request.callId) ?: return false
             keyNotify(group, tx)
+            return true
+        }
+        if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == GroupDynamicData.EVENT) {
+            val group = gddCallIds[request.callId] ?: return false
+            tx.respond(200)
+            gddNotify(group, request)
             return true
         }
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "conference") {
@@ -1129,6 +1226,8 @@ class McvideoService(
      */
     override suspend fun logOff() {
         _calls.value.forEach { call -> runCatching { hangup(call) }.onFailure { release(call, "logged off") } }
+        for (group in gddDialogs.keys.toList()) runCatching { refreshGdd(group, resubscribe = false) }
+        settingsEtag = null
         endGroupKeySubscriptions()
     }
 

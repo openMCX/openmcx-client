@@ -346,3 +346,23 @@ class McvideoAdhocTest {
         assertTrue(imminent.contains("<imminentperil-ind type=\"Normal\"><mcvideoBoolean>false</mcvideoBoolean></imminentperil-ind>"))
     }
 }
+
+/** TS 24.281 §8.2.1.6, §8.3.1.2, §8.3.2.2: the group dynamic data filter and notifications. */
+class GroupDynamicDataTest {
+    @Test fun filterNamesTheGroupAndTheItems() {
+        val xml = GroupDynamicData.filter("sip:operations@mcx.test", "gdd-1", listOf(GroupDynamicData.Item.AFFILIATED, GroupDynamicData.Item.STATUS))
+        assertTrue(xml, xml.contains("<ns-binding prefix=\"mcvideoPI10\" urn=\"urn:3gpp:ns:mcvideoPresInfo:1.0\"/>"))
+        assertTrue(xml, xml.contains("<filter id=\"gdd-1\"><what><include>//pidf:presence[@entity=&quot;sip:operations@mcx.test&quot;]</include>" +
+            "<include>//pidf:presence/pidf:groupStatus/@pidf:ModifiedBy</include><include>//pidf:presence/pidf:tuple/pidf:status/pidf:affiliation/@pidf:client [@pidf:status=&quot;affiliated&quot;]</include></what></filter>"))
+    }
+
+    @Test fun notificationIsRead() {
+        val pidf = """<?xml version="1.0"?><presence xmlns="urn:ietf:params:xml:ns:pidf" xmlns:v="urn:3gpp:ns:mcvideoPresInfo:1.0" entity="sip:operations@mcx.test">
+            <tuple id="sip:alice.mcvideo@mcx.test"><status><v:affiliation client="urn:uuid:1" expires="2030-01-01T00:00:00Z"/><v:functionalAlias functionalAliasID="sip:fa@mcx.test"/></status></tuple>
+            <v:groupStatus ModifiedBy="sip:admin@mcx.test">enabled</v:groupStatus><v:additionalData groupCallOngoing="true"/></presence>"""
+        val state = GroupDynamicData.parse(pidf)
+        assertEquals("sip:operations@mcx.test", state.group); assertEquals("enabled", state.status); assertEquals("sip:admin@mcx.test", state.modifiedBy)
+        assertEquals(true, state.callOngoing)
+        assertEquals(listOf(GroupDynamicData.Member("sip:alice.mcvideo@mcx.test", listOf("urn:uuid:1"), listOf("sip:fa@mcx.test"))), state.members)
+    }
+}

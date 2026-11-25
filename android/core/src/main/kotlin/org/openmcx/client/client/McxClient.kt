@@ -1799,7 +1799,8 @@ class McxClient(
         }
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "presence") {
             val subscription = subscriptions.values.firstOrNull { it.request.callId == request.callId }
-            if (subscription == null) { tx.respond(481); return }
+            // Another presence subscription of a service (MCVideo group dynamic data, TS 24.281 §8.2.1.6) is its handler's.
+            if (subscription == null) { for (handler in handlers) if (handler.handle(tx)) return; tx.respond(481); return }
             tx.respond(200)
             if (request.body.isNotEmpty()) {
                 val body = Multipart.parse(request.contentType, request.body).firstOrNull { it.mediaType == Affiliation.CONTENT_TYPE }?.text
