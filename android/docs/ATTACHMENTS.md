@@ -15,6 +15,25 @@ MESSAGE carries its URL and metadata (name, type, size, SHA-256). Text keeps usi
 | Private staging (limit on the bytes read), records, FileProvider viewer grants | `app/…/attachments/AttachmentFiles.kt`, `data/AttachmentStore.kt` |
 | Messages UI: paperclip in the message box (Image, Video, Document), picked file with size and limit, file rows with progress, Download / Reject / Retry / Cancel / Open | `app/…/ui/Screens.kt`, `UiModel.kt`, `MainActivity.kt` |
 | Debug commands `fd-send`, `fd-send-group`, `fd-download`, `fd-reject`, `fd-cancel`, `fd-files`, `fd-hash`, `fd-open`, `fd-config`, `fd-discover` | `app/…/DebugControl.kt` |
+| Release and extension of an FD over HTTP (phase 4): the FD HTTP TERMINATION (TS 24.282 §15.1.13.1) sent to cancel this user's own distribution (§6.2.2.4), release another user's as an authorised user (§13.2.5.3.2.1), ask for an extension after the intent to release (§13.2.4.5.2.2, with the controller PSI the server gave), announce a release and answer an extension request as the authorised user (§13.2.6.3.2.1, §13.2.6.3.2.3); the server's answer, transmission stop, intent to release and extension response kept in the record. Debug commands `fd-terminate`, `fd-release`, `fd-extend`, `fd-release-intent`, `fd-extension-response` | `core/…/mcdata/FdService.kt` `terminate`, `FdMessages.kt` `FdHttpTermination` |
+
+## FD over the media plane (phase 4)
+
+A file can also travel over MSRP, in the SIP session that offers it (TS 24.282 §10.2.5, TS 24.582 §7):
+
+- **Sending** (`fd-media <MCData ID|group=<group>> <path> [name=…] [type=…] [mandatory] [completed] [emergency|imminent]`,
+  §10.2.5.2.1, §10.2.5.2.3). The INVITE carries the FD SIGNALLING PAYLOAD without a Payload IE (§6.2.2.3). The offer
+  carries the RFC 5547 attributes: `a=file-selector` with the name, type, size and SHA-256, `a=file-transfer-id`,
+  `a=file-date` and `a=file-description`. Its `a=accept-types` is the signalling type only. The file is one SEND of
+  `application/vnd.3gpp.mcdata-file`, in chunks of 2048 octets, and the BYE follows its last 200. A protected file is
+  sealed as on HTTP: PCK one-to-one, GMK for a group.
+- **Receiving** (§10.2.5.2.4). A mandatory download is taken at once. Any other file waits for the user, who sees
+  Accept, Decline or Later in Messages (`fd-media-answer accept|decline|defer`). The INVITE is held with a 180 meanwhile.
+  Decline answers 480 with warning 110, Later 480 with warning 231. The received file is checked against the selector's
+  size and hash, kept under `files/attachments/fd/media/`, and acknowledged with FD NOTIFICATION completed when asked.
+  `fd-media-policy ask|accept|decline` sets what happens without the user (the lab uses it).
+- **Code:** `core/…/mcdata/FdMedia.kt`, `McdataMediaService.kt`, the MSRP stack in `core/…/msrp/`.
+- **Lab:** S64 in [TEST_REPORT.md](TEST_REPORT.md#phase-4-the-mcdata-media-plane).
 
 The server side needs openmcx-server with large-file support: `mcx-http-proxy` `--content-request-limit-bytes` and
 `--file-transfer-timeout-ms`, the same timeout for `mcx-common --role content`, 413 for an overrunning streamed
@@ -70,5 +89,5 @@ had only been run on an emulator before. Server: `go test ./...` passes (4 new t
 
 ## Not covered
 
-Camera capture, several files per message, FD over MSRP, message-store integration, releasing a distribution,
-end-to-end file protection (PCK), and expiry on the phones (covered by the unit tests and the server's FD-03).
+Camera capture, several files per message, message-store integration, end-to-end file protection (PCK), FD over MSRP
+and the release of a distribution on two phones (both on redroid only, S64), and expiry on the phones (covered by the unit tests and the server's FD-03).
