@@ -1145,6 +1145,28 @@ class Lab:
         self.video_idle([A, B])
         self.check("alice ends her subscription", self.cmd(A, "video-gdd-unsubscribe", GROUP)["status"] == 200)
 
+    def v5_kms(self) -> None:
+        """On a --protected lab: a private video call's PCK keyed to the KMS of the called user from the MCVideo user
+        profile's <PrivateCallKMSURI> (TS 24.281 §6.2.8.3.9 1) a)); a PCK naming another receiver KMS is answered 488
+        with a KMS Redirect Response, and the call is keyed again to the receiver KMS it lists (TS 33.180 §5.2.8.2.5)."""
+        if not self.protected:
+            print("  [SKIP] needs a lab made with --protected"); return
+        call = self.cmd(A, "video-call", "sip:bob.mcvideo@mcx.test", timeout=30)
+        self.check("the PCK is keyed to bob's KMS from alice's user profile", call["state"] == "established" and call.get("protected") and
+                   call.get("kms_source") == "user-profile" and call.get("kms_uri"), call={k: call.get(k) for k in ("state", "kms_uri", "kms_source")})
+        self.cmd(A, "video-hangup")
+        self.video_idle([A, B])
+        self.cmd(A, "video-pck-kms", "https://kms-elsewhere.mcx.test")
+        call = self.cmd(A, "video-call", "sip:bob.mcvideo@mcx.test", timeout=30)
+        krr = call.get("krr") or {}
+        self.check("a PCK for another KMS gets a KMS Redirect Response naming bob's KMS", krr.get("receiver_kms") == "https://kms-elsewhere.mcx.test"
+                   and krr.get("receiver_list") == [call.get("kms_uri")], krr=krr)
+        self.check("the call is keyed again to that KMS and set up", call["state"] == "established" and call.get("kms_source") == "kms-redirect")
+        self.wait("bob's protected call is up", lambda: (v := self.video(B)) and v["state"] == "established" and v.get("pck_id") == call.get("pck_id"))
+        self.check("bob holds the PCK of the redirected call", True)
+        self.cmd(A, "video-hangup")
+        self.video_idle([A, B])
+
     SCENARIOS = {"S1": s1_startup, "S2": s2_private_automatic, "S3": s3_private_manual, "S4": s4_group, "S5": s5_adhoc, "S6": s6_sds,
                  "S7": s7_refresh_and_recovery, "S8": s8_lifecycle, "S9": s9_impaired, "S10": s10_latency,
                  "S11": s11_product, "S12": s12_private_no_floor, "S13": s13_location,
@@ -1154,7 +1176,7 @@ class Lab:
                  "S17": s17_functional_aliases,
                  "S18": s18_floor_queue,
                  "S19": s19_reg_event,
-                 "V1": v1_transmission_control, "V2": v2_adhoc, "V3": v3_priority_extras, "V4": v4_settings_and_gdd}
+                 "V1": v1_transmission_control, "V2": v2_adhoc, "V3": v3_priority_extras, "V4": v4_settings_and_gdd, "V5": v5_kms}
 
 
 def main() -> None:

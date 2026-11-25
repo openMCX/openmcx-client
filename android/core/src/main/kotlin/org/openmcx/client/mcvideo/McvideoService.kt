@@ -75,6 +75,12 @@ class VideoCall internal constructor(
     @Volatile var mayRelease: Boolean = true
     /** The viewed-to user of a remotely initiated ambient viewing call gets no indication of it (§15.2.1.2 step 8, NOTE 4). */
     val hidden get() = ambientType == "remote-init" && ambientRole == "viewed-to"
+    /** The KMS the PCK is keyed to (TS 24.281 §6.2.8.3.9) and where it came from: user-profile, initial-configuration, kms-redirect. */
+    @Volatile var kmsUri: String? = null
+    @Volatile var kmsSource: String? = null
+    /** The KMS a redirected call is keyed to (TS 33.180 §5.2.8.2.5), and the KMS Redirect Response received. */
+    internal var targetKms: String? = null
+    @Volatile var krr: KmsRedirect? = null
     /** The PCK-ID of a protected one-to-one call (TS 33.180 7.4), once selected. */
     @Volatile var pckId: Long? = null
     /** Where the server saved the video of a push to it (§13.2.3.2.3). */
@@ -612,7 +618,27 @@ class McvideoService(
         media.control.remote(user, start)
     }
 
-    private suspend fun originate(call: VideoCall, commencement: Commencement?): VideoCall {
+    /** Debug builds: name the next PCK's receiver KMS as this URI, to see the server's KMS Redirect Response. */
+    @Volatile var mislabelNextPckKms: String? = null
+
+    /** A 488 with a KMS Redirect Response (TS 33.180 §5.2.8.2.5): the receiver KMS chosen, to key the call again to. */
+    private class KmsRedirected(val kms: String) : Exception("KMS redirect to $kms")
+
+    /**
+     * Originate [call]; on a KMS Redirect Response to its PCK (TS 33.180 §5.2.8.2.5), once, the same call again with the
+     * PCK keyed to the first receiver KMS listed that this client holds the certificate of.
+     */
+    private suspend fun originate(call: VideoCall, commencement: Commencement?): VideoCall = try {
+        originateOnce(call, commencement)
+    } catch (e: KmsRedirected) {
+        originateOnce(VideoCall(ids.incrementAndGet(), true, call.peer, call.transmissionControl, null, call.sessionType).also {
+            it.priority = call.priority; it.ambientType = call.ambientType; it.ambientRole = call.ambientRole
+            it.mayRelease = call.mayRelease; it.implicitAsked = call.implicitAsked; it.pushUrl = call.pushUrl
+            it.calledAlias = call.calledAlias; it.targetKms = e.kms; it.krr = call.krr
+        }, commencement)
+    }
+
+    private suspend fun originateOnce(call: VideoCall, commencement: Commencement?): VideoCall {
         // The user knows nothing of a hidden ambient viewing call: a call of their own ends it (the server
         // releases it too, with call-request-initiated-by-viewed-to-client, §15.4.3).
         active?.takeIf { it.hidden }?.let { release(it, "call-request-initiated-by-viewed-to-client") }
@@ -626,7 +652,16 @@ class McvideoService(
         if (call.isAdhoc && call.rejoinUri == null && !adhocSupported()) throw CallError("ad hoc group calls are not allowed (service configuration)")
         val pck = if (protectedMedia && !call.isGroup && !call.withServer && !call.toAlias) {
             val keys = client.videoKeys ?: throw CallError("no MCVideo keys for a protected call")
-            keys.makePck(target ?: throw CallError("no one to call"))
+            val who = target ?: throw CallError("no one to call")
+            // §10.2.2.2.1 step 8 d) with §6.2.8.3.9: keyed to the KMS of the called user: the user profile's
+            // <PrivateCallKMSURI> for them, else this client's own KMS; after a KMS Redirect Response, the receiver KMS
+            // chosen (TS 33.180 §5.2.8.2.5).
+            val (kms, source) = call.targetKms?.let { it to "kms-redirect" }
+                ?: profile?.privateCallKms?.get(who)?.takeIf { it.isNotBlank() }?.let { it to "user-profile" }
+                ?: (keys.ownKmsUri to "initial-configuration")
+            call.kmsUri = kms; call.kmsSource = source
+            if (!keys.knowsKms(kms)) throw CallError("no KMS certificate for the KMS URI of $who: $kms")
+            keys.makePck(who, kms, mislabelled = mislabelNextPckKms.also { mislabelNextPckKms = null })
         } else null
         // Calls with the MCVideo server itself (recording, playback) stay in the clear, transmission control too.
         // A protected group or chat call's media under the group's GMK (TS 33.180 7.3).
@@ -698,6 +733,13 @@ class McvideoService(
                 val selected = redirect?.requestUri ?: throw CallError("functional alias redirect without an MCVideo ID")
                 event("call ${call.id}: functional alias ${redirect.calledFunctionalAlias ?: target} is $selected")
                 throw AliasRedirect(selected, redirect.calledFunctionalAlias)
+            }
+            // TS 33.180 §5.2.8.2.5: a KMS Redirect Response to our PCK: key it again to a receiver KMS we know, once.
+            if (response.status == 488 && call.pckId != null && call.targetKms == null) KmsRedirect.of(response.contentType, response.body)?.let { krr ->
+                call.krr = krr
+                val chosen = krr.choose { client.videoKeys?.knowsKms(it) == true }
+                event("call ${call.id}: KMS Redirect Response from ${krr.creator}: receiver KMSs ${krr.receiverList}, chosen $chosen")
+                throw if (chosen != null) KmsRedirected(chosen) else CallError("KMS Redirect Response: no acceptable receiver KMS", 488)
             }
             if (!response.isSuccess) {
                 val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""

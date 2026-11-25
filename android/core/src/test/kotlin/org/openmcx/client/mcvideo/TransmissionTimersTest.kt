@@ -366,3 +366,25 @@ class GroupDynamicDataTest {
         assertEquals(listOf(GroupDynamicData.Member("sip:alice.mcvideo@mcx.test", listOf("urn:uuid:1"), listOf("sip:fa@mcx.test"))), state.members)
     }
 }
+
+/** TS 33.180 §5.2.8.2 and annex D.4: the KMS Redirect Response. */
+class KmsRedirectTest {
+    private val krr = """<?xml version="1.0" encoding="UTF-8"?><KmsRedirectResponse xmlns="urn:3gpp:ns:mcsecKMSKRR:1.0" Version="1.0.0" Id="0102">
+        <Time>2026-11-25T10:00:00</Time><KRRCreatorUri>sip:mcvideo@mcx.test</KRRCreatorUri><InitiatorUri>sip:alice.mcvideo@mcx.test</InitiatorUri>
+        <InitiatorKmsUri>https://kms:8443</InitiatorKmsUri><ReceiverUri>sip:bob.mcvideo@mcx.test</ReceiverUri><ReceiverKmsUri>https://other</ReceiverKmsUri>
+        <InitiatorKmsList><ANY></ANY></InitiatorKmsList><ReceiverKmsList><KmsUri>https://kms2</KmsUri><KmsUri>https://kms:8443</KmsUri></ReceiverKmsList></KmsRedirectResponse>"""
+
+    @Test fun parsedAndTheFirstKnownReceiverKmsChosen() {
+        val r = KmsRedirect.parse(krr)
+        assertEquals("sip:mcvideo@mcx.test", r.creator); assertEquals("https://other", r.receiverKms)
+        assertEquals(listOf("https://kms2", "https://kms:8443"), r.receiverList); assertTrue(r.initiatorAny)
+        assertEquals("https://kms:8443", r.choose { it == "https://kms:8443" })
+        assertNull(r.choose { false })
+        assertEquals(r, KmsRedirect.of(KmsRedirect.CONTENT_TYPE, krr.toByteArray()))
+        assertNull(KmsRedirect.of("application/sdp", "v=0".toByteArray()))
+    }
+
+    @Test fun anyWithUrisIsRefused() {
+        assertTrue(runCatching { KmsRedirect.parse(krr.replace("<KmsUri>https://kms2</KmsUri>", "<ANY/>")) }.isFailure)
+    }
+}

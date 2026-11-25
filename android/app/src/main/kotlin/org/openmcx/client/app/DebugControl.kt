@@ -263,6 +263,9 @@ class DebugControl(private val context: Context) {
             JSONObject().put("group", a.group).put("latitude", a.location?.latitude).put("longitude", a.location?.longitude)
         })
         "video-tamper-pck" -> { mcvideo().tamperNextPck = true; "next PCK tampered" }
+        // TS 33.180 §5.2.8.2: video-pck-kms <KMS URI>: the next PCK names that receiver KMS (the key still under this
+        // client's KMS), to see the server's KMS Redirect Response and the call keyed again.
+        "video-pck-kms" -> { mcvideo().mislabelNextPckKms = args[0]; "next PCK's receiver KMS ${args[0]}" }
         "keys" -> JSONObject().put("kms", Engine.client?.keysOf(org.openmcx.client.body.McService.MCPTT)?.kms?.kmsUri)
             .put("csk_id", Engine.client?.cskOf(org.openmcx.client.body.McService.MCPTT)?.csbId)
             .put("identity", Engine.client?.keysOf(org.openmcx.client.body.McService.MCPTT)?.identity)
@@ -525,6 +528,8 @@ class DebugControl(private val context: Context) {
             .put("queue_position", media?.takeIf { it.isStarted }?.control?.queuePosition)
             .put("timeouts", JSONArray(media?.takeIf { it.isStarted }?.control?.timeouts ?: emptyList<String>()))
             .put("granted_by_sdp", call.grantedBySdp)
+            .put("kms_uri", call.kmsUri).put("kms_source", call.kmsSource)
+            .put("krr", call.krr?.let { JSONObject().put("creator", it.creator).put("receiver_kms", it.receiverKms).put("receiver_list", JSONArray(it.receiverList)) })
             .put("request_priority", media?.takeIf { it.isStarted }?.control?.priority)
             .put("request_reception_priority", media?.takeIf { it.isStarted }?.control?.receptionPriority)
             .put("negotiated_priority", call.negotiatedPriority).put("negotiated_reception_priority", call.negotiatedReceptionPriority)
