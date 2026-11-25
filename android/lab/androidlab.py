@@ -352,6 +352,9 @@ def create(args) -> None:
         if not args.admin_image:
             sys.exit("--admin needs --admin-image (built from the openmcx-admin repository)")
         command += ["--admin", "--admin-image", args.admin_image]
+    # Further options of the fixture generator, as given (e.g. --private-services for a conformance lab whose peers need
+    # the private call service rights); recorded in lab.json.
+    command += list(args.fixture_arg or [])
     subprocess.run(command, check=True)
     generated = fixture / "generated"
     compose = json.loads((fixture / "compose.json").read_text())
@@ -508,7 +511,7 @@ def create(args) -> None:
                 "priority": args.priority, "floor_queue": args.floor_queue,
                 "reference_clients": args.reference_client or [], "client_image": args.client_image,
                 "admin": args.admin, "admin_image": args.admin_image, "keycloak": args.keycloak,
-                "mcptt_server": mcptt_server_name(compose["services"]),
+                "mcptt_server": mcptt_server_name(compose["services"]), "fixture_args": args.fixture_arg or [],
                 "clients": [] if args.phones_only else [c for c in CLIENTS if c not in phones]}
     if phones:
         meta_doc["phones"] = phones
@@ -913,6 +916,9 @@ def main() -> None:
     c.add_argument("--reference-client", action="append", choices=["client-c", "client-d"],
                    help="keep this client of the fixture: the C++ mcx-client, as a further party beside the phones")
     c.add_argument("--client-image", help="the mcx-client image for --reference-client (linux/tools/build-image of openmcx-client, flag --server)")
+    c.add_argument("--fixture-arg", action="append", metavar="ARG",
+                   help="a further option for openmcx-server tools/prepare-prearranged-test.py, as given (repeat; "
+                        "write --fixture-arg=--private-services)")
     c.add_argument("--fd-availability-seconds", type=int, default=900, help="how long an uploaded file stays available")
     c.add_argument("--file-transfer-timeout-ms", type=int, default=900_000, help="the deadline of one file upload or download")
     for action in ("up", "down", "ps", "logs", "install"):
