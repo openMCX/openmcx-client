@@ -86,6 +86,17 @@ object McpttSdp {
 
     private fun sessionId() = (random.nextInt() and 0x7fffffff).toLong()
 
+    /**
+     * The o= line of one call's SDP (RFC 4566 §5.2, RFC 3264 §8): the same session ID for the whole session, and a
+     * version one higher in each new offer or answer, so that a subsequent answer is told apart from the one before.
+     */
+    class Origin {
+        val sessionId = McpttSdp.sessionId()
+        @Volatile var version = 0L
+            private set
+        @Synchronized fun next(address: String): String = "- $sessionId ${++version} IN IP4 $address"
+    }
+
     private fun audio(local: LocalMedia, pt: Int, octetAligned: Boolean) = MediaDescription(
         "audio", local.audioPort, if (local.protected) "RTP/SAVP" else "RTP/AVP", listOf(pt.toString()), info = "speech",
         attributes = listOf(
@@ -110,8 +121,8 @@ object McpttSdp {
             if (implicit && granted) ";mc_granted" else ""),
     )
 
-    fun offer(local: LocalMedia): String = SessionDescription(
-        origin = "- ${sessionId()} 1 IN IP4 ${local.address}",
+    fun offer(local: LocalMedia, origin: Origin = Origin()): String = SessionDescription(
+        origin = origin.next(local.address),
         connection = "IN IP4 ${local.address}",
         media = listOfNotNull(audio(local, PAYLOAD_TYPE, false),
             if (local.floorControl) floor(local, null, local.queueing, local.implicitRequest, local.granted) else null),
@@ -119,8 +130,8 @@ object McpttSdp {
     ).encode()
 
     /** Answer [offer]: its payload type and octet alignment, its floor priority echoed, queueing when both support it (§14.2.2). */
-    fun answer(offer: RemoteMedia, local: LocalMedia): String = SessionDescription(
-        origin = "- ${sessionId()} 1 IN IP4 ${local.address}",
+    fun answer(offer: RemoteMedia, local: LocalMedia, origin: Origin = Origin()): String = SessionDescription(
+        origin = origin.next(local.address),
         connection = "IN IP4 ${local.address}",
         media = listOfNotNull(audio(local, offer.payloadType, offer.octetAligned),
             if (offer.floorControl && local.floorControl) floor(local, offer.floorPriority, offer.queueing && local.queueing) else null),

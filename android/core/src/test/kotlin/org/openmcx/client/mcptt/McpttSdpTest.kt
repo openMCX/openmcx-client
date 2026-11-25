@@ -112,4 +112,16 @@ class McpttSdpTest {
         val ours = McpttSdp.answer(answer, local)
         assertFalse(ours.contains("mc_implicit_request") || ours.contains("mc_granted") || ours.contains("mc_ssrc"))
     }
+
+    /** RFC 3264 §8: the same session ID in the call's SDP, its version one higher in each subsequent offer or answer. */
+    @Test fun subsequentSdpIncrementsTheVersion() {
+        val origin = McpttSdp.Origin()
+        val first = McpttSdp.offer(local, origin).lines().first { it.startsWith("o=") }
+        val remote = McpttSdp.remote(McpttSdp.offer(local))
+        val second = McpttSdp.answer(remote, local, origin).lines().first { it.startsWith("o=") }
+        val (id1, v1) = first.split(' ').let { it[1] to it[2].toLong() }
+        val (id2, v2) = second.split(' ').let { it[1] to it[2].toLong() }
+        assertEquals(id1, id2)
+        assertEquals(v1 + 1, v2)
+    }
 }

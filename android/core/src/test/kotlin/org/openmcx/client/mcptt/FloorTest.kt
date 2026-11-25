@@ -31,8 +31,10 @@ class FloorTest {
 
     @Test
     fun requestsAndReleases() {
-        assertArrayEquals(hex("80 CC 00 03  D7 41 F4 72  4D 43 50 54  0D 02 80 00"), FloorMessage.request(server).encode())
-        assertArrayEquals(hex("80 CC 00 04  D7 41 F4 72  4D 43 50 54  00 02 00 00  0D 02 80 00"), FloorMessage.request(server, priority = 0).encode())
+        assertArrayEquals(hex("80 CC 00 04  D7 41 F4 72  4D 43 50 54  0D 02 80 00  13 01 00 00"), FloorMessage.request(server).encode())
+        assertArrayEquals(hex("80 CC 00 05  D7 41 F4 72  4D 43 50 54  00 02 00 00  0D 02 80 00  13 01 00 00"), FloorMessage.request(server, priority = 0).encode())
+        // TS 24.380 §6.2.4.3.5 1 c) i): the Location field, Location Type '0' (Not provided).
+        assertArrayEquals(byteArrayOf(0), FloorMessage.decode(FloorMessage.request(server).encode()).field(FloorField.LOCATION))
         assertArrayEquals(hex("84 CC 00 03  D7 41 F4 72  4D 43 50 54  0D 02 80 00"), FloorMessage.release(server).encode())
         assertArrayEquals(hex("94 CC 00 03  D7 41 F4 72  4D 43 50 54  0D 02 80 00"), FloorMessage.release(server, ackRequired = true).encode())
     }

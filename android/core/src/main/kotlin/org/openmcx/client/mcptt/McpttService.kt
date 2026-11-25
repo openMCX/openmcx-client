@@ -88,6 +88,8 @@ class Call internal constructor(
      * and at the 200 (OK) "accepted", "granted" (by the answer's "mc_granted", §14.2.4) or "not accepted".
      */
     @Volatile var implicitFloorRequest: String? = null
+    /** The o= of this client's SDP in the call: one session ID, the version incremented (RFC 3264 §8). */
+    internal val origin = McpttSdp.Origin()
     /** Our initial INVITE's offer had "mc_granted" (TS 24.380 §14.2.4). */
     @Volatile var grantedOffered: Boolean = false
     /** A protected incoming call's keys, opened before it is answered: its PCK (private) or GMK (group). */
@@ -421,9 +423,12 @@ class McpttService(
             val presented = client.aliases.value.inUse.takeIf { type != CallType.PREARRANGED }
             call.callingAlias = presented
             call.calledAlias = calledAlias ?: peer.takeIf { toAlias }
+            // §11.1.1.2.1.1 14B) a): a private call the user initiates (not a forwarded one, which this client does not
+            // make) has <forwarding-sequence-number> 0.
             val info = priorityInfo(McpttInfo(sessionType = type.sessionType, requestUri = group, clientId = client.config.clientId,
-                functionalAlias = presented, callToFunctionalAlias = if (toAlias) true else null, calledFunctionalAlias = calledAlias), priority)
-            val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(offered).toByteArray()),
+                functionalAlias = presented, callToFunctionalAlias = if (toAlias) true else null, calledFunctionalAlias = calledAlias,
+                forwardingSequenceNumber = if (type == CallType.PRIVATE) 0 else null), priority)
+            val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(offered, call.origin).toByteArray()),
                 Part(McpttInfo.CONTENT_TYPE, info.encode().toByteArray()))
             if (targets.isNotEmpty()) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(targets).toByteArray())
             val (contentType, body) = Multipart.encode(parts)
@@ -601,7 +606,7 @@ class McpttService(
         call.media = media
         val offered = tx.request.headers["Session-Expires"]?.substringBefore(';')?.trim()?.toIntOrNull() ?: 90
         call.sessionExpires = offered
-        val answer = McpttSdp.answer(remote, local)
+        val answer = McpttSdp.answer(remote, local, call.origin)
         val response = tx.response(200, body = answer.toByteArray(), contentType = "application/sdp", extra = listOf(
             "Contact" to client.sessionContact(McService.MCPTT), "Require" to "timer", "Supported" to "timer",
             "Session-Expires" to "$offered;refresher=uas", "Allow" to ALLOW))
@@ -621,7 +626,7 @@ class McpttService(
         if (media == null) { tx.respond(491); return }
         val sdp = Multipart.parse(tx.request.contentType, tx.request.body).firstOrNull { it.mediaType == "application/sdp" }?.text
         val remote = sdp?.let { runCatching { McpttSdp.remote(it) }.getOrNull() }
-        val answer = if (remote != null) McpttSdp.answer(remote, media.local) else null
+        val answer = if (remote != null) McpttSdp.answer(remote, media.local, call.origin) else null
         tx.respond(200, body = answer?.toByteArray() ?: ByteArray(0), contentType = answer?.let { "application/sdp" },
             extra = sessionTimerHeaders(tx.request))
         // The server announces a changed call state (emergency, imminent peril) by re-INVITE (§6.2.8.1).
@@ -678,7 +683,7 @@ class McpttService(
             enabled -> info.copy(imminentPeril = true)
             else -> info.copy(imminentPeril = false)
         }
-        val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(media.local).toByteArray()), Part(McpttInfo.CONTENT_TYPE, info.encode().toByteArray()))
+        val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(media.local, call.origin).toByteArray()), Part(McpttInfo.CONTENT_TYPE, info.encode().toByteArray()))
         if (call.type == CallType.PRIVATE) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOfNotNull(call.peer)).toByteArray())
         val request = ua.inDialog(dialog, "INVITE")
         commonHeaders(request)
