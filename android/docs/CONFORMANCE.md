@@ -28,8 +28,9 @@ the published specifications and not re-checked against a local copy; they are m
 
 ## Service settings and affiliation
 
-The MCPTT procedures of `client/ServiceProcedures.kt` (one instance per service; MCVideo's are phase 7), each with its
-debug command ([README](../README.md#debug-control-endpoint)).
+The procedures of `client/ServiceProcedures.kt`, one instance per service: MCPTT's (`McxClient.procedures`) and
+MCVideo's (`McxClient.videoProcedures`, see the MCVideo table), each with its debug command
+([README](../README.md#debug-control-endpoint)).
 
 | Requirement | Clause | Code | Evidence |
 |---|---|---|---|
@@ -115,7 +116,10 @@ debug command ([README](../README.md#debug-control-endpoint)).
 | Settings-only PUBLISH | TS 24.281 §7.2.3, §7.2.1A; RFC 3903 §5 | `McvideoService.publishSettings` | V4 |
 | Group dynamic data subscription | TS 24.281 §8.2.1.6, §8.3.1.2, §8.3.2.2 | `McvideoService.subscribeGdd`, `GroupDynamicData` | `GroupDynamicDataTest`; V4 |
 | Target KMS of a private call from `<PrivateCallKMSURI>`; KMS redirect (488 with a KRR) | TS 24.281 §6.2.8.3.9, §10.2.2.2.1 step 8 d); TS 33.180 §5.2.8.2.5, annex D.4 | `McvideoService.originate`, `KmsRedirect`, `KeyClient.makePck` | `KmsRedirectTest`; V5 |
-| **Not implemented:** remote affiliation per group and de-affiliation from one group (§8.2.1.2-8.2.1.5, in `McxClient`, phase 1); other KMSs' certificates (KMS CertCache); ad hoc participant modification; protected ad hoc calls | | | |
+| Negotiated-mode affiliation request received: 200 at once, the user's confirmation sought (a dialog, or `video-affiliation-accept [<group>...]` / `video-affiliation-decline`); accepted for the groups named only, each applied as in §8.2.1.2 | TS 24.281 §8.2.1.5 | `McxClient.videoProcedures` (`ServiceProcedures` for MCVideo), `McxClient.changeAffiliation`; `ui/UiModel.kt` | `McvideoProceduresTest.negotiatedRequestAcceptedPerGroup`, `deaffiliationFromOneGroup`; V6 (the OpenMCX servers do not relay the request, so only its MESSAGE is checked there) |
+| De-affiliation from one group (`video-deaffiliate <group>`) and affiliation to one (`video-affiliate <group>`): the PUBLISH lists the groups still wanted, Expires 0 when none is left; the change confirmed by the next NOTIFY; kept across a new registration | TS 24.281 §8.2.1.2 steps 4 and 5, §8.2.1.3 | `McxClient.changeAffiliation`, `affiliate`, `wantedGroups` | `McvideoProceduresTest.deaffiliationFromOneGroup`; V6 |
+| Another user's MCVideo affiliation (subscription), and the change for them in mandatory or negotiated mode, sent with the mcvideo-info, the MCVideo PSI and `application/vnd.3gpp.mcvideo-affiliation-command+xml` | TS 24.281 §8.2.1.2, §8.2.1.3, §8.2.1.4 | `ServiceProcedures.affiliationSubscribe`, `affiliateRemote` | `McvideoProceduresTest.requestsForAnotherUser`; V6 |
+| **Not implemented:** other KMSs' certificates (KMS CertCache); ad hoc participant modification; protected ad hoc calls | | | |
 
 ## Android integration
 
@@ -130,6 +134,27 @@ debug command ([README](../README.md#debug-control-endpoint)).
 
 ## Deviations and limits
 
+- **Faults found on the Android labs** (the server ones not changed here; openmcx-server `mcdpre-800c657`):
+  - **MCData on a protected lab after an app restart:** the MCData server opens every request of a user it holds a
+    binding for with the CSK of that binding (`src/mcdata/sip_dispatch.cpp`, `DataServer::incoming` ->
+    `open_signalling`) before the service authorisation sees the request. A new service authorisation uploads a new CSK
+    and encrypts its mcdata-info under it (TS 33.180 §9.2.1.3, TS 24.282 §7.2.2 steps 3 and 4), so it is refused 403
+    with warning 140 ("XML content encrypted under another XPK") until the old binding ends; `authorise_csk`, which would
+    take the uploaded CSK, is never reached. Any restart of the app without a log-off (a reinstall, a crash, `die`)
+    shows it; MCPTT and MCVideo authorise with their new CSK.
+  - **A group call made while the last one is being released joins it:** when the initiator leaves, the MCPTT server
+    BYEs the others (`end_when_initiator_leaves`) but keeps the session in `sessions_` until each BYE is answered
+    (`McServer::release_departed_leg`). A new group call INVITE in that time is a "call_joined" of that session
+    (warning 123), which then ends with its last participant's answer, and the caller gets a BYE. TS 24.379
+    §10.1.1.4.2 has the controlling function create a prearranged group session when none is ongoing, and a session in
+    release is no longer one. S16 met it on MCVideo labs, where client-c answers its BYE later; S16 now waits for every
+    member to be out of the call.
+  - **The in-progress imminent peril notification is answered 488:** the joining INVITE above made the server send
+    bob a MESSAGE with the group's imminent peril state (TS 24.379 §6.3.3.1.11); the Android MCPTT client handles
+    such MESSAGEs only for emergency alerts and answers this one 488 (client gap, TS 24.379 §12.1.1.3, not fixed here).
+  - **MCPTT ad hoc calls on a protected lab:** in S5 the Floor Idle of the ad hoc call fails its authentication at the
+    clients ("packet failed authentication, dropped"), so no floor is granted (S5 4/6 there, 12/12 unprotected).
+    Protected floor control of an ad hoc call is not done (no MCPTT floor or key code changed in phase 7).
 - **Server-driven choices** (see the wire contracts):
   - An explicit floor request by default; the implicit one (`mcptt.implicit_floor_request`) is accepted by the server,
     which grants the floor by Floor Granted and does not use `mc_granted`.

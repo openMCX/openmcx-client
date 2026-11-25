@@ -12,11 +12,20 @@ of `androidlab.py` is the exception). Test scripts: `tests/`; lab: `lab/androidl
 | Lab scenarios S1-S11 (`tests/scenarios.py a1`) | Three redroid 15 clients on the OpenMCX lab, TLS | 144 of 144 checks passed, repeatedly, against several server builds |
 | JVM unit tests, phase 7 (MCVideo) | Docker, JDK 17 | 424 passed, 0 failed (2026-11-25, branch `android-p7`) |
 | MCVideo signalling scenarios V1-V5 (`tests/scenarios.py LAB V1 V2 V3 V4 V5`), phase 7 | Two redroid 15 clients and the Linux reference client, server `openmcx-all:mcdpre-800c657`; protected lab with XML confidentiality and integrity | 35 of 35, with S2, S3, S12 and S16 in the same run (79 of 79). See [VIDEO.md](VIDEO.md#signalling-on-redroid-phase-7) |
+| JVM unit tests, after phase 7 (MCVideo affiliation) | Docker, JDK 17 | 454 passed, 0 failed (2026-11-25, branch `android-p7b`; `McvideoProceduresTest` new) |
+| Scenarios S1-S6, S16, V1-V6, after phase 7 | Three redroid 15 clients, server `openmcx-all:mcdpre-800c657`; a protected lab (XML confidentiality and integrity) and an unprotected one, both `--mcvideo --priority` | Protected 134 of 136 (two S5 floor checks: MCPTT ad hoc floor control is not protected); unprotected 135 of 135. See [VIDEO.md](VIDEO.md#affiliation-and-the-re-runs-after-phase-7) |
 
 In S9, 91-97% of the payloads arrived at each listener, all unchanged, with 52-57 reordered. In S10 the access time was
 4-10 ms and mouth-to-ear 47-72 ms. Some S10 mouth-to-ear samples are large negative numbers: a listener reported no
 first playout time for that burst. The check takes the maximum only, so it does not catch this; it is a gap in the
 client's reporting or in the check, not a server fault.
+
+**S16 on MCVideo labs.** S16 stopped at its imminent peril group call on `--mcvideo --priority` labs, with the APK
+from before phase 7 too. Cause, from the MCPTT server's events: alice's emergency call ends with her BYE; the server
+BYEs bob and client-c but keeps the session until both answer; alice's imminent peril INVITE, 40 ms later, arrives
+before client-c's answer and is a "call_joined" of that session, which ends with client-c's answer, so the server
+BYEs alice and bob is never invited. A server fault (CONFORMANCE.md, "Deviations and limits"); S16 now waits for every
+member of the group, client-c included, to be out of the call before the next one (18/18).
 
 ## Environment
 

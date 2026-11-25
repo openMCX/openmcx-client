@@ -49,6 +49,7 @@ transmitting, the **Transmit** button (hold), **Flip** (back or front camera: at
 | Ad hoc group calls (TS 24.281 §22): to listed users (resource-lists) or participant criteria, the service configuration's `<allow-adhoc-group-call-support>` checked; the server names the ad hoc group in its 2xx; emergency (`<adhoc-emergency-ind>`, §6.2.8.1.19) and imminent peril (§6.2.8.1.23) ad hoc calls; leaving keeps the session re-joinable, the re-join an INVITE to the session identity (§22.2.4.1.1, §22.2.5.1.1; group sessions too, §9.2.1.2.4.1); released for everyone with Reason "User requested release" (§22.2.3.1.1). Transmission control in the clear, as the server keeps it for ad hoc calls | `McvideoService.adhocCall`, `rejoin`, `hangup(releaseForAll)` |
 | Priority extras: the emergency cancelled together with another user's alert (§6.2.8.1.14 step 3, `<originated-by>`); a group's imminent peril cancelled without a call (§9.2.5.2.1, MESSAGE, MVIG 3 then MVIG 1 or 2); the ad hoc group emergency alert's criteria modified (§12.1A.1.4) | `McvideoService.setPriority`, `cancelImminent`, `EmergencyAlerts.modifyAdhoc` |
 | Service settings and group dynamic data: the settings-only PUBLISH (§7.2.3, its own entity-tag, a 412 published anew); the group dynamic data subscription (§8.2.1.6: SUBSCRIBE Event presence with the simple-filter of §8.3.2.2, re-subscription, de-subscription, the pidf of §8.3.1.2 read) | `McvideoService.publishSettings`, `subscribeGdd`, `GroupDynamicData.kt` |
+| Affiliation (TS 24.281 §8.2.1.2 to §8.2.1.5), the MCVideo instance of `ServiceProcedures` (`McxClient.videoProcedures`): a negotiated-mode request received is answered 200 at once and shown to the user (the MCPTT dialog, "(MCVideo)" after the sender), accepted for all or some of its groups, each change applied as in §8.2.1.2; de-affiliation from one group and affiliation to one, the others kept (Expires 0 when none is left), confirmed by the next NOTIFY and kept across a new registration; another user's affiliation subscribed to, and changed for them in mandatory or negotiated mode | `client/ServiceProcedures.kt`, `McxClient.changeAffiliation` |
 | Media session: camera video and speech while transmitting, the transmitter's video decoded from its next key picture, key pictures paced | `VideoMediaSession.kt` |
 | Calls: INVITE to the MCVideo PSI with the MCVideo ICSI and feature tag (private: `session-type` private and a resource-lists target; group: `prearranged` and the group), answer (a group call's invitation too), UPDATE refresh, BYE | `McvideoService.kt` |
 | Registration, service authorisation (PUBLISH poc-settings with the same access token), affiliation | `client/McxClient.kt` |
@@ -56,7 +57,7 @@ transmitting, the **Transmit** button (hold), **Flip** (back or front camera: at
 | Camera (Camera2) into the hardware H.264 encoder's input surface; MediaCodec decoder onto the call screen | `app/…/media/AndroidVideo.kt` |
 | Upright pictures: the SurfaceTexture's transform matrix already turns each camera frame by the sensor orientation (Camera2 sets it on the stream, with a mirror for the front camera); the OpenGL stage turns it further only for the way the phone is held, undoes the front camera's mirror for the encoder and keeps it in the preview; the picture's shape follows the JPEG_ORIENTATION rule; the receiver shows it at its own shape | `app/…/media/CameraGl.kt`, `media/VideoOrientation.kt`, `ui/VideoCallScreen.kt` |
 | Call screen, Call tab entries, camera permission, camera foreground-service type during a call | `app/…/ui/VideoCallScreen.kt`, `Screens.kt`, `MainActivity.kt`, `McxService.kt` |
-| Debug commands `video-call <target> [notc] [manual] [emergency] [implicit]`, `video-group [group] [emergency\|imminent] [implicit]`, `video-adhoc <ID>...\|criteria=<c> [emergency\|imminent]`, `video-adhoc-release`, `video-rejoin`, `video-rejoinable`, `video-queue-position`, `video-reception-end`, `video-profile`, `video-emergency off alert=<ID>`, `video-imminent-cancel [group]`, `video-settings-publish [remove]`, `video-gdd-subscribe <group> [fetch] [items]`, `video-gdd-resubscribe`, `video-gdd-unsubscribe`, `video-gdd`, `video-pck-kms <uri>`, `adhoc-alert modify <criteria>`, `video-emergency on\|off`, `video-imminent on\|off`, `video-alert on\|off [lat lon] [for <MCVideo ID>]`, `video-alerts`, `video-chat [group]`, `video-transmit <s>`, `video-release`, `video-status`, `video-hashes`, `video-hangup`, `video-answer`, `video-camera front\|back` | `app/…/DebugControl.kt` |
+| Debug commands `video-call <target> [notc] [manual] [emergency] [implicit]`, `video-group [group] [emergency\|imminent] [implicit]`, `video-adhoc <ID>...\|criteria=<c> [emergency\|imminent]`, `video-adhoc-release`, `video-rejoin`, `video-rejoinable`, `video-queue-position`, `video-reception-end`, `video-profile`, `video-emergency off alert=<ID>`, `video-imminent-cancel [group]`, `video-settings-publish [remove]`, `video-gdd-subscribe <group> [fetch] [items]`, `video-gdd-resubscribe`, `video-gdd-unsubscribe`, `video-gdd`, `video-pck-kms <uri>`, `video-affiliate <group>`, `video-deaffiliate <group>`, `video-affiliation-accept [<group>...]`, `video-affiliation-decline`, `video-affiliation-subscribe <ID> [fetch]`, `video-affiliation-unsubscribe <ID>`, `video-affiliate-remote <ID> <group> affiliate\|deaffiliate mandatory\|negotiated`, `video-procedures`, `adhoc-alert modify <criteria>`, `video-emergency on\|off`, `video-imminent on\|off`, `video-alert on\|off [lat lon] [for <MCVideo ID>]`, `video-alerts`, `video-chat [group]`, `video-transmit <s>`, `video-release`, `video-status`, `video-hashes`, `video-hangup`, `video-answer`, `video-camera front\|back` | `app/…/DebugControl.kt` |
 
 Video is 640×480 (or the nearest camera size) turned upright, so 480×640 from a phone held upright and 640×480 from
 one held sideways (chosen when the transmission starts; turning the phone during it keeps the picture upright,
@@ -358,9 +359,25 @@ server image `openmcx-all:mcdpre-800c657`, reference client `openmcx-client:mcde
 | V5 | 4 | PCK keyed to bob's KMS from the profile; a KMS Redirect Response and the call keyed again |
 
 On an unprotected lab (`p7-u1`, the same without `--protected`), V1 to V4 pass too (29/29; V5 needs protection).
-S16 (MCPTT) then stopped at its imminent peril group call there, and did the same with the APK from before phase 7:
-a matter of that lab's state, not of this change. On the protected lab MCData is not authorised with this server
-image (403, warning 140, "XML content encrypted under another XPK"), with the APK from before phase 7 as well.
+S16 (MCPTT) then stopped at its imminent peril group call there, and did the same with the APK from before phase 7.
+On the protected lab MCData was not authorised (403, warning 140, "XML content encrypted under another XPK"), with
+the APK from before phase 7 as well. Both are server faults, found after phase 7 (CONFORMANCE.md, "Deviations and
+limits"): the MCPTT server lets a new group call join the session it is still releasing, and the MCData server
+decrypts a new service authorisation under the CSK of the old binding, which an app restart (here the reinstall)
+leaves behind.
+
+### Affiliation and the re-runs (after phase 7)
+
+Branch `android-p7b`, server image `openmcx-all:mcdpre-800c657`, three redroid 15 clients (no reference client; V2
+takes the redroid client-c as its third participant). V6 checks MCVideo affiliation: de-affiliation from the group and
+affiliation again, the PUBLISH of each, this user's own affiliation subscription, and the negotiated-mode MESSAGE with
+the MCVideo affiliation command (the OpenMCX servers do not relay it, so bob's acceptance per group is checked by
+`McvideoProceduresTest` only).
+
+| Lab | Scenarios | Result |
+|---|---|---|
+| `p7b-x2`: `--mcvideo --priority --protected --xml-protection --integrity-protection --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1-S6, S16, V1-V6 | 134/136: everything but two S5 checks (MCPTT ad hoc floor control is not protected; see CONFORMANCE.md). MCData authorised, S6 15/15 |
+| `p7b-u1`: `--mcvideo --priority` | S1-S6, S16, V1-V4, V6 (V5 needs protection) | 135/135, S16 18/18 |
 
 The OpenMCX MCVideo server lets an ad hoc call go on without its initiator (TS 24.281 §6.3.8.1 item 3), whatever the
 BYE's Reason, and its ad hoc re-INVITE changes the participants only: an ad hoc call's emergency cannot be cancelled
@@ -368,8 +385,6 @@ in the call there (it ends with the call). `tests/video.py` needs the phones' ca
 
 ## Not yet
 
-- Remote affiliation requests accepted per group and de-affiliation from one group (TS 24.281 §8.2.1.2 to §8.2.1.5):
-  the affiliation lives in `McxClient`, shared with MCPTT (phase 1).
 - The KMS CertCache of other KMSs (TS 33.180 §5.2.8.3): only the client's own KMS can key a PCK.
 - Ad hoc group call participant modification (`mcvideo-adhoc-modify` of the Linux client), protected ad hoc calls.
 - Protected FD (PCK).
