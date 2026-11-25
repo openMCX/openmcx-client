@@ -319,6 +319,8 @@ class DebugControl(private val context: Context) {
             val reason = args.drop(if (query) 2 else 1).joinToString(" ").ifBlank { null }
             JSONObject().put("status", media().release(args[0], reason, query))
         }
+        // IP connectivity, enhanced status, the message store, ad hoc and alias media (TS 24.282 §20, §14, §21, §24): McdataCommands.kt.
+        in McdataCommands.NAMES -> McdataCommands.execute(cmd, args)
         "events" -> JSONArray(Engine.log.last(args.firstOrNull()?.toInt() ?: 50))
         // File distribution. Paths are on the device (adb push to /data/local/tmp, then chmod 644).
         "fd-send" -> fdSend(args, group = false)

@@ -163,6 +163,15 @@ data class ClientConfig(
          * the PCK's own Expiry time when it is earlier (TS 33.180 annex E.6.10).
          */
         val pckLifetimeS: Long = DEFAULT_PCK_LIFETIME_S,
+        /** TS 24.282 §20.2.0a step 1: this client's IP address in an IP connectivity tunnel (`ipconn.address`). */
+        val ipconnAddress: String? = null,
+        /**
+         * TS 24.282 §21.1 and §21.2: the MCData message store (`msgstore`, its server root) and the notification server
+         * (`notification`) of the NMS REST API; `msgstore_store` is the store name (default "mcdata").
+         */
+        val msgstore: String? = null,
+        val notification: String? = null,
+        val msgstoreStore: String = "mcdata",
     )
 
     data class Media(val portRange: IntRange, val amrWbMode: Int)
@@ -271,7 +280,9 @@ data class ClientConfig(
                     Mcdata(it.str("user_id"), it.str("psi"), it.strings("groups"), it.int("max_payload_size_sds_cplane_bytes", 1000),
                         it.int("tdu1_seconds", 10), FdConfig.parse(it["fd"] as? JsonObject), it.strings("functional_aliases"),
                         it.flag("protect_payload"), it.flag("protect_signalling"), it.flag("authenticate_payload"),
-                        it.count("pck_lifetime_s", DEFAULT_PCK_LIFETIME_S, 1))
+                        it.count("pck_lifetime_s", DEFAULT_PCK_LIFETIME_S, 1),
+                        (it["ipconn"] as? JsonObject)?.optStr("address"), it.optStr("msgstore"), it.optStr("notification"),
+                        it.optStr("msgstore_store") ?: "mcdata")
                 },
                 media = Media(ports[0]..ports[1], media.int("amr_wb_mode", 2)),
                 mcvideo = (root["mcvideo"] as? JsonObject)?.let {

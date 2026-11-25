@@ -267,6 +267,8 @@ object Engine {
             }
             fd = files
             c.handlers += files
+            // IP connectivity, enhanced status, the message store (TS 24.282 §20, §14, §21).
+            McdataExtras.start(c, scope, SocketHttpClient(ssl, endpoints, proxy = config.httpProxy))
         }
         config.mcvideo?.let {
             val devices = AndroidVideo(context.applicationContext).also { v -> video = v }
@@ -374,6 +376,7 @@ object Engine {
         client?.stop()
         deviceLocation?.stop(); deviceLocation = null; locations = emptyList()
         alertHandlers = emptyList(); alerts = null; notifications?.emergencyAlerts(emptyList())
+        McdataExtras.stop()
         client = null; mcptt = null; mcdata = null; fd = null; mcvideo = null; video = null; telecom = null; fileAudio = null
         _inVideoCall.value = false
         history?.close(); history = null

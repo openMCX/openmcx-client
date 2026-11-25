@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lab"))
 from androidlab import ADB, FILES, PACKAGE, Device, meta  # noqa: E402
+import mcdata_extras  # noqa: E402  (S80 onwards)
 
 A, B, C = "client-a", "client-b", "client-c"
 FGS_PHONE_CALL, FGS_MICROPHONE, FGS_SPECIAL_USE = 0x4, 0x80, 0x40000000  # ServiceInfo.FOREGROUND_SERVICE_TYPE_*
@@ -2185,6 +2186,10 @@ class Lab:
                  "S29": s29_floor_priority, "S30": s30_regroup, "S31": s31_temporary_group,
                  "S60": s60_long_sds, "S61": s61_media_group_sds, "S62": s62_one_to_one_session, "S63": s63_group_session,
                  "S64": s64_media_fd, "S65": s65_media_priority, "S66": s66_media_release, "S67": s67_media_reference_client}
+
+
+# S80 onwards (parity phase 4b): tests/mcdata_extras.py.
+Lab.SCENARIOS.update(mcdata_extras.SCENARIOS)
 
 
 def main() -> None:
