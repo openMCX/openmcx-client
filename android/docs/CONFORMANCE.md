@@ -2,7 +2,7 @@
 
 For each requirement this lists the clause, the code that implements it, and the evidence that it works. The evidence
 is a JVM unit test (`core/src/test`), an instrumented test (`app/src/androidTest`) or a check in the Android-only lab
-scenarios (`tests/scenarios.py`, S1–S24). Paths are relative to `android/`. Clause numbers are from ETSI TS 124 379 and TS 124 282 V19.7.0. Clauses of TS 24.380, 24.482 and 24.484 are cited from
+scenarios (`tests/scenarios.py`, S1–S31). Paths are relative to `android/`. Clause numbers are from ETSI TS 124 379 and TS 124 282 V19.7.0. Clauses of TS 24.380, 24.482 and 24.484 are cited from
 the published specifications and not re-checked against a local copy; they are marked *(not checked locally)*.
 
 ## Start-up
@@ -74,6 +74,16 @@ debug command ([README](../README.md#debug-control-endpoint)).
 | SDP: one AMR-WB stream and `m=application … udp MCPTT` with `mc_floor_ssrc`; an offered `mc_priority` is echoed; one session ID per call and the version one higher in each subsequent offer or answer | TS 24.379 §6.2.1, §6.2.2; TS 24.380 §14 *(not checked locally)*; RFC 3264 §8 | `mcptt/McpttSdp.kt` (`Origin`) | `McpttSdpTest`; S2–S5 |
 | Implicit floor request: `mc_implicit_request` in the initial INVITE's offer only (`mcptt.implicit_floor_request`, or per call), the accepted request entering 'U: pending Request' with T101 | TS 24.379 §6.4; TS 24.380 §14.2.5, §14.5, §6.2.4.2.2 | `McpttService.originate`, `FloorParticipant.startImplicit` | `FloorParticipantTest`, `McpttSdpTest`; S20 |
 | `mc_granted` offered only next to `mc_implicit_request` in the initial offer (`mcptt.offer_granted`, default false, or per call); its grant in the 200 (OK) taken as a Floor Granted with `mc_ssrc`, the Floor Granted that may follow not a second grant; answer parameters not offered discarded | TS 24.380 §14.2.4, §14.3.4, §14.3.6, §14.4, §6.2.4.4.2 | `McpttService.originate`, `FloorParticipant.startImplicit`, `ClientRules.answerParameterKept` | `FloorParticipantTest.grantInTheAnswerIsTheOnlyGrant`, `ClientRulesTest`; S20 (offer only: the OpenMCX server grants by Floor Granted) |
+| First-to-answer call, terminating: the INVITE of session type `first-to-answer` is a private call (with or without floor control) that rings and waits for the user (step 8 a), the server's Priv-Answer-Mode Manual, step 10 c)); 486 when busy (8 c)), 480 when not answered (8 d)), 487 to a CANCEL; a BYE with `<release-reason>` "not selected for call" ends it with that reason; a protected one is answered with the invitee's own PCK (step 5) | TS 24.379 §11.1.1.2.1.2 | `McpttService.incoming`, `GroupCallRules.firstToAnswerRelease`, `ClientRules.manualCommencement` | `McpttCallTypesTest.firstToAnswerInviteRingsAndIsAnswered` (the TS 37.579-2 6.2.21 INVITE, answered 400 before), `firstToAnswerCancelledBeforeTheAnswer`, `GroupCallRulesTest`; S25 |
+| First-to-answer call, originating: two or more targets in the resource list, session type `first-to-answer`, no Answer-Mode or `<forwarding-sequence-number>`; the right `<allow-request-first-to-answer-call>` (step 2); the answerer from `<mcptt-called-party-id>` | TS 24.379 §11.1.1.2.1.1 steps 2, 10 a), 15; 200 step 4 | `McpttService.firstToAnswerCall`, `GroupCallRules.firstToAnswerTargets` | `McpttCallTypesTest.firstToAnswerOriginated`; S25 (either invitee wins, the other is cancelled; bob's call refused) |
+| Chat group call: initiate and join with session type `chat` and the group, leave by BYE, join again; a group whose document says chat (`<on-network-invite-members>` false) is joined, not called | TS 24.379 §10.1.2.2.1.1, §10.1.2.2.3.1; TS 24.481 §7.2.4.2 | `McpttService.chatCall`, `GroupDocument.type` | `McpttCallTypesTest.chatCallJoin`, `GroupCallRulesTest.groupDocumentPhase2Parts`; S26 |
+| Broadcast group call: `<broadcast-ind>` true in mcptt-info (a plain boolean after `<imminentperil-ind>`), received too; the Floor Indicator's bit B | TS 24.379 §6.2.8.2, annex F.1; TS 24.380 §6.2.4.3.5 1 b) | `McpttService.broadcastCall`, `McpttInfo`, `ClientRules.floorIndicator` | `McpttCallTypesTest.broadcastCall`, `GroupCallRulesTest.mcpttInfoBroadcastAndReleaseReason`; S27 (a receiver denied, cause 5; the call ends with the initiator's burst) |
+| Ad hoc call by participant criteria (`<call-participants-criterias>`, no resource list), also broadcast | TS 24.379 §17.2.2.1.1 steps 9, 12 | `McpttService.adhocCall`, `GroupCallRules.adhocCriteria` | `McpttCallTypesTest.adhocByCriteriaAndModified`; S28 |
+| Ad hoc call modification: a re-INVITE with the mcptt-info as established and either the users with "method" INVITE or BYE or new criteria, never both (NOTE) | TS 24.379 §17.2.6.1.1 | `McpttService.modifyAdhoc`, `GroupCallRules.adhocModificationEntries` | `McpttCallTypesTest.adhocByCriteriaAndModified`, `GroupCallRulesTest`; S28 (client-c removed and added, criteria changed) |
+| Ad hoc call leave (a BYE without the Reason of a release) and rejoin to the MCPTT session identity | TS 24.379 §17.2.4.1.1, §17.2.5.1.1 | `McpttService.hangup(releaseAll = false)`, `rejoinAdhoc` | `McpttCallTypesTest.adhocByCriteriaAndModified`; S28 (bob leaves and rejoins) |
+| Calls on a group whose document has `<preconfigured-group-use-only>` true are not made | TS 24.379 §10.1.1.2.1.1, §10.1.2.2.1.1 | `McpttService.originate`, `GroupCallRules.callsAllowed` | `GroupCallRulesTest` |
+| Floor priority: group calls offer `mc_priority` (`mcptt.floor_priority`, else the group document's `<user-priority>` of the user, else the user profile's `<MCPTT-group-call>`/`<Priority>`); the Floor Request carries the priority negotiated (not higher than the answer's) | TS 24.380 §14.3.3, §6.2.4.3.5 1 a); TS 24.481 §7.2.2; TS 24.484 §8.3.2.1 8 e) v) | `GroupCallRules.floorPriorityOffer`, `negotiatedFloorPriority`, `McpttSdp` | `McpttCallTypesTest.floorPriorityOfferedAndNegotiated`, `privateCallOffersNoFloorPriority`, `GroupCallRulesTest.floorPriority`; S29 |
+| Pre-emption, the revoked side: the Floor Revoke stops the media, tells the user the cause, and the Floor Release repeats its G-bit; then 'U: pending Release' and the Floor Taken of the new talker | TS 24.380 §6.2.4.5.4, §4.1.1.4 | `FloorParticipant.receive` | `FloorParticipantTest.preemptedTalkerReleasesWithTheDualFloorBit`; S29 (bob at 90 pre-empts alice; client-c at 10 does not) |
 | Floor control packets (RTCP APP `MCPT`) | TS 24.380 §8 *(not checked locally)* | `mcptt/Floor.kt` | `FloorTest` (captured bytes) |
 | Floor participant: request, grant, deny, taken, idle, revoke, release, acknowledgements, T100/T101 | TS 24.380 §6.2.4 *(not checked locally)* | `mcptt/FloorParticipant.kt` | `FloorParticipantTest`; S2–S5, S4 (deny), S9 (retransmission) |
 | Floor Indicator of the Floor Request and Floor Release by call type (D emergency, E imminent peril, else A), with bit F when queueing was negotiated | TS 24.380 §6.2.4.3.5 1 b), §8.2.3.15, §14.6.2 NOTE; TS 37.579-1 tables 5.5.6.2-1, 5.5.6.5-1 | `ClientRules.floorIndicator`, `McpttService.indicatorOf` | `ClientRulesTest.floorIndicatorByCallType`, `FloorParticipantTest.floorIndicatorOfTheCall` |
@@ -95,6 +105,19 @@ debug command ([README](../README.md#debug-control-endpoint)).
 | Receiving: sender from `mcdata-calling-user-id`, group from `mcdata-calling-group-id`, 200 OK, deduplication by message ID | TS 24.282 §9.2.2.2.2, §9.2.1.2 | `McdataService.received` | S6 |
 | Disposition: DELIVERED, READ, DELIVERED AND READ with TDU1; Sender IE always present | TS 24.282 §9.2.1.3, §12.2.1.1 | `McdataService.notify`, `display` | S6 |
 | Receiving notifications, several per MESSAGE (aggregated) | TS 24.282 §12.2.1.2 | `McdataService.handle` | S6 (the group case) |
+
+## Regroups and temporary groups
+
+`mcptt/Regroups.kt`, one per MCPTT service, as the Linux client's `mcptt/regroup.cpp` and `core/group_management.cpp`.
+
+| Requirement | Clause | Code | Evidence |
+|---|---|---|---|
+| Regroup request: MESSAGE to the PSI with the client ID and the regroup document (annex F.7.2: `<preconfig-group-id>`, `<mcptt-regroup-uri>`, groups or users, `<regroup-action>`); a removal names only the identity | TS 24.379 §16.2.1.1, §16.2.1.2, §16.3.1.1 | `Regroups.request`, `Regroup.encode` | `McpttCallTypesTest.regroupRequestNoticeAndCall`, `GroupCallRulesTest.regroupDocument`; S30 (bob refused with 160) |
+| Regroup notices from the participating function: stored or forgotten, the preconfigured group's document read for its configuration; a notice from elsewhere refused | TS 24.379 §16.2.1.3, §16.2.1.4, §16.1 | `Regroups.handle`, `McpttService.handle` | `McpttCallTypesTest.regroupNoticeFromAnotherSourceIsRefused`; S30 |
+| A call on a regroup or temporary group names the constituent group it is placed from in `<associated-group-id>`; a chat regroup carries a chat call | TS 24.379 §10.1.1.2.1.1 step 14 d), §10.1.2.2.1.1 step 13 d) | `Regroups.callingConstituent`, `configurationOf` | `McpttCallTypesTest.regroupRequestNoticeAndCall`, `GroupCallRulesTest`; S30, S31 |
+| Temporary group formation (POST of the GMOP group regroup creation request to the user's tree, `<on-network-temporary>`) and tear down (DELETE); the OpenMCX servers notify it as a regroup of its own preconfigured group | TS 24.481 §6.3.14.2, §6.3.15.2, §7.3.4.3 | `Regroups.temporaryCreate`, `temporaryDelete`, `TemporaryGroups` | `GroupCallRulesTest.temporaryGroupRequest`; S31 (bob refused with 403) |
+| Group documents: the type (chat, from `<on-network-invite-members>` or the OpenMCX extension), `<preconfigured-group-use-only>`, the members' `<user-priority>`, `<on-network-temporary>`, `<on-network-regrouped>` | TS 24.481 §7.2.2, §7.2.4.2 | `GroupDocument.parse` | `GroupCallRulesTest.groupDocumentPhase2Parts` |
+| The Call tab lists the regroups and temporary groups with their constituent groups, called like groups | — | `ui/UiModel.kt` `snapshot`, `ui/Screens.kt` `TalkScreen` | S30, S31 (through the debug control) |
 
 ## Android integration
 
@@ -130,7 +153,8 @@ debug command ([README](../README.md#debug-control-endpoint)).
   activation, the per-alias user status subscription, and MCData file distribution to an alias.
 - **Not implemented:**
   - pre-established sessions
-  - broadcast group calls
+  - group-broadcast and user-broadcast groups as their own call kind (a broadcast call on them is made as on any
+    group); originating protected first-to-answer calls (§11.1.1.2.1.1, the 200 step 2 PCK)
   - MCData on the media plane (MSRP), file distribution and data streaming
   - end-to-end media and floor protection (TS 33.180 keys)
   - off-network operation

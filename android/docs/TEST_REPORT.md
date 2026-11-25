@@ -166,3 +166,40 @@ pass the MESSAGE on), the grant in the 200 (OK), the Retry-After of a 500 or 503
 server does not refuse it), Answer-Mode with parameters (the server sends a plain `Auto`), the Floor Indicator's call
 type and bit F, the Location field of the Floor Request, `<forwarding-sequence-number>` and the SDP version of a
 subsequent answer.
+
+## Parity phase 2 (2026-11-25)
+
+[PARITY_PLAN.md](PARITY_PLAN.md) phase 2 (branch `android-p2`): MCPTT call types, floor priority and pre-emption,
+regroups and temporary groups. Three labs, each three redroid 15 clients (`redroid/redroid:15.0.0_64only-latest`) on
+`openmcx-all:mcdpre-800c657`, TLS, run one after the other:
+
+- `p2-a`: `lab/androidlab.py create --name p2-a` (the default fixture), the regression and S28;
+- `p2-f`: `--priority --chat --broadcast` (the private call policy: client-a may make first-to-answer calls; bob may
+  pre-empt the floor at priority 75 or more, his floor priority 90, the others' 10);
+- `p2-g`: `--regroup` (constituent groups north with client-a and client-b, south with client-c; client-a may regroup
+  and form temporary groups).
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 439 passed, 0 failed (416 before this phase) |
+| App unit tests (`:app:testDebugUnitTest`) | 13 passed |
+| `:app:assembleDebug` | Built |
+| S1-S6 (regression, `p2-a`) | 76 of 76 |
+| S28 on `p2-a` | 19 of 19 |
+| S1, S25-S29 on `p2-f` | 90 of 90 |
+| S30, S31 on `p2-g` | 41 of 41 |
+
+| # | Scenario | Checks | Result |
+|---|---|---|---|
+| S25 | First-to-answer (TS 24.379 §11.1.1.2.1.1, §11.1.1.2.1.2) | 23 | alice's INVITE names bob and client-c with session type first-to-answer, no Answer-Mode or forwarding sequence number; both ring (before, the app answered such an INVITE with 400, TS 37.579-2 6.2.21); bob, then client-c in a second round, answers first and takes the call, the other's invitation ends; speech both ways unchanged; bob, without the right, is refused |
+| S26 | Chat group call (§10.1.2.2.1.1, §10.1.2.2.3.1) | 16 | alice joins with session type chat and nobody is invited; bob and client-c join the same call; bob leaves and joins again while the others stay; speech unchanged; the call ends when one participant remains (the server's §6.3.8.1 item 2) |
+| S27 | Broadcast group call (§6.2.8.2) | 10 | `<broadcast-ind>` true in alice's INVITE; bob and client-c receive a broadcast call; bob is denied the floor (cause 5, receive only); alice's burst reaches both, and the server ends the call with it |
+| S28 | Ad hoc call by criteria and its modification (§17.2.2.1.1, §17.2.6.1.1, §17.2.4.1.1, §17.2.5.1.1) | 19 | the criteria `affiliated:sip:operations@mcx.test` and no resource list; bob and client-c are called; client-c removed (`;method=BYE`) and added again; the criteria changed; bob leaves and rejoins by the session identity and talks |
+| S29 | Floor priority and pre-emption (TS 24.380 §14.3.3, §6.2.4.5.4) | 7 | bob's offer has `mc_priority=90`, negotiated 90; while alice (10) talks, bob's request revokes her and he is granted; alice sees the revoke, then bob take the floor; client-c (10) does not pre-empt alice |
+| S30 | Regroup (§16.2.1.1-§16.2.1.4, §10.1.1.2.1.1 step 14 d)) | 24 | bob is refused (160); alice's regroup of north and south is created and all three are told, with both groups; a call on north is refused (148); alice's call on the regroup names north in `<associated-group-id>` and reaches bob and client-c; speech both ways; the removal is told to all and north carries a call again |
+| S31 | Temporary group (TS 24.481 §6.3.14.2, §6.3.15.2) | 17 | bob is refused (403); alice's temporary group of north and south is formed (200), the three are told; its document lists both constituents; a call on it reaches bob and client-c with the speech unchanged; the tear down (200) is told to all |
+
+Not exercised in the lab, unit tests only: a received BYE with "not selected for call" (the OpenMCX server sends it only
+when two answers cross), a protected first-to-answer call, the Floor Release's G-bit after a dual-floor revoke, the
+floor priority from the group document or the user profile (the lab's comes from the provisioning), and
+`<preconfigured-group-use-only>` refused locally (the regroup lab's preconfigured group is never called directly).

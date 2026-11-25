@@ -128,7 +128,10 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
                      and ref["gms"].get("subscription_psi") else {}),
                   **({"cms_subscription_psi": ref["cms"]["subscription_psi"]} if isinstance(ref.get("cms"), dict)
                      and ref["cms"].get("subscription_psi") else {}),
-                  "documents_on_notify": bool(ref["mcptt"].get("documents_on_notify", False))},
+                  "documents_on_notify": bool(ref["mcptt"].get("documents_on_notify", False)),
+                  # TS 24.380 clause 14.3.3: the highest floor priority the reference client asks for (--priority:
+                  # client-b 90, the others 10), offered in "mc_priority".
+                  **({"floor_priority": int(mcptt["maximum_floor_priority"])} if "maximum_floor_priority" in mcptt else {})},
         "media": {"port_range": [20000, 20400], "amr_wb_mode": 2},
     }
     if mcdata:
@@ -310,6 +313,18 @@ def create(args) -> None:
         # them, client-a may cancel an alert (its own or another user's). With the private call policy: emergency
         # private calls, client-a to anyone, client-b to client-a only.
         command += ["--priority", "--private-call"]
+    if args.chat:
+        # Chat group calls (TS 24.379 §10.1.2): a four-member chat group <group>-chat (at most 3 participants, 20 s
+        # inactivity) in every user profile, joined from the Call tab; and two restricted chat groups.
+        command.append("--chat")
+    if args.broadcast:
+        # Broadcast group calls (TS 24.379 §6.2.8.2): client-a and client-b may broadcast on the prearranged group.
+        command.append("--broadcast")
+    if args.regroup:
+        # Regroups (TS 24.379 §16) and temporary groups (TS 24.481 §6.3.14): a preconfigured group and two constituent
+        # groups, <group>-north (client-a, client-b) and <group>-south (client-c, client-d), which become the clients'
+        # own groups; client-a may regroup and form temporary groups.
+        command.append("--regroup")
     if args.floor_queue:
         # Queued floor requests (TS 24.380 §6.2.4.9, §6.3.5.4.4): the server queues a request while the floor is taken
         # and publishes <floor-control-queue> in the MCPTT service configuration, from which the app offers mc_queueing.
@@ -516,6 +531,7 @@ def create(args) -> None:
     meta_doc = {"openmcx": str(openmcx), "project": f"mcxandroid-{args.name}", "debug_sip": args.debug_sip,
                 "server_image": args.server_image, "mcvideo": args.mcvideo, "protected": args.protected, "transport_keys": args.transport_keys, "location": args.location,
                 "priority": args.priority, "floor_queue": args.floor_queue,
+                "chat": args.chat, "broadcast": args.broadcast, "regroup": args.regroup,
                 "reference_clients": args.reference_client or [], "client_image": args.client_image,
                 "admin": args.admin, "admin_image": args.admin_image, "keycloak": args.keycloak,
                 "mcptt_server": mcptt_server_name(compose["services"]),
@@ -894,6 +910,11 @@ def main() -> None:
     c.add_argument("--mcvideo", action="store_true", help="add the MCVideo server and provision MCVideo (video calls)")
     c.add_argument("--location", action="store_true",
                    help="location reporting (TS 24.379 clause 13): configurations, reports, requests and the LMS")
+    c.add_argument("--chat", action="store_true", help="a chat group (TS 24.379 clause 10.1.2) in every user profile")
+    c.add_argument("--broadcast", action="store_true", help="broadcast group calls by client-a and client-b (TS 24.379 clause 6.2.8.2)")
+    c.add_argument("--regroup", action="store_true",
+                   help="regroups and temporary groups (TS 24.379 clause 16, TS 24.481 clause 6.3.14): constituent groups "
+                        "north (client-a, client-b) and south (client-c), client-a authorised")
     c.add_argument("--floor-queue", action="store_true",
                    help="queued floor requests: the server queues a request while the floor is taken (scenario S18)")
     c.add_argument("--monitor-group", action="store_true",

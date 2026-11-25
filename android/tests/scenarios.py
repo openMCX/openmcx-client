@@ -46,6 +46,7 @@ class Lab:
         # Phone mode: each installed phone plays its client's part.
         clients += [role for role, phone in (m.get("phones") or {}).items() if phone.get("serial")]
         self.devices = {c: Device(name, c) for c in sorted(clients)}
+        self.meta = m
         self.protected = bool(m.get("protected"))
         self.results: list[dict] = []
         self.scenario = ""
@@ -1200,6 +1201,294 @@ class Lab:
         r = self.cmd(A, "gdd-subscribe", GROUP, "fetch", "call")
         self.check("a dynamic data fetch with an item filter is accepted", r["status"] == 200, result=r)
 
+    # Phase 2: MCPTT call types, floor priority and pre-emption, regroups and temporary groups (S25 to S31).
+
+    CHAT = "sip:operations-chat@mcx.test"
+    NORTH, SOUTH = "sip:operations-north@mcx.test", "sip:operations-south@mcx.test"
+    PRECONF = "sip:operations-preconf@mcx.test"
+
+    def needs(self, flag: str, scenario: str) -> bool:
+        """The lab was made with the androidlab.py option this scenario needs; else it is skipped."""
+        if self.meta.get(flag):
+            return True
+        print(f"  [SKIP] {scenario} needs a lab made with --{flag.replace('_', '-')}")
+        self.skipped_parts.append(f"{scenario} (no --{flag.replace('_', '-')})")
+        return False
+
+    def ringing(self, client: str) -> dict:
+        return self.wait(f"{client} rings", lambda: (c := self.call(client)) and c.get("state") == "ringing" and c, timeout=15)
+
+    def s25_first_to_answer(self) -> None:
+        # TS 24.379 §11.1.1.2.1.1 steps 10 a) and 15, §11.1.1.2.1.2 step 8: both invitees ring (the server sets
+        # Priv-Answer-Mode Manual), the first to answer takes the call, the other is cancelled. TS 37.579-2 6.2.21 had
+        # the app answer the first-to-answer INVITE with 400.
+        if not self.needs("priority", "S25"):
+            return
+        for winner, loser in ((B, C), (C, B)):
+            result: dict = {}
+            t = threading.Thread(target=lambda: result.update(r=self.cmd(A, "first-to-answer", MCPTT[B], MCPTT[C], ok=False, timeout=40)))
+            t.start()
+            rings = {c: self.ringing(c) for c in (B, C)}
+            for c, call in rings.items():
+                self.check(f"{c} rings for the first-to-answer call (not 400)", call["first_to_answer"] and call["peer"] == MCPTT[A], call=call)
+            invite = self.last_sent(A, "INVITE ") or ""
+            self.check("alice's INVITE has session type first-to-answer and both invitees, no Answer-Mode",
+                       "<session-type>first-to-answer</session-type>" in invite and MCPTT[B] in invite and MCPTT[C] in invite
+                       and "\nAnswer-Mode:" not in invite and "forwarding-sequence-number" not in invite)
+            self.cmd(winner, "answer")
+            t.join()
+            r = result.get("r") or {}
+            self.check(f"alice's call is established with {winner}", r.get("ok") and r["result"]["peer"] == MCPTT[winner], result=r)
+            self.established(winner)
+            self.wait(f"{loser} is no longer ringing", lambda: self.call(loser) is None, timeout=10)
+            released = self.last_released(loser) or {}
+            self.check(f"{loser}'s invitation ends (cancelled or not selected)", released.get("reason") in
+                       ("cancelled", "not answered", "not selected for call", "released by the server"), released=released)
+            self.talk_and_verify(A, [winner], seconds=2)
+            self.talk_and_verify(winner, [A], seconds=2)
+            self.hangup(A)
+            self.idle_everywhere([A, B, C])
+        # §11.1.1.2.1.1 step 2 and the server's 156: bob has no first-to-answer right.
+        r = self.cmd(B, "first-to-answer", MCPTT[A], MCPTT[C], ok=False, timeout=30)
+        self.check("bob's first-to-answer call is refused (no right)", not r.get("ok"), result=r)
+        self.idle_everywhere([A, B, C])
+
+    def s26_chat(self) -> None:
+        # TS 24.379 §10.1.2.2.1.1: alice and bob join the chat group call (session type chat); the server invites nobody,
+        # so client-c is not in it; bob leaves (BYE, §10.1.2.2.3.1) and joins again.
+        if not self.needs("chat", "S26"):
+            return
+        call = self.cmd(A, "chat", self.CHAT)
+        self.check("alice joins the chat group call", call["state"] == "established" and call["type"] == "chat", call=call)
+        invite = self.last_sent(A, "INVITE ") or ""
+        self.check("the INVITE has session type chat and the group", "<session-type>chat</session-type>" in invite and self.CHAT in invite)
+        time.sleep(2)
+        self.check("client-c is not invited to the chat call", self.call(C) is None)
+        bob = self.cmd(B, "chat", self.CHAT)
+        self.check("bob joins the same chat call", bob["state"] == "established" and bob["group"] == self.CHAT, call=bob)
+        carol = self.cmd(C, "chat", self.CHAT)
+        self.check("client-c joins too", carol["state"] == "established", call=carol)
+        self.talk_and_verify(A, [B, C], seconds=2)
+        # The server ends a chat call when one participant remains (§6.3.8.1 item 2): three are in it, so bob may leave.
+        self.hangup(B)
+        self.wait("bob left", lambda: self.call(B) is None, timeout=10)
+        time.sleep(1)
+        self.check("alice and client-c are still in the chat call after bob left",
+                   (self.call(A) or {}).get("state") == "established" and (self.call(C) or {}).get("state") == "established")
+        again = self.cmd(B, "rejoin", "chat")
+        self.check("bob rejoins the chat call", again["state"] == "established" and again["type"] == "chat", call=again)
+        self.talk_and_verify(B, [A, C], seconds=2)
+        self.hangup(B)
+        self.hangup(C)
+        self.wait("the chat call ends with one participant left", lambda: self.call(A) is None, timeout=10)
+        self.idle_everywhere([A, B, C])
+        # The group list shows it, joined rather than called: it is a chat group of the user profile.
+        doc = self.cmd(A, "group-document", self.CHAT)
+        self.check("the chat group's document says chat", doc and doc["type"] == "chat", doc=doc)
+
+    def s27_broadcast(self) -> None:
+        # TS 24.379 §6.2.8.2: <broadcast-ind> in the INVITE; every member receives it as a broadcast call; a receiver's
+        # floor request is denied (receive only, cause 5); the call ends with the initiator's transmission.
+        if not self.needs("broadcast", "S27"):
+            return
+        call = self.cmd(A, "broadcast", GROUP)
+        self.check("alice's broadcast call is established", call["state"] == "established" and call["broadcast"], call=call)
+        invite = self.last_sent(A, "INVITE ") or ""
+        self.check("the INVITE has <broadcast-ind> true", "<broadcast-ind>true</broadcast-ind>" in invite)
+        for c in (B, C):
+            got = self.established(c)
+            self.check(f"{c} receives a broadcast group call", got["broadcast"] and got["group"] == GROUP, call=got)
+        denied = self.cmd(B, "ptt", SPEECH[B], "1", timeout=30)
+        self.check("bob, a receiver, is denied the floor", not denied.get("granted"), result=denied)
+        self.check("bob is told the floor was denied (receive only)", any("denied cause 5" in e for e in self.call(B)["floor_events"]),
+                   events=self.call(B)["floor_events"])
+        before = {l: len(self.call(l)["bursts"]) for l in (B, C)}
+        r = self.cmd(A, "ptt", SPEECH[A], "2", timeout=30)
+        self.check("alice is granted the floor", r.get("granted"), result=r)
+        # The server ends a broadcast call when the initiator's transmission ends.
+        self.idle_everywhere([A, B, C])
+        for l in (B, C):
+            history = self.last_released(l) or {}
+            got = [b for b in history.get("bursts", [])[before[l]:] if b["direction"] == "received"]
+            self.check(f"{l} received alice's broadcast", any(b["frames"] >= 80 for b in got), bursts=[b["frames"] for b in got])
+        self.check("the call ended with the transmission", (self.last_released(A) or {}).get("state") == "released")
+
+    def s28_adhoc_criteria(self) -> None:
+        # TS 24.379 §17.2.2.1.1 step 12: an ad hoc call by criteria (the users affiliated to the group); §17.2.6.1.1:
+        # its participant list modified (client-c removed, then added again) and its criteria changed; §17.2.4.1.1 and
+        # §17.2.5.1.1: bob leaves and rejoins by the session identity.
+        call = self.cmd(A, "adhoc", "criteria", f"affiliated:{GROUP}")
+        self.check("alice's ad hoc call by criteria is established", call["state"] == "established", call=call)
+        invite = self.last_sent(A, "INVITE ") or ""
+        self.check("the INVITE has the criteria and no resource list",
+                   f"<call-participants-criterias>affiliated:{GROUP}</call-participants-criterias>" in invite
+                   and "resource-lists+xml" not in invite)
+        group = call.get("group") or ""
+        for c in (B, C):
+            got = self.established(c)
+            self.check(f"{c} is called by the criteria", got["type"] == "adhoc" and got["group"] == group, call=got)
+        self.talk_and_verify(A, [B, C], seconds=2)
+        r = self.cmd(A, "adhoc-modify", "remove", MCPTT[C], ok=False)
+        self.check("the removal of client-c is accepted", r.get("ok"), result=r)
+        reinvite = self.last_sent(A, "INVITE ") or ""
+        self.check("the re-INVITE names client-c with method BYE", f"{MCPTT[C]};method=BYE" in reinvite)
+        try:
+            self.wait("client-c leaves", lambda: self.call(C) is None, timeout=10)
+        except Failed:
+            pass
+        self.check("client-c is removed from the call", self.call(C) is None)
+        r = self.cmd(A, "adhoc-modify", "add", MCPTT[C], ok=False)
+        self.check("adding client-c again is accepted", r.get("ok"), result=r)
+        try:
+            self.established(C)
+        except Failed:
+            pass
+        self.check("client-c is in the call again", (self.call(C) or {}).get("state") == "established")
+        r = self.cmd(A, "adhoc-modify", "criteria", f"member:{GROUP}", ok=False)
+        self.check("the criteria change gets a final answer", r.get("ok") or "error" in r, result=r)
+        reinvite = self.last_sent(A, "INVITE ") or ""
+        self.check("the re-INVITE carries the new criteria and no list",
+                   f"member:{GROUP}" in reinvite and "resource-lists+xml" not in reinvite.split("\r\n\r\n", 1)[-1])
+        self.cmd(B, "adhoc-leave")
+        self.wait("bob left", lambda: self.call(B) is None, timeout=10)
+        r = self.cmd(B, "rejoin", "adhoc", ok=False, timeout=30)
+        self.check("bob rejoins the ad hoc call by its session identity", r.get("ok") and r["result"]["group"] == group, result=r)
+        if r.get("ok"):
+            self.talk_and_verify(B, [A], seconds=2)
+        self.cmd(A, "adhoc-release")
+        self.idle_everywhere([A, B, C])
+
+    def s29_floor_priority(self) -> None:
+        # TS 24.380 §14.3.3: the floor priority offered (bob 90, alice 10, from the provisioning) and negotiated; §4.1.1.4
+        # and the server's policy (bob may pre-empt at 75 or more): bob's request revokes alice, who releases
+        # (§6.2.4.5.4) and sees bob take the floor.
+        if not self.needs("priority", "S29"):
+            return
+        call = self.cmd(B, "group", GROUP)
+        offer = self.last_sent(B, "INVITE ") or ""
+        self.check("bob's offer has mc_priority 90", "mc_priority=90" in offer)
+        self.check("bob's negotiated floor priority is 90", call.get("floor_priority") == 90, call=call)
+        self.established(A)
+        holder = threading.Thread(target=lambda: self.cmd(A, "ptt", SPEECH[A], "6", timeout=40))
+        holder.start()
+        self.wait("alice holds the floor", lambda: self.call(A).get("floor") == "HAS_PERMISSION", timeout=8)
+        time.sleep(1)
+        r = self.cmd(B, "ptt", SPEECH[B], "2", timeout=30)
+        self.check("bob pre-empts alice and is granted the floor", r.get("granted"), result=r)
+        holder.join()
+        events = self.call(A)["floor_events"]
+        self.check("alice's permission is revoked", any(e.startswith("revoked") for e in events), events=events)
+        self.check("alice then sees bob take the floor", any(f"taken by {MCPTT[B]}" in e for e in events), events=events)
+        self.hangup(B)
+        self.idle_everywhere([A, B, C])
+        # A lower priority request does not pre-empt: client-c (10) is denied while alice (10) talks.
+        self.cmd(A, "group", GROUP)
+        self.established(C)
+        holder = threading.Thread(target=lambda: self.cmd(A, "ptt", SPEECH[A], "4", timeout=30))
+        holder.start()
+        self.wait("alice holds the floor", lambda: self.call(A).get("floor") == "HAS_PERMISSION", timeout=8)
+        denied = self.cmd(C, "ptt", SPEECH[C], "1", timeout=30)
+        self.check("client-c, of no higher priority, does not pre-empt", not denied.get("granted"), result=denied)
+        holder.join()
+        self.check("alice was not revoked", not any(e.startswith("revoked") for e in self.call(A)["floor_events"]))
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+
+    def regroups(self, client: str) -> dict:
+        return self.cmd(client, "regroups")
+
+    def s30_regroup(self) -> None:
+        # TS 24.379 §16.2.1.1: alice regroups north (alice, bob) and south (client-c) with the preconfigured group;
+        # §16.2.1.3: every member is told; a call on the regroup names the caller's constituent group (§10.1.1.2.1.1
+        # step 14 d)) and reaches both groups; north is regrouped (148); §16.2.1.2 the removal frees it.
+        if not self.needs("regroup", "S30"):
+            return
+        for c in self.devices:
+            self.wait(f"{c} ready", lambda c=c: self.status(c)["phase"] == "ready", timeout=90)
+        rg = "sip:operations-regroup-a1@mcx.test"
+        r = self.cmd(B, "regroup", "create", rg, self.PRECONF, f"{self.NORTH},{self.SOUTH}")
+        self.check("bob may not regroup (403, warning 160)", r["status"] == 403 and "160" in (r["warning"] or ""), result=r)
+        r = self.cmd(A, "regroup", "create", rg, self.PRECONF, f"{self.NORTH},{self.SOUTH}")
+        self.check("alice's regroup is created", r["status"] == 200, result=r)
+        message = self.last_sent(A, "MESSAGE ") or ""
+        self.check("the request carries the regroup document", "application/vnd.3gpp.mcptt-regroup+xml" in message
+                   and "<regroup-action>create</regroup-action>" in message and self.SOUTH in message)
+        for c in (A, B, C):
+            try:
+                self.wait(f"{c} told of the regroup", lambda c=c: rg in self.regroups(c)["regroups"], timeout=15)
+            except Failed:
+                pass
+            got = self.regroups(c)["regroups"].get(rg) or {}
+            self.check(f"{c} is told of the regroup with both groups", set(got.get("groups", [])) == {self.NORTH, self.SOUTH}, got=got)
+        refused = self.cmd(A, "group", self.NORTH, ok=False)
+        self.check("a call on north, now regrouped, is refused (148)", not refused.get("ok") and "148" in refused.get("error", ""), result=refused)
+        self.idle_everywhere([A, B, C])
+        call = self.cmd(A, "group", rg)
+        self.check("alice's call on the regroup is established", call["state"] == "established", call=call)
+        invite = self.last_sent(A, "INVITE ") or ""
+        self.check("the INVITE names alice's constituent group (associated-group-id)",
+                   f"<associated-group-id type=\"Normal\"><mcpttURI>{self.NORTH}</mcpttURI>" in invite)
+        for c in (B, C):
+            got = self.established(c)
+            self.check(f"{c} is in the call on the regroup", got["group"] == rg, call=got)
+        self.talk_and_verify(A, [B, C], seconds=2)
+        self.talk_and_verify(C, [A, B], seconds=2)
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+        r = self.cmd(A, "regroup", "remove", rg)
+        self.check("alice removes the regroup", r["status"] == 200, result=r)
+        for c in (A, B, C):
+            try:
+                self.wait(f"{c} told of the removal", lambda c=c: rg not in self.regroups(c)["regroups"], timeout=15)
+            except Failed:
+                pass
+            self.check(f"{c} forgets the regroup", rg not in self.regroups(c)["regroups"])
+        call = self.cmd(A, "group", self.NORTH)
+        self.check("north carries a call again", call["state"] == "established", call=call)
+        self.established(B)
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+
+    def s31_temporary_group(self) -> None:
+        # TS 24.481 §6.3.14.2: alice forms a temporary group of north and south at the GMS; the servers notify the
+        # members; a group call on it reaches both groups; §6.3.15.2 the tear down.
+        if not self.needs("regroup", "S31"):
+            return
+        for c in self.devices:
+            self.wait(f"{c} ready", lambda c=c: self.status(c)["phase"] == "ready", timeout=90)
+        tg = "sip:operations-temp-a1@mcx.test"
+        doc = "temp-a1"
+        r = self.cmd(B, "temporary-create", doc, tg, f"{self.NORTH},{self.SOUTH}")
+        self.check("bob may not form a temporary group (403)", r["status"] == 403, result=r)
+        r = self.cmd(A, "temporary-create", doc, tg, f"{self.NORTH},{self.SOUTH}")
+        self.check("alice's temporary group is formed (200)", r["status"] == 200, result=r)
+        for c in (A, B, C):
+            try:
+                self.wait(f"{c} told of the temporary group", lambda c=c: tg in self.regroups(c)["regroups"], timeout=20)
+            except Failed:
+                pass
+            got = self.regroups(c)["regroups"].get(tg) or {}
+            self.check(f"{c} is told of the temporary group", got.get("temporary") is True, got=got)
+        d = self.cmd(A, "group-document", tg)
+        self.check("the temporary group's document lists both constituents",
+                   d and set(d["temporary_constituents"]) == {self.NORTH, self.SOUTH}, doc=d)
+        call = self.cmd(A, "group", tg)
+        self.check("alice's call on the temporary group is established", call["state"] == "established", call=call)
+        for c in (B, C):
+            got = self.established(c)
+            self.check(f"{c} is in the call on the temporary group", got["group"] == tg, call=got)
+        self.talk_and_verify(A, [B, C], seconds=2)
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+        r = self.cmd(A, "temporary-delete", doc)
+        self.check("alice tears the temporary group down (200)", r["status"] == 200, result=r)
+        for c in (A, B, C):
+            try:
+                self.wait(f"{c} told of the tear down", lambda c=c: tg not in self.regroups(c)["regroups"], timeout=20)
+            except Failed:
+                pass
+            self.check(f"{c} forgets the temporary group", tg not in self.regroups(c)["regroups"])
+
     SCENARIOS = {"S1": s1_startup, "S2": s2_private_automatic, "S3": s3_private_manual, "S4": s4_group, "S5": s5_adhoc, "S6": s6_sds,
                  "S7": s7_refresh_and_recovery, "S8": s8_lifecycle, "S9": s9_impaired, "S10": s10_latency,
                  "S11": s11_product, "S12": s12_private_no_floor, "S13": s13_location,
@@ -1210,7 +1499,9 @@ class Lab:
                  "S18": s18_floor_queue,
                  "S19": s19_reg_event,
                  "S20": s20_implicit_floor, "S21": s21_service_settings, "S22": s22_monitor,
-                 "S23": s23_remote_affiliation, "S24": s24_group_dynamic_data}
+                 "S23": s23_remote_affiliation, "S24": s24_group_dynamic_data,
+                 "S25": s25_first_to_answer, "S26": s26_chat, "S27": s27_broadcast, "S28": s28_adhoc_criteria,
+                 "S29": s29_floor_priority, "S30": s30_regroup, "S31": s31_temporary_group}
 
 
 def main() -> None:

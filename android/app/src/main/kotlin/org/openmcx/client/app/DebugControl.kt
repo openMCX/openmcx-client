@@ -128,10 +128,15 @@ class DebugControl(private val context: Context) {
             }
         }
         // adhoc-leave: leave the ad hoc call without releasing it (§17.2.4.1.1); adhoc-release: release it for all (§17.2.3.1.1)
-        "adhoc-leave" -> { mcptt().hangup(releaseAll = false); "left" }
+        "adhoc-leave" -> { mcptt().hangup(releaseAll = false); lastChat = null; "left" }
         "adhoc-release" -> { mcptt().hangup(releaseAll = true); "released" }
-        // rejoin: the last chat group joined (§10.1.2.2.1.1) or the ad hoc call left (§17.2.5.1.1)
-        "rejoin" -> call { s -> lastChat?.let { s.chatCall(it) } ?: s.rejoinAdhoc() }
+        // rejoin [chat|adhoc]: the last chat group joined (§10.1.2.2.1.1) or the ad hoc call left (§17.2.5.1.1), by
+        // default the one left last
+        "rejoin" -> call { s -> when (args.firstOrNull()) {
+            "adhoc" -> s.rejoinAdhoc()
+            "chat" -> s.chatCall(lastChat ?: throw IllegalStateException("no chat group joined"))
+            else -> lastChat?.let { s.chatCall(it) } ?: s.rejoinAdhoc()
+        } }
         // chat [<group>] [emergency|imminent] [implicit|explicit]: initiate or join a chat group call (§10.1.2.2.1.1); leave with hangup
         "chat" -> call {
             val group = args.firstOrNull { a -> a.startsWith("sip:") } ?: Engine.client!!.config.mcptt!!.groups.first()

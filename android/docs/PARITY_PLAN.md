@@ -16,11 +16,11 @@ keys and notifications, and a `DebugControl` command for every procedure so the 
 | Start-up, registration, reg event, log-off, recovery | yes | yes | Retry-After on a refused authorisation, `authorise_by_register`, P-Access-Network-Info (planned in CONFORMANCE.md) |
 | Service settings (TS 24.379 7.2.3, 7.2.4) | settings-only PUBLISH, settings subscription | poc-settings with the authorisation only | settings PUBLISH and subscription |
 | Affiliation | own groups, `monitor` groups, remote affiliation (9.2.1.2-9.2.1.5), GDD subscription (9.2.1.6), rules based affiliation (9.2.1.7) | own groups | monitor, remote, GDD, rules based |
-| MCPTT private calls | automatic, manual, forced, with and without floor control, first-to-answer | the same, without first-to-answer | first-to-answer |
-| MCPTT group calls | prearranged, chat, broadcast, ad hoc (participants or criteria, modification) | prearranged, ad hoc (participants) | chat, broadcast, ad hoc criteria and modification |
-| Floor control | priority, queueing, pre-emption, `mc_granted`, Floor Indicator by call type and bit F | queueing; Floor Indicator always NORMAL; no `mc_granted` | Floor Indicator, `mc_granted`, pre-emption |
+| MCPTT private calls | automatic, manual, forced, with and without floor control, first-to-answer | the same (first-to-answer in phase 2) | none |
+| MCPTT group calls | prearranged, chat, broadcast, ad hoc (participants or criteria, modification) | the same (phase 2) | none |
+| Floor control | priority, queueing, pre-emption, `mc_granted`, Floor Indicator by call type and bit F | the same (Floor Indicator and `mc_granted` in phase 0, priority and pre-emption in phase 2) | none |
 | MCPTT call services | ambient listening, remotely initiated calls, call-back, transfer, forwarding | none | all five |
-| Groups | regroups, temporary groups | none | both |
+| Groups | regroups, temporary groups | both (phase 2) | none |
 | Emergency, imminent peril, alerts | all three services, ad hoc group alerts | MCPTT and MCVideo calls, alerts of the three services | MCData emergency and imminent-peril communications |
 | Functional aliases | all, location based activation | all but location based activation, per-alias status, FD to an alias | location based, FD to an alias |
 | Pre-established sessions | MCPTT (TS 24.379 8, ICE), MCData (TS 24.282 18.3, emergency included) | none | both |
@@ -64,6 +64,10 @@ Done for MCPTT on `android-p01`, S20-S24; the MCVideo settings, remote affiliati
 - **UI:** a group list that shows the affiliation state and the monitored groups.
 
 ### Phase 2: MCPTT call types and floor (M-L)
+
+Done on `android-p2`, S25-S31 (CONFORMANCE.md "MCPTT", "Regroups and temporary groups"; TEST_REPORT.md "Parity phase
+2"). Not done: group-broadcast and user-broadcast groups as their own call kind, and originating protected
+first-to-answer calls.
 
 - Chat group calls (TS 24.379 10.1.2) and broadcast group calls (10.1.1.2.1, the B bit).
 - Ad hoc calls by participant criteria, and modification of an ad hoc call (17.2).
