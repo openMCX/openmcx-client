@@ -417,7 +417,7 @@ Client::Client(Json cfg, bool disable_tls)
       sip_(client_sip_config(cfg_, disable_tls),
            {[this](const SipMessage &message) { return incoming(message); },
             [this](std::string_view id, SipCallState state, int code) {
-              if (pre_session_state(id, state)) return;
+              if (pre_session_state(id, state) || mcdata_pre_state(id, state)) return;
               if (mcvideo_closing(id, state) || mcvideo_call_state(id, state)) return;
               call_state(id, state, code);
             },

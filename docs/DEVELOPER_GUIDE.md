@@ -398,7 +398,10 @@ sequenceDiagram
   notifications are answered by `mcdata_notify`; timer TDU1 is kept per message.
 - **SDS and FD over the media plane.** `sds-media`, `sds-session`, `fd-media` open an INVITE with MSRP media
   (`mcdata/media.cpp`, TS 24.282 clause 9.2.3 with TS 24.582); the terminating side is `mcdata_media_invite`
-  (`mcdata/media_session.cpp`).
+  (`mcdata/media_session.cpp`). With a pre-established session (`mcdata-pre-establish`, `mcdata/pre_established.cpp`,
+  TS 24.282 clauses 18.3 and 9.2.5) they go by REFER within it instead: `mcdata_pre_refer`, then the participating
+  function's re-INVITE (`mcdata_pre_reinvite`) starts the MSRP connection to the session's MSRP URI; `mcdata_media_close`
+  leaves by a REFER "BYE".
 - **File distribution over HTTP.** `fd-send` → `mcdata_send_file` (`mcdata/file_distribution.cpp`, TS 24.282 clause
   10.2.4.2.1): upload to the media storage function, then a SIP MESSAGE with the FD signalling; `fd-accept`,
   `fd-reject`, `fd-defer` answer an offer.

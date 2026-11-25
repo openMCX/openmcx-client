@@ -69,6 +69,7 @@ add_executable(mcx-client
     src/client/mcdata/media.cpp
     src/client/mcdata/media_session.cpp
     src/client/mcdata/message_store.cpp
+    src/client/mcdata/pre_established.cpp
     src/client/mcdata/priority.cpp
     src/client/mcdata/protection.cpp
     src/client/mcdata/release.cpp

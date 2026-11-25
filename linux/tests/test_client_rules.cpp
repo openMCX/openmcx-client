@@ -635,6 +635,38 @@ static void test_sds_payloads() {
   check(hex_text(location_payload("-45,-90")) == "c00000c00000", "45 S 90 W");
 }
 
+//------------------------------------------------------------------------------
+// TS 24.282 clauses 18.3.2.1 step 9, 9.2.5.2.1.1, 9.2.5.4.1.2 and 18.3.1.1: the MCData-Info and SDP parts of a
+// pre-established session.
+void test_pre_established_parts() {
+  using mcx::client_rules::mcdata_communication_state;
+  using mcx::client_rules::mcdata_info_with_any_ext;
+  const std::string bare = "<mcdatainfo><mcdata-Params><request-type>x</request-type></mcdata-Params></mcdatainfo>";
+  const auto added = mcdata_info_with_any_ext(bare, "<pre-established-session-ind>true</pre-established-session-ind>");
+  check(added == "<mcdatainfo><mcdata-Params><request-type>x</request-type><anyExt><pre-established-session-ind>true"
+                 "</pre-established-session-ind></anyExt></mcdata-Params></mcdatainfo>",
+        "anyExt added to mcdata-Params");
+  const auto again = mcdata_info_with_any_ext(added, "<a>1</a>");
+  check(again.find("</pre-established-session-ind><a>1</a></anyExt>") != std::string::npos, "into the existing anyExt");
+  bool threw = false;
+  try {
+    (void)mcdata_info_with_any_ext("<mcdatainfo/>", "<a/>");
+  } catch (const std::invalid_argument &) {
+    threw = true;
+  }
+  check(threw, "no mcdata-Params refused");
+  const std::string trimmed = "<anyExt><mcdata-communication-state> establish-success </mcdata-communication-state>";
+  check(mcdata_communication_state(trimmed) == "establish-success", "communication state read, trimmed");
+  check(mcdata_communication_state("<m:mcdata-communication-state>terminate request</m:mcdata-communication-state>") ==
+            "terminate-request",
+        "TS 37.579-7 spelling read as terminate-request");
+  check(mcdata_communication_state("<anyExt/>").empty(), "no communication state");
+  const auto ice = mcx::client_rules::msrp_ice_attributes("uf", "pw", "10.0.0.1", 4000);
+  check(ice == "a=ice-ufrag:uf\r\na=ice-pwd:pw\r\na=candidate:1 1 TCP 2124414975 10.0.0.1 4000 typ host tcptype "
+               "passive\r\n",
+        "ICE attributes of the MSRP listener");
+}
+
 int main() {
   test_call_floor_ssrcs();
   test_floor_multiplexing();
@@ -659,6 +691,7 @@ int main() {
   test_reg_event_rules();
   test_mc_priorities();
   test_sds_payloads();
+  test_pre_established_parts();
   if (failures) std::fprintf(stderr, "%d check(s) failed\n", failures);
   return failures ? 1 : 0;
 }

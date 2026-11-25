@@ -124,7 +124,10 @@ void Client::mcdata_open_session(const std::string &target, bool group, const st
   if (group) info.request_uri = target;
   const auto participants = adhoc ? mcdata_adhoc_target(target.substr(6), info) : std::vector<std::string>{};
   mcdata_session_priority_state(info, target, group, emergency, imminent, with_alert);
-  auto offer = mcdata_media_offer();
+  // TS 24.282 clauses 9.2.5.2.1.1 and 9.2.5.3.1.1: within the pre-established session when there is one to use (a
+  // normal priority communication: the emergency procedures over the session, clause 9.2.5.2.1.3, are not built).
+  const bool pre = !adhoc && !emergency && !imminent && mcdata_rejoin_uri_.empty() && mcdata_pre_usable();
+  auto offer = pre ? mcdata_pre_media("sendrecv") : mcdata_media_offer();
   offer.direction = "sendrecv"; // TS 24.282 clause 9.2.4.2.1 step 1c: an SDS session, one-to-one, group or ad hoc
   mcdata_media_protect(offer, target, group, adhoc);
   std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
@@ -163,10 +166,15 @@ void Client::mcdata_open_session(const std::string &target, bool group, const st
   // TS 24.282 clause 24.2.5.1.1: a rejoin goes to the MCData session identity of the ad hoc group session
   const auto request_uri = mcdata_rejoin_uri_.empty() ? mcdata_service() : mcdata_rejoin_uri_;
   if (adhoc) mcdata_adhoc_last_ = {{"target", target}, {"criteria", info.participant_criteria}, {"uri", ""}};
-  mcdata_media_dialog_ = sip_.invite_sdp(
-      request_uri, msrp_sdp(offer, 1), mcdata_seal_signalling(parts),
-      [this](const SipResponse &raw) { mcdata_session_answered(raw); }, headers);
-  event("mcdata_session_opened", {{"target", target}, {"group", group}, {"adhoc", adhoc}, {"priority", priority}});
+  if (pre) {
+    mcdata_pre_refer(target, info, offer);
+  } else {
+    mcdata_media_dialog_ = sip_.invite_sdp(
+        request_uri, msrp_sdp(offer, 1), mcdata_seal_signalling(parts),
+        [this](const SipResponse &raw) { mcdata_session_answered(raw); }, headers);
+  }
+  event("mcdata_session_opened",
+        {{"target", target}, {"group", group}, {"adhoc", adhoc}, {"priority", priority}, {"pre_established", pre}});
 }
 
 //------------------------------------------------------------------------------
@@ -619,7 +627,10 @@ void Client::mcdata_send_media_sds(const std::string &target, const std::string 
   mcdata_media_message_id_ = mcdata::uuid_text(signalling.message);
   mcdata_media_pending_ = {{std::string(mcdata::signalling_mime), mcdata::encode(signalling)},
                            {std::string(mcdata::payload_mime), mcdata::encode(payload)}};
-  auto offer = mcdata_media_offer(); // "a=sendonly": a standalone SDS (TS 24.282 clause 9.2.3.2.1)
+  // TS 24.282 clauses 9.2.5.2.1.1 and 9.2.5.3.1.1: within the pre-established session when there is one to use.
+  const bool pre = !adhoc && mcdata_pre_usable();
+  // "a=sendonly": a standalone SDS (TS 24.282 clause 9.2.3.2.1)
+  auto offer = pre ? mcdata_pre_media("sendonly") : mcdata_media_offer();
   mcdata_media_protect(offer, target, group, adhoc);
   mcdata_media_pending_[1].second = mcdata_media_payload(mcdata_media_pending_[1].second);
   std::vector<BodyPart> parts{{mcdata::info_mime, mcdata::info_xml(info)}};
@@ -636,11 +647,16 @@ void Client::mcdata_send_media_sds(const std::string &target, const std::string 
                           {"adhoc", adhoc},
                           {"protected", mcdata_media_key_.has_value()},
                           {"dppk_id", mcdata_media_key_ ? Json(mcdata_media_key_->csb_id) : Json(nullptr)}};
-  mcdata_media_dialog_ = sip_.invite_sdp(
-      mcdata_service(), msrp_sdp(offer, 1), mcdata_seal_signalling(parts),
-      [this](const SipResponse &raw) { mcdata_media_answered(raw, "SDS"); },
-      mcdata_media_headers());
-  event("mcdata_media_sds_sent", {{"message_id", mcdata_media_message_id_}, {"target", target}});
+  if (pre) {
+    mcdata_pre_refer(target, info, offer);
+  } else {
+    mcdata_media_dialog_ = sip_.invite_sdp(
+        mcdata_service(), msrp_sdp(offer, 1), mcdata_seal_signalling(parts),
+        [this](const SipResponse &raw) { mcdata_media_answered(raw, "SDS"); },
+        mcdata_media_headers());
+  }
+  event("mcdata_media_sds_sent",
+        {{"message_id", mcdata_media_message_id_}, {"target", target}, {"pre_established", pre}});
 }
 
 } // namespace mcx
