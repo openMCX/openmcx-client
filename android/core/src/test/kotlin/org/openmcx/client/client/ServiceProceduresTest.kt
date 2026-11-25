@@ -239,6 +239,7 @@ class ServiceProceduresTest {
         assertEquals("accepted", procedures.state.value.lastAffiliationAnswer)
         assertNull(procedures.state.value.affiliationRequest)
         assertEquals(listOf(group), client.wantedGroups(McService.MCPTT))
+        assertEquals("the phase is ready again after the change", "ready", client.status.value.phase)
         // A second request, declined: no PUBLISH.
         val (type2, body2) = Multipart.encode(listOf(org.openmcx.client.body.Part(AffiliationCommand.contentType(McService.MCPTT),
             AffiliationCommand.encode(emptyList(), listOf(group)).toByteArray())))

@@ -1749,7 +1749,10 @@ class McxClient(
     }
 
     /** Change the groups of [service] (full state, TS 24.379 §9.2.1.2). */
-    suspend fun setAffiliations(service: McService, groups: List<String>) = affiliate(service, groups)
+    suspend fun setAffiliations(service: McService, groups: List<String>) {
+        val phase = _status.value.phase
+        try { affiliate(service, groups) } finally { if (_status.value.phase.startsWith("affiliating")) setPhase(phase) }
+    }
 
     // The groups this client wants to be affiliated to (TS 24.379 §9.2.1.2: each PUBLISH names all of them).
 
@@ -1790,7 +1793,7 @@ class McxClient(
         if (wanted.size > MAX_MONITORED) throw IllegalArgumentException("at most $MAX_MONITORED groups are monitored")
         extraGroups[McService.MCPTT] = wanted
         event("monitored groups: $wanted")
-        affiliate(McService.MCPTT, wantedGroups(McService.MCPTT))
+        reaffiliate(McService.MCPTT)
     }
 
     /**
@@ -1806,7 +1809,13 @@ class McxClient(
         extraGroups[service] = (extraGroups[service].orEmpty() + join.filter { it !in base } - part.toSet()).distinct()
         droppedGroups[service] = droppedGroups[service].orEmpty() - join.toSet() + part.filter { it in base }
         event("${service.name} affiliation change: affiliate $join, de-affiliate $part")
-        affiliate(service, wantedGroups(service))
+        reaffiliate(service)
+    }
+
+    /** The affiliation PUBLISH of [service]'s wanted groups while up: the phase returns to what it was ("ready"). */
+    private suspend fun reaffiliate(service: McService) {
+        val phase = _status.value.phase
+        try { affiliate(service, wantedGroups(service)) } finally { if (_status.value.phase.startsWith("affiliating")) setPhase(phase) }
     }
 
     private fun updateService(service: McService, change: (ServiceState) -> ServiceState) = _status.update {
