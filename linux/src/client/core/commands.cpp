@@ -883,7 +883,7 @@ void Client::deaffiliate_command() {
     release();
     if (!dialog_.empty()) sip_.bye(dialog_);
   }
-  auto [type, body] = publish_body(true);
+  auto [type, body] = publish_body(true, true); // an empty <status>: no group is left
   sip_.publish(service(), type, body,
                {{"P-Preferred-Service", mcptt_icsi},
                 {"Event", "presence"},

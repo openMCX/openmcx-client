@@ -103,8 +103,11 @@ void Client::failure(const std::string &what) {
 
 //------------------------------------------------------------------------------
 // TS 24.379 clause 7.2.2 (poc-settings and the CSK upload of TS 33.180 clause 5.4) or clause 9.2.1.2 (the
-// affiliation pidf+xml): the multipart body of the service authorisation or affiliation SIP PUBLISH.
-std::pair<std::string, std::string> Client::publish_body(bool affiliation) {
+// affiliation pidf+xml): the multipart body of the service authorisation or affiliation SIP PUBLISH. withdraw: the
+// PUBLISH with Expires 0 that removes the affiliation (clause 9.2.1.2 4), the user no longer interested in any group):
+// its PIDF has an empty <status> (NOTE 2 makes the PIDF optional; TS 37.579-2 tables 5.3.3.3 and 6.1.4.2.3.3 have it
+// present and empty), not the groups being left.
+std::pair<std::string, std::string> Client::publish_body(bool affiliation, bool withdraw) {
   McpttInfo info;
   info.client_id = client_id();
   info.access_token = token_;
@@ -115,8 +118,10 @@ std::pair<std::string, std::string> Client::publish_body(bool affiliation) {
     // TS 24.379 clause 9.2.1.2: the selected group (unless the user is no longer interested in it, left_selected_)
     // and the groups monitored besides it.
     std::vector<std::string> groups;
-    if (!left_selected_) groups.push_back(group());
-    groups.insert(groups.end(), monitored_groups_.begin(), monitored_groups_.end());
+    if (!withdraw) {
+      if (!left_selected_) groups.push_back(group());
+      groups.insert(groups.end(), monitored_groups_.begin(), monitored_groups_.end());
+    }
     Affiliation request{user(), client_id(), random_id(), groups, {}};
     mcptt_sent_pid_ = request.publication_id; // TS 24.379 clause 10.1.4.2.2 step 1 c): the NOTIFY naming it
     parts.push_back({"application/pidf+xml", affiliation_xml(request, false)});
