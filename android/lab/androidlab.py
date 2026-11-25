@@ -363,6 +363,16 @@ def create(args) -> None:
         policy = user.get("private_call") or {}
         if policy.get("any_target") and not policy.get("targets"):
             policy["targets"] = [i for i in callable_ids if i != user["mcptt_id"]]
+    if args.monitor_group:
+        # TS 24.379 clause 9.2.1.2 (monitored groups): a second prearranged group in the user profiles of client-a to
+        # client-c, not provisioned as their group: the app affiliates to it only when the user monitors it.
+        members = [json.loads((generated / f"{r}.json").read_text())["mcptt"]["user_id"] for r in CLIENTS]
+        group_id = f"sip:monitor@{site['domain']}"
+        site["groups"] = [g for g in site["groups"] if g["id"] != group_id]
+        site["groups"].append(dict(id=group_id, members=members, protect_media=False, protect_floor=False))
+        for user in site["users"]:
+            if user["mcptt_id"] in members and group_id not in user["groups"]:
+                user["groups"].append(group_id)
     (generated / "site.json").write_text(json.dumps(site, indent=2) + "\n")
     template = compose["services"]["client-a"]
     for role in ["client-a", "client-b", "client-c", "client-d"]:
@@ -886,6 +896,8 @@ def main() -> None:
                    help="location reporting (TS 24.379 clause 13): configurations, reports, requests and the LMS")
     c.add_argument("--floor-queue", action="store_true",
                    help="queued floor requests: the server queues a request while the floor is taken (scenario S18)")
+    c.add_argument("--monitor-group", action="store_true",
+                   help="a second group, sip:monitor@<domain>, in the user profiles of client-a to client-c (TS 24.379 9.2.1.2 monitoring)")
     c.add_argument("--functional-alias", action="store_true",
                    help="functional aliases (TS 24.379 clause 9A): duty-officer (client-a, client-b), patrol-car-12, incident-commander")
     c.add_argument("--priority", action="store_true",
