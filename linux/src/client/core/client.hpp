@@ -1894,6 +1894,27 @@ private:
   // criterion and area; none before the first position), and the aliases activated by a location criterion.
   std::vector<McvideoProfile::FunctionalAlias> mcvideo_alias_rules_;
   std::map<std::string, bool> mcvideo_alias_area_inside_;
+
+  // MCPTT location rules (mcptt/location_rules.cpp): TS 24.379 clause 9A.2.1.4 (functional aliases), clause 9.2.1.7.2
+  // (the user profile's affiliation rules) and clause 9.2.1.7.3 (the group documents' geographic areas). Where the
+  // client was in each rule's areas at the last position (none before the first), the last position, the areas of
+  // the group documents read, the groups left for being outside their mandatory area, and those a rule affiliated.
+  McpttProfileRules mcptt_location_rules_;
+  std::map<std::string, bool> mcptt_rule_area_inside_;
+  std::optional<location::Point> mcptt_last_position_;
+  std::map<std::string, GroupGeographicAreas> group_areas_;
+  std::set<std::string> area_left_groups_, rule_affiliated_groups_;
+  void take_profile_rules(const std::string &profile);
+  bool rule_area_crossed(const std::string &key, const std::vector<location::Area> &areas, bool entry, double lat,
+                         double lon);
+  void mcptt_location_rules(const location::Point &position);
+  bool rule_aliases_met(const McpttAffiliationRule &rule) const;
+  void affiliation_rules_aliases_changed(const std::set<std::string> &before);
+  void apply_affiliation_rules(const std::map<std::string, std::pair<bool, bool>> &fulfilled, const char *trigger);
+  void note_group_areas(const std::string &group, const std::string &document);
+  bool affiliation_allowed_here(const std::string &group) const;
+  void mcptt_group_areas();
+  void check_manual_deaffiliation(const std::vector<std::string> &groups) const;
   std::set<std::string> mcvideo_aliases_by_location_;
   void mcvideo_alias_location(const location::Point &position);
 

@@ -232,8 +232,11 @@ SipResponse Client::alias_status_notify(const SipMessage &message) {
         location_alias_ = alias;
         location_signal(location::Event::FunctionalAliasDeactivation);
       }
+    const auto before = active_aliases_;
     active_aliases_ = active;
     standing_aliases_ = standing;
+    // TS 24.379 clause 9.2.1.7.2: rules with a functional alias criterion (mcptt/location_rules.cpp).
+    if (active != before) schedule([this, before] { affiliation_rules_aliases_changed(before); });
     takeover_possible_aliases_ = possible;
     auto &last = status_["last_fa_result"];
     const bool handled =

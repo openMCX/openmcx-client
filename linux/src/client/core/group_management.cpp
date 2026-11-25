@@ -412,6 +412,7 @@ void Client::take_profile_groups(const std::string &profile) {
     event("profile_warning", {{"reason", std::string("PrivateCallKMSURI: ") + error.what()}});
   }
   status_["profile_private_call_kms"] = private_call_kms_;
+  take_profile_rules(profile); // TS 24.379 clauses 9A.2.1.4 and 9.2.1.7.2 (mcptt/location_rules.cpp)
   profile_body_ = profile;
   status_["profile_groups"] = profile_groups_;
 }
