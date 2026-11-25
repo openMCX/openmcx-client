@@ -24,7 +24,19 @@ import org.openmcx.client.mcptt.FloorState
 import org.openmcx.client.mcvideo.TxState
 import java.util.UUID
 
-data class GroupItem(val id: String, val affiliated: Boolean, val selected: Boolean)
+/**
+ * A group of the Call tab: its affiliation status as the server notified it (TS 24.379 §9.2.1.3: "affiliated",
+ * "affiliating", "deaffiliating", or null when not listed); [kind] "base" for a group affiliated at start-up,
+ * "monitored" for one of the user profile affiliated besides them (§9.2.1.2), "available" for one that may be monitored.
+ */
+data class GroupItem(val id: String, val affiliated: Boolean, val selected: Boolean, val status: String? = null,
+                     val kind: String = "base") {
+    val monitored: Boolean get() = kind == "monitored"
+    val callable: Boolean get() = kind != "available"
+}
+
+/** A received negotiated-mode affiliation request awaiting the user's answer (TS 24.379 §9.2.1.5). */
+data class AffiliationRequestItem(val from: String, val affiliate: List<String>, val deaffiliate: List<String>)
 
 data class CallItem(
     val id: Int,
@@ -171,6 +183,11 @@ data class UiState(
     val serverAddressEdited: Boolean = false,
     /** Ordinary private calls to this phone ring first (manual answer). */
     val ringFirst: Boolean = false,
+    /** The outcome of the last service settings PUBLISH (TS 24.379 §7.2.3), and the answer modes the server notified (§7.2.4). */
+    val settingsNote: String? = null,
+    val notifiedAnswerModes: List<Pair<String, String>> = emptyList(),
+    /** A negotiated-mode affiliation request from another user, until it is answered (§9.2.1.5). */
+    val affiliationRequest: AffiliationRequestItem? = null,
     /** Why the last call attempt failed, until the next attempt or a dismiss. */
     val callFailure: String? = null,
     /** The provisioned identities and servers, as label and value, for the Logs tab. */
@@ -238,6 +255,10 @@ interface UiActions {
     fun callAlias(alias: String, service: String = "mcptt") {}
     fun setMuted(muted: Boolean) {}
     fun setRingFirst(on: Boolean) {}
+    /** Monitor (affiliate to) a group of the user profile besides the base groups, or stop (TS 24.379 §9.2.1.2). */
+    fun setMonitored(group: String, on: Boolean) {}
+    /** Accept or decline the received negotiated-mode affiliation request (TS 24.379 §9.2.1.5). */
+    fun answerAffiliationRequest(accept: Boolean) {}
     fun callAdhoc(targets: List<String>) {}
     fun answer() {}
     fun reject() {}
@@ -364,9 +385,14 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     val status = client.status.value
     val mcptt = Engine.mcptt
     val profile = client.profile
-    val groups = (client.config.mcptt?.groups ?: emptyList()).map {
-        GroupItem(it, Affiliation.counts(status.mcptt.affiliations[it]), Engine.selectedGroup.value == it)
+    // The base groups, then the monitored ones, then those of the user profile that may be monitored.
+    val monitored = client.monitoredGroups
+    val base = if (client.config.mcptt != null) client.wantedGroups(org.openmcx.client.body.McService.MCPTT).filter { it !in monitored } else emptyList()
+    val groups = (base.map { it to "base" } + monitored.map { it to "monitored" } +
+        client.monitorableGroups.filter { it !in monitored && it !in base }.map { it to "available" }).map { (id, kind) ->
+        GroupItem(id, Affiliation.counts(status.mcptt.affiliations[id]), Engine.selectedGroup.value == id, status.mcptt.affiliations[id], kind)
     }
+    val procedures = client.procedures?.state?.value
     fun item(call: Call): CallItem {
         val floor = call.media?.takeIf { it.isStarted }?.floor
         val state = when (floor?.state?.value) {
@@ -496,6 +522,14 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         speaker = Engine.telecom?.speaker?.value,
         callFailure = Engine.callFailure.value,
         ringFirst = mcptt?.answerMode == "manual",
+        settingsNote = procedures?.settingsPublication?.let { r ->
+            if (r.status in 200..299) "Answer mode sent to the server" else
+                "The server did not take the answer mode: ${if (r.status == 0) "no answer" else r.status.toString()}${r.warning?.let { " ($it)" } ?: ""}"
+        },
+        notifiedAnswerModes = procedures?.serviceSettings?.entries?.mapNotNull { (id, c) ->
+            c.answerMode?.let { (if (c.own) "This phone" else "Other device ${id.takeLast(8)}") to it }
+        } ?: emptyList(),
+        affiliationRequest = procedures?.affiliationRequest?.let { AffiliationRequestItem(it.from?.short() ?: "an authorised user", it.affiliate, it.deaffiliate) },
         filesEnabled = Engine.fd != null,
         videoChatGroups = client.config.mcvideo?.chatGroups ?: emptyList(),
         videoRecordings = Engine.mcvideo?.recordings?.value ?: emptyList(),
@@ -598,6 +632,11 @@ object EngineActions : UiActions {
     }
     override fun setMuted(muted: Boolean) { Engine.mcptt?.setMuted(muted) }
     override fun setRingFirst(on: Boolean) = Engine.setRingFirst(on)
+    override fun setMonitored(group: String, on: Boolean) = launch {
+        val client = Engine.client ?: return@launch
+        client.monitor(if (on) client.monitoredGroups + group else client.monitoredGroups - group)
+    }
+    override fun answerAffiliationRequest(accept: Boolean) = launch { Engine.client?.procedures?.answerAffiliationRequest(accept) }
     override fun logOff() = launch { runCatching { Engine.client?.logOff() }.onFailure { Engine.log.add("log-off: ${it.message}") } }
     override fun logOn() { runCatching { Engine.client?.logOn() }.onFailure { Engine.log.add("log-on: ${it.message}") } }
     override fun retryNow() { Engine.client?.retryNow() }

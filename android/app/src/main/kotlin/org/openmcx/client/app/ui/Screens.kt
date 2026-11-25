@@ -213,6 +213,12 @@ object Tags {
     fun adhocChoice(criteria: String) = "adhoc-choice-$criteria"
     const val ALERT_RESULT = "alert-result"
     fun callGroup(group: String) = "call-group-$group"
+    fun monitor(group: String) = "monitor-$group"
+    fun groupStatus(group: String) = "group-status-$group"
+    const val SETTINGS_NOTE = "settings-note"
+    const val AFFILIATION_REQUEST = "affiliation-request"
+    const val AFFILIATION_ACCEPT = "affiliation-accept"
+    const val AFFILIATION_DECLINE = "affiliation-decline"
     fun callPrivate(target: String) = "call-private-$target"
 }
 
@@ -272,6 +278,7 @@ fun McxApp(state: UiState, actions: UiActions, initialTab: Int = 0) {
                 }
             }
             state.incoming?.let { IncomingCall(it, actions) }
+            state.affiliationRequest?.let { AffiliationRequestPrompt(it, actions) }
             if (!state.provisioned) Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = actions::scanProvisioning, modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = LightGrey, contentColor = Mcx.Ink)) { Text("Scan QR code") }
@@ -365,6 +372,11 @@ private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit
                         style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
                 }
                 Switch(checked = state.ringFirst, onCheckedChange = actions::setRingFirst, modifier = Modifier.testTag(Tags.RING_FIRST))
+            }
+            // TS 24.379 §7.2.3: the answer mode goes to the server in the service settings; §7.2.4: those it notified.
+            state.settingsNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Mcx.Muted, modifier = Modifier.testTag(Tags.SETTINGS_NOTE)) }
+            state.notifiedAnswerModes.forEach { (who, mode) ->
+                Text("$who answers $mode", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
             }
             Section("Provisioning")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
@@ -546,6 +558,44 @@ private fun IncomingCall(call: CallItem, actions: UiActions) {
     }
 }
 
+/** The status line of a group: the affiliation the server notified, and whether it is monitored or may be. */
+private fun groupStatusText(g: GroupItem): String {
+    val affiliation = when (g.status) {
+        null -> "not affiliated"
+        "affiliated" -> "affiliated"
+        else -> g.status
+    }
+    return when (g.kind) {
+        "monitored" -> "monitored, $affiliation"
+        "available" -> if (g.status == null) "not monitored" else "not monitored, $affiliation"
+        else -> affiliation
+    }
+}
+
+/**
+ * TS 24.379 §9.2.1.5 step 2: an authorised user asks this phone to affiliate to or de-affiliate from groups (negotiated
+ * mode); the user accepts or declines.
+ */
+@Composable
+private fun AffiliationRequestPrompt(request: AffiliationRequestItem, actions: UiActions) = AlertDialog(
+    onDismissRequest = {},
+    modifier = Modifier.testTag(Tags.AFFILIATION_REQUEST),
+    title = { Text("Group change requested") },
+    text = {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("${request.from} asks this phone to change its groups.")
+            if (request.affiliate.isNotEmpty()) Text("Join: ${request.affiliate.joinToString { it.short() }}", fontWeight = FontWeight.Medium)
+            if (request.deaffiliate.isNotEmpty()) Text("Leave: ${request.deaffiliate.joinToString { it.short() }}", fontWeight = FontWeight.Medium)
+        }
+    },
+    confirmButton = {
+        TextButton(onClick = { actions.answerAffiliationRequest(true) }, modifier = Modifier.testTag(Tags.AFFILIATION_ACCEPT)) { Text("Accept") }
+    },
+    dismissButton = {
+        TextButton(onClick = { actions.answerAffiliationRequest(false) }, modifier = Modifier.testTag(Tags.AFFILIATION_DECLINE)) { Text("Decline") }
+    },
+)
+
 @Composable
 private fun TalkScreen(state: UiState, actions: UiActions) {
     val call = state.call
@@ -570,18 +620,30 @@ private fun TalkScreen(state: UiState, actions: UiActions) {
         item { Section("Groups") }
         items(state.groups) { g ->
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp)) {
-                RadioButton(selected = g.selected, onClick = { actions.selectGroup(g.id) })
+                RadioButton(selected = g.selected, onClick = { actions.selectGroup(g.id) }, enabled = g.callable)
                 Column(Modifier.weight(1f)) {
                     Text(g.id.short(), style = MaterialTheme.typography.titleMedium)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Box(Modifier.size(7.dp).background(if (g.affiliated) Mcx.OkDot else Color.Transparent, CircleShape)
                             .border(1.dp, if (g.affiliated) Mcx.OkDot else Mcx.Muted, CircleShape))
-                        Text(if (g.affiliated) "affiliated" else "not affiliated", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                        // TS 24.379 §9.3.1.2: the status the server notified; a monitored group says so.
+                        Text(groupStatusText(g), style = MaterialTheme.typography.bodySmall, color = Mcx.Muted,
+                            modifier = Modifier.testTag(Tags.groupStatus(g.id)))
                     }
                 }
-                Button(onClick = { actions.callGroup(g.id) }, enabled = state.registered,
-                    modifier = Modifier.testTag(Tags.callGroup(g.id))) { Text("Call") }
-                GroupOptions(g.id, state.registered, actions)
+                if (g.kind != "base") {
+                    // Monitor a group of the user profile besides the base groups (TS 24.379 §9.2.1.2).
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Switch(checked = g.monitored, onCheckedChange = { actions.setMonitored(g.id, it) }, enabled = state.registered,
+                            modifier = Modifier.testTag(Tags.monitor(g.id)))
+                        Text("Monitor", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                    }
+                }
+                if (g.callable) {
+                    Button(onClick = { actions.callGroup(g.id) }, enabled = state.registered,
+                        modifier = Modifier.testTag(Tags.callGroup(g.id))) { Text("Call") }
+                    GroupOptions(g.id, state.registered, actions)
+                }
             }
         }
         item { Section("Private calls") }
