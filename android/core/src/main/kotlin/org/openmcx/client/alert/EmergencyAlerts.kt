@@ -29,6 +29,13 @@ class AlertError(message: String, val status: Int? = null) : Exception(message)
 data class EmergencyAlert(val service: LocationService, val user: String, val group: String?, val adhoc: Boolean,
                           val location: EmergencyLocation?, val criteria: String? = null, val at: Long = System.currentTimeMillis())
 
+/**
+ * A group's in-progress emergency and imminent peril states as the server notified them (TS 24.379 §12.1.1.3 steps 3 to
+ * 6: "MEG 2: in-progress", "MIG 2: in-progress"), with the user named in the last notification.
+ */
+data class GroupPriorityState(val emergency: Boolean = false, val imminentPeril: Boolean = false, val by: String? = null,
+                              val at: Long = System.currentTimeMillis())
+
 /** This user's ad hoc group emergency alert: the group identity the server gave it, and its criteria. */
 data class OwnAdhocAlert(val group: String, val criteria: String)
 
@@ -74,6 +81,9 @@ class EmergencyAlerts(
     private val _adhoc = MutableStateFlow<OwnAdhocAlert?>(null)
     val adhoc: StateFlow<OwnAdhocAlert?> = _adhoc
     val notices: MutableList<AreaNotice> = CopyOnWriteArrayList()
+    private val _groupStates = MutableStateFlow<Map<String, GroupPriorityState>>(emptyMap())
+    /** The emergency and imminent peril states of the groups (§12.1.1.3 steps 3 to 6), by group. */
+    val groupStates: StateFlow<Map<String, GroupPriorityState>> = _groupStates
     val events: MutableList<String> = CopyOnWriteArrayList()
     var listener: AlertListener? = null
     /** Where the phone is, for an alert the area notice raises; the group it goes to. */
@@ -94,7 +104,8 @@ class EmergencyAlerts(
                          val clientId: String? = null, val alert: Boolean? = null, val originatedBy: String? = null,
                          val alertReceived: Boolean? = null, val adhocAlert: Boolean? = null, val adhocAlertReceived: Boolean? = null,
                          val criteria: String? = null, val alertArea: Boolean? = null, val groupArea: Boolean? = null,
-                         val associatedGroup: String? = null, val reqType: String? = null)
+                         val associatedGroup: String? = null, val reqType: String? = null,
+                         val emergency: Boolean? = null, val imminentPeril: Boolean? = null)
 
     private val infoType = when (service) {
         LocationService.MCPTT -> McpttInfo.CONTENT_TYPE; LocationService.MCDATA -> McdataInfo.CONTENT_TYPE; LocationService.MCVIDEO -> McvideoInfo.CONTENT_TYPE
@@ -111,7 +122,8 @@ class EmergencyAlerts(
     private fun decode(text: String): Fields = when (service) {
         LocationService.MCPTT -> McpttInfo.parse(text).let {
             Fields(it.requestUri, it.callingUserId, it.callingGroupId, it.clientId, it.alert, it.originatedBy, it.alertReceived,
-                it.adhocAlert, it.adhocAlertReceived, it.participantCriteria, it.emergencyAlertArea, it.groupGeoArea, it.associatedGroupId)
+                it.adhocAlert, it.adhocAlertReceived, it.participantCriteria, it.emergencyAlertArea, it.groupGeoArea, it.associatedGroupId,
+                emergency = it.emergency, imminentPeril = it.imminentPeril)
         }
         LocationService.MCDATA -> McdataInfo.parse(text).let {
             Fields(it.requestUri, it.callingUserId, it.callingGroupId, it.clientId, it.alert, it.originatedBy, it.alertReceived,
@@ -204,13 +216,19 @@ class EmergencyAlerts(
         val parts = Multipart.parse(request.contentType, request.body)
         val info = parts.firstOrNull { it.mediaType == infoType }?.let { runCatching { decode(it.text) }.getOrNull() } ?: return false
         val group = info.alert != null && groupAlerts
-        if (!group && info.adhocAlert == null && info.alertArea == null && info.groupArea == null) return false
+        // §12.1.1.3 steps 3 to 6: a notification of a group's emergency or imminent peril state, without an alert (an
+        // imminent peril group call, another user in the emergency group call, or the state's cancellation).
+        val callNotice = groupAlerts && (info.emergency != null || info.imminentPeril != null) && (info.callingGroup ?: info.requestUri) != null
+        if (!group && !callNotice && info.adhocAlert == null && info.alertArea == null && info.groupArea == null) return false
         val location = parts.firstOrNull { it.mediaType == service.mime }?.let { runCatching { EmergencyLocation.parse(it.text) }.getOrNull() }
-        tx.respond(200)
+        tx.respond(200) // §12.1.1.3 steps 7, 8
         when {
             info.alertArea != null || info.groupArea != null -> area(info)
             info.adhocAlert != null -> adhoc(info, location)
-            else -> groupAlert(info, location)
+            else -> {
+                if (callNotice) groupState(info)
+                if (group) groupAlert(info, location)
+            }
         }
         return true
     }
@@ -231,6 +249,21 @@ class EmergencyAlerts(
         _alerts.value = if (on) _alerts.value + (key(originator, group) to alert) else _alerts.value - key(originator, group)
         event("alert from $originator on $group: ${if (on) "raised at ${location?.latitude}, ${location?.longitude}" else "cancelled"}")
         listener?.alert(alert, on)
+    }
+
+    /**
+     * §12.1.1.3 steps 2 c), 3 to 6: <emergency-ind> true sets the group's emergency state "MEG 2: in-progress", false
+     * "MEG 1: no-emergency"; <imminentperil-ind> the same for "MIG 2: in-progress" and "MIG 1: no-imminent-peril".
+     */
+    private fun groupState(info: Fields) {
+        val group = info.callingGroup ?: info.requestUri ?: return
+        val before = _groupStates.value[group] ?: GroupPriorityState()
+        val after = before.copy(emergency = info.emergency ?: before.emergency, imminentPeril = info.imminentPeril ?: before.imminentPeril,
+            by = info.callingUser ?: before.by, at = System.currentTimeMillis())
+        _groupStates.value = if (!after.emergency && !after.imminentPeril) _groupStates.value - group else _groupStates.value + (group to after)
+        event("$group: " + listOfNotNull(info.emergency?.let { if (it) "emergency in progress" else "emergency cancelled" },
+            info.imminentPeril?.let { if (it) "imminent peril in progress" else "imminent peril cancelled" }).joinToString(", ") +
+            (info.callingUser?.let { " ($it)" } ?: ""))
     }
 
     private fun adhoc(info: Fields, location: EmergencyLocation?) {
