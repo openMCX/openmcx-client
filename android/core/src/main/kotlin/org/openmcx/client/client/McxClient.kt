@@ -316,9 +316,22 @@ class McxClient(
 
     /**
      * The MCPTT service settings and the affiliation procedures towards other users (TS 24.379 §7.2.3, §7.2.4,
-     * §9.2.1.2 to §9.2.1.6); null without MCPTT. (MCVideo's, TS 24.281, would be another instance.)
+     * §9.2.1.2 to §9.2.1.6); null without MCPTT.
      */
     val procedures: ServiceProcedures? by lazy { config.mcptt?.let { ServiceProcedures(this, McService.MCPTT) } }
+
+    /**
+     * The same procedures of MCVideo (TS 24.281 §7.2.3, §7.2.4, §8.2.1.2 to §8.2.1.6), another instance with the
+     * mcvideo-info, the MCVideo PSI and the MCVideo affiliation command; null without MCVideo.
+     */
+    val videoProcedures: ServiceProcedures? by lazy { config.mcvideo?.let { ServiceProcedures(this, McService.MCVIDEO) } }
+
+    /** The procedures of [service], when it has them (MCPTT and MCVideo). */
+    fun proceduresOf(service: McService): ServiceProcedures? = when (service) {
+        McService.MCPTT -> procedures; McService.MCVIDEO -> videoProcedures; McService.MCDATA -> null
+    }
+
+    private val allProcedures: List<ServiceProcedures> get() = listOfNotNull(procedures, videoProcedures)
     private var registration: SipRequest? = null
     /** The IMS AKA registration of this life of the client, when it registered with IMS AKA. */
     @Volatile var imsAka: ImsAkaRegistrar? = null
@@ -430,7 +443,7 @@ class McxClient(
                     // goes with its flow (a start-up that failed after the registration left it in place).
                     regCancel()
                     dropDocumentSubscriptions()
-                    procedures?.drop()
+                    allProcedures.forEach { it.drop() }
                     // Back off, unless told to reconnect now (a new network, or the user's Retry now).
                     if (!reconnectNow.isCompleted) withTimeoutOrNull(backoff) { reconnectNow.await() }
                     backoff = nextBackoff(backoff)
@@ -505,7 +518,7 @@ class McxClient(
         housekeeping?.cancel()
         setPhase("logging-off")
         handlers.forEach { runCatching { it.logOff() } }
-        runCatching { procedures?.logOff() }
+        allProcedures.forEach { runCatching { it.logOff() } }
         for (channel in aliasChannels.values) {
             channel.request?.callId?.let(endingSubscriptions::add)
             channel.dialog?.let { unsubscribe(it, channel.service, FunctionalAliasPidf.CONTENT_TYPE) }
@@ -575,13 +588,17 @@ class McxClient(
     /** The protection of the SIP flow's own connection (e.g. "TLS 1.3"), null without one or for plain TCP. */
     val sipConnectionSecurity: String? get() = ua.flow?.connection?.security
 
-    /** Run a refresh now instead of at its timer: `register`, `subscription` or `token`. */
+    /**
+     * Run a refresh now instead of at its timer: `register`, `subscription` (MCPTT's own affiliation subscription),
+     * `video-subscription` (MCVideo's, TS 24.281 §8.2.1.3) or `token`.
+     */
     suspend fun refreshNow(what: String) {
         when (what) {
             "register" -> register(registerExpires())
             "subscription" -> refreshSubscription(McService.MCPTT)
+            "video-subscription" -> refreshSubscription(McService.MCVIDEO)
             "token" -> renewToken()
-            else -> throw IllegalArgumentException("refresh register|subscription|token")
+            else -> throw IllegalArgumentException("refresh register|subscription|video-subscription|token")
         }
         setPhase("ready")
     }
@@ -664,7 +681,7 @@ class McxClient(
         try {
             config.mcptt?.let { bringUp(McService.MCPTT, wantedGroups(McService.MCPTT), lifeline) }
             config.mcdata?.let { bringUp(McService.MCDATA, it.groups, lifeline) }
-            config.mcvideo?.let { bringUp(McService.MCVIDEO, it.groups, lifeline) }
+            config.mcvideo?.let { bringUp(McService.MCVIDEO, wantedGroups(McService.MCVIDEO), lifeline) }
             servicesSettled()
             _status.update { it.copy(offlineSince = null, nextRetryAt = null) }
             housekeeping?.cancel()
@@ -682,7 +699,7 @@ class McxClient(
         regCancel()
         dropDocumentSubscriptions()
         subscriptions.clear()
-        procedures?.drop()
+        allProcedures.forEach { it.drop() }
         handlers.forEach { runCatching { it.flowLost() } }
         throw IllegalStateException("flow closed: ${cause?.message ?: "locally"}")
     }
@@ -1160,7 +1177,7 @@ class McxClient(
         }
         for (subscription in subscriptions.values) endingSubscriptions.add(subscription.request.callId)
         subscriptions.clear()
-        procedures?.drop()
+        allProcedures.forEach { it.drop() }
         dropDocumentSubscriptions()
         authEtags.clear(); affiliationEtags.clear()
         dropCsks()
@@ -1509,6 +1526,8 @@ class McxClient(
         withTimeoutOrNull(5_000) { subscription.firstNotify.await() }
         val body = Affiliation.publish(service, ownId(service), config.clientId, groups)
         val parts = listOf(infoPart(service, requestUri = ownId(service)), Part(Affiliation.CONTENT_TYPE, body.toByteArray()))
+        // The groups this PUBLISH gives up: affiliated now, not wanted any more.
+        val leaving = subscription.affiliations.filter { (g, st) -> g !in groups && Affiliation.counts(st) }.keys
         // §9.2.1.2 steps 4 and 5: Expires 0 when no group is wanted.
         val expires = if (groups.isEmpty()) "0" else "4294967295"
         val request = serviceRequest(service, "PUBLISH", "presence", parts).also { it.headers.add("Expires", expires) }
@@ -1522,9 +1541,12 @@ class McxClient(
         }
         if (!response.isSuccess) throw IllegalStateException("${service.name} affiliation: ${response.status} ${response.reason}")
         response.headers["SIP-ETag"]?.let { affiliationEtags[service] = it }
-        // Affiliated when a NOTIFY says so for every group (§9.2.1.3); the p-id is not reliable.
+        // Affiliated when a NOTIFY says so for every group (§9.2.1.3); the p-id is not reliable. A group given up is
+        // waited for too (TS 24.281 §8.2.1.2: the de-affiliation from one group shows in the next NOTIFY), without
+        // failing when the server does not notify it in time.
         val deadline = System.currentTimeMillis() + 10_000
-        while (groups.any { !Affiliation.counts(subscription.affiliations[it]) }) {
+        val left = { subscription.affiliations.filter { (g, st) -> g in leaving && Affiliation.counts(st) }.keys }
+        while (groups.any { !Affiliation.counts(subscription.affiliations[it]) } || left().isNotEmpty()) {
             val wait = deadline - System.currentTimeMillis()
             if (wait <= 0 || withTimeoutOrNull(wait) { subscription.changed.await() } == null) break
             subscription.changed = CompletableDeferred()
@@ -1898,8 +1920,8 @@ class McxClient(
             return
         }
         // TS 24.379 §7.2.4, §9.2.1.3, §9.2.1.6: the NOTIFYs of the procedures' subscriptions; §9.2.1.5: an affiliation
-        // command in a MESSAGE.
-        if (procedures?.handle(tx) == true) return
+        // command in a MESSAGE (TS 24.281 §8.2.1.5 for MCVideo's, application/vnd.3gpp.mcvideo-affiliation-command+xml).
+        for (p in allProcedures) if (p.handle(tx)) return
         // TS 24.484 §6.3.13.2.2, TS 24.481 §6.3.13.2.1: a NOTIFY of a document subscription, answered 200 (RFC 6665
         // §4.1.3), its documents read after the answer; "terminated" ends the subscription.
         if (request.method == "NOTIFY" && eventPackage(request) == DocumentSubscriptions.EVENT) {

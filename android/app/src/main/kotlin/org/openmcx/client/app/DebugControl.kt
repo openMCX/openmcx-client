@@ -178,6 +178,27 @@ class DebugControl(private val context: Context) {
         "gdd-resubscribe" -> resultJson(procedures().gddResubscribe(args.single()))
         "gdd-unsubscribe" -> resultJson(procedures().gddResubscribe(args.single(), end = true))
         "procedures" -> proceduresJson()
+        // MCVideo affiliation (TS 24.281 §8.2.1.2 to §8.2.1.5), the MCVideo instance of the procedures above, as the
+        // reference client's mcvideo-affiliate <group>, mcvideo-deaffiliate <group>, mcvideo-affiliation-accept
+        // [<group>...], mcvideo-affiliation-decline: video-affiliate <group>, video-deaffiliate <group>,
+        // video-affiliation-accept [<group>...], video-affiliation-decline, video-affiliation-subscribe <ID> [fetch],
+        // video-affiliation-unsubscribe <ID>, video-affiliate-remote <ID> <group> affiliate|deaffiliate
+        // mandatory|negotiated, video-procedures.
+        "video-affiliate" -> videoAffiliation(args, affiliate = true)
+        "video-deaffiliate" -> videoAffiliation(args, affiliate = false)
+        "video-affiliation-accept" -> { videoProcedures().answerAffiliationRequest(true, args.toSet()); proceduresJson(org.openmcx.client.body.McService.MCVIDEO) }
+        "video-affiliation-decline" -> { videoProcedures().answerAffiliationRequest(false); proceduresJson(org.openmcx.client.body.McService.MCVIDEO) }
+        "video-affiliation-subscribe" -> {
+            require(args.size in 1..2 && (args.size == 1 || args[1] == "fetch")) { "usage: video-affiliation-subscribe <MCVideo ID> [fetch]" }
+            resultJson(videoProcedures().affiliationSubscribe(args[0], fetch = args.getOrNull(1) == "fetch"))
+        }
+        "video-affiliation-unsubscribe" -> resultJson(videoProcedures().affiliationUnsubscribe(args.single()))
+        "video-affiliate-remote" -> {
+            require(args.size == 4 && args[2] in setOf("affiliate", "deaffiliate") && args[3] in setOf("mandatory", "negotiated")) {
+                "usage: video-affiliate-remote <MCVideo ID> <group> affiliate|deaffiliate mandatory|negotiated" }
+            resultJson(videoProcedures().affiliateRemote(args[0], args[1], affiliate = args[2] == "affiliate", negotiated = args[3] == "negotiated"))
+        }
+        "video-procedures" -> proceduresJson(org.openmcx.client.body.McService.MCVIDEO)
         "import" -> { Provisioning(context).import(java.io.File(args[0]).readText()); Engine.restart(context); "imported" }
         // What the QR code scanner gives the app, as text: the same loading path without the camera.
         // An MCX Admin activation code and the account's password (slice F2), without the camera.
@@ -434,6 +455,28 @@ class DebugControl(private val context: Context) {
     private fun procedures(): org.openmcx.client.client.ServiceProcedures =
         Engine.client?.procedures ?: throw IllegalStateException("MCPTT not provisioned")
 
+    /** The MCVideo instance of the same procedures (TS 24.281 §7.2.3, §7.2.4, §8.2.1.2 to §8.2.1.6). */
+    private fun videoProcedures(): org.openmcx.client.client.ServiceProcedures =
+        Engine.client?.videoProcedures ?: throw IllegalStateException("MCVideo not provisioned")
+
+    /**
+     * TS 24.281 §8.2.1.2: `video-affiliate <group>` / `video-deaffiliate <group>`: the client's interest in that one
+     * MCVideo group added or removed, the others kept (the PUBLISH lists every group still wanted; Expires 0 when none
+     * is left, step 4). De-affiliating from a group not affiliated is an error, as the reference client's.
+     */
+    private suspend fun videoAffiliation(args: List<String>, affiliate: Boolean): JSONObject {
+        val client = Engine.client ?: throw IllegalStateException("not started")
+        val video = org.openmcx.client.body.McService.MCVIDEO
+        require(args.size == 1) { "usage: video-${if (affiliate) "" else "de"}affiliate <group>" }
+        if (!client.status.value.mcvideo.authorised) throw IllegalStateException("MCVideo not authorised")
+        val group = args[0]
+        val affiliated = org.openmcx.client.body.Affiliation.counts(client.status.value.mcvideo.affiliations[group])
+        if (!affiliate && !affiliated) throw IllegalStateException("not affiliated to $group")
+        if (affiliate) client.changeAffiliation(video, listOf(group), emptyList()) else client.changeAffiliation(video, emptyList(), listOf(group))
+        return JSONObject().put("affiliations", JSONObject(client.status.value.mcvideo.affiliations))
+            .put("wanted_groups", JSONArray(client.wantedGroups(video)))
+    }
+
     /**
      * The call's implicit floor request (TS 24.380 §14.2.5): `implicit` (with `granted`, "mc_granted" in the offer,
      * §14.2.4), `explicit`, or the configured choice; a `.wav` argument is what its talk burst sends once granted.
@@ -455,9 +498,9 @@ class DebugControl(private val context: Context) {
      * service_settings, settings_subscribed, settings_publication, target_affiliations, remote_affiliation,
      * affiliation_command (the pending §9.2.1.5 request), last_affiliation_answer, group_dynamic_data, monitored_groups.
      */
-    private fun proceduresJson(): JSONObject {
+    private fun proceduresJson(service: org.openmcx.client.body.McService = org.openmcx.client.body.McService.MCPTT): JSONObject {
         val client = Engine.client ?: return JSONObject()
-        val p = client.procedures?.state?.value ?: return JSONObject()
+        val p = client.proceduresOf(service)?.state?.value ?: return JSONObject()
         return JSONObject()
             .put("service_settings", JSONObject(p.serviceSettings.mapValues { (_, c) ->
                 JSONObject().put("answer_mode", c.answerMode).put("profile_index", c.profileIndex)
@@ -465,7 +508,7 @@ class DebugControl(private val context: Context) {
             .put("settings_subscribed", p.settingsSubscribed)
             .put("settings_subscription", p.settingsSubscription?.let(::resultJson) ?: JSONObject.NULL)
             .put("settings_publication", p.settingsPublication?.let(::resultJson) ?: JSONObject.NULL)
-            .put("answer_mode", client.answerModeOf(org.openmcx.client.body.McService.MCPTT))
+            .put("answer_mode", client.answerModeOf(service))
             .put("target_affiliations", JSONObject(p.targetAffiliations.mapValues { (_, t) ->
                 JSONObject().put("subscribed", t.subscribed).put("status", t.status).put("notifications", t.notifications)
                     .put("clients", JSONObject(t.clients.mapValues { JSONObject(it.value) })) }))
@@ -482,9 +525,12 @@ class DebugControl(private val context: Context) {
                     .put("members", JSONArray(g.data?.members?.map { m ->
                         JSONObject().put("id", m.id).put("clients", JSONArray(m.clients)).put("functional_aliases", JSONArray(m.functionalAliases)) }
                         ?: emptyList<JSONObject>())) }))
-            .put("monitored_groups", JSONArray(client.monitoredGroups))
-            .put("monitorable_groups", JSONArray(client.monitorableGroups))
-            .put("wanted_groups", JSONArray(client.wantedGroups(org.openmcx.client.body.McService.MCPTT)))
+            .put("monitored_groups", JSONArray(if (service == org.openmcx.client.body.McService.MCPTT) client.monitoredGroups else emptyList()))
+            .put("monitorable_groups", JSONArray(if (service == org.openmcx.client.body.McService.MCPTT) client.monitorableGroups else emptyList()))
+            .put("wanted_groups", JSONArray(client.wantedGroups(service)))
+            .put("affiliations", JSONObject(when (service) {
+                org.openmcx.client.body.McService.MCVIDEO -> client.status.value.mcvideo.affiliations
+                else -> client.status.value.mcptt.affiliations }))
     }
 
     private suspend fun functionalAlias(args: List<String>, service: org.openmcx.client.body.McService): Any {

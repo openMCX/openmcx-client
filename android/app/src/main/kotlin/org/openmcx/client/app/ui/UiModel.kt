@@ -529,7 +529,10 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         notifiedAnswerModes = procedures?.serviceSettings?.entries?.mapNotNull { (id, c) ->
             c.answerMode?.let { (if (c.own) "This phone" else "Other device ${id.takeLast(8)}") to it }
         } ?: emptyList(),
-        affiliationRequest = procedures?.affiliationRequest?.let { AffiliationRequestItem(it.from?.short() ?: "an authorised user", it.affiliate, it.deaffiliate) },
+        // TS 24.379 §9.2.1.5 and TS 24.281 §8.2.1.5: the MCPTT request first, then the MCVideo one.
+        affiliationRequest = procedures?.affiliationRequest?.let { AffiliationRequestItem(it.from?.short() ?: "an authorised user", it.affiliate, it.deaffiliate) }
+            ?: client.videoProcedures?.state?.value?.affiliationRequest?.let {
+                AffiliationRequestItem((it.from?.short() ?: "an authorised user") + " (MCVideo)", it.affiliate, it.deaffiliate) },
         filesEnabled = Engine.fd != null,
         videoChatGroups = client.config.mcvideo?.chatGroups ?: emptyList(),
         videoRecordings = Engine.mcvideo?.recordings?.value ?: emptyList(),
@@ -636,7 +639,11 @@ object EngineActions : UiActions {
         val client = Engine.client ?: return@launch
         client.monitor(if (on) client.monitoredGroups + group else client.monitoredGroups - group)
     }
-    override fun answerAffiliationRequest(accept: Boolean) = launch { Engine.client?.procedures?.answerAffiliationRequest(accept) }
+    override fun answerAffiliationRequest(accept: Boolean) = launch {
+        val client = Engine.client ?: return@launch
+        val pending = listOfNotNull(client.procedures, client.videoProcedures).firstOrNull { it.state.value.affiliationRequest != null }
+        pending?.answerAffiliationRequest(accept)
+    }
     override fun logOff() = launch { runCatching { Engine.client?.logOff() }.onFailure { Engine.log.add("log-off: ${it.message}") } }
     override fun logOn() { runCatching { Engine.client?.logOn() }.onFailure { Engine.log.add("log-on: ${it.message}") } }
     override fun retryNow() { Engine.client?.retryNow() }

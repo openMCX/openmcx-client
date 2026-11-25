@@ -123,9 +123,12 @@ Debug builds listen on the abstract socket `@mcxclient-control` for one JSON req
 | `affiliation-accept [<group>…]`, `affiliation-decline` | Answer a received negotiated-mode request (§9.2.1.5), all or some of its groups |
 | `gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]`, `gdd-resubscribe <group>`, `gdd-unsubscribe <group>` | Group dynamic data (§9.2.1.6) |
 | `procedures` | The state of the procedures above (also in `status`, key `procedures`) |
+| `video-affiliate <group>`, `video-deaffiliate <group>` | MCVideo affiliation to or de-affiliation from one group, the others kept (TS 24.281 §8.2.1.2) |
+| `video-affiliation-accept [<group>…]`, `video-affiliation-decline` | Answer a received MCVideo negotiated-mode request (§8.2.1.5), all or some of its groups |
+| `video-affiliation-subscribe <mcvideo-id> [fetch]`, `video-affiliation-unsubscribe <mcvideo-id>`, `video-affiliate-remote <mcvideo-id> <group> affiliate\|deaffiliate mandatory\|negotiated`, `video-procedures` | The MCVideo instance of the procedures above (§8.2.1.2 to §8.2.1.4) and its state |
 | `ptt <wav> [seconds]`, `floor request\|release`, `audio-next <wav>` | Talk a file (the devices have no microphone) |
 | `sds <mcdata-id> <text> [--disposition delivery\|read\|delivery-read]`, `sds-group <group> <text> …`, `display <message-id>` | Short data |
-| `refresh register\|subscription\|token`, `drop-flow` | Force a refresh or a new flow |
+| `refresh register\|subscription\|video-subscription\|token`, `drop-flow` | Force a refresh or a new flow |
 | `history [N]`, `telecom`, `resolve <host>`, `sip-probe` | Diagnostics |
 | `import <path>` | Install a `.mcxprov` provisioning file from the device and restart the engine |
 

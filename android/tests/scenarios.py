@@ -1397,6 +1397,60 @@ class Lab:
         self.cmd(A, "video-hangup")
         self.video_idle([A, B])
 
+    def v6_affiliation(self) -> None:
+        """TS 24.281 §8.2.1.2: de-affiliation from one MCVideo group (video-deaffiliate <group>; the last group: Expires 0
+        and no PIDF, step 4) and affiliation again; §8.2.1.3: this user's own MCVideo affiliation subscribed to; §8.2.1.4:
+        a negotiated-mode request (MESSAGE with the MCVideo affiliation command) to bob, who accepts it for the group
+        named (§8.2.1.5, video-affiliation-accept <group>) when the server passes it on."""
+        alice, bob = "sip:alice.mcvideo@mcx.test", "sip:bob.mcvideo@mcx.test"
+        video_groups = lambda c: self.status(c)["mcvideo"]["affiliations"]
+        self.check("alice is affiliated to the MCVideo group", video_groups(A).get(GROUP) == "affiliated", groups=video_groups(A))
+        r = self.cmd(A, "video-deaffiliate", GROUP, timeout=30)
+        self.check("alice de-affiliates from that one group", r["affiliations"].get(GROUP) != "affiliated" and GROUP not in r["wanted_groups"], result=r)
+        publish = self.last_sent(A, "PUBLISH sip:mcvideo", "Event: presence") or ""
+        self.check("the PUBLISH has Expires 0 and names no group (§8.2.1.2 step 4)", "Expires: 0" in publish and f'group="{GROUP}"' not in publish)
+        r = self.cmd(A, "video-deaffiliate", GROUP, ok=False)
+        self.check("de-affiliating again is refused: not affiliated", not r.get("ok") and "not affiliated" in (r.get("error") or ""), reply=r)
+        r = self.cmd(A, "video-affiliate", GROUP, timeout=30)
+        self.check("alice affiliates to the group again", r["affiliations"].get(GROUP) == "affiliated", result=r)
+        publish = self.last_sent(A, "PUBLISH sip:mcvideo", "Event: presence") or ""
+        # On a protected lab the trace holds the bodies as sent, encrypted: their content is checked unprotected only.
+        self.check("the PUBLISH carries the MCVideo PIDF" + ("" if self.protected else " naming the group"),
+                   "Expires: 4294967295" in publish and "application/pidf+xml" in publish and
+                   (self.protected or (GROUP in publish and "urn:3gpp:ns:mcvideoPresInfo" in publish)))
+        r = self.cmd(A, "video-affiliation-subscribe", alice)
+        self.check("alice's subscription to her own MCVideo affiliation is accepted", r["status"] == 200, result=r)
+        groups = lambda: [g for v in (self.cmd(A, "video-procedures")["target_affiliations"].get(alice) or {}).get("clients", {}).values()
+                          for g, st in v.items() if st == "affiliated"]
+        try:
+            self.wait("alice's own MCVideo affiliation notified", lambda: GROUP in groups(), timeout=15)
+            ok = True
+        except Failed:
+            ok = False
+        self.check("the notification lists alice's client affiliated to the group", ok, target=self.cmd(A, "video-procedures")["target_affiliations"])
+        self.cmd(A, "video-affiliation-unsubscribe", alice)
+        # The server notifies one affiliation subscription per user (see S23): the client's own takes it back.
+        self.cmd(A, "refresh", "video-subscription")
+        r = self.cmd(A, "video-affiliate-remote", bob, GROUP, "deaffiliate", "negotiated")
+        self.check("the negotiated-mode MESSAGE gets a final answer", r["status"] >= 200, result=r)
+        message = self.last_sent(A, "MESSAGE sip:mcvideo") or ""
+        self.check("the MESSAGE carries the MCVideo affiliation command" + ("" if self.protected else " naming bob"),
+                   "application/vnd.3gpp.mcvideo-affiliation-command+xml" in message and
+                   (self.protected or ("<de-affiliate><group>" in message and bob in message)), message=message[-1200:])
+        time.sleep(2)
+        pending = self.cmd(B, "video-procedures")["affiliation_command"]
+        if pending is None:
+            self.check("bob got no request (the server does not relay it)", True)
+        else:
+            r = self.cmd(B, "video-affiliation-accept", GROUP, timeout=30)
+            self.check("bob accepts it for the group and de-affiliates", r["last_affiliation_answer"] == "accepted" and
+                       r["affiliations"].get(GROUP) != "affiliated", result=r)
+            self.cmd(B, "video-affiliate", GROUP, timeout=30)
+        r = self.cmd(B, "video-affiliation-accept", ok=False)
+        self.check("with no request pending, video-affiliation-accept is refused", not r.get("ok"), reply=r)
+        self.check("alice and bob are affiliated to the MCVideo group at the end",
+                   video_groups(A).get(GROUP) == "affiliated" and video_groups(B).get(GROUP) == "affiliated")
+
     SCENARIOS = {"S1": s1_startup, "S2": s2_private_automatic, "S3": s3_private_manual, "S4": s4_group, "S5": s5_adhoc, "S6": s6_sds,
                  "S7": s7_refresh_and_recovery, "S8": s8_lifecycle, "S9": s9_impaired, "S10": s10_latency,
                  "S11": s11_product, "S12": s12_private_no_floor, "S13": s13_location,
@@ -1408,7 +1462,8 @@ class Lab:
                  "S19": s19_reg_event,
                  "S20": s20_implicit_floor, "S21": s21_service_settings, "S22": s22_monitor,
                  "S23": s23_remote_affiliation, "S24": s24_group_dynamic_data,
-                 "V1": v1_transmission_control, "V2": v2_adhoc, "V3": v3_priority_extras, "V4": v4_settings_and_gdd, "V5": v5_kms}
+                 "V1": v1_transmission_control, "V2": v2_adhoc, "V3": v3_priority_extras, "V4": v4_settings_and_gdd, "V5": v5_kms,
+                 "V6": v6_affiliation}
 
 
 def main() -> None:
