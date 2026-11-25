@@ -32,8 +32,16 @@ A file can also travel over MSRP, in the SIP session that offers it (TS 24.282 �
   Decline answers 480 with warning 110, Later 480 with warning 231. The received file is checked against the selector's
   size and hash, kept under `files/attachments/fd/media/`, and acknowledged with FD NOTIFICATION completed when asked.
   `fd-media-policy ask|accept|decline` sets what happens without the user (the lab uses it).
-- **Code:** `core/…/mcdata/FdMedia.kt`, `McdataMediaService.kt`, the MSRP stack in `core/…/msrp/`.
-- **Lab:** S64 in [TEST_REPORT.md](TEST_REPORT.md#phase-4-the-mcdata-media-plane).
+- **Ad hoc groups** (phase 4b, TS 24.282 §24.2.2.1.1): `fd-media adhoc=<ID,ID,...|criteria=…|group=…> <path> …` sends
+  one file to an ad hoc group (`adhoc-group-fd-session`); the server names the ad hoc group in its 2xx. An ad hoc group
+  has no GMK, so the file goes and is received in the clear, also on a protected lab. Ad hoc emergency and imminent
+  peril files are refused locally.
+- **Functional aliases** (phase 4b, TS 24.282 §22): `fd-media fa=<alias> …` names the alias with
+  `<call-to-functional-alias-ind>` and follows a 300 to the user the server selects. The OpenMCX server does not resolve
+  an alias on the media plane (CONFORMANCE.md, "Deviations and limits"); an alias among ad hoc participants works.
+- **Code:** `core/…/mcdata/FdMedia.kt`, `McdataMediaService.kt`, `Adhoc.kt`, the MSRP stack in `core/…/msrp/`.
+- **Lab:** S64 in [TEST_REPORT.md](TEST_REPORT.md#phase-4-the-mcdata-media-plane), S84 in
+  [TEST_REPORT.md](TEST_REPORT.md#phase-4b-ip-connectivity-enhanced-status-message-store-ad-hoc).
 
 The server side needs openmcx-server with large-file support: `mcx-http-proxy` `--content-request-limit-bytes` and
 `--file-transfer-timeout-ms`, the same timeout for `mcx-common --role content`, 413 for an overrunning streamed

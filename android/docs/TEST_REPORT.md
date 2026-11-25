@@ -318,6 +318,43 @@ Found in the lab, and allowed for in the scenarios: the OpenMCX server passes ne
 asked for Manual (so the forwarded call may connect at once). Not exercised in the lab: the announced transfer
 (not implemented), `<ric-app-level-priority>` (unit test only), a protected ambient listening call.
 
+## Phase 4b: IP connectivity, enhanced status, message store, ad hoc
+
+Branch `android-p4b`, server image `openmcx-all:mcdpre-800c657`, three redroid 15 clients.
+- Lab `p4b-a`: `androidlab.py create --priority --functional-alias --reference-client client-d --client-image
+  openmcx-client:mcdemerg-ce06d65 --fixture-arg=--msgstore`.
+- Lab `p4b-p`: `androidlab.py create --priority --protected` (payloads under PCK/GMK, MCData signalling under the CSK).
+
+The fixture's IP connectivity addresses are 10.77.0.1 (alice), .2 (bob), .3 (client-c). `--msgstore` lets alice store
+private and group communications and client-c none. client-c (and client-d) may activate the MCData alias
+`patrol-car-12.fa`.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 537 passed, 0 failed. New: `IpConnectivityTest` (5), `EnhancedStatusTest` (3), `MessageStoreTest` (3), `MsrpSignallingProtectionTest` (2), `AdhocMediaTest` (4) |
+| `:app:testDebugUnitTest` | 13 passed |
+| `:app:assembleDebug` | Built |
+| `p4b-a`: S1, S6, S60-S67, S80-S82, S84 | 131 of 131; S84 and S64 again after the last fix, 28 of 28 |
+| `p4b-p`: S1, S6, S60-S63, S65, S66, S80, S81, S83, S84 | All pass: 107 of 108 in the first run, then S84 after the ad hoc file fix (S1, S83, S84: all pass) |
+| `p4b-p`: S64 | 9 of 14: the protected file arrives and is opened, but the scenario compares the selector's size and hash (of the protected series) with the clear file's |
+
+| # | Scenario | Checks | Result |
+|---|---|---|---|
+| S80 | IP connectivity (TS 24.282 §20.2.1, §20.2.2; TS 24.582 §13) | 8 | Alice opens a session with bob. Both tunnel ends are the MCData server's relay. Alice's three pings of 120 octets reach bob's endpoint, and its replies come back; bob's two pings are answered too. Alice's BYE ends bob's leg. client-c's session with bob is refused 403 (bob takes one-to-one communications from alice only) |
+| S81 | Enhanced status (§14.2.1) | 6 | The group document allows it and lists "On scene", "En route", "Available". Alice's "On scene" is rendered by bob and client-c. An id the group does not list (sent with `force`) is discarded by bob. A group without `<mcdata-allow-enhanced-status>` is refused locally |
+| S82 | Message store and notification channel (§21.2, §21.3.2.2) | 10 | Alice enables storage (200); client-c is refused 403 warning 234. Alice's channel and subscription exist. Bob's SDS stored in her box is notified, reads From bob, Direction In, and its payload has the text. It is marked \Seen, found by a search on From, deleted, and gone after a synchronisation. Storage is disabled again |
+| S83 | Protected MSRP bodies (§6.6.3.2), `p4b-p` only | 7 | Both phones protect their signalling. Alice's message in an SDS session reaches bob; bob's in-session DELIVERED reaches alice; bob's long standalone SDS reaches alice over MSRP. Each side's counters show the SENDs sealed and opened |
+| S84 | Ad hoc SDS and FD, functional aliases over the media plane (§9.2.2.2.1 3A, §24.2.2.1.1, §22) | 14 | Alice's ad hoc SDS to bob and client-c (signalling plane) arrives on the server's ad hoc group. So do her long ad hoc SDS over MSRP, her ad hoc session message and her ad hoc file (900 octets, whole). With `patrol-car-12.fa` among the participants, client-c receives the message, told the alias called. Alice's one-to-one SDS to the alias is sent with it named; the server refuses it (see below) |
+
+Found:
+- **Client fault, fixed here:** on a protected lab, the receiver of an ad hoc file tried to open it as a protected
+  series ("DPPK-ID is neither a PCK-ID nor a GMK-ID"); ad hoc files are in the clear.
+- **Server, not changed:** a one-to-one media-plane communication to a functional alias is refused. The server treats
+  the alias as a user (403 warning 229 for alice, whose one-to-one list does not hold it). On the signalling plane and
+  for IP connectivity it answers 300.
+- **Server, still there:** an app restart on a protected lab makes MCData refuse every request with 403 warning 140
+  (CONFORMANCE.md, "Deviations and limits"). The protected lab was brought down and up again after each new APK.
+
 ## Parity phase 5: pre-established sessions (2026-11-26)
 
 [PARITY_PLAN.md](PARITY_PLAN.md) phase 5 (branch `android-p5`, with `android-parity` and phase 3 merged). One lab,
@@ -332,8 +369,10 @@ the fixture's `--mcdata-pre-established` (`mcdata.resource_sharing` "rx") and `-
 | JVM unit tests (`tools/gradle-docker.sh :core:test`) | 563 passed, 0 failed. New: `PreEstablishedTest` (14, MCData), `McpttPreSessionTest` (12, MCPTT) |
 | App unit tests (`:app:testDebugUnitTest`) | 15 passed |
 | `:app:assembleDebug` | Built |
-| One run of S1, S6, S60-S67 and S70-S80 | 193 of 196. The three failures were S76's: the group was left in emergency by an earlier S80 run that failed before the 491 retry (below), so alice's call reached bob as an emergency call by INVITE with Replaces. After cancelling it, S76 and S80 again: 23 of 23 |
+| One run of S1, S6, S60-S67, S70-S79 and S85 | 193 of 196. The three failures were S76's: the group was left in emergency by an earlier S85 run that failed before the 491 retry (below), so alice's call reached bob as an emergency call by INVITE with Replaces. After cancelling it, S76 and S85 again: 23 of 23 |
 | MCPTT regression S2-S5, S16 | 64 of 64 |
+
+(Phase 5's S80 is S85 since the phase 4b merge, which took S80-S84.)
 
 | # | Scenario | Checks | Result |
 |---|---|---|---|
@@ -347,7 +386,7 @@ the fixture's `--mcdata-pre-established` (`mcdata.resource_sharing` "rx") and `-
 | S77 | Private calls (§11.1.1.2.2.1, §11.1.1.2.2.2) | 15 | Alice's automatic private call over her session; her manual one reaches bob, who holds a session, by re-INVITE: he rings, answers, and the Connect follows |
 | S78 | Modification and release (§8.3.1.1, §8.4.1.1) | 5 | Implicit floor request on by re-INVITE, off by UPDATE; the BYE; the next call on demand |
 | S79 | Flow loss | 6 | The MCPTT session is kept on the new registration and carries a call |
-| S80 | INVITE with Replaces (§6.3.2.2.5.3 step 1), an emergency call over the session | 10 | Alice's emergency call reaches bob on demand with Replaces naming his session: he ends it and makes it again after the call. Alice's own emergency group call goes over her session |
+| S85 | INVITE with Replaces (§6.3.2.2.5.3 step 1), an emergency call over the session | 10 | Alice's emergency call reaches bob on demand with Replaces naming his session: he ends it and makes it again after the call. Alice's own emergency group call goes over her session |
 
 Faults found and fixed here:
 - **A cancelled ringing call answered 480** (`McpttCallTypesTest.firstToAnswerCancelledBeforeTheAnswer`, flaky): the

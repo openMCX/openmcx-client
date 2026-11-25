@@ -1494,6 +1494,8 @@ private fun MessagesScreen(state: UiState, actions: UiActions) {
         LazyColumn(Modifier.weight(1f)) {
             items(state.messages, key = { it.id }) { m -> MessageRow(m, actions) }
         }
+        // The message store, enhanced status and IP connectivity (TS 24.282 §21, §14, §20): McdataPanel.kt.
+        McdataPanel(target, group, state.registered)
         // Pill-shaped fields, as chat apps draw them.
         Row(verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(target, { target = it }, label = { Text("To (group or MCData ID)") }, singleLine = true,

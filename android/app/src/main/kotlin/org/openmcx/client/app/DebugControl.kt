@@ -365,6 +365,8 @@ class DebugControl(private val context: Context) {
             val reason = args.drop(if (query) 2 else 1).joinToString(" ").ifBlank { null }
             JSONObject().put("status", media().release(args[0], reason, query))
         }
+        // IP connectivity, enhanced status, the message store, ad hoc and alias media (TS 24.282 §20, §14, §21, §24): McdataCommands.kt.
+        in McdataCommands.NAMES -> McdataCommands.execute(cmd, args)
         "events" -> JSONArray(Engine.log.last(args.firstOrNull()?.toInt() ?: 50))
         // File distribution. Paths are on the device (adb push to /data/local/tmp, then chmod 644).
         "fd-send" -> fdSend(args, group = false)
@@ -879,6 +881,7 @@ class DebugControl(private val context: Context) {
         .put("id", c.id).put("kind", c.kind).put("outgoing", c.outgoing).put("peer", c.peer).put("group", c.group)
         .put("state", c.state).put("status", c.status).put("warning", c.warning).put("error", c.error)
         .put("emergency", c.emergency).put("imminent_peril", c.imminentPeril).put("message_id", c.messageId?.toString())
+        .put("adhoc", c.adhoc).put("sender_alias", c.senderAlias).put("called_alias", c.calledAlias)
         .put("conversation_id", c.conversationId.toString()).put("security", c.security).put("release", c.release)
         .put("file", c.fileName).put("size", c.fileSize).put("sha256", c.sha256).put("path", c.filePath)
         .put("messages", JSONArray(c.messages.map { it.take(120) })).put("pre_established", c.preEstablished)

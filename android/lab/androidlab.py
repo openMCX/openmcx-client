@@ -143,6 +143,13 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
                             # MCData functional aliases (TS 24.282 clause 22): those whose MCData user list names this user.
                             "functional_aliases": [fa["id"] for fa in site.get("functional_aliases", [])
                                                    if mcdata["user_id"] in fa.get("mcdata_users", [])]}
+        # TS 24.282 clause 20.2.0a step 1: the client's address in an IP connectivity tunnel; clause 21: the message store
+        # and the notification server of the NMS REST API, as the reference client has them.
+        if (mcdata.get("ipconn") or {}).get("address"):
+            bundle["mcdata"]["ipconn"] = {"address": mcdata["ipconn"]["address"]}
+        for key in ("msgstore", "notification"):
+            if key in ref["endpoints"]:
+                bundle["mcdata"][key] = ref["endpoints"][key]
         if fd:
             bundle["mcdata"]["fd"] = fd
         # TS 33.180 clauses 8 and 9.5 (the fixture's --protected): payload protection, signalling protection under the

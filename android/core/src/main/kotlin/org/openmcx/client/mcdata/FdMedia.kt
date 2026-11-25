@@ -37,8 +37,9 @@ internal object FdMedia {
                      mandatory: Boolean, completion: Boolean, priority: String): MediaCommunication {
         val s = service.internals
         val emergency = priority == "emergency"; val imminent = priority == "imminent"
+        if (priority != "normal" && AdhocTarget.of(target) != null) throw SdsError("ad hoc group emergency and imminent peril communications are not implemented")
         if (imminent && !group) throw SdsError("imminent peril applies to group communications")
-        val c = MediaCommunication(s.nextId(), "fd", true, target.takeIf { !group }, target.takeIf { group })
+        val c = service.outgoing("fd", target, group)
         c.emergency = emergency; c.imminentPeril = imminent
         s.add(c)
         var local = s.protect(c, s.localMedia("sendonly", acceptTypes = listOf(McdataService.SIGNALLING)), target, group)
@@ -130,7 +131,8 @@ internal object FdMedia {
         if (body.size.toLong() != offer.metadata.size || (offer.metadata.sha256 != null && offer.metadata.sha256 != sha)) {
             s.fail(c, "file ${offer.metadata.name}: ${body.size} octets, hash $sha, not as offered", "corrupt"); return
         }
-        val contents = s.peer.protection?.takeIf { it.protectsPayload }?.let { p ->
+        // An ad hoc group has no group key: its files come in the clear (as they are sent, McdataMediaService.protect).
+        val contents = s.peer.protection?.takeIf { it.protectsPayload && !c.adhoc }?.let { p ->
             try { p.openFile(body, c.peer, c.group) } catch (e: Exception) {
                 p.failures.incrementAndGet()
                 s.fail(c, "file undecryptable: ${e.message}", "undecryptable"); return

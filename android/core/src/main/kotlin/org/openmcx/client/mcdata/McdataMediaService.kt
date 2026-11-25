@@ -58,6 +58,12 @@ interface McdataMediaPeer {
     suspend fun info(dialog: Dialog, parts: List<Part>, headers: List<Pair<String, String>>): SipResponse
     fun event(text: String)
     val protection: McdataProtection? get() = null
+    /**
+     * TS 24.282 §6.6.3.2 (TS 33.180 §9.5.3): the MCData signalling bodies of an MSRP SEND sealed under the CSK, or
+     * opened (throws when refused); unchanged while signalling is not protected.
+     */
+    fun sealMsrp(parts: List<Part>): List<Part> = parts
+    fun openMsrp(parts: List<Part>): List<Part> = parts
     /** A MESSAGE for file distribution (FD NOTIFICATION, TS 24.282 §12.2.1.1); null when not available. */
     suspend fun fdMessage(parts: List<Part>): SipResponse? = null
     /** A REFER outside a dialog to [uri] (TS 24.282 §9.2.5.2.1.1, §9.2.5.4.1.1), always multipart when it has parts. */
@@ -120,6 +126,8 @@ class ClientMediaPeer(private val client: McxClient) : McdataMediaPeer {
     }
     override fun event(text: String) = client.event("mcdata media: $text")
     override val protection get() = client.mcdataProtection
+    override fun sealMsrp(parts: List<Part>) = client.protection.sealMsrp(parts)
+    override fun openMsrp(parts: List<Part>) = client.protection.openMsrp(parts)
     override suspend fun fdMessage(parts: List<Part>) = ClientFdPeer(client).send(parts)
     override suspend fun refer(uri: String, parts: List<Part>, headers: List<Pair<String, String>>): SipResponse {
         val request = ua.newRequest("REFER", uri, NameAddr(uri))
@@ -150,7 +158,7 @@ class MediaCommunication(
     val outgoing: Boolean,
     /** The other user (one-to-one), the originator (terminating) or null. */
     @Volatile var peer: String?,
-    val group: String?,
+    @Volatile var group: String?,
     val conversationId: UUID = UUID.randomUUID(),
     val startedAt: Long = System.currentTimeMillis(),
 ) {
@@ -161,6 +169,11 @@ class MediaCommunication(
     @Volatile var error: String? = null
     @Volatile var emergency = false
     @Volatile var imminentPeril = false
+    /** An ad hoc group communication (TS 24.282 §24); its group is the one the server names (§24.2.2.1.1 step 4). */
+    @Volatile var adhoc = false
+    /** Functional aliases (§22): the alias the sender presented, and the alias this communication was sent to. */
+    @Volatile var senderAlias: String? = null
+    @Volatile var calledAlias: String? = null
     @Volatile var messageId: UUID? = null
     @Volatile var security: String? = null
     /** The release of TS 24.282 §13.2: the server's notice or request, and this client's answer. */
@@ -257,6 +270,8 @@ class McdataMediaService(
      */
     private suspend fun protect(c: MediaCommunication, media: MsrpMedia, target: String, group: Boolean): MsrpMedia {
         val protection = peer.protection?.takeIf { it.protectsPayload } ?: return media
+        // An ad hoc group has no group key, and the user an alias stands for is not known yet: in the clear (Linux).
+        if (c.adhoc || AliasTarget.of(target) != null) return media
         return try {
             if (group) { c.key = protection.gmkFor(target); media }
             else { val (key, message) = protection.pckFor(target); c.key = key; if (message != null) media.copy(keyMgmt = message) else media }
@@ -267,6 +282,16 @@ class McdataMediaService(
         val protection = peer.protection
         val sealed = c.key?.let { protection?.seal(encoded, it) } ?: encoded
         return protection?.sign(sealed) ?: sealed
+    }
+
+    /**
+     * A new originating communication: [target] an MCData ID, a group ([group]), an ad hoc group (`adhoc=...`,
+     * TS 24.282 §24.2.2.1.1) or a functional alias (`fa=<alias>`, §22).
+     */
+    internal fun outgoing(kind: String, target: String, group: Boolean, conversationId: UUID = UUID.randomUUID()): MediaCommunication {
+        val adhoc = AdhocTarget.of(target)
+        return MediaCommunication(ids.incrementAndGet(), kind, true, target.takeIf { !group && adhoc == null },
+            if (group) target else adhoc?.let { it.group ?: "ad hoc ${it.label}" }, conversationId).also { it.adhoc = adhoc != null }
     }
 
     private fun failure(response: SipResponse) = "${response.status} ${response.reason}" + (response.headers["Warning"]?.let { " ($it)" } ?: "")
@@ -299,21 +324,40 @@ class McdataMediaService(
     // Originating (TS 24.282 §9.2.3.2.3, §9.2.4.2.3).
 
     private fun requestInfo(requestType: String, target: String, group: Boolean, emergency: Boolean = false, imminent: Boolean = false,
-                            alert: Boolean? = null) =
-        McdataInfo(requestType = requestType, requestUri = if (group) target else null, clientId = peer.clientId,
+                            alert: Boolean? = null): McdataInfo {
+        val base = McdataInfo(requestType = requestType, requestUri = if (group) target else null, clientId = peer.clientId,
             functionalAlias = peer.aliasInUse(), emergency = if (emergency) true else null, imminentPeril = if (imminent) true else null,
             alert = alert)
+        // TS 24.282 §24.2.2.1.1 steps 5-7: an ad hoc group: its request type, criteria or group; §22: the alias called.
+        AdhocTarget.of(target)?.let { return it.info(base.copy(requestType = AdhocRequest.mediaRequestType(requestType))) }
+        if (AliasTarget.of(target) != null) return base.copy(callToFunctionalAlias = true)
+        return base
+    }
 
     private fun targetParts(target: String, group: Boolean, info: McdataInfo, media: MsrpMedia): MutableList<Part> {
         val parts = mutableListOf(sdpPart(media), Part(McdataInfo.CONTENT_TYPE, info.encode().toByteArray()))
-        if (!group) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOf(target)).toByteArray())
+        val adhoc = AdhocTarget.of(target)
+        if (adhoc != null) parts += adhoc.resourceLists()
+        else if (!group) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOf(AliasTarget.of(target) ?: target)).toByteArray())
         return parts
     }
 
     /** The INVITE of a communication, its 2xx and the MSRP connection; the communication fails otherwise. */
     private suspend fun establish(c: MediaCommunication, parts: List<Part>, headers: List<Pair<String, String>>, local: MsrpMedia) {
         c.localMedia = local
-        val (response, dialog) = try { peer.invite(parts, headers) } catch (e: Exception) { fail(c, e.message ?: "INVITE failed"); throw SdsError(e.message ?: "INVITE failed") }
+        var (response, dialog) = try { peer.invite(parts, headers) } catch (e: Exception) { fail(c, e.message ?: "INVITE failed"); throw SdsError(e.message ?: "INVITE failed") }
+        val alias = c.peer?.let(AliasTarget::of)
+        if (dialog == null && response.status == 300 && alias != null) {
+            // §22 with §9.2.2.2.1: the MCData ID the server selected for the alias is invited, naming the alias called.
+            val selected = AliasTarget.selected(response) ?: run { fail(c, "300 without a selected user", "refused"); throw SdsError("300 without a selected user", 300) }
+            event("communication ${c.id}: functional alias $alias: inviting $selected")
+            c.peer = selected; c.calledAlias = alias
+            val again = try { peer.invite(AliasTarget.redirected(parts, selected, alias), headers) }
+                catch (e: Exception) { fail(c, e.message ?: "INVITE failed"); throw SdsError(e.message ?: "INVITE failed") }
+            response = again.first; dialog = again.second
+        }
+        // §24.2.2.1.1, on the 2xx, step 4: the ad hoc group the server created.
+        if (dialog != null && c.adhoc) AdhocTarget.groupOf(response)?.let { c.group = it; event("communication ${c.id}: ad hoc group $it") }
         c.status = response.status
         c.warning = response.headers["Warning"]
         if (dialog == null) { fail(c, failure(response), "refused"); throw SdsError(failure(response), response.status) }
@@ -373,7 +417,7 @@ class McdataMediaService(
      */
     suspend fun sendStandalone(target: String, text: String, group: Boolean, disposition: DispositionRequest? = null,
                                conversationId: UUID = UUID.randomUUID(), inReplyTo: UUID? = null): SentSds {
-        val c = MediaCommunication(ids.incrementAndGet(), "sds", true, target.takeIf { !group }, target.takeIf { group }, conversationId)
+        val c = outgoing("sds", target, group, conversationId)
         add(c)
         val info = requestInfo(if (group) "group-sds" else "one-to-one-sds", target, group)
         event("communication ${c.id}: standalone SDS of ${text.length} characters to $target over the media plane")
@@ -383,8 +427,8 @@ class McdataMediaService(
         val signalling = SdsSignalling(clock(), conversationId, UUID.randomUUID(), inReplyTo, disposition = disposition)
         c.messageId = signalling.messageId
         try {
-            c.msrp!!.sendParts(listOf(Part(McdataService.SIGNALLING, signalling.encode()),
-                Part(McdataService.PAYLOAD, payload(c, DataPayload(listOf(Payload.text(text))).encode()))))
+            c.msrp!!.sendParts(peer.sealMsrp(listOf(Part(McdataService.SIGNALLING, signalling.encode()),
+                Part(McdataService.PAYLOAD, payload(c, DataPayload(listOf(Payload.text(text))).encode())))))
         } catch (e: Exception) {
             // TS 24.582 §6.1.1.2.1: the message could not be sent; the SIP session ends.
             hangUp(c)
@@ -405,9 +449,10 @@ class McdataMediaService(
      */
     suspend fun openSession(target: String, group: Boolean, priority: String = "normal", alert: Boolean = false): MediaCommunication {
         val emergency = priority == "emergency"; val imminent = priority == "imminent"
+        if (priority != "normal" && AdhocTarget.of(target) != null) throw SdsError("ad hoc group emergency and imminent peril communications are not implemented")
         if (imminent && !group) throw SdsError("imminent peril applies to group communications")
         if (alert && !(emergency && group)) throw SdsError("an emergency alert goes with an emergency group communication")
-        val c = MediaCommunication(ids.incrementAndGet(), "session", true, target.takeIf { !group }, target.takeIf { group })
+        val c = outgoing("session", target, group)
         c.emergency = emergency; c.imminentPeril = imminent
         add(c)
         val info = requestInfo(if (group) "group-sds-session" else "one-to-one-sds-session", target, group, emergency, imminent,
@@ -454,8 +499,8 @@ class McdataMediaService(
     suspend fun sessionSend(text: String, disposition: DispositionRequest? = null, c: MediaCommunication? = session): SentSds {
         val s = c?.takeIf { it.open } ?: throw SdsError("no SDS session is open")
         val signalling = SdsSignalling(clock(), s.conversationId, UUID.randomUUID(), disposition = disposition, sender = peer.userId)
-        s.msrp!!.sendParts(listOf(Part(McdataService.SIGNALLING, signalling.encode()),
-            Part(McdataService.PAYLOAD, payload(s, DataPayload(listOf(Payload.text(text))).encode()))))
+        s.msrp!!.sendParts(peer.sealMsrp(listOf(Part(McdataService.SIGNALLING, signalling.encode()),
+            Part(McdataService.PAYLOAD, payload(s, DataPayload(listOf(Payload.text(text))).encode())))))
         s.messages += "out: $text"
         changed(s)
         event("communication ${s.id}: session SDS ${signalling.messageId} sent")
@@ -467,7 +512,8 @@ class McdataMediaService(
     /** TS 24.582 §6.1.2.5.3: an SDS NOTIFICATION in the session, a SEND of the signalling body alone. */
     private suspend fun sendNotification(c: MediaCommunication, notification: SdsNotification): Boolean {
         if (!c.open) return false
-        c.msrp?.send(McdataService.SIGNALLING, notification.encode()) ?: return false
+        c.msrp?.send(McdataService.SIGNALLING, peer.sealMsrp(listOf(Part(McdataService.SIGNALLING, notification.encode())))[0].content)
+            ?: return false
         return true
     }
 
@@ -554,9 +600,15 @@ class McdataMediaService(
         // This client does not listen: an offer that would make it the passive endpoint is refused.
         if (offer.setup == "active") { tx.respond(488); event("offer with a=setup:active refused: this client does not listen"); return true }
         if (info.callingUserId.isNullOrEmpty()) { tx.respond(403); return true }
-        val session = info.requestType?.endsWith("-sds-session") == true
+        // TS 24.282 §24.4.2.1.1 step 10: an ad hoc group request type covers a standalone SDS and a session, which the
+        // offer tells apart ("a=sendrecv" for a session).
+        val adhoc = info.requestType?.startsWith("adhoc-") == true
+        val session = info.requestType?.endsWith("-sds-session") == true && (!adhoc || offer.direction == "sendrecv")
         val kind = if (fd) "fd" else if (session) "session" else "sds"
         val c = MediaCommunication(ids.incrementAndGet(), kind, false, info.callingUserId, info.callingGroupId)
+        c.adhoc = adhoc
+        c.senderAlias = info.functionalAlias
+        c.calledAlias = info.calledFunctionalAlias
         c.emergency = info.emergency == true
         c.imminentPeril = info.imminentPeril == true
         c.offeredSdp = sdp
@@ -672,7 +724,9 @@ class McdataMediaService(
     /** TS 24.582 §6.1.1.3.2, §6.1.2.6: the MCData bodies of a received SEND, as a message of the signalling plane. */
     private suspend fun received(c: MediaCommunication, contentType: String, body: ByteArray) {
         if (contentType.substringBefore(';').trim() == FILE) return fileReceived(c, body)
-        val parts = if (contentType.startsWith("multipart/")) Multipart.parse(contentType, body) else listOf(Part(contentType, body))
+        val received = if (contentType.startsWith("multipart/")) Multipart.parse(contentType, body) else listOf(Part(contentType, body))
+        // TS 24.282 §6.6.3.2: signalling from the server under the CSK is opened first; a refused SEND is dropped.
+        val parts = try { peer.openMsrp(received) } catch (e: Exception) { event("communication ${c.id}: signalling refused: ${e.message}"); return }
         val signalling = parts.firstOrNull { it.mediaType == McdataService.SIGNALLING } ?: run { event("communication ${c.id}: SEND without signalling"); return }
         when (MessageType.of(signalling.content)) {
             MessageType.SDS_NOTIFICATION -> {
@@ -682,7 +736,8 @@ class McdataMediaService(
             MessageType.SDS_SIGNALLING_PAYLOAD -> {
                 val decoded = SdsSignalling.decode(signalling.content)
                 // Any participant of a session may send: the Sender IE names them.
-                val info = McdataInfo(callingUserId = decoded.sender ?: c.peer, callingGroupId = c.group)
+                val info = McdataInfo(callingUserId = decoded.sender ?: c.peer, callingGroupId = c.group,
+                    functionalAlias = c.senderAlias, calledFunctionalAlias = c.calledAlias)
                 val payload = parts.firstOrNull { it.mediaType == McdataService.PAYLOAD }?.content ?: ByteArray(0)
                 val opened = sds.openPayload(emptyList(), info, payload)
                 if (opened.data == null) { event("communication ${c.id}: payload refused"); return }

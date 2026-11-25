@@ -259,8 +259,11 @@ class DocumentClient(private val http: HttpClient, private val cms: String, priv
     suspend fun ueConfiguration(mcpttId: String, ueId: String, token: String): String =
         fetch("$cms/org.3gpp.mcptt.ue-config/users/${enc(mcpttId)}/${enc(ueId)}", token)
 
-    suspend fun group(groupId: String, token: String): GroupDocument =
-        GroupDocument.parse(fetch("$gms/org.openmobilealliance.groups/global/byGroupID/${enc(groupId)}", token))
+    suspend fun group(groupId: String, token: String): GroupDocument = GroupDocument.parse(groupText(groupId, token))
+
+    /** The group document of [groupId] as text (TS 24.481 §6.3.3; read for the MCData enhanced status, TS 24.282 §14.2.1). */
+    suspend fun groupText(groupId: String, token: String): String =
+        fetch("$gms/org.openmobilealliance.groups/global/byGroupID/${enc(groupId)}", token)
 
     /**
      * A group management request of TS 24.481 §6.3 (temporary group formation §6.3.14.2, tear down §6.3.15.2) to the

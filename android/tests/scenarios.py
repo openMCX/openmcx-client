@@ -25,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lab"))
 from androidlab import ADB, FILES, PACKAGE, Device, meta  # noqa: E402
+import mcdata_extras  # noqa: E402  (S80 onwards)
 
 A, B, C = "client-a", "client-b", "client-c"
 FGS_PHONE_CALL, FGS_MICROPHONE, FGS_SPECIAL_USE = 0x4, 0x80, 0x40000000  # ServiceInfo.FOREGROUND_SERVICE_TYPE_*
@@ -2756,7 +2757,7 @@ class Lab:
         self.idle_everywhere([A, B, C])
         self.cmd(A, "pre-session-release")
 
-    def s80_pre_replaces(self) -> None:
+    def s85_pre_replaces(self) -> None:
         # TS 24.379 §6.3.2.2.5.3 step 1: an emergency call reaches a member holding a session by an on-demand INVITE with
         # Replaces naming it (RFC 3891); the member ends the session once the call is accepted, and makes it again after.
         # Then §10.1.2.2.2.1 / §6.2.8.1.16: alice's own emergency group call over her session. Needs --priority.
@@ -2807,7 +2808,11 @@ class Lab:
                  "S70": s70_pre_session_sds, "S71": s71_pre_session_offered, "S72": s72_pre_session_priority,
                  "S73": s73_pre_session_release, "S74": s74_pre_session_flow_loss,
                  "S75": s75_pre_group_call, "S76": s76_pre_connect, "S77": s77_pre_private, "S78": s78_pre_modify_release,
-                 "S79": s79_pre_flow_loss, "S80": s80_pre_replaces}
+                 "S79": s79_pre_flow_loss, "S85": s85_pre_replaces}
+
+
+# S80 onwards (parity phase 4b): tests/mcdata_extras.py.
+Lab.SCENARIOS.update(mcdata_extras.SCENARIOS)
 
 
 def main() -> None:
