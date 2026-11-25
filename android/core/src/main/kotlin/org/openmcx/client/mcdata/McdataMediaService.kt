@@ -248,7 +248,7 @@ class McdataMediaService(
     /** TS 24.582 §6.1.1.2.1 steps 1-4: the MSRP connection the answer describes, this client the active endpoint. */
     private suspend fun connect(c: MediaCommunication, local: MsrpMedia, remote: MsrpMedia) {
         if (remote.setup == "active") throw SdsError("the answer is a=setup:active: this client does not listen (RFC 6135)")
-        val session = MsrpSession(scope, connector, local.uri, listener(c), trace = { event("call ${c.id} $it") })
+        val session = MsrpSession(scope, connector, local.uri, listener(c), trace = { event("communication ${c.id} $it") })
         c.msrp = session
         c.state = "connecting"; changed(c)
         session.connect(remote.uri)

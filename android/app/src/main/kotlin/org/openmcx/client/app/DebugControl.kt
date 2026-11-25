@@ -633,7 +633,7 @@ class DebugControl(private val context: Context) {
         }
         val sent = service.send(words.first(), words.drop(1).joinToString(" "), group, disposition, toAlias = toAlias)
         Engine.sent(sent)
-        return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("dppk_id", sent.dppkId ?: JSONObject.NULL)
+        return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("dppk_id", sent.dppkId ?: JSONObject.NULL).put("plane", sent.plane)
     }
 
     private fun media(): org.openmcx.client.mcdata.McdataMediaService = Engine.mcdataMedia ?: throw IllegalStateException("MCData not provisioned")
@@ -696,7 +696,7 @@ class DebugControl(private val context: Context) {
         .put("emergency", c.emergency).put("imminent_peril", c.imminentPeril).put("message_id", c.messageId?.toString())
         .put("conversation_id", c.conversationId.toString()).put("security", c.security).put("release", c.release)
         .put("file", c.fileName).put("size", c.fileSize).put("sha256", c.sha256).put("path", c.filePath)
-        .put("messages", JSONArray(c.messages.toList()))
+        .put("messages", JSONArray(c.messages.map { it.take(120) }))
 
     private fun mcvideo(): McvideoService = Engine.mcvideo ?: throw IllegalStateException("MCVideo not provisioned")
 
