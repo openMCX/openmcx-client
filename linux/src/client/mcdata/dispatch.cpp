@@ -698,7 +698,8 @@ void Client::mcdata_sds_session_command(std::istringstream &words) {
     return mcdata_session_send(text, disposition);
   }
   if (word == "close") {
-    if (!mcdata_media_) throw std::runtime_error("no MCData SDS session is open");
+    // a communication over the pre-established session may still be being established (no media plane yet)
+    if (!mcdata_media_ && !mcdata_media_pre_) throw std::runtime_error("no MCData SDS session is open");
     std::string scope;
     words >> scope;
     mcdata_media_result_["state"] = "closed";
@@ -1219,6 +1220,11 @@ void Client::mcdata_status() {
   status_["mcdata_functional_alias_subscription_result"] = mcdata_alias_subscription_result_;
   status_["mcdata_functional_aliases_take_over_possible"] = mcdata_takeover_possible_;
   status_["mcdata_alert_state"] = mdea_name(mdea_);
+  // TS 24.282 annex G.4: the priority states (for the record; a test observes them by the requests they shape)
+  status_["mcdata_priority_states"] = {{"mdeg", mdeg_name(mdeg_)},   {"mdegc", mdegc_name(mdegc_)},
+                                       {"mdig", mdig_name(mdig_)},   {"mdigc", mdigc_name(mdigc_)},
+                                       {"mdepc", mdepc_name(mdepc_)}, {"mdepp", mdepp_},
+                                       {"group", mcdata_priority_group_}};
   status_["mcdata_emergency"] = mcdata_emergency_;
   status_["mcdata_alerts_received"] = mcdata_alerts_received_;
   status_["mcdata_alert_last_result"] = mcdata_alert_last_result_;

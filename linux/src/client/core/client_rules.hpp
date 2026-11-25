@@ -853,6 +853,77 @@ inline std::string mcdata_communication_state(std::string_view info_xml) {
 }
 
 //------------------------------------------------------------------------------
+// The MCData priority states of TS 24.282 annex G.4 as numbers (the n of "MDEG n: ...").
+struct McdataPriorityStates {
+  int mdeg = 1, mdegc = 1, mdea = 1, mdig = 1, mdigc = 1, mdepc = 1, mdepp = 1;
+};
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 6.2.8.1.16: the participating function's re-INVITE within the pre-established session targeted by
+// the REFER of an emergency or imminent peril group communication, with the <emergency-ind>, <imminentperil-ind> and
+// <alert-ind> it carries (empty: absent):
+//   1) MDEGC 2: a) no <emergency-ind>, or "true", and no <imminentperil-ind>: i) MDEG 2, ii) MDEGC 3; b) MDEA 2:
+//      <alert-ind> "true" or absent: MDEA 3, "false": MDEA 1;
+//   2) MDIGC 2: a) <imminentperil-ind> "true" or absent: i) MDIGC 3, ii) MDIG 2; b) "false" with <emergency-ind" "true":
+//      MDEG 2. The clause leaves MDIGC and MDIG as they were in b); the request was denied (the NOTE), so they go back
+//      to "MDIGC 1" and (from "MDIG 4: confirm-pending") "MDIG 1", as clause 6.2.8.1.13 3) has for the same correction
+//      by SIP INFO.
+inline McdataPriorityStates pre_group_priority_granted(McdataPriorityStates s, std::optional<bool> emergency,
+                                                       std::optional<bool> imminent, std::optional<bool> alert) {
+  if (s.mdegc == 2) {
+    if (emergency != false && !imminent.has_value()) {
+      s.mdeg = 2;
+      s.mdegc = 3;
+    }
+    if (s.mdea == 2) s.mdea = alert == false ? 1 : 3;
+  }
+  if (s.mdigc == 2) {
+    if (imminent != false) {
+      s.mdigc = 3;
+      s.mdig = 2;
+    } else if (emergency == true) {
+      s.mdeg = 2;
+      s.mdigc = 1;
+      if (s.mdig == 4) s.mdig = 1;
+    }
+  }
+  return s;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 9.2.5.2.1.1, re-INVITE 3)a): the grant of an emergency one-to-one communication over the
+// pre-established session: MDEPC 2 or 3: i) MDEPP 2, ii) MDEPC 3 (iii), MDPEA: no one-to-one emergency alert here).
+inline McdataPriorityStates pre_private_priority_granted(McdataPriorityStates s) {
+  if (s.mdepc == 2 || s.mdepc == 3) {
+    s.mdepp = 2;
+    s.mdepc = 3;
+  }
+  return s;
+}
+
+//------------------------------------------------------------------------------
+// The priority states on the release of a communication:
+//   TS 24.282 clause 6.2.8.1.17 (group): 1) MDEGC 2: a) MDEGC 1, b) the "confirm-pending" emergency group state back
+//     to "MDEG 1" (the clause writes "MDEG 3: confirm-pending"; MDEG 3 is "cancel-pending", annex G.4.4: read as MDEG
+//     4), c) MDEA 2 -> MDEA 1; 2) MDIGC 2: a) MDIG 4 -> MDIG 1, b) MDIGC 1.
+//   TS 24.282 clause 6.2.8.1.18 (one-to-one): 1) MDEPC 2: a) MDEPC 1, b) MDEPP 3 -> MDEPP 1, c) MDPEA 2 -> MDPEA 1.
+// Beyond the clauses, a granted communication's states (MDEGC 3, MDIGC 3, MDEPC 3) return to "capable" (the next
+// communication is a new request) and MDEPP, the state "of the private communication" (annex G.4.10), to 1; the
+// in-progress states of the group (MDEG 2, MDIG 2) last until cancelled.
+inline McdataPriorityStates priority_released(McdataPriorityStates s) {
+  if (s.mdegc == 2) {
+    if (s.mdeg == 4) s.mdeg = 1;
+    if (s.mdea == 2) s.mdea = 1;
+  }
+  if (s.mdigc == 2 && s.mdig == 4) s.mdig = 1;
+  if (s.mdepc == 2 && s.mdepp == 3) s.mdepp = 1;
+  s.mdegc = s.mdigc = s.mdepc = s.mdepp = 1;
+  if (s.mdeg == 4) s.mdeg = 1;
+  if (s.mdig == 4) s.mdig = 1;
+  return s;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.282 clauses 18.3.2.1 step 1 and 18.3.1.1 with RFC 8839 sections 5.1 and 5.4 and RFC 6544 section 4.5: the ICE
 // attributes of the "m=message" section of the pre-established session's SDP offer: the client's credentials and its
 // one host candidate, the passive TCP candidate of its MSRP listener (the MCData UE gathers candidates only on the

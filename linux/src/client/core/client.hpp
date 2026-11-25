@@ -2459,6 +2459,8 @@ private:
   std::vector<SipHeader> mcdata_priority_headers(const char *level = "emergency") const;
 
   void mcdata_priority_response(const SipResponse &response);
+  // TS 24.282 clauses 6.2.8.1.17 and 6.2.8.1.18: the priority states on the release of a communication.
+  void mcdata_priority_released();
 
   void mcdata_priority_info(const mcdata::Info &info);
 
@@ -2626,6 +2628,17 @@ private:
     // step 6) and the last <mcdata-communication-state> received.
     std::string communication, communication_uri, last_state;
     unsigned established = 0, terminated = 0; // communications established and terminated, for the user (MMI)
+    // The priority of the communication the sent REFER requested (TS 24.282 clauses 9.2.5.2.1.1 1a), 9.2.5.3.1.1
+    // 3A)/3C)): "" (none), "emergency" or "imminent"; group or one-to-one; the priority states before the REFER
+    // (restored on "establish-fail", clause 9.2.5.2.1.1 2)i)).
+    std::string priority;
+    bool priority_group = false;
+    struct States {
+      int mdegc, mdeg, mdea, mdigc, mdig, mdepc, mdepp;
+      bool emergency;
+      std::string group;
+    };
+    std::optional<States> before;
   };
 
   std::unique_ptr<McdataPreSession> mcdata_pre_;
@@ -2637,7 +2650,12 @@ private:
   [[nodiscard]] bool mcdata_pre_usable() const;
   MsrpMedia mcdata_pre_media(const std::string &direction) const;
   std::string mcdata_pre_sdp(const std::string &setup) const;
-  void mcdata_pre_refer(const std::string &target, const mcdata::Info &info, const MsrpMedia &offer);
+  void mcdata_pre_refer(const std::string &target, const mcdata::Info &info, const MsrpMedia &offer,
+                        const std::vector<BodyPart> &entry_extra = {}, const std::vector<SipHeader> &extra_headers = {},
+                        const std::string &priority = {});
+  void mcdata_pre_priority_granted(const SipMessage &reinvite, const mcdata::Info &info);
+  void mcdata_pre_priority_refused(const SipResponse &response);
+  void mcdata_pre_restore_states();
   void mcdata_pre_leave();
   void mcdata_pre_connect();
   void mcdata_pre_drop_media();
