@@ -27,12 +27,16 @@ import java.util.UUID
 /**
  * A group of the Call tab: its affiliation status as the server notified it (TS 24.379 §9.2.1.3: "affiliated",
  * "affiliating", "deaffiliating", or null when not listed); [kind] "base" for a group affiliated at start-up,
- * "monitored" for one of the user profile affiliated besides them (§9.2.1.2), "available" for one that may be monitored.
+ * "monitored" for one of the user profile affiliated besides them (§9.2.1.2), "available" for one that may be monitored,
+ * "regroup" for a regroup the user was told of (§16.2.1.3) and "temporary" for a temporary group (TS 24.481 §6.3.14).
+ * [chat]: a chat group (§10.1.2), joined rather than called; [constituents] of a regroup.
  */
 data class GroupItem(val id: String, val affiliated: Boolean, val selected: Boolean, val status: String? = null,
-                     val kind: String = "base") {
+                     val kind: String = "base", val chat: Boolean = false, val constituents: List<String> = emptyList()) {
     val monitored: Boolean get() = kind == "monitored"
-    val callable: Boolean get() = kind != "available"
+    /** A chat group needs no affiliation first: joining affiliates (TS 24.379 §9.2.2.3.6). */
+    val callable: Boolean get() = kind != "available" || chat
+    val regrouped: Boolean get() = kind == "regroup" || kind == "temporary"
 }
 
 /** A received negotiated-mode affiliation request awaiting the user's answer (TS 24.379 §9.2.1.5). */
@@ -64,6 +68,11 @@ data class CallItem(
     val queuePosition: Int? = null,
     /** The functional alias of the call (TS 24.379 §9A): "as <alias>" for a caller's alias, "to <alias>" for a called one. */
     val alias: String? = null,
+    /** A broadcast group call (§6.2.8.2): only its initiator talks. A first-to-answer call (§11.1.1). */
+    val broadcast: Boolean = false,
+    val firstToAnswer: Boolean = false,
+    /** An ad hoc call's participant criteria (§17.2.2.1.1 step 12). */
+    val criteria: String? = null,
 )
 
 /**
@@ -209,6 +218,8 @@ data class UiState(
     val ownAlert: List<String> = emptyList(),
     val ownAdhoc: String? = null,
     val adhocChoices: List<AlertChoice> = emptyList(),
+    /** The criteria an ad hoc group call can be made by (TS 24.379 §17.2.2.1.1 step 12), from the user's groups. */
+    val adhocCallChoices: List<AlertChoice> = emptyList(),
     /** The outcome of the last alert request, or the last area notice. */
     val alertResult: String? = null,
     /** Other people's active emergency alerts, one each. */
@@ -260,6 +271,12 @@ interface UiActions {
     /** Accept or decline the received negotiated-mode affiliation request (TS 24.379 §9.2.1.5). */
     fun answerAffiliationRequest(accept: Boolean) {}
     fun callAdhoc(targets: List<String>) {}
+    /** An ad hoc group call by participant criteria (§17.2.2.1.1 step 12). */
+    fun callAdhocCriteria(criteria: String) {}
+    /** A first-to-answer call to two or more users (§11.1.1.2.1.1). */
+    fun callFirstToAnswer(targets: List<String>) {}
+    /** A broadcast group call (§10.1.1.2.1.1, §6.2.8.2). */
+    fun callGroupBroadcast(group: String) {}
     fun answer() {}
     fun reject() {}
     fun hangup() {}
@@ -388,9 +405,17 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     // The base groups, then the monitored ones, then those of the user profile that may be monitored.
     val monitored = client.monitoredGroups
     val base = if (client.config.mcptt != null) client.wantedGroups(org.openmcx.client.body.McService.MCPTT).filter { it !in monitored } else emptyList()
+    // The regroups and temporary groups the user was told of (TS 24.379 §16.2.1.3), after them: considered affiliated
+    // (§16.2.2.4 step 3 h)) and called at once with their preconfigured group's configuration (§16.1).
+    val regroups = mcptt?.regroups?.state?.value?.regroups?.values ?: emptyList()
     val groups = (base.map { it to "base" } + monitored.map { it to "monitored" } +
         client.monitorableGroups.filter { it !in monitored && it !in base }.map { it to "available" }).map { (id, kind) ->
-        GroupItem(id, Affiliation.counts(status.mcptt.affiliations[id]), Engine.selectedGroup.value == id, status.mcptt.affiliations[id], kind)
+        GroupItem(id, Affiliation.counts(status.mcptt.affiliations[id]), Engine.selectedGroup.value == id, status.mcptt.affiliations[id], kind,
+            chat = mcptt?.regroups?.configurationOf(id)?.chat == true)
+    } + regroups.map { r ->
+        GroupItem(r.uri, true, Engine.selectedGroup.value == r.uri, "regrouped", if (r.temporary) "temporary" else "regroup",
+            chat = mcptt?.regroups?.configurationOf(r.uri)?.chat == true,
+            constituents = r.groups.ifEmpty { client.groupDocuments[r.uri]?.temporaryConstituents ?: emptyList() })
     }
     val procedures = client.procedures?.state?.value
     fun item(call: Call): CallItem {
@@ -407,6 +432,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
             CallType.PRIVATE -> call.peer?.short() ?: "private call"
             CallType.PREARRANGED -> call.groupId?.short() ?: "group"
             CallType.ADHOC -> "ad hoc: ${call.groupId?.short() ?: ""}"
+            CallType.CHAT -> call.groupId?.short() ?: "chat group"
         }
         val limit = call.floorEvents.lastOrNull { it.startsWith("granted") }?.let { Regex("""(\d+)s$""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
         val self = client.config.mcptt?.userId
@@ -418,7 +444,8 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         val shown = if (call.type == CallType.PRIVATE) CallDisplay.privateCall(call.outgoing, call.peer, call.callingAlias, call.calledAlias)
             else CallDisplay.groupCall(title, call.outgoing, call.callingAlias)
         return CallItem(call.id, shown.title, call.type, call.state, state, floor?.talker, call.floorEvents.lastOrNull(), limit, call.startedAt, members,
-            call.floorControl, call.media?.muted == true, call.priority, floor?.queuePosition?.value, shown.subtitle)
+            call.floorControl, call.media?.muted == true, call.priority, floor?.queuePosition?.value, shown.subtitle,
+            call.broadcast, call.firstToAnswer, call.criteria)
     }
     val calls = mcptt?.calls?.value ?: emptyList()
     val incoming = calls.firstOrNull { !it.outgoing && it.state == "ringing" }
@@ -539,6 +566,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         ownAlert = Engine.alerts?.own()?.keys?.sortedBy { it.ordinal }?.map(AlertCenter::label) ?: emptyList(),
         ownAdhoc = Engine.alerts?.ownAdhoc()?.let { (criteria, via) -> "${AlertChoices.describe(criteria)} (${via.joinToString(", ", transform = AlertCenter::label)})" },
         adhocChoices = if (Engine.alerts?.adhocServices().isNullOrEmpty()) emptyList() else AlertChoices.of(groups.map { it.id }),
+        adhocCallChoices = AlertChoices.of(groups.filter { !it.regrouped }.map { it.id }),
         alertResult = Engine.alertResult.value,
         receivedAlerts = Engine.alerts?.received()?.map { a ->
             AlertItem(a.person.replaceFirstChar { it.uppercase() },
@@ -642,6 +670,9 @@ object EngineActions : UiActions {
     override fun retryNow() { Engine.client?.retryNow() }
     override fun signIn() { runCatching { Engine.client?.signIn() }.onFailure { Engine.log.add("sign-in: ${it.message}") } }
     override fun callAdhoc(targets: List<String>) = place("the ad hoc group") { Engine.mcptt?.adhocCall(targets) }
+    override fun callAdhocCriteria(criteria: String) = place("the ad hoc group") { Engine.mcptt?.adhocCall(emptyList(), criteria) }
+    override fun callFirstToAnswer(targets: List<String>) = place("the first to answer") { Engine.mcptt?.firstToAnswerCall(targets) }
+    override fun callGroupBroadcast(group: String) = place(group) { Engine.mcptt?.broadcastCall(group) }
     override fun answer() { Engine.mcptt?.answer() }
     override fun reject() { Engine.mcptt?.reject() }
     override fun hangup() = launch { Engine.mcptt?.hangup() }

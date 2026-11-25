@@ -110,7 +110,62 @@ class DebugControl(private val context: Context) {
             when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }, implicitChoice(args)) }
         // priority emergency|imminent on|off: the state of the call in progress (§6.2.8)
         "priority" -> { mcptt().setPriority(args[0] == "emergency", args.getOrNull(1) != "off"); mcptt().active?.priority ?: "no call" }
-        "adhoc" -> call { it.adhocCall(args) }
+        // adhoc [broadcast] <MCPTT ID>... | adhoc [broadcast] criteria <criteria> (TS 24.379 §17.2.2.1.1 steps 9, 11, 12)
+        "adhoc" -> call {
+            val broadcast = args.firstOrNull() == "broadcast"
+            val rest = if (broadcast) args.drop(1) else args
+            if (rest.firstOrNull() == "criteria") it.adhocCall(emptyList(), rest.drop(1).joinToString(" "), broadcast)
+            else it.adhocCall(rest, broadcast = broadcast)
+        }
+        // adhoc-modify add <MCPTT ID>... [remove <MCPTT ID>...] | adhoc-modify remove ... | adhoc-modify criteria <criteria> (§17.2.6.1.1)
+        "adhoc-modify" -> {
+            if (args.firstOrNull() == "criteria") JSONObject().put("result", mcptt().modifyAdhoc(criteria = args.drop(1).joinToString(" ")))
+            else {
+                val add = mutableListOf<String>(); val remove = mutableListOf<String>(); var into: MutableList<String>? = null
+                for (a in args) when (a) { "add" -> into = add; "remove" -> into = remove
+                    else -> (into ?: throw IllegalArgumentException("usage: adhoc-modify add|remove <MCPTT ID>... | criteria <criteria>")) += a }
+                JSONObject().put("result", mcptt().modifyAdhoc(add, remove))
+            }
+        }
+        // adhoc-leave: leave the ad hoc call without releasing it (§17.2.4.1.1); adhoc-release: release it for all (§17.2.3.1.1)
+        "adhoc-leave" -> { mcptt().hangup(releaseAll = false); "left" }
+        "adhoc-release" -> { mcptt().hangup(releaseAll = true); "released" }
+        // rejoin: the last chat group joined (§10.1.2.2.1.1) or the ad hoc call left (§17.2.5.1.1)
+        "rejoin" -> call { s -> lastChat?.let { s.chatCall(it) } ?: s.rejoinAdhoc() }
+        // chat [<group>] [emergency|imminent] [implicit|explicit]: initiate or join a chat group call (§10.1.2.2.1.1); leave with hangup
+        "chat" -> call {
+            val group = args.firstOrNull { a -> a.startsWith("sip:") } ?: Engine.client!!.config.mcptt!!.groups.first()
+            lastChat = group
+            it.chatCall(group, when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }, implicitChoice(args))
+        }
+        // broadcast [<group>] [emergency|imminent]: a broadcast group call (§10.1.1.2.1.1, §6.2.8.2)
+        "broadcast" -> call { it.broadcastCall(args.firstOrNull { a -> a.startsWith("sip:") } ?: Engine.client!!.config.mcptt!!.groups.first(),
+            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }) }
+        // first-to-answer <MCPTT ID> <MCPTT ID>... [emergency] [no-floor] [implicit|explicit] (§11.1.1.2.1.1 steps 10, 15)
+        "first-to-answer" -> call { it.firstToAnswerCall(args.filter { a -> a.startsWith("sip:") }, emergency = "emergency" in args,
+            floorControl = "no-floor" !in args, implicit = implicitChoice(args)) }
+        // floor-priority <0..255>|none: the floor priority offered in group calls (TS 24.380 §14.3.3)
+        "floor-priority" -> { mcptt().floorPriority = args.single().takeIf { it != "none" }?.toInt()?.also { require(it in 0..255) { "0..255" } }
+            JSONObject().put("floor_priority", mcptt().floorPriority ?: JSONObject.NULL) }
+        // regroup create <tgi> <preconfigured> <group>,<group>... | regroup users <tgi> <preconfigured> <MCPTT ID>,... | regroup remove <tgi>
+        "regroup" -> resultJson(when (args.firstOrNull()) {
+            "create" -> mcptt().regroups.request("create", args[1], args[2], groups = args[3].split(',').filter { it.isNotBlank() })
+            "users" -> mcptt().regroups.request("create", args[1], args[2], users = args[3].split(',').filter { it.isNotBlank() })
+            "remove" -> mcptt().regroups.request("remove", args[1])
+            else -> throw IllegalArgumentException("usage: regroup create|users <tgi> <preconfigured> <list> | regroup remove <tgi>")
+        })
+        "regroups" -> regroupsJson()
+        // temporary-create <document> <temporary group ID> <group>,<group>... [chat] [protected] (TS 24.481 §6.3.14.2)
+        "temporary-create" -> resultJson(mcptt().regroups.temporaryCreate(args[0], args[1], args[2].split(',').filter { it.isNotBlank() },
+            chat = "chat" in args.drop(3), protect = "protected" in args.drop(3)))
+        // temporary-delete <document> (TS 24.481 §6.3.15.2)
+        "temporary-delete" -> resultJson(mcptt().regroups.temporaryDelete(args.single()))
+        // group-document <group>: read the group's document again and show what the client uses of it
+        "group-document" -> Engine.client!!.refreshGroupDocument(args.single())?.let { d ->
+            JSONObject().put("uri", d.uri).put("type", d.type).put("members", JSONArray(d.members))
+                .put("preconfigured_use_only", d.preconfiguredUseOnly).put("user_priorities", JSONObject(d.userPriorities))
+                .put("temporary_constituents", JSONArray(d.temporaryConstituents)).put("regrouped_into", JSONArray(d.regroupedInto))
+        } ?: JSONObject.NULL
         "answer" -> mcptt().answer()
         "reject" -> mcptt().reject()
         "hangup" -> { mcptt().hangup(); "released" }
@@ -391,6 +446,20 @@ class DebugControl(private val context: Context) {
 
     private fun mcptt(): McpttService = Engine.mcptt ?: throw IllegalStateException("MCPTT not provisioned")
 
+    /** The chat group last joined from this endpoint, for `rejoin`. */
+    @Volatile private var lastChat: String? = null
+
+    /** The regroups notified (TS 24.379 §16.2.1.3) and the last regroup and temporary group requests. */
+    private fun regroupsJson(): JSONObject {
+        val state = Engine.mcptt?.regroups?.state?.value ?: return JSONObject()
+        return JSONObject().put("regroups", JSONObject(state.regroups.mapValues { (_, r) ->
+            JSONObject().put("preconfigured", r.preconfigured).put("groups", JSONArray(r.groups)).put("users", JSONArray(r.users))
+                .put("temporary", r.temporary)
+        })).put("notifications", state.notifications)
+            .put("last_request", state.lastRequest?.let(::resultJson) ?: JSONObject.NULL)
+            .put("last_temporary", state.lastTemporary?.let(::resultJson) ?: JSONObject.NULL)
+    }
+
     private fun procedures(): org.openmcx.client.client.ServiceProcedures =
         Engine.client?.procedures ?: throw IllegalStateException("MCPTT not provisioned")
 
@@ -633,6 +702,10 @@ class DebugControl(private val context: Context) {
         .put("pending_floor_confirmation", call.media?.takeIf { it.isStarted }?.floor?.offered?.value == true)
         .put("floor_events", JSONArray(call.floorEvents))
         .put("implicit_floor_request", call.implicitFloorRequest ?: JSONObject.NULL).put("granted_offered", call.grantedOffered)
+        .put("first_to_answer", call.firstToAnswer).put("invitees", JSONArray(call.invitees)).put("broadcast", call.broadcast)
+        .put("criteria", call.criteria ?: JSONObject.NULL).put("associated_group", call.associatedGroup ?: JSONObject.NULL)
+        .put("floor_priority", call.floorPriority ?: JSONObject.NULL).put("session_uri", call.sessionUri ?: JSONObject.NULL)
+        .put("last_modification", call.lastModification ?: JSONObject.NULL)
         .put("bursts", JSONArray(call.media?.bursts?.map { b ->
             JSONObject().put("direction", b.direction).put("ssrc", b.ssrc).put("frames", b.payloadHashes.size)
                 .put("hashes", JSONArray(b.payloadHashes)).put("started_at", b.startedAt)
@@ -669,6 +742,7 @@ class DebugControl(private val context: Context) {
             .put("calls", JSONArray(Engine.mcptt?.calls?.value?.map(::callJson) ?: emptyList<JSONObject>()))
             .put("functional_aliases", aliasJson())
             .put("procedures", proceduresJson())
+            .put("regroups", regroupsJson())
             .put("mcdata_functional_aliases", aliasJson(org.openmcx.client.body.McService.MCDATA))
             .put("mcvideo_functional_aliases", aliasJson(org.openmcx.client.body.McService.MCVIDEO))
             .put("history", JSONArray(Engine.mcptt?.history?.map(::callJson) ?: emptyList<JSONObject>()))
