@@ -169,6 +169,32 @@ class Notifications(private val context: Context) {
         manager.notify(AREA_ID, notification)
     }
 
+    /**
+     * A private call service request received (a call-back request, TS 24.379 §11.1.5.2.2; a remotely initiated call
+     * with <notify-remote-user> "true", §11.1.7.2.2 1)), or the outcome of this user's own request.
+     */
+    fun callService(record: org.openmcx.client.mcptt.ServiceRecord) {
+        val who = name(record.peer)
+        val target = record.target?.let { name(it) }
+        val text = when (record.type) {
+            org.openmcx.client.mcptt.PrivateServiceRules.CALL_BACK -> "$who asks you to call back"
+            org.openmcx.client.mcptt.PrivateServiceRules.CALL_BACK_CANCEL -> "$who withdrew the call-back request"
+            org.openmcx.client.mcptt.PrivateServiceRules.REMOTE_PRIVATE -> "$who asked this phone to call $target"
+            org.openmcx.client.mcptt.PrivateServiceRules.REMOTE_GROUP -> "$who asked this phone to call the group $target"
+            org.openmcx.client.mcptt.PrivateServiceRules.TRANSFER -> "$who transfers you to $target"
+            org.openmcx.client.mcptt.PrivateServiceRules.FORWARD -> "Your call is forwarded to $target"
+            else -> "${record.type.substringBefore("-response").replace('-', ' ')}${target?.let { " ($it)" } ?: ""}: ${record.outcome ?: "done"}"
+        }
+        val notification = NotificationCompat.Builder(context, MESSAGES)
+            .setSmallIcon(android.R.drawable.stat_notify_more)
+            .setContentTitle(context.getString(R.string.app_name))
+            .setContentText(text)
+            .setContentIntent(open())
+            .setAutoCancel(true)
+            .build()
+        manager.notify(SERVICE_ID + Math.floorMod((record.type + record.peer).hashCode(), 1000), notification)
+    }
+
     fun message(message: ReceivedSds) {
         val notification = NotificationCompat.Builder(context, MESSAGES)
             .setSmallIcon(android.R.drawable.stat_notify_chat)
@@ -201,6 +227,7 @@ class Notifications(private val context: Context) {
         const val VIDEO_CALL_ID = 2000
         const val VIDEO_ALERT_ID = 3000
         const val AREA_ID = 6000
+        const val SERVICE_ID = 7000
         const val ONGOING_ID = 4000
         const val VIDEO_ONGOING_ID = 5000
         const val ACTION_HANGUP = "org.openmcx.client.action.HANGUP"

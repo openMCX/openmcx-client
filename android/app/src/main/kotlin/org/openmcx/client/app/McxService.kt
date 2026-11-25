@@ -34,19 +34,27 @@ class McxService : LifecycleService() {
     /**
      * Idle, the service holds the signalling flow (special use). In a call it adds phoneCall
      * and, when the user may talk, microphone, so capture keeps working with the screen off.
+     *
+     * A remotely initiated ambient listening call (TS 24.379 §11.1.6.2.1.2) arrives with no user and often with the
+     * screen off, when Android (14 and later) no longer lets the app add the microphone type, a while-in-use type. So
+     * with the microphone permission the service asks for the microphone type from its start, while the app is in the
+     * foreground, and keeps it; when that is refused (a start from the background, at boot), it goes on without, and
+     * the listened-to user's speech may then be silent until the app has been opened once.
      */
     private fun foreground(inCall: Boolean, inVideoCall: Boolean = false) {
         var types = ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
         if (inVideoCall && checkSelfPermission(android.Manifest.permission.CAMERA) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
             types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
         }
-        if (inCall || inVideoCall) {
-            types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
-            if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            }
-        }
-        runCatching { ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(inCall || (inVideoCall && Engine.mcvideo?.active?.hidden != true)), types) }
+        if (inCall || inVideoCall) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+        val microphone = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        // A hidden call (ambient listening or viewing, the listened-to or viewed-to user) shows no call in the notification.
+        val shown = (inCall && Engine.mcptt?.active != null) || (inVideoCall && Engine.mcvideo?.active?.hidden != true)
+        if (microphone && runCatching {
+                ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(shown), types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+            }.isSuccess) return
+        if (microphone) Engine.log.add("foreground service: the microphone type was refused; without it")
+        runCatching { ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(shown), types) }
             .onFailure { Engine.log.add("foreground service types $types refused: ${it.message}") }
     }
 

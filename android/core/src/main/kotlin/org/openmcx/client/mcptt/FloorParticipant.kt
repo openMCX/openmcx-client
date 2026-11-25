@@ -90,6 +90,13 @@ class FloorParticipant(
      */
     @Volatile var autoConfirm: Boolean = true
 
+    /**
+     * TS 24.379 §6.4: the INVITE that set up the call was an implicit request to grant the floor to this client (the
+     * listened-to user of a remotely initiated ambient listening call, §11.1.6.2.1.2): a Floor Granted in 'U: has no
+     * permission' is taken as the grant of a request ('U: has permission', TS 24.380 §6.2.4.4.2), not ignored.
+     */
+    @Volatile var grantExpected: Boolean = false
+
     /** The call is established: floor messages may flow (§6.2.4.2). */
     suspend fun start() = lock.withLock { if (_state.value == FloorState.START_STOP) _state.value = FloorState.NO_PERMISSION }
 
@@ -251,6 +258,11 @@ class FloorParticipant(
                     if (autoConfirm) confirmLocked()
                 }
                 FloorState.HAS_PERMISSION -> Unit // a retransmitted grant: already acknowledged
+                FloorState.NO_PERMISSION -> if (grantExpected) {
+                    _state.value = FloorState.HAS_PERMISSION
+                    currentMediaSsrc = message.mediaSsrc; talker = null
+                    listener.granted(message.mediaSsrc ?: 0, message.durationSeconds)
+                }
                 // A grant that crossed our release: release again (§6.2.4.6).
                 FloorState.PENDING_RELEASE -> Unit
                 else -> Unit

@@ -283,3 +283,37 @@ Server gaps found (openmcx-server, not changed here):
 - **A declined media-plane FD.** The server takes the recipient's 480 with warning 110 or 231, then ends the
   originator's INVITE with 487, without the warning.
 - **An SDS above the group's limit.** The server ends the originator's leg before answering the SEND.
+
+## Parity phase 3 (2026-11-25)
+
+[PARITY_PLAN.md](PARITY_PLAN.md) phase 3 (branch `android-p3`): the MCPTT call services. One lab, `p3-a`:
+`lab/androidlab.py create --name p3-a --server-image openmcx-all:mcdpre-800c657 --private-services --priority` (host ports
+24061, 24443-24447), three redroid 15 clients (`redroid/redroid:15.0.0_64only-latest`), TLS. `--private-services` gives
+the fixture's `--private-call --private-services` rights for three clients: client-a listens (remote-init and
+local-init), asks for call-backs, remote calls and transfers and forwards by hand; bob forwards by hand and forces
+automatic commencement; client-c takes calls from anyone and is forwarded to bob after 4 s without an answer; the
+never-registered "offline" is forwarded to bob at once.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 505 passed, 0 failed (488 before this phase). New: `PrivateServicesTest` (16), `FloorParticipantTest.expectedGrantWithoutRequest` |
+| App unit tests (`:app:testDebugUnitTest`) | 15 passed (new: `ServiceTextTest`, 2) |
+| `:app:assembleDebug` | Built |
+| One run of S1-S6 (regression) and S32-S39 on `p3-a` | 152 of 152 (S1-S6 76, S32-S39 76) |
+| S11 on `p3-a` (its idle service type check now allows the microphone type) | 8 of 8 |
+
+| # | Scenario | Checks | Result |
+|---|---|---|---|
+| S32 | Ambient listening, remote-init (TS 24.379 §11.1.6.2.1.1, §11.1.6.2.1.2) | 12 | With bob's screen off, alice's INVITE (ambient-listening, remote-init, Priv-Answer-Mode Auto, recvonly) reaches bob with a null alert; bob's app answers 200 at once, sendonly, shows no call and no notification, and keeps the microphone service type; the server grants bob the floor without a request and alice gets bob's speech unchanged; alice holds the release capability and ends the call; bob's own remote-init request is refused |
+| S33 | Ambient listening, local-init | 5 | bob's offer is sendonly with his implicit floor request; alice is the listening user and is shown the call; bob's speech arrives unchanged; alice may release it |
+| S34 | Call-back (§11.1.5.2) | 11 | alice's request (urgency high, time of request) is stored and confirmed (PCCB-I3); bob calls back with manual commencement, alice answers, speech flows, both entries go; a second request to client-c is withdrawn at both ends; bob has no right to ask |
+| S35 | Remotely initiated private call (§11.1.7.2) | 10 | alice has bob's phone call client-c silently: bob's INVITE carries `<remotely-initiated-call-request-ind>` and Answer-Mode Auto, bob is not told, alice gets the success; with alice the target, no report; bob may not ask |
+| S36 | Remotely initiated group call (§10.1.5.2), imminent peril notification (§12.1.1.3) | 9 | bob's phone calls the group, alice and client-c join, alice gets the success with the group; with client-c out of the call, alice's imminent peril reaches client-c as a MESSAGE, answered 200 (it was 488), and its cancellation clears the state |
+| S37 | Transfer (§11.1.8.2) | 11 | alice transfers bob to client-c: bob's INVITE has `<call-transfer-ind>` and Priv-Answer-Mode Auto while his call with alice goes on; alice gets the success and her call ends; bob and client-c talk both ways; bob may not transfer |
+| S38 | Manual forwarding (§11.1.9.2.1) | 9 | bob forwards alice's ringing call to client-c (manual-input) and declines it with 480 and warning 175; alice's app calls client-c with `<call-forwarding-ind>`, sequence number 1 and Priv-Answer-Mode Manual; speech; bob gets the success |
+| S39 | Forwarding by the server (§6.3.2.5, §11.1.1.3.2) | 9 | alice's call to client-c is not answered in 4 s and ends with 480 and warning 175, and her app calls bob; her call to the unregistered "offline" is forwarded at once (Priv-Answer-Mode Auto, sequence number 1) |
+
+Found in the lab, and allowed for in the scenarios: the OpenMCX server passes neither `<call-transfer-ind>` nor
+`<call-forwarding-ind>` on to the target, and gives the invitee of a forwarded call Answer-Mode Auto although the caller
+asked for Manual (so the forwarded call may connect at once). Not exercised in the lab: the announced transfer
+(not implemented), `<ric-app-level-priority>` (unit test only), a protected ambient listening call.

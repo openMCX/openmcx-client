@@ -32,7 +32,12 @@ data class LocalMedia(val address: String, val audioPort: Int, val floorPort: In
                       /** "mc_granted" (§14.2.4): we accept the floor granted in the SIP 200 (OK); only with [implicitRequest]. */
                       val granted: Boolean = false,
                       /** The "mc_priority" of an offer (TS 24.380 §14.3.3): the highest floor priority asked for; null: none. */
-                      val floorPriority: Int? = null)
+                      val floorPriority: Int? = null,
+                      /**
+                       * The speech direction (RFC 3264 §5.1): `sendrecv`, or for an ambient listening call (TS 24.379
+                       * §6.2.1 item 2c) `recvonly` for the listening user and `sendonly` for the listened-to user.
+                       */
+                      val direction: String = "sendrecv")
 
 /** What the other side (the MCPTT server) negotiated. */
 data class RemoteMedia(
@@ -58,6 +63,8 @@ data class RemoteMedia(
     val granted: Boolean = false,
     /** The answer's "mc_ssrc" (§14.3.6): the RTP SSRC to send with once granted; null without one. */
     val grantedSsrc: Long? = null,
+    /** The speech direction attribute (RFC 3264 §5.1); `sendrecv` without one. */
+    val direction: String = "sendrecv",
 )
 
 /**
@@ -108,7 +115,7 @@ object McpttSdp {
             "ptime" to "20",
             "maxptime" to "240",
             "rtcp" to (local.audioPort + 1).toString(),
-            "sendrecv" to null,
+            local.direction to null,
         ) + (if (local.audioSsrc != 0L) listOf("ssrc" to "${local.audioSsrc} cname:mcptt") else emptyList()),
     )
 
@@ -160,6 +167,7 @@ object McpttSdp {
             implicitRequest = floor != null && "mc_implicit_request" in floorParams,
             granted = floor != null && "mc_granted" in floorParams,
             grantedSsrc = floorParams["mc_ssrc"]?.toLongOrNull(),
+            direction = audio.direction,
             keyMgmt = (session.attributes.firstOrNull { it.first == "key-mgmt" }?.second ?: audio.attribute("key-mgmt"))
                 ?.trim()?.takeIf { it.startsWith("mikey ") }?.removePrefix("mikey ")?.trim())
     }

@@ -171,6 +171,40 @@ class DebugControl(private val context: Context) {
                 .put("preconfigured_use_only", d.preconfiguredUseOnly).put("user_priorities", JSONObject(d.userPriorities))
                 .put("temporary_constituents", JSONArray(d.temporaryConstituents)).put("regrouped_into", JSONArray(d.regroupedInto))
         } ?: JSONObject.NULL
+        // Ambient listening (TS 24.379 §11.1.6.2.1.1): ambient remote <MCPTT ID> listens to that user (remote-init);
+        // ambient local <MCPTT ID> lets that user listen (local-init). ambient-source <wav>|none: what this phone's
+        // microphone gives next when it is listened to (the lab's devices have none).
+        "ambient" -> {
+            require(args.size == 2 && args[0] in setOf("remote", "local")) { "usage: ambient remote|local <MCPTT ID>" }
+            call { it.ambientCall(args[1], local = args[0] == "local") }
+        }
+        "ambient-source" -> {
+            Engine.fileAudio?.nextSource = args.single().takeIf { it != "none" }?.let { java.io.File(it).also { f -> require(f.canRead()) { "cannot read $it" } } }
+            "ok"
+        }
+        // Private call services, as the reference client (TS 24.379 §11.1.5, §11.1.7, §10.1.5, §11.1.8, §11.1.9):
+        //   callback <MCPTT ID> [low|normal|high] | callback-cancel <MCPTT ID> | callback-fulfil <MCPTT ID>
+        //   remote-call <remote ID> <target ID> [auto|manual|force-auto] [silent] [priority=<namespace.value>]
+        //   remote-group-call <remote ID> <group> [silent] [priority=<namespace.value>]
+        //   transfer <MCPTT ID> [fa] | forward <MCPTT ID> [fa] | call-services
+        "callback" -> resultJson(mcptt().services.requestCallBack(args[0], args.getOrNull(1) ?: "normal"))
+        "callback-cancel" -> resultJson(mcptt().services.cancelCallBack(args.single()))
+        "callback-fulfil" -> callJson(mcptt().services.fulfilCallBack(args.single()))
+        "remote-call" -> {
+            require(args.size >= 2) { "usage: remote-call <remote ID> <target ID> [auto|manual|force-auto] [silent] [priority=<namespace.value>]" }
+            val mode = when { "force-auto" in args -> Commencement.FORCED; "manual" in args -> Commencement.MANUAL; "auto" in args -> Commencement.AUTOMATIC
+                else -> null }
+            resultJson(mcptt().services.remotePrivateCall(args[0], args[1], mode, notify = "silent" !in args,
+                priority = args.firstOrNull { it.startsWith("priority=") }?.removePrefix("priority=")))
+        }
+        "remote-group-call" -> {
+            require(args.size >= 2) { "usage: remote-group-call <remote ID> <group> [silent] [priority=<namespace.value>]" }
+            resultJson(mcptt().services.remoteGroupCall(args[0], args[1], notify = "silent" !in args,
+                priority = args.firstOrNull { it.startsWith("priority=") }?.removePrefix("priority=")))
+        }
+        "transfer" -> resultJson(mcptt().services.transfer(args[0], toAlias = args.getOrNull(1) == "fa"))
+        "forward" -> resultJson(mcptt().services.forward(args[0], toAlias = args.getOrNull(1) == "fa"))
+        "call-services" -> callServicesJson()
         "answer" -> mcptt().answer()
         "reject" -> mcptt().reject()
         "hangup" -> { mcptt().hangup(); "released" }
@@ -955,12 +989,29 @@ class DebugControl(private val context: Context) {
         .put("criteria", call.criteria ?: JSONObject.NULL).put("associated_group", call.associatedGroup ?: JSONObject.NULL)
         .put("floor_priority", call.floorPriority ?: JSONObject.NULL).put("session_uri", call.sessionUri ?: JSONObject.NULL)
         .put("last_modification", call.lastModification ?: JSONObject.NULL)
+        .put("ambient_type", call.ambientType ?: JSONObject.NULL).put("ambient_role", call.ambientRole ?: JSONObject.NULL)
+        .put("hidden", call.hidden).put("may_release", call.mayRelease).put("service", call.service ?: JSONObject.NULL)
+        .put("answer_mode", call.answerMode ?: JSONObject.NULL).put("forwarding_sequence", call.forwardingSequence)
         .put("bursts", JSONArray(call.media?.bursts?.map { b ->
             JSONObject().put("direction", b.direction).put("ssrc", b.ssrc).put("frames", b.payloadHashes.size)
                 .put("hashes", JSONArray(b.payloadHashes)).put("started_at", b.startedAt)
                 .put("requested_at", b.requestedAt).put("granted_at", b.grantedAt)
                 .put("first_playout_at", b.firstPlayoutAt).put("concealed", b.concealed).put("late", b.late)
         } ?: emptyList<JSONObject>()))
+
+    /** The call-back requests sent and received, the requests carried out and the outcomes of this user's own. */
+    private fun callServicesJson(): JSONObject {
+        val st = Engine.mcptt?.services?.state?.value ?: return JSONObject()
+        fun record(r: org.openmcx.client.mcptt.ServiceRecord) = JSONObject().put("type", r.type).put("peer", r.peer)
+            .put("target", r.target ?: JSONObject.NULL).put("outcome", r.outcome ?: JSONObject.NULL).put("notify", r.notify).put("at", r.at)
+        return JSONObject().put("callbacks_sent", JSONObject(st.callBacksSent))
+            .put("callbacks_received", JSONObject(st.callBacksReceived.mapValues { (_, r) ->
+                JSONObject().put("urgency", r.urgency).put("time", r.time ?: JSONObject.NULL) }))
+            .put("handled", JSONArray(st.handled.map(::record))).put("outcomes", JSONArray(st.outcomes.map(::record)))
+            .put("last_request", st.lastRequest?.let(::resultJson) ?: JSONObject.NULL)
+            .put("group_states", JSONObject(Engine.alertHandlers.firstOrNull { it.service == org.openmcx.client.location.LocationService.MCPTT }?.groupStates?.value?.mapValues { (_, g) ->
+                JSONObject().put("emergency", g.emergency).put("imminent_peril", g.imminentPeril).put("by", g.by ?: JSONObject.NULL) } ?: emptyMap<String, JSONObject>()))
+    }
 
     private fun status(): JSONObject {
         val network = NetworkStatus.current.value?.json() ?: JSONObject.NULL
@@ -992,6 +1043,7 @@ class DebugControl(private val context: Context) {
             .put("functional_aliases", aliasJson())
             .put("procedures", proceduresJson())
             .put("regroups", regroupsJson())
+            .put("call_services", callServicesJson())
             .put("mcdata_functional_aliases", aliasJson(org.openmcx.client.body.McService.MCDATA))
             .put("mcvideo_functional_aliases", aliasJson(org.openmcx.client.body.McService.MCVIDEO))
             .put("history", JSONArray(Engine.mcptt?.history?.map(::callJson) ?: emptyList<JSONObject>()))
