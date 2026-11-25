@@ -55,9 +55,11 @@ interface McdataMediaPeer {
     suspend fun invite(parts: List<Part>, headers: List<Pair<String, String>>): Pair<SipResponse, Dialog?>
     suspend fun reinvite(dialog: Dialog, parts: List<Part>, headers: List<Pair<String, String>>): SipResponse
     suspend fun bye(dialog: Dialog, headers: List<Pair<String, String>> = emptyList())
-    suspend fun info(dialog: Dialog, parts: List<Part>): SipResponse
+    suspend fun info(dialog: Dialog, parts: List<Part>, headers: List<Pair<String, String>>): SipResponse
     fun event(text: String)
     val protection: McdataProtection? get() = null
+    /** A MESSAGE for file distribution (FD NOTIFICATION, TS 24.282 §12.2.1.1); null when not available. */
+    suspend fun fdMessage(parts: List<Part>): SipResponse? = null
 }
 
 /** [McdataMediaPeer] on the running [McxClient]. */
@@ -102,22 +104,26 @@ class ClientMediaPeer(private val client: McxClient) : McdataMediaPeer {
         headers.forEach { (k, v) -> bye.headers.add(k, v) }
         runCatching { withTimeoutOrNull(5_000) { ua.send(bye, dialog) } }
     }
-    override suspend fun info(dialog: Dialog, parts: List<Part>): SipResponse {
+    override suspend fun info(dialog: Dialog, parts: List<Part>, headers: List<Pair<String, String>>): SipResponse {
         val request = ua.inDialog(dialog, "INFO")
-        val (type, body) = Multipart.encode(parts)
+        val (type, body) = if (parts.size == 1) parts[0].contentType to parts[0].content else Multipart.encode(parts)
         request.headers.add("Content-Type", type)
-        // TS 24.282 §13.2.4.2.2: the INFO package of MCData communication release.
-        request.headers.add("Info-Package", "g.3gpp.mcdata-com-release")
+        // TS 24.282 §13.2.4.2.2 with RFC 6086 §4.2.1: the INFO package of MCData communication release.
+        request.headers.add("Info-Package", CommunicationRelease.PACKAGE).add("Content-Disposition", "Info-Package")
+        headers.forEach { (k, v) -> request.headers.add(k, v) }
         return ua.send(SipRequest(request.method, request.uri, request.headers, body), dialog)
     }
     override fun event(text: String) = client.event("mcdata media: $text")
     override val protection get() = client.mcdataProtection
+    override suspend fun fdMessage(parts: List<Part>) = ClientFdPeer(client).send(parts)
 }
 
 /** An incoming INVITE and the means to answer it (a [ServerTransaction], or a test's). */
 interface MediaInvite {
     val request: SipRequest
     val localTag: String
+    /** Completes when the INVITE is cancelled (RFC 3261 §9.2). */
+    val cancelled: kotlinx.coroutines.Deferred<Unit>? get() = null
     suspend fun respond(status: Int, body: ByteArray = ByteArray(0), contentType: String? = null, extra: List<Pair<String, String>> = emptyList())
 }
 
@@ -188,6 +194,8 @@ class McdataMediaService(
     var listener: MediaListener? = null
     /** TS 24.282 §10.2.5.2.4 step 7: how an FD offer is decided ("ask" waits for [answerFile], "accept", "decline"). */
     @Volatile var fileDecision: (MediaCommunication) -> String = { "accept" }
+    /** Where received files are kept (TS 24.582 §7.1.3.2); null: not stored, only given to [MediaListener.file]. */
+    @Volatile var fileDirectory: java.io.File? = null
 
     /** The open SDS session (the last one opened or received). */
     val session: MediaCommunication? get() = _communications.value.lastOrNull { it.kind == "session" && it.open }
@@ -418,12 +426,13 @@ class McdataMediaService(
     override suspend fun handle(tx: ServerTransaction): Boolean = handle(object : MediaInvite {
         override val request get() = tx.request
         override val localTag get() = tx.localTag
+        override val cancelled get() = tx.cancelled
         override suspend fun respond(status: Int, body: ByteArray, contentType: String?, extra: List<Pair<String, String>>) {
             tx.respond(status, body = body, contentType = contentType, extra = extra)
         }
     })
 
-    private fun ours(request: SipRequest) = _communications.value.lastOrNull { it.dialog?.callId == request.callId && !it.ended }
+    private fun ours(request: SipRequest) = _communications.value.lastOrNull { it.dialog?.callId == request.callId }
 
     suspend fun handle(tx: MediaInvite): Boolean {
         val request = tx.request
@@ -472,8 +481,7 @@ class McdataMediaService(
                 tx.respond(488, extra = listOf("Warning" to McdataProtection.WARNING_136)); return true
             }
         }
-        if (fd) { if (!fileOffer(c, tx, parts, offer)) return true }
-        add(c)
+        if (fd) { if (!fileOffer(c, tx, parts, offer)) return true } else add(c)
         answer(c, tx, offer)
         return true
     }
@@ -558,6 +566,18 @@ class McdataMediaService(
 
     // FD over the media plane (TS 24.282 §10.2.5): FdMedia.kt.
 
+    /** TS 24.282 §10.2.5.2.3: send [contents] as the file [name] over the media plane. */
+    suspend fun sendFile(target: String, group: Boolean, name: String, contents: ByteArray, type: String = "application/octet-stream",
+                         mandatory: Boolean = false, completion: Boolean = false, priority: String = "normal"): MediaCommunication =
+        FdMedia.send(this, target, group, name, contents, type, mandatory, completion, priority)
+
+    /** TS 24.282 §10.2.5.2.4 7)b)-d): the user's decision ("accept", "decline", "defer") on the offered file [id] (the latest). */
+    fun answerFile(decision: String, id: Int? = null): Boolean {
+        require(decision in setOf("accept", "decline", "defer")) { "accept, decline or defer" }
+        val c = _communications.value.lastOrNull { it.decision != null && (id == null || it.id == id) } ?: return false
+        return c.decision?.complete(decision) ?: false
+    }
+
     /** TS 24.282 §10.2.5.2.4 steps 5-7: the file offered; false when the INVITE was answered (refused, declined). */
     private suspend fun fileOffer(c: MediaCommunication, tx: MediaInvite, parts: List<Part>, offer: MsrpMedia): Boolean =
         FdMedia.offer(this, c, tx, parts, offer)
@@ -565,6 +585,11 @@ class McdataMediaService(
     private suspend fun fileReceived(c: MediaCommunication, body: ByteArray) = FdMedia.received(this, c, body)
 
     private suspend fun info(c: MediaCommunication, tx: MediaInvite) = Release.received(this, c, tx)
+
+    /** TS 24.282 §13.2.4 to §13.2.6: a communication release request of this user ([Release.send]). */
+    suspend fun release(action: String, reason: String? = null, query: Boolean = false, c: MediaCommunication? = null): Int =
+        Release.send(this, c ?: _communications.value.lastOrNull { !it.ended && it.dialog != null } ?: throw SdsError("no communication is open"),
+            action, reason, query)
 
     internal val internals = Internals()
     /** What the FD and release procedures of this service reach. */

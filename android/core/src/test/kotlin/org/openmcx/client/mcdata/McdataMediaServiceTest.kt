@@ -7,6 +7,7 @@ package org.openmcx.client.mcdata
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -85,7 +86,12 @@ class McdataMediaServiceTest {
             reinvites += parts; return SipResponse(status, "OK")
         }
         override suspend fun bye(dialog: Dialog, headers: List<Pair<String, String>>) { byes += headers }
-        override suspend fun info(dialog: Dialog, parts: List<Part>) = SipResponse(200, "OK")
+        val infos = CopyOnWriteArrayList<Pair<List<Part>, List<Pair<String, String>>>>()
+        val fdMessages = CopyOnWriteArrayList<List<Part>>()
+        override suspend fun info(dialog: Dialog, parts: List<Part>, headers: List<Pair<String, String>>): SipResponse {
+            infos += parts to headers; return SipResponse(200, "OK")
+        }
+        override suspend fun fdMessage(parts: List<Part>): SipResponse { fdMessages += parts; return SipResponse(200, "OK") }
         override fun event(text: String) { println(text) }
     }
 
@@ -318,5 +324,161 @@ class McdataMediaServiceTest {
         assertEquals(200, tx.responses.single().first)
         assertTrue(media.session!!.emergency)
         assertNotNull(MsrpMedia.parse(tx.responses.single().second!!))
+    }
+
+    // FD over the media plane (TS 24.282 §10.2.5, TS 24.582 §7).
+
+    @Test fun fileOverTheMediaPlaneIsOfferedWithRfc5547AttributesAndSent() = runBlocking {
+        val server = FakeServer()
+        val (_, media) = services(server)
+        val contents = ByteArray(5000) { (it * 7).toByte() }
+        val c = media.sendFile(bob, group = false, name = "photo.jpg", contents = contents, type = "image/jpeg", mandatory = true)
+        val (parts, headers) = server.invites.single()
+        val offer = sdp(parts)
+        // TS 24.282 §10.2.5.2.1: the signalling type only, the file selector with size and hash, sendonly.
+        assertEquals(listOf(McdataService.SIGNALLING), offer.acceptTypes)
+        assertEquals("sendonly", offer.direction)
+        val metadata = FileMetadata.parse("file-selector:" + offer.fileSelector)
+        assertEquals(5000L, metadata.size)
+        assertEquals(FdService.sha256Bytes(contents), metadata.sha256)
+        assertNotNull(offer.fileTransferId)
+        assertTrue(offer.fileDate!!.startsWith("creation:\""))
+        assertEquals("photo.jpg", offer.fileDescription)
+        assertEquals("one-to-one-fd", info(parts).requestType)
+        assertTrue(headers.contains("P-Preferred-Service" to Icsi.MCDATA_FD))
+        // TS 24.282 §6.2.2.3: the FD SIGNALLING PAYLOAD has no Payload IE.
+        val signalling = FdSignalling.decode(parts.first { it.mediaType == McdataService.SIGNALLING }.content, mediaPlane = true)
+        assertEquals("", signalling.fileUrl)
+        assertTrue(signalling.mandatoryDownload)
+        assertTrue(runCatching { FdSignalling.decode(parts.first { it.mediaType == McdataService.SIGNALLING }.content) }.isFailure)
+        val e = server.endpoint!!
+        e.next()
+        val chunks = (1..3).map { e.next() }
+        assertTrue(chunks.all { it.contentType == McdataMediaService.FILE })
+        assertEquals(contents.toList(), chunks.map { it.body }.reduce { a, b -> a + b }.toList())
+        assertEquals("delivered", c.state)
+        waitFor("BYE") { server.byes.size == 1 }
+    }
+
+    private fun fdInvite(e: PassiveEndpoint, contents: ByteArray, mandatory: Boolean, completion: Boolean = false): SipRequest {
+        val signalling = FdSignalling(1, UUID.randomUUID(), UUID.randomUUID(), "", completionRequested = completion, mandatoryDownload = mandatory)
+        val selector = FileMetadata("report.pdf", "application/pdf", contents.size.toLong(), FdService.sha256Bytes(contents)).encode()
+            .removePrefix("file-selector:")
+        return invite(e, "one-to-one-fd", service = Icsi.MCDATA_FD,
+            extraParts = listOf(Part(McdataService.SIGNALLING, signalling.encode(mediaPlane = true)))) {
+            it.copy(acceptTypes = listOf(McdataService.SIGNALLING), fileSelector = selector, fileTransferId = "t1")
+        }
+    }
+
+    @Test fun mandatoryFileIsReceivedCheckedAndCompletionNotified() = runBlocking {
+        val server = FakeServer()
+        val (_, media) = services(server)
+        val dir = java.nio.file.Files.createTempDirectory("fd").toFile()
+        media.fileDirectory = dir
+        val contents = ByteArray(4000) { it.toByte() }
+        val e = PassiveEndpoint().also { endpoints += it }
+        val tx = Answer(fdInvite(e, contents, mandatory = true, completion = true))
+        media.handle(tx)
+        val answer = MsrpMedia.parse(tx.responses.single().second!!)
+        // TS 24.282 §10.2.5.2.2: the answer names the signalling type and repeats the file selector.
+        assertEquals(listOf(McdataService.SIGNALLING), answer.acceptTypes)
+        assertNotNull(answer.fileSelector)
+        assertEquals("t1", answer.fileTransferId)
+        assertTrue(tx.responses.single().third.any { it.first == "Contact" && it.second.contains("+g.3gpp.mcdata.fd") })
+        e.next()
+        e.send(MsrpMessage("f1", method = "SEND", toPath = listOf(e.clientUri!!), fromPath = listOf(e.uri), messageId = "file",
+            byteRange = ByteRange(1, 4000, 4000), contentType = McdataMediaService.FILE, body = contents))
+        waitFor("received") { media.communications.value.single().state == "received" }
+        assertEquals(contents.toList(), java.io.File(dir, "report.pdf").readBytes().toList())
+        // TS 24.282 §12.2.1.1: the completion notification goes on the signalling plane.
+        waitFor("COMPLETED") { server.fdMessages.isNotEmpty() }
+        val notice = FdNotification.decode(server.fdMessages.single().first { it.mediaType == McdataService.SIGNALLING }.content)
+        assertEquals(FdNotificationType.COMPLETED, notice.type)
+        assertEquals(alice, notice.sender)
+    }
+
+    @Test fun nonMandatoryFileIsDeclinedOrDeferredByTheUser() = runBlocking {
+        val (_, media) = services(FakeServer())
+        val e = PassiveEndpoint().also { endpoints += it }
+        media.fileDecision = { "decline" }
+        val declined = Answer(fdInvite(e, ByteArray(10), mandatory = false))
+        media.handle(declined)
+        assertEquals(480, declined.responses.single().first)
+        assertTrue(declined.responses.single().third.contains("Warning" to FdMedia.DECLINED))
+        media.fileDecision = { "ask" }
+        val asked = Answer(fdInvite(e, ByteArray(10), mandatory = false))
+        val job = kotlinx.coroutines.GlobalScope.launch { media.handle(asked) }
+        waitFor("ringing") { asked.responses.isNotEmpty() }
+        assertEquals(180, asked.responses.single().first)
+        assertTrue(media.answerFile("defer"))
+        job.join()
+        assertEquals(480, asked.responses.last().first)
+        assertTrue(asked.responses.last().third.contains("Warning" to FdMedia.DEFERRED))
+        assertEquals("deferred", media.communications.value.last().state)
+    }
+
+    @Test fun corruptFileIsNotKept() = runBlocking {
+        val (_, media) = services(FakeServer())
+        val e = PassiveEndpoint().also { endpoints += it }
+        media.handle(Answer(fdInvite(e, ByteArray(100) { 1 }, mandatory = true)))
+        e.next()
+        e.send(MsrpMessage("f1", method = "SEND", toPath = listOf(e.clientUri!!), fromPath = listOf(e.uri), messageId = "file",
+            byteRange = ByteRange(1, 100, 100), contentType = McdataMediaService.FILE, body = ByteArray(100) { 2 }))
+        waitFor("corrupt") { media.communications.value.single().state == "corrupt" }
+    }
+
+    // Communication release (TS 24.282 §13.2).
+
+    @Test fun communicationReleaseCodec() {
+        for (m in listOf(CommunicationRelease(ReleaseType.INTENT_TO_RELEASE, remainingDataQuery = true),
+                         CommunicationRelease(ReleaseType.EXTENSION_RESPONSE, extensionAccepted = false),
+                         CommunicationRelease(ReleaseType.AUTH_USER_RELEASE_REQUEST)))
+            assertEquals(m, CommunicationRelease.decode(m.encode()))
+        // Table 15.1.10.1-1: message type, the type octet, then the half-octet IEs.
+        assertEquals(listOf(0x0a, 1, 0xb1), CommunicationRelease(ReleaseType.INTENT_TO_RELEASE, true).encode().map { it.toInt() and 0xff })
+    }
+
+    private fun releaseInfo(request: SipRequest, message: CommunicationRelease, reason: String? = null): SipRequest {
+        val headers = Headers().add("Via", "SIP/2.0/TLS 10.0.0.1;branch=z9hG4bKinfo${UUID.randomUUID()}")
+            .add("From", "<sip:mcdata@mcx.test>;tag=srv").add("To", "<$alice>;tag=ours").add("Call-ID", request.callId)
+            .add("CSeq", "3 INFO").add("Info-Package", CommunicationRelease.PACKAGE).add("Content-Type", McdataService.SIGNALLING)
+        reason?.let { headers.add("Reason", "SIP;cause=200;text=\"$it\"") }
+        return SipRequest("INFO", "sip:alice@127.0.0.1", headers, message.encode())
+    }
+
+    @Test fun releaseIntentWithQueryIsAnsweredWithTheRemainingData() = runBlocking {
+        val server = FakeServer()
+        val (_, media) = services(server)
+        val e = PassiveEndpoint().also { endpoints += it }
+        val request = invite(e, "one-to-one-sds-session")
+        media.handle(Answer(request))
+        waitFor("open") { media.session != null }
+        val tx = Answer(releaseInfo(request, CommunicationRelease(ReleaseType.INTENT_TO_RELEASE, remainingDataQuery = true), "data limit"))
+        assertTrue(media.handle(tx))
+        assertEquals(200, tx.responses.single().first)
+        assertEquals("release pending: data limit", media.session!!.release)
+        // TS 24.282 §13.2.4.2.1 step 2c: the remaining amount in an INFO of its own, a TEXT payload.
+        val (parts, _) = server.infos.single()
+        assertEquals("0", DataPayload.decode(parts.single { it.mediaType == McdataService.PAYLOAD }.content).payloads.single().text)
+        // An authorised user's release request is the server's to make, not to receive: 403.
+        val refused = Answer(releaseInfo(request, CommunicationRelease(ReleaseType.AUTH_USER_RELEASE_REQUEST)))
+        media.handle(refused)
+        assertEquals(403, refused.responses.single().first)
+    }
+
+    @Test fun releaseRequestsOfThisUser() = runBlocking {
+        val server = FakeServer()
+        val (_, media) = services(server)
+        media.openSession(group, group = true)
+        assertEquals(200, media.release("intent", reason = "done", query = true))
+        val (parts, headers) = server.infos.single()
+        // TS 24.282 §13.2.6.2.2.1: mcdata-info with the client ID, then the COMMUNICATION RELEASE; the Reason.
+        assertEquals("urn:uuid:1", info(parts).clientId)
+        assertEquals(CommunicationRelease(ReleaseType.INTENT_TO_RELEASE, true),
+            CommunicationRelease.decode(parts.single { it.mediaType == McdataService.SIGNALLING }.content))
+        assertTrue(headers.contains("Reason" to "SIP;cause=200;text=\"done\""))
+        media.release("extend")
+        assertEquals(CommunicationRelease(ReleaseType.EXTENSION_REQUEST),
+            CommunicationRelease.decode(server.infos.last().first.single().content))
     }
 }

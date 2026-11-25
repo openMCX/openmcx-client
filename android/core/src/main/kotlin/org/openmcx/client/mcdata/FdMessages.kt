@@ -13,20 +13,22 @@ data class FdSignalling(
     val mandatoryDownload: Boolean = false, val applicationId: Int? = null,
     val sender: String? = null, val inReplyTo: UUID? = null,
 ) {
-    fun encode(): ByteArray = Writer().apply {
-        require(fileUrl.isNotBlank()) { "HTTP FD requires a FILEURL" }
+    /** [mediaPlane]: TS 24.282 §6.2.2.3, an FD over the media plane carries no Payload IE (the file goes by MSRP). */
+    fun encode(mediaPlane: Boolean = false): ByteArray = Writer().apply {
+        require(mediaPlane || fileUrl.isNotBlank()) { "HTTP FD requires a FILEURL" }
         fdHeader(2, time, conversationId, messageId)
         inReplyTo?.let { u8(0x21); uuid(it) }
         applicationId?.let { require(it in 0..255); u8(0x22); u8(it) }
         if (completionRequested) u8(0x91)
         if (mandatoryDownload) u8(0xa1)
-        tlvE(0x78, byteArrayOf(4) + fileUrl.toByteArray(Charsets.UTF_8))
+        if (fileUrl.isNotBlank()) tlvE(0x78, byteArrayOf(4) + fileUrl.toByteArray(Charsets.UTF_8))
         metadata?.let { tlvE(0x79, it.toByteArray(Charsets.UTF_8)) }
         sender?.let { tlvE(0x51, it.toByteArray(Charsets.UTF_8)) }
     }.bytes()
 
     companion object {
-        fun decode(data: ByteArray): FdSignalling {
+        /** [mediaPlane]: the FILEURL is not required (TS 24.282 §6.2.2.3); it is "" when absent. */
+        fun decode(data: ByteArray, mediaPlane: Boolean = false): FdSignalling {
             val r = Reader(data); r.expectType(2)
             val time = r.dateTime(); val conversation = r.uuid(); val message = r.uuid()
             var url: String? = null; var metadata: String? = null; var sender: String? = null
@@ -54,8 +56,8 @@ data class FdSignalling(
                     else -> throw McdataCodecError("unsupported FD IE $ie")
                 }
             }
-            if (url.isNullOrBlank()) throw McdataCodecError("HTTP FD requires a FILEURL")
-            return FdSignalling(time, conversation, message, url, metadata, completion, mandatory, app, sender, reply)
+            if (url.isNullOrBlank() && !mediaPlane) throw McdataCodecError("HTTP FD requires a FILEURL")
+            return FdSignalling(time, conversation, message, url ?: "", metadata, completion, mandatory, app, sender, reply)
         }
     }
 }

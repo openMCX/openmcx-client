@@ -479,6 +479,9 @@ class FdService(
             return safe.ifEmpty { "file" }
         }
 
+        /** The SHA-256 of [data] in lower-case hex (RFC 5547 hash:sha-256, as [FileMetadata] holds it). */
+        fun sha256Bytes(data: ByteArray): String = MessageDigest.getInstance("SHA-256").digest(data).joinToString("") { "%02x".format(it) }
+
         fun sha256(file: File): String {
             val digest = MessageDigest.getInstance("SHA-256")
             file.inputStream().use { input ->
