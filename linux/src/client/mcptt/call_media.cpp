@@ -235,6 +235,14 @@ void Client::call_state(std::string_view id, SipCallState state, int code) {
       mcdata_media_pending_.clear();
       mcdata_media_role_.clear();
       mcdata_media_session_ = false;
+      // The communication's own group and peer go with it, as on the user's release (mcdata_media_close): a later
+      // one-to-one communication's payload is opened with the PCK of its sender (mcdata_media_origin), not looked up
+      // as a group's.
+      mcdata_session_group_.clear();
+      mcdata_session_adhoc_ = false;
+      mcdata_media_group_.clear();
+      mcdata_media_peer_.clear();
+      mcdata_media_key_.reset();
       event("mcdata_media_released", {{"dialog", std::string(id)}, {"status", code}});
     }
     return;
