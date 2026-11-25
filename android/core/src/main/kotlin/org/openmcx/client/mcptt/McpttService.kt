@@ -83,6 +83,13 @@ class Call internal constructor(
     @Volatile var callingAlias: String? = null
     @Volatile var calledAlias: String? = null
     val floorEvents: MutableList<String> = CopyOnWriteArrayList()
+    /**
+     * The implicit floor request of the call's initial INVITE (TS 24.380 §14.2.5): null without one, then "offered",
+     * and at the 200 (OK) "accepted", "granted" (by the answer's "mc_granted", §14.2.4) or "not accepted".
+     */
+    @Volatile var implicitFloorRequest: String? = null
+    /** Our initial INVITE's offer had "mc_granted" (TS 24.380 §14.2.4). */
+    @Volatile var grantedOffered: Boolean = false
     /** A protected incoming call's keys, opened before it is answered: its PCK (private) or GMK (group). */
     internal var keys: Pair<org.openmcx.client.security.KeyMessage?, org.openmcx.client.security.KeyMessage?> = null to null
 }
@@ -303,6 +310,15 @@ class McpttService(
         }
     }
 
+    /**
+     * TS 24.380 §6.2.4.3.5 1 b): the Floor Indicator of the call's Floor Request and Floor Release: emergency (a group
+     * or private emergency call) or imminent peril, else normal; bit F when the call negotiated queueing.
+     * No broadcast group calls are made by this client.
+     */
+    private fun indicatorOf(call: Call, local: LocalMedia, remote: RemoteMedia): Int = ClientRules.floorIndicator(
+        broadcast = false, emergency = call.priority == "emergency", imminent = call.priority == "imminent",
+        queueing = local.queueing && remote.queueing)
+
     private fun floor(call: Call, text: String) { call.floorEvents += text; event("call ${call.id} floor $text"); changed(call) }
 
     // Originating calls.
@@ -312,8 +328,9 @@ class McpttService(
      * (§11.1.2.2): offered without `m=application`, both parties then speak at once, like a telephone call.
      */
     suspend fun privateCall(target: String, commencement: Commencement = Commencement.AUTOMATIC, floorControl: Boolean = true,
-                            emergency: Boolean = false): Call =
-        originate(CallType.PRIVATE, target, null, listOf(target), commencement, floorControl, if (emergency) "emergency" else "normal")
+                            emergency: Boolean = false, implicit: Implicit? = null): Call =
+        originate(CallType.PRIVATE, target, null, listOf(target), commencement, floorControl, if (emergency) "emergency" else "normal",
+            implicit = implicit)
 
     /**
      * A private call to a functional alias (§11.1.1.2.1.1 step 14c): the request names the alias with
@@ -335,15 +352,21 @@ class McpttService(
      * Prearranged group call (TS 24.379 §10.1.1.2.1.1); with [priority] `emergency` or `imminent`, an emergency or
      * imminent peril group call (§6.2.8.1).
      */
-    suspend fun groupCall(group: String, priority: String = "normal"): Call =
-        originate(CallType.PREARRANGED, null, group, emptyList(), null, priority = priority)
+    suspend fun groupCall(group: String, priority: String = "normal", implicit: Implicit? = null): Call =
+        originate(CallType.PREARRANGED, null, group, emptyList(), null, priority = priority, implicit = implicit)
+
+    /**
+     * The implicit floor request of one call (TS 24.380 §14.2.5) and whether its offer has "mc_granted" (§14.2.4),
+     * instead of the configured `implicit_floor_request` and `offer_granted`.
+     */
+    data class Implicit(val request: Boolean, val granted: Boolean)
 
     /** Ad hoc group call (TS 24.379 §17.2.2.1.1): the participants are chosen here. */
     suspend fun adhocCall(participants: List<String>): Call = originate(CallType.ADHOC, null, null, participants, null)
 
     private suspend fun originate(type: CallType, peer: String?, group: String?, targets: List<String>, commencement: Commencement?,
                                   floorControl: Boolean = true, priority: String = "normal", toAlias: Boolean = false,
-                                  calledAlias: String? = null): Call {
+                                  calledAlias: String? = null, implicit: Implicit? = null): Call {
         if (active != null) throw CallError("already in a call")
         val resource = resourcePriority(priority)
         // TS 33.180 7.4 (TS 24.379 §11.1.1.2.1.1): a protected private call's media under a new PCK for the called
@@ -365,6 +388,14 @@ class McpttService(
             gmk != null -> floored.copy(protected = true)
             else -> floored
         }
+        // TS 24.379 §6.4, TS 24.380 §14.2.5: the initial INVITE may request the floor implicitly; §14.2.4: with
+        // "mc_granted" when the floor granted in the 200 (OK) is accepted (offer_granted). Only this offer carries them
+        // (§14.5): the call's own media ([local]) has neither, so no re-INVITE repeats them.
+        val implicitRequest = floorControl && (implicit?.request ?: config.implicitFloorRequest)
+        val grantedOffer = implicitRequest && (implicit?.granted ?: config.offerGranted)
+        val offered = if (implicitRequest) local.copy(implicitRequest = true, granted = grantedOffer, audioSsrc = McpttSdp.newFloorSsrc()) else local
+        call.implicitFloorRequest = if (implicitRequest) "offered" else null
+        call.grantedOffered = grantedOffer
         val media = newMedia(call, ports, local)
         media.protection = protection
         pck?.let { event("call ${call.id}: PCK %08x for $peer".format(it.first.csbId)) }
@@ -387,7 +418,7 @@ class McpttService(
             call.calledAlias = calledAlias ?: peer.takeIf { toAlias }
             val info = priorityInfo(McpttInfo(sessionType = type.sessionType, requestUri = group, clientId = client.config.clientId,
                 functionalAlias = presented, callToFunctionalAlias = if (toAlias) true else null, calledFunctionalAlias = calledAlias), priority)
-            val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(local).toByteArray()),
+            val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(offered).toByteArray()),
                 Part(McpttInfo.CONTENT_TYPE, info.encode().toByteArray()))
             if (targets.isNotEmpty()) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(targets).toByteArray())
             val (contentType, body) = Multipart.encode(parts)
@@ -426,7 +457,20 @@ class McpttService(
             val remote = McpttSdp.remote(sdp.text)
             if (remote.floorControl != floorControl) throw CallError("floor control not negotiated as offered")
             if (remote.protected != local.protected) throw CallError("media protection not negotiated as offered")
-            media.start(remote, priority = null)
+            // TS 24.380 §14.4: the answer's "mc_implicit_request" and "mc_granted" count only when our offer had them.
+            val accepted = ClientRules.answerParameterKept(remote.implicitRequest, implicitRequest)
+            val grantedByAnswer = accepted && ClientRules.answerParameterKept(remote.granted, grantedOffer)
+            if (implicitRequest) {
+                call.implicitFloorRequest = when { grantedByAnswer -> "granted"; accepted -> "accepted"; else -> "not accepted" }
+                event("call ${call.id}: implicit floor request ${call.implicitFloorRequest}")
+            }
+            // §14.3.6: the RTP SSRC of a grant in the answer is its "mc_ssrc", else the one our offer announced.
+            media.start(remote, priority = null, implicit = accepted,
+                grantedSsrc = if (grantedByAnswer) remote.grantedSsrc ?: offered.audioSsrc else null,
+                indicator = { indicatorOf(call, local, remote) })
+            // The microphone opens while the grant is awaited, as on a PTT press (pttPress).
+            if (accepted && !grantedByAnswer) { media.requestedAt = System.currentTimeMillis(); media.prepareTalk() }
+            if (grantedByAnswer) floor(call, "granted by mc_granted in the 200 (OK)")
             call.state = "established"
             call.sessionExpires = response.headers["Session-Expires"]?.substringBefore(';')?.trim()?.toIntOrNull() ?: 0
             val refresher = response.headers["Session-Expires"]?.substringAfter("refresher=", "")?.substringBefore(';')?.trim()
@@ -557,7 +601,7 @@ class McpttService(
             "Contact" to client.sessionContact(McService.MCPTT), "Require" to "timer", "Supported" to "timer",
             "Session-Expires" to "$offered;refresher=uas", "Allow" to ALLOW))
         call.dialog = Dialog.fromRequest(tx.request, tx.localTag)
-        media.start(remote)
+        media.start(remote, indicator = { indicatorOf(call, local, remote) })
         tx.send(response)
         call.state = "established"
         startRefresh(call) // we are the refresher (§6.2.3.1.1 step 5)

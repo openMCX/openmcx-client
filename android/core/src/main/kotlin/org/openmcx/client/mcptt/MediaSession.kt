@@ -124,18 +124,27 @@ class MediaSession(
     /** Duplex calls: the microphone is not sent (the RTP timestamps still advance). */
     @Volatile var muted = false
 
-    /** Start once the SDP negotiation is done (the call is established). */
-    fun start(remote: RemoteMedia, priority: Int? = remote.floorPriority) {
+    /**
+     * Start once the SDP negotiation is done (the call is established). [implicit]: our implicit floor request was
+     * accepted (TS 24.380 §6.2.4.2.2 step 4), with [grantedSsrc] when the answer granted the floor ("mc_granted").
+     * [indicator] gives the Floor Indicator of our floor messages (§6.2.4.3.5). The floor participant is started before
+     * the floor port is read, so that the messages that arrived before the 200 (OK) (held by the socket, step 2) are
+     * received in its state.
+     */
+    fun start(remote: RemoteMedia, priority: Int? = remote.floorPriority, implicit: Boolean = false, grantedSsrc: Long? = null,
+              indicator: () -> Int = { FloorIndicator.NORMAL }) {
         this.remote = remote
-        floor = FloorParticipant(scope, remote.floorSsrc, ::sendFloor, this, priority)
+        floor = FloorParticipant(scope, remote.floorSsrc, ::sendFloor, this, priority, indicator = indicator)
         jobs += scope.launch(Dispatchers.IO) { receiveAudio() }
         if (!remote.floorControl) {
             // No floor: speak at once, with the SSRC our SDP announced.
             talking = scope.launch(Dispatchers.IO) { talk(remote, local.audioSsrc, null) }
             return
         }
-        jobs += scope.launch(Dispatchers.IO) { receiveFloor() }
-        scope.launch { floor.start() }
+        jobs += scope.launch(Dispatchers.IO) {
+            if (implicit) floor.startImplicit(grantedSsrc) else floor.start()
+            receiveFloor()
+        }
     }
 
     private suspend fun sendFloor(message: FloorMessage) {
