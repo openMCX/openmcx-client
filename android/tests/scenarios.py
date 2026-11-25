@@ -514,7 +514,10 @@ class Lab:
         self.hangup(A)
         self.idle_everywhere([A, B, C])
         types = self.fgs_types(A)
-        self.check("alice's service is back to special use only after the call", types == self.special_use(A), types=hex(types))
+        # The microphone type stays (held from the service's start, for a remotely initiated ambient listening call,
+        # TS 24.379 §11.1.6.2.1.2); phoneCall goes.
+        self.check("alice's service is back to special use (and the microphone) after the call",
+                   types & ~FGS_MICROPHONE == self.special_use(A), types=hex(types))
         # A message notification, and history that outlives the process.
         text = f"Notify me {time.strftime('%H%M%S')}"
         self.cmd(A, "sds", MCDATA[B], text)
