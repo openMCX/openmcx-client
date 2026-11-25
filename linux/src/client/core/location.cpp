@@ -461,9 +461,9 @@ std::optional<SipResponse> Client::mcdata_location_incoming(const SipMessage &me
 
 //------------------------------------------------------------------------------
 // TS 24.282 clause 16.2.1.5: entry into an emergency alert area starts an MCData emergency alert;
-// TS 24.282 clause 16.2.1.4: entry into or exit from a group geographic area affiliates to or leaves the group.
-// Limitation: the MCData client affiliates its configured group set as a whole, so it acts only on a notice naming
-// its configured group.
+// TS 24.282 clause 16.2.1.4: entry into or exit from a group geographic area affiliates to or leaves the group the
+// participating function indicates (<associated-group-id>), through clause 8.2.2: one PUBLISH changing that group
+// only, the user's other groups kept.
 void Client::mcdata_area_notice(const mcdata::Info &info) {
   Json entry;
   if (info.emergency_alert_area) {
@@ -482,15 +482,20 @@ void Client::mcdata_area_notice(const mcdata::Info &info) {
     }
   } else {
     entry = {{"kind", "group_geographic_area"}, {"entered", *info.group_geo_area}, {"group_id", info.associated_group}};
-    if (info.associated_group == mcdata_group()) {
+    if (!info.associated_group.empty()) {
       try {
-        mcdata_affiliate(*info.group_geo_area);
+        const std::vector<std::string> group{info.associated_group};
+        // 2)a)ii) / 2)b)ii): affiliate to / de-affiliate from the indicated group (nothing to send when the client
+        // already is / is not affiliated to it)
+        const bool sent = *info.group_geo_area ? mcdata_change_affiliation(group, {})
+                                               : mcdata_change_affiliation({}, group);
         entry["affiliation"] = *info.group_geo_area;
+        entry["publish"] = sent;
       } catch (const std::exception &error) {
         entry["affiliation_error"] = error.what();
       }
     } else
-      entry["affiliation_error"] = "the client affiliates to its configured MCData group only";
+      entry["affiliation_error"] = "no <associated-group-id> in the notification";
   }
   mcdata_area_notices_received_.push_back(entry);
   event("mcdata_location_area_notice", entry);
