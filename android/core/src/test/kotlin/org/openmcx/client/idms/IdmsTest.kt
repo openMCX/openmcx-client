@@ -226,6 +226,9 @@ class IdmsTest {
             " 3gpp:mc:video_service 3gpp:mc:video_config_management_service 3gpp:mc:video_group_management_service" +
             " 3gpp:mc:ptt_key_management_service 3gpp:mc:video_key_management_service",
             IdmsClient.scope(listOf("ptt", "data", "video"), listOf("ptt", "video")))
+        // TS 33.180 table B.4.2.2-1: a client with a SEAL location management server asks for its scope too.
+        assertEquals("openid 3gpp:mc:ptt_service 3gpp:mc:ptt_config_management_service 3gpp:mc:ptt_group_management_service" +
+            " 3gpp:mc:location_management_service", IdmsClient.scope(listOf("ptt"), location = true))
     }
 
     @Test

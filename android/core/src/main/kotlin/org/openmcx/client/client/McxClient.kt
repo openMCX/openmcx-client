@@ -212,7 +212,8 @@ class McxClient(
                 "video".takeIf { config.mcvideo != null }),
             if (config.security == null) emptyList()
             else listOfNotNull("ptt".takeIf { config.mcptt != null }, "data".takeIf { config.mcdata != null },
-                "video".takeIf { config.mcvideo != null })),
+                "video".takeIf { config.mcvideo != null }),
+            location = config.lms != null),
         clock = clock, endpoints = config.idms.endpoints)
 
     /**

@@ -634,7 +634,7 @@ class DebugControl(private val context: Context) {
                     .put("adhoc", a.adhoc).put("criteria", a.criteria).put("lat", a.latitude).put("lon", a.longitude)
             }))
             .put("notices", JSONArray(Engine.alertHandlers.flatMap { h -> h.notices.map { n ->
-                JSONObject().put("service", n.service.lower).put("alert_area", n.alertArea).put("entered", n.entered).put("group", n.group).put("alerted", n.alerted).put("affiliation", n.affiliation)
+                JSONObject().put("service", n.service.lower).put("alert_area", n.alertArea).put("entered", n.entered).put("group", n.group).put("alerted", n.alerted).put("affiliation", n.affiliation).put("at", n.at)
             } }))
             .put("result", Engine.alertResult.value)
             .put("events", JSONArray(Engine.alertHandlers.flatMap { h -> h.events.toList() }))
