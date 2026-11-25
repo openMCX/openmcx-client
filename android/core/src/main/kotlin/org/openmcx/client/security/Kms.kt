@@ -367,6 +367,28 @@ class KeyClient(private val http: HttpClient, kmsUri: String, val identity: Stri
         return key to java.util.Base64.getEncoder().encodeToString(Mikey.create(k, id, recipient, key))
     }
 
+    /**
+     * TS 33.180 clause 5.2.8.3: whether this client holds the certificate of the KMS [uri] (the KMS URI of its
+     * documents, `kms_id`, or its address): only its own KMS's here, no KMS CertCache of other KMSs being fetched.
+     */
+    fun knowsKms(uri: String): Boolean = uri.trimEnd('/').let { it == kmsId.trimEnd('/') || it == kmsUri || it == kms?.kmsUri?.trimEnd('/') }
+
+    /** The KMS URI this client's documents carry (TS 24.281 §6.2.8.3.9 1) b): the initial configuration's <kms>). */
+    val ownKmsUri: String get() = kmsId
+
+    /**
+     * A new PCK for [recipient] keyed to the KMS [recipientKmsUri] (TS 24.281 §10.2.2.2.1 step 8 d), TS 33.180 annex
+     * E.2: IDRkmsr), which must be one this client knows ([knowsKms]). Debug builds may name the receiver KMS
+     * [mislabelled] as another URI, the key still under this KMS, to see the server's KMS Redirect Response.
+     */
+    suspend fun makePck(recipient: String, recipientKmsUri: String, mislabelled: String? = null): Pair<KeyMessage, String> {
+        if (!knowsKms(recipientKmsUri)) throw KeyError("no KMS certificate for $recipientKmsUri")
+        val (k, id) = current()
+        val key = Mikey.newKey(1, Mikey.nowNtp())
+        val receiver = mislabelled?.let { k.copy(kmsUri = it) } ?: k
+        return key to java.util.Base64.getEncoder().encodeToString(Mikey.create(k, id, recipient, key, recipientKms = receiver))
+    }
+
     /** Open a PCK offered by [expected] (its initiator, authenticated), refusing a replay; key parameters allowed. */
     override suspend fun acceptPck(expected: String, encoded: String): KeyMessage {
         val message = decode(encoded)

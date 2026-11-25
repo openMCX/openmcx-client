@@ -318,4 +318,69 @@ class SignallingProtectionTest {
         assertEquals(403, answer.status)
         assertTrue(answer.headers["Warning"]!!.contains("140"))
     }
+
+    // MCVideo (TS 24.281 clauses 4.8, 6.6.2, 6.6.3 with TS 33.180 clause 9.3): the MCVideo server's requests under this
+    // client's MCVideo CSK, its own XPK-ID and its own MC service user ID.
+
+    private val videoInfo = Part(McvideoInfo.CONTENT_TYPE, McvideoInfo(sessionType = "prearranged", callingUserId = "sip:bob.mcvideo@mcx.test",
+        callingGroupId = "sip:operations@mcx.test", clientId = "urn:uuid:2").encode().toByteArray())
+
+    private fun videoServerParts(key: XmlProtection.Key, tamper: Boolean = false): List<Part> {
+        val body = XmlProtection.encrypt(videoInfo.text, key, XmlProtection.signallingProfile("mcvideo"))
+        val signatures = XmlProtection.sign(listOf(XmlProtection.SignedBody("v@s", body)), key, SignallingProtection.SIGNED_NAMESPACE)
+        val sent = if (tamper) body.replace("Encrypted", "Encrypted ") else body
+        return listOf(Part("application/sdp", "v=0\r\n".toByteArray()),
+            Part(McvideoInfo.CONTENT_TYPE, sent.toByteArray(), listOf("Content-ID" to "<v@s>")),
+            Part(SignallingProtection.SIGNED, signatures.toByteArray()))
+    }
+
+    /** TS 24.281 clause 6.6.1.4: an MCVideo INVITE's mcvideo-info verified and decrypted under the MCVideo CSK. */
+    @Test fun mcvideoInviteIsVerifiedAndDecrypted() {
+        csks[McService.MCPTT] = csk(0x20000001); csks[McService.MCVIDEO] = csk(0x20000002)
+        val key = key(McService.MCVIDEO, "sip:alice.mcvideo@mcx.test")
+        val sent = videoServerParts(key)
+        assertFalse(sent[1].text.contains("bob.mcvideo"))
+        val opened = incoming(request("INVITE", "sip:alice@x", "P-Asserted-Service" to Icsi.MCVIDEO), sent)
+        assertEquals(listOf("application/sdp", McvideoInfo.CONTENT_TYPE), opened.map { it.mediaType })
+        val info = McvideoInfo.parse(opened[1].text)
+        assertEquals("sip:bob.mcvideo@mcx.test", info.callingUserId); assertEquals("sip:operations@mcx.test", info.callingGroupId)
+    }
+
+    /** TS 24.281 clauses 6.6.3.4.2 and 6.6.2.4.2: a failed check of an MCVideo request is 403 with warning 139, an undecryptable one 140. */
+    @Test fun mcvideoRequestsRefusedWith139Or140() = withUa { ua, core ->
+        csks[McService.MCVIDEO] = csk(0x20000002)
+        val key = key(McService.MCVIDEO, "sip:alice.mcvideo@mcx.test")
+        suspend fun deliver(method: String, parts: List<Part>, branch: String): String? {
+            val (type, body) = Multipart.encode(parts)
+            val headers = Headers().add("Via", "SIP/2.0/TLS 127.0.0.1:5061;branch=$branch").add("From", "<sip:mcvideo@mcx.test>;tag=s")
+                .add("To", "<sip:alice@mcx.test>").add("Call-ID", "$branch@s").add("CSeq", "1 $method").add("Content-Type", type)
+                .add("P-Asserted-Service", Icsi.MCVIDEO).add("Contact", "<sip:mcvideo@mcx.test>")
+            ua.receive(SipRequest(method, "sip:alice@x", headers, body))
+            val answer = core.answer()
+            assertEquals(403, answer.status)
+            return answer.headers["Warning"]
+        }
+        assertTrue(deliver("INVITE", videoServerParts(key, tamper = true), "z9hG4bKv1")!!.contains("139 integrity protection check failed"))
+        val other = XmlProtection.Key(ByteArray(16) { 7 }, key.id, key.user)
+        val wrong = Part(McvideoInfo.CONTENT_TYPE, XmlProtection.encrypt(videoInfo.text, other, XmlProtection.signallingProfile("mcvideo")).toByteArray())
+        assertTrue(deliver("MESSAGE", listOf(wrong), "z9hG4bKv2")!!.contains("140 unable to decrypt XML content"))
+    }
+
+    /** TS 24.281 clause 6.6.2.1: the conference SUBSCRIBE's mcvideo-info and an alert's location encrypted; all signed. */
+    @Test fun mcvideoConferenceSubscriptionAndAlertAreProtected() {
+        documents["mcvideo"] = true to true
+        csks[McService.MCVIDEO] = csk(0x20000002); held += McService.MCVIDEO
+        val subscribe = request("SUBSCRIBE", "sip:focus@mcvideo.mcx.test", "P-Preferred-Service" to Icsi.MCVIDEO, "Event" to "conference")
+        val info = Part(McvideoInfo.CONTENT_TYPE, McvideoInfo(requestUri = "sip:operations@mcx.test", clientId = "urn:uuid:1").encode().toByteArray())
+        val parts = out(subscribe, listOf(info))
+        assertFalse(parts[0].text.contains("sip:operations@mcx.test"))
+        assertEquals(0x20000002L, XmlProtection.keyId(parts[0].text))
+        val location = Part("application/vnd.3gpp.mcvideo-location-info+xml", org.openmcx.client.mcvideo.EmergencyLocation(48.85, 2.35).encode().toByteArray())
+        val alert = out(request("MESSAGE", "sip:mcvideo@mcx.test", "P-Preferred-Service" to Icsi.MCVIDEO),
+            listOf(Part(McvideoInfo.CONTENT_TYPE, McvideoInfo(requestUri = "sip:operations@mcx.test", alert = true).encode().toByteArray()), location))
+        assertEquals(listOf(McvideoInfo.CONTENT_TYPE, "application/vnd.3gpp.mcvideo-location-info+xml", SignallingProtection.SIGNED), alert.map { it.mediaType })
+        assertTrue(XmlProtection.isProtected(alert[1].text))
+        val key = key(McService.MCVIDEO, "sip:alice.mcvideo@mcx.test")
+        assertEquals(2, XmlProtection.verify(signatures(alert), bodies(alert), key).size)
+    }
 }

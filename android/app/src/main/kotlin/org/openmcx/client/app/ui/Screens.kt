@@ -577,7 +577,7 @@ private fun groupStatusText(g: GroupItem): String {
         "monitored" -> "monitored, $affiliation"
         "available" -> if (g.status == null) "not monitored" else "not monitored, $affiliation"
         else -> affiliation
-    }
+    } + (g.rule?.let { " ($it)" } ?: "")
 }
 
 /**
@@ -748,7 +748,7 @@ private fun FunctionalAliases(state: UiState, actions: UiActions) {
                 Text(when (alias.service) { "mcdata" -> "MCData"; "mcvideo" -> "MCVideo"; else -> "MCPTT" }, color = Mcx.Muted,
                     style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
                 val (label, ink) = when (alias.status) {
-                    "active" -> (if (alias.inUse) "Active · on your calls" else "Active") to Mcx.OkInk
+                    "active" -> ((if (alias.inUse) "Active · on your calls" else "Active") + if (alias.byLocation) " · by location" else "") to Mcx.OkInk
                     "take-over-possible" -> "Held by another user" to Mcx.WarnInk
                     else -> "Not active" to Mcx.Muted
                 }

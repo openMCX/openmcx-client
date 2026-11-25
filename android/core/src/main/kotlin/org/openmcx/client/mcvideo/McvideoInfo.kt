@@ -41,6 +41,8 @@ data class McvideoInfo(
     val participantCriteria: String? = null,
     val adhocAlert: Boolean? = null,
     val adhocAlertReceived: Boolean? = null,
+    /** In `<anyExt>`: an emergency ad hoc group call (TS 24.281 §6.2.8.1.19 step 2, §22.2.2.2.1 step 4). */
+    val adhocEmergency: Boolean? = null,
     /**
      * In `<anyExt>` (TS 24.281 Annex F.1.2), functional aliases (§20): the alias presented by the caller, the alias
      * called, the call to an alias, and the <req-type> of the alias status subscription (§20.2.1.3 step 2).
@@ -64,10 +66,11 @@ data class McvideoInfo(
             wrapped("originated-by", originatedBy, "mcvideoURI")
             wrapped("mcvideo-client-id", clientId, "mcvideoString")
             wrapped("video-pull-url", videoPullUrl, "mcvideoURI")
-            if (ambientViewingType != null || participantCriteria != null || adhocAlert != null || adhocAlertReceived != null ||
+            if (ambientViewingType != null || participantCriteria != null || adhocAlert != null || adhocAlertReceived != null || adhocEmergency != null ||
                 functionalAlias != null || calledFunctionalAlias != null || callToFunctionalAlias != null || reqType != null) element("anyExt") {
                 leaf("ambient-viewing-type", ambientViewingType)
                 leaf("call-participants-criteria", participantCriteria)
+                leaf("adhoc-emergency-ind", adhocEmergency?.toString())
                 leaf("adhoc-alert-ind", adhocAlert?.toString())
                 leaf("adhoc-alert-ind-rcvd", adhocAlertReceived?.toString())
                 wrapped("functional-alias-URI", functionalAlias, "mcvideoURI")
@@ -108,6 +111,7 @@ data class McvideoInfo(
                 releaseReason = params.descendants("release-reason").firstOrNull()?.text(),
                 participantCriteria = params.descendants("call-participants-criteria").firstOrNull()?.text(),
                 adhocAlert = params.descendants("adhoc-alert-ind").firstOrNull()?.text()?.trim()?.let { it == "true" || it == "1" },
+                adhocEmergency = params.descendants("adhoc-emergency-ind").firstOrNull()?.text()?.trim()?.let { it == "true" || it == "1" },
                 adhocAlertReceived = params.descendants("adhoc-alert-ind-rcvd").firstOrNull()?.text()?.trim()?.let { it == "true" || it == "1" },
                 functionalAlias = params.descendants("functional-alias-URI").firstOrNull()?.text(),
                 calledFunctionalAlias = params.descendants("called-functional-alias-URI").firstOrNull()?.text(),

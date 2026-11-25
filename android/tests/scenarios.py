@@ -289,6 +289,11 @@ class Lab:
                     self.cmd(c, "hangup", ok=False)
             except Exception:
                 pass
+            try:
+                if self.cmd(c, "video-status", ok=False).get("result", {}).get("active"):
+                    self.cmd(c, "video-hangup", ok=False)
+            except Exception:
+                pass
         self.release_aliases(list(self.devices))
 
     def release_aliases(self, clients) -> None:
@@ -1489,6 +1494,364 @@ class Lab:
                 pass
             self.check(f"{c} forgets the temporary group", tg not in self.regroups(c)["regroups"])
 
+    # MCVideo (TS 24.281, TS 24.581) on redroid: no camera there, so these check the signalling, transmission and
+    # reception control, not pictures (tests/video.py checks the pictures on phones).
+
+    def video(self, client: str) -> dict | None:
+        return self.cmd(client, "video-status").get("active")
+
+    def video_events(self, client: str) -> list:
+        return (self.video(client) or {}).get("events") or []
+
+    def video_idle(self, clients) -> None:
+        for c in clients:
+            self.wait(f"{c} has no video call", lambda c=c: self.video(c) is None, timeout=15)
+
+    def video_hangup(self, client: str) -> None:
+        if self.video(client):
+            self.cmd(client, "video-hangup", ok=False)
+
+    def v1_transmission_control(self) -> None:
+        """TS 24.581 §6.2.4 and §6.2.5 with §11: the transmission ends by Transmission end request and its response
+        (§6.2.4.5.3, §6.2.4.6.4), never Transmission Release; no counter reaches its limit; a receiver stops receiving
+        (§6.2.5.5.3, T104); the transmission and reception priorities offered from the MCVideo user profile, negotiated
+        and requested (§14.2.3, §14.3.3, §6.2.4.3.2; a lab made with --mcvideo-priority client-a=7:4); an implicit request
+        with the group call setup (TS 24.281 §6.4) granted without a Transmission Request. On a lab made with --protected
+        --xml-protection --integrity-protection, the MCVideo signalling is XML protected (TS 33.180 §9.3) with nothing refused."""
+        m = meta(self.name)
+        keys = {c: self.cmd(c, "keys")["xml_protection"] for c in (A, B)}
+        xml = all((k["services"].get("mcvideo") or {}).get("confidentiality") and (k["services"].get("mcvideo") or {}).get("integrity")
+                  for k in keys.values())
+        if xml:
+            self.check("MCVideo XML confidentiality and integrity required by the service configuration, both with an MCVideo CSK",
+                       all(k["services"]["mcvideo"]["csk_id"] for k in keys.values()))
+        call = self.cmd(A, "video-call", "sip:bob.mcvideo@mcx.test", timeout=30)
+        self.check("a private video call with transmission control is established", call["state"] == "established", call=call)
+        self.wait("bob's call is up", lambda: (v := self.video(B)) and v["state"] == "established")
+        r = self.cmd(A, "video-transmit", "2", timeout=30)
+        self.check("alice is granted the transmission", r.get("granted") is True, result=r)
+        self.wait("alice's transmission ends with the end response", lambda: "transmission ended" in self.video_events(A))
+        ev = self.video_events(B)
+        self.check("bob is told alice transmits and receives it", "taken by sip:alice.mcvideo@mcx.test" in ev and "receiving" in ev, events=ev)
+        a = self.video(A)
+        self.check("alice's end request is answered (T101 stopped, no timeout), back to no permission",
+                   a["transmission"] == "NO_PERMISSION" and not a.get("timeouts"), call=a)
+        # Reception end while alice transmits.
+        done = {}
+        t = threading.Thread(target=lambda: done.update(r=self.cmd(A, "video-transmit", "4", timeout=40)))
+        t.start()
+        self.wait("bob receives alice's second transmission", lambda: (v := self.video(B)) and v["reception"] == "HAS_PERMISSION" or
+                  (v and v["receiving"]))
+        r = self.cmd(B, "video-reception-end")
+        self.check("bob sends a Media reception end request", r["sent"] is True)
+        self.wait("bob's reception ends with the response (T104 stopped)", lambda: (v := self.video(B)) and v["reception"] == "TERMINATED")
+        self.check("bob no longer receives, without a timeout", not self.video(B).get("timeouts"))
+        t.join()
+        self.cmd(A, "video-hangup")
+        self.video_idle([A, B])
+        # Implicit transmission request with the group call setup.
+        call = self.cmd(A, "video-group", "implicit", timeout=30)
+        got = self.wait("alice is granted without pressing Transmit", lambda: (v := self.video(A)) and v["transmission"] == "HAS_PERMISSION" and v)
+        self.check("an implicit request in the group call's offer is granted (T100 of the implicit request stopped)",
+                   not got.get("timeouts") and "granted" in " ".join(got["events"]), events=got["events"])
+        if m.get("mcvideo_priority"):
+            self.check("alice offered her profile priority 7 and the server capped it: the request carries the negotiated 4",
+                       got.get("negotiated_priority") == 4 and got.get("request_priority") == 4,
+                       negotiated=got.get("negotiated_priority"), request=got.get("request_priority"))
+        self.cmd(A, "video-release")
+        self.wait("the implicit transmission ends with the end response", lambda: "transmission ended" in self.video_events(A))
+        self.check("the implicitly granted transmission ends", True)
+        self.cmd(A, "video-hangup")
+        self.video_idle([A, B])
+        if xml:
+            after = {c: self.cmd(c, "keys")["xml_protection"] for c in (A, B)}
+            self.check("the calls' MCVideo signalling was encrypted, signed, verified and decrypted, nothing refused",
+                       all(after[c]["encrypted"] > keys[c]["encrypted"] and after[c]["decrypted"] > keys[c]["decrypted"] and
+                           after[c]["verified"] > keys[c]["verified"] and after[c]["refused"] == 0 and after[c]["not_sent"] == 0 for c in (A, B)),
+                       before=keys, after=after)
+
+    def v2_adhoc(self) -> None:
+        """TS 24.281 §22: an ad hoc group video call to listed users (§22.2.2.1.1 step 11), the server naming the ad hoc
+        group; bob leaves (§22.2.4.1.1) and re-joins at the session identity (§22.2.5.1.1); alice releases it for
+        everyone (§22.2.3.1.1, Reason "User requested release"). Then emergency and imminent peril ad hoc group calls
+        (§6.2.8.1.19, §6.2.8.1.23, <adhoc-emergency-ind>, <imminentperil-ind>) that bob receives as such. client-c, when the lab has the reference client, is the third participant."""
+        others = ["sip:bob.mcvideo@mcx.test"] + (["sip:client-c.mcvideo@mcx.test"] if meta(self.name).get("reference_clients") else [])
+        call = self.cmd(A, "video-adhoc", *others, timeout=30)
+        group = call["group"] or ""
+        self.check("alice's ad hoc group video call is up, and the server names its ad hoc group",
+                   call["state"] == "established" and call["session_type"] == "adhoc" and group.startswith("sip:"), call=call)
+        b = self.wait("bob is in the ad hoc call", lambda: (v := self.video(B)) and v["state"] == "established" and v)
+        self.check("bob's call is the same ad hoc group", b["session_type"] == "adhoc" and b["group"] == group, group=b["group"])
+        self.wait("alice lists every participant", lambda: len((self.video(A) or {}).get("participants") or {}) == len(others) + 1)
+        r = self.cmd(A, "video-transmit", "2", timeout=30)
+        self.check("alice transmits in the ad hoc call (transmission control in the clear)", r.get("granted") is True, result=r)
+        self.cmd(B, "video-hangup")
+        rejoin = self.cmd(B, "video-rejoinable")
+        self.check("bob leaves; the ad hoc session can be re-joined", rejoin["type"] == "adhoc" and rejoin["group"] == group, rejoin=rejoin)
+        self.wait("alice sees bob leave", lambda: (self.video(A) or {}).get("participants", {}).get("sip:bob.mcvideo@mcx.test") != "connected")
+        again = self.cmd(B, "video-rejoin", timeout=30)
+        self.check("bob re-joins the ad hoc session at its identity", again["state"] == "established" and again["group"] == group, call=again)
+        self.wait("alice sees bob back", lambda: (self.video(A) or {}).get("participants", {}).get("sip:bob.mcvideo@mcx.test") == "connected")
+        self.cmd(A, "video-adhoc-release")
+        self.video_idle([A])
+        released = self.cmd(A, "video-status")["history"][-1]
+        self.check("alice releases the ad hoc call (BYE with Reason \"User requested release\")",
+                   released["reason"] == "released for everyone", reason=released["reason"])
+        # TS 24.281 clause 6.3.8.1 item 3 limits the release on the initiator's leaving to pre-arranged calls: the OpenMCX
+        # MCVideo server lets an ad hoc call go on without its initiator, whatever the Reason.
+        time.sleep(2)
+        self.check("the MCVideo server keeps the ad hoc call for the others (its policy, clause 6.3.8.1 item 3)",
+                   (self.video(B) or {}).get("state") == "established")
+        self.video_hangup(B)
+        self.video_idle([A, B])
+        if not meta(self.name).get("priority"):
+            return
+        for level in ("emergency", "imminent"):
+            call = self.cmd(A, "video-adhoc", *others, level, timeout=30)
+            self.check(f"an {level} ad hoc group video call is up as one", call["state"] == "established" and call["priority"] == level, call=call)
+            self.wait(f"bob's ad hoc call shows {level}", lambda level=level: (v := self.video(B)) and v["priority"] == level)
+            self.check(f"bob receives the {level} ad hoc group call as such", True)
+            # The OpenMCX server's ad hoc re-INVITE changes the participants only (adhoc_modify), not the priority:
+            # the emergency ends with the call (TS 24.281 clause 6.2.8.1.25).
+            self.cmd(A, "video-adhoc-release")
+            self.video_idle([A])
+            self.video_hangup(B)
+            self.video_idle([A, B])
+
+    def v3_priority_extras(self) -> None:
+        """On a lab made with --priority: an authorised user cancels another user's emergency alert with the emergency
+        in a call (TS 24.281 §6.2.8.1.14 step 3: <alert-ind> "false", <originated-by>); a group's imminent peril state
+        cancelled without a call (§9.2.5.2.1, MESSAGE with <imminentperil-ind> "false")."""
+        if not meta(self.name).get("priority"):
+            print("  [SKIP] needs a lab made with --priority"); return
+        self.cmd(B, "video-alert", "on", "48.85", "2.35")
+        self.wait("alice receives bob's video alert", lambda: "sip:bob.mcvideo@mcx.test" in self.cmd(A, "video-alerts"))
+        self.cmd(A, "video-group", "emergency", timeout=30)
+        self.wait("bob's call shows the emergency", lambda: (v := self.video(B)) and v["priority"] == "emergency")
+        self.cmd(A, "video-emergency", "off", "alert=sip:bob.mcvideo@mcx.test")
+        self.check("alice cancels the emergency and bob's alert with it", self.video(A)["priority"] == "normal" and
+                   "sip:bob.mcvideo@mcx.test" not in self.cmd(A, "video-alerts"))
+        self.wait("bob's own alert is cancelled", lambda: not self.cmd(B, "video-status").get("alerting"))
+        self.check("bob is told his alert was cancelled", True)
+        self.cmd(A, "video-hangup")
+        self.video_idle([A, B])
+        self.cmd(A, "video-group", "imminent", timeout=30)
+        self.wait("bob's call shows imminent peril", lambda: (v := self.video(B)) and v["priority"] == "imminent")
+        self.cmd(A, "video-hangup")
+        self.video_idle([A, B])
+        r = self.cmd(A, "video-imminent-cancel", ok=False)
+        self.check("alice cancels the group's imminent peril without a call (MVIG 1 on the 2xx)",
+                   r.get("ok") and r["result"]["state"] == "MVIG 1: no-imminent-peril", reply=r)
+
+    def v4_settings_and_gdd(self) -> None:
+        """TS 24.281 §7.2.3: the MCVideo settings-only PUBLISH, then its modification (SIP-If-Match); §8.2.1.6: the group
+        dynamic data subscription of the group: its members and their clients, the call ongoing during a group call (a
+        re-subscription brings the full state), and the de-subscription."""
+        self.check("alice publishes her MCVideo service settings", self.cmd(A, "video-settings-publish")["status"] == 200)
+        self.check("and publishes them again, as a modification", self.cmd(A, "video-settings-publish")["status"] == 200)
+        self.check("alice subscribes to the group's dynamic data", self.cmd(A, "video-gdd-subscribe", GROUP)["status"] == 200)
+        gdd = lambda: self.cmd(A, "video-gdd", GROUP).get(GROUP)
+        got = self.wait("the group's dynamic data", lambda: (d := gdd()) and d)
+        ids = {m["id"] for m in got["members"]}
+        self.check("it lists alice and bob with their clients", {"sip:alice.mcvideo@mcx.test", "sip:bob.mcvideo@mcx.test"} <= ids and
+                   all(m["clients"] for m in got["members"]), members=got["members"])
+        self.cmd(B, "video-group", timeout=30)
+        self.wait("alice's call is up", lambda: (v := self.video(A)) and v["state"] == "established")
+        self.cmd(A, "video-gdd-resubscribe", GROUP)
+        self.wait("the group's call is ongoing", lambda: (d := gdd()) and d.get("call_ongoing") is True, timeout=10)
+        self.check("during bob's group call the dynamic data says a call is ongoing", True)
+        self.cmd(B, "video-hangup")
+        self.video_idle([A, B])
+        self.check("alice ends her subscription", self.cmd(A, "video-gdd-unsubscribe", GROUP)["status"] == 200)
+
+    def v5_kms(self) -> None:
+        """On a --protected lab: a private video call's PCK keyed to the KMS of the called user from the MCVideo user
+        profile's <PrivateCallKMSURI> (TS 24.281 §6.2.8.3.9 1) a)); a PCK naming another receiver KMS is answered 488
+        with a KMS Redirect Response, and the call is keyed again to the receiver KMS it lists (TS 33.180 §5.2.8.2.5)."""
+        if not self.protected:
+            print("  [SKIP] needs a lab made with --protected"); return
+        call = self.cmd(A, "video-call", "sip:bob.mcvideo@mcx.test", timeout=30)
+        self.check("the PCK is keyed to bob's KMS from alice's user profile", call["state"] == "established" and call.get("protected") and
+                   call.get("kms_source") == "user-profile" and call.get("kms_uri"), call={k: call.get(k) for k in ("state", "kms_uri", "kms_source")})
+        self.cmd(A, "video-hangup")
+        self.video_idle([A, B])
+        self.cmd(A, "video-pck-kms", "https://kms-elsewhere.mcx.test")
+        call = self.cmd(A, "video-call", "sip:bob.mcvideo@mcx.test", timeout=30)
+        krr = call.get("krr") or {}
+        self.check("a PCK for another KMS gets a KMS Redirect Response naming bob's KMS", krr.get("receiver_kms") == "https://kms-elsewhere.mcx.test"
+                   and krr.get("receiver_list") == [call.get("kms_uri")], krr=krr)
+        self.check("the call is keyed again to that KMS and set up", call["state"] == "established" and call.get("kms_source") == "kms-redirect")
+        self.wait("bob's protected call is up", lambda: (v := self.video(B)) and v["state"] == "established" and v.get("pck_id") == call.get("pck_id"))
+        self.check("bob holds the PCK of the redirected call", True)
+        self.cmd(A, "video-hangup")
+        self.video_idle([A, B])
+
+    # Phase 6: location rules, group geographic areas and SEAL location reporting, on a lab made with
+    # --location --functional-alias --location-rules (androidlab.location_rules: the areas below).
+    HOME = ("48.0", "2.0")              # where every client starts (the fixture's positions)
+    ALIAS_AREA = ("48.03", "1.97")      # RULES_ALIAS_AREA: incident-commander activated inside
+    RULE_AREA = ("48.03", "2.03")       # RULES_AFFILIATION_AREA: alice's group left inside, affiliated on leaving
+    OUTSIDE = ("48.2", "2.0")           # outside the group's mandatory area RULES_MANDATORY_AREA
+    GROUP_AREA = ("48.02", "2.02")      # the server's group geographic area (6.3.2.4 notices)
+    HAZARD = ("48.05", "2.05")          # the server's emergency alert area
+
+    def rules(self, client: str = A) -> dict:
+        return self.cmd(client, "location-rules")
+
+    def move(self, client: str, where) -> None:
+        self.cmd(client, "location-position", *where)
+
+    def rules_home(self) -> dict:
+        """alice at home with her rules read (the first position only places her: no area is crossed)."""
+        r = self.wait("alice's location rules read", lambda: (x := self.rules(A)) and x["mcptt"]["loaded"] and x["mcdata"]["loaded"] and x, timeout=30)
+        self.move(A, self.HOME)
+        time.sleep(2)
+        return r
+
+    def affiliated(self, client: str, service: str) -> bool:
+        return self.status(client)[service]["affiliations"].get(GROUP) == "affiliated"
+
+    def s40_location_aliases(self) -> None:
+        """TS 24.379 9A.2.1.4 and TS 24.282 22.2.1.4: entering the area of incident-commander's
+        <LocationCriteriaForActivation> activates it on MCPTT and MCData (9A.2.1.2 / 22.2.1.2), leaving the area of its
+        <LocationCriteriaForDeactivation> deactivates it; meanwhile the profile's lock refuses the user's deactivation."""
+        r = self.rules_home()
+        ic = next((a for a in r["mcptt"]["functional_aliases"] if a.startswith("sip:incident-commander.")), None)
+        icd = next((a for a in r["mcdata"]["functional_aliases"] if a.startswith("sip:incident-commander.")), None)
+        if not self.check("alice's MCPTT and MCData profiles give incident-commander location criteria", ic is not None and icd is not None, rules=r):
+            return
+        self.release_aliases([A])
+        try:
+            self.move(A, self.ALIAS_AREA)
+            got = self.wait("incident-commander active on MCPTT and MCData", lambda: (x := self.rules(A)) and ic in x["mcptt"]["active_aliases"] and icd in x["mcdata"]["active_aliases"] and x, timeout=20)
+            self.check("entering the area activates incident-commander on MCPTT and MCData", True)
+            self.check("the app says it was activated by location", ic in got["mcptt"]["aliases_by_location"] and icd in got["mcdata"]["aliases_by_location"])
+            refused = self.cmd(A, "fa", "deactivate", ic, ok=False)
+            self.check("the user's deactivation is refused while the location criterion holds it (9A.2.1.2)", not refused["ok"] and "not allowed" in refused["error"], reply=refused)
+            self.move(A, self.HOME)
+            self.wait("incident-commander inactive", lambda: (x := self.rules(A)) and ic not in x["mcptt"]["active_aliases"] and icd not in x["mcdata"]["active_aliases"], timeout=20)
+            self.check("leaving the area deactivates it on both services", True)
+        finally:
+            self.move(A, self.HOME)
+
+    def s41_rules_affiliation(self) -> None:
+        """TS 24.379 9.2.1.7.2 and TS 24.282 8.2.6.2: alice's <RulesForDeaffiliation> (entering the rule area) leaves her
+        group on MCPTT and MCData (9.2.1.2 / 8.2.2), her <RulesForAffiliation> (leaving it) affiliates again; while that
+        rule holds the group, the profile's <manual-deaffiliation-not-allowed-if-affiliation-rules-are-met> refuses
+        her de-affiliation."""
+        r = self.rules_home()
+        self.check("alice's profiles carry the affiliation rules", r["mcptt"]["affiliation_rules"] == 2 and r["mcdata"]["affiliation_rules"] == 2
+                   and GROUP in r["mcptt"]["locked"], rules=r)
+        try:
+            self.move(A, self.RULE_AREA)
+            self.wait("alice leaves the group on both services", lambda: not self.affiliated(A, "mcptt") and not self.affiliated(A, "mcdata"), timeout=30)
+            self.check("entering the area de-affiliates alice from the group (MCPTT and MCData)", True)
+            # Not affiliated, so a group call of bob's does not reach her.
+            self.cmd(B, "group", GROUP, timeout=30)
+            self.established(B)
+            time.sleep(3)
+            self.check("bob's group call does not reach alice meanwhile", self.call(A) is None)
+            self.hangup(B)
+            self.idle_everywhere([A, B])
+            self.move(A, self.HOME)
+            self.wait("alice affiliated again on both services", lambda: self.affiliated(A, "mcptt") and self.affiliated(A, "mcdata"), timeout=30)
+            got = self.rules(A)
+            self.check("leaving the area affiliates her again, by the rule", GROUP in got["mcptt"]["rule_affiliated"], rules=got["mcptt"])
+            refused = self.cmd(A, "deaffiliate", GROUP, ok=False)
+            self.check("her de-affiliation is refused while the rule holds the group (9.2.1.2)", not refused["ok"] and "not allowed" in refused["error"], reply=refused)
+            self.check("and she stays affiliated", self.affiliated(A, "mcptt"))
+        finally:
+            self.move(A, self.HOME)
+            self.wait("alice affiliated", lambda: self.affiliated(A, "mcptt") and self.affiliated(A, "mcdata"), timeout=30)
+
+    def s42_group_mandatory_area(self) -> None:
+        """TS 24.379 9.2.1.7.3: outside the group's <mandatory-geographic-area> alice de-affiliates; there an affiliation
+        is refused; back inside she affiliates again."""
+        r = self.rules_home()
+        self.check("the app read the group's geographic area", GROUP in r["mcptt"]["group_areas"], rules=r["mcptt"])
+        try:
+            self.move(A, self.OUTSIDE)
+            self.wait("alice leaves the group", lambda: not self.affiliated(A, "mcptt"), timeout=30)
+            got = self.rules(A)
+            self.check("outside the mandatory area alice de-affiliates", GROUP in got["mcptt"]["area_left"], rules=got["mcptt"])
+            refused = self.cmd(A, "affiliate", GROUP, ok=False)
+            self.check("an affiliation outside the area is refused", not refused["ok"] and "outside" in refused["error"], reply=refused)
+            self.move(A, self.HOME)
+            self.wait("alice affiliated again", lambda: self.affiliated(A, "mcptt"), timeout=30)
+            self.check("back inside she affiliates again", GROUP not in self.rules(A)["mcptt"]["area_left"])
+        finally:
+            self.move(A, self.HOME)
+            self.wait("alice affiliated", lambda: self.affiliated(A, "mcptt"), timeout=30)
+
+    def s43_group_geographic_area(self) -> None:
+        """TS 24.379 12.1.1.4 and TS 24.282 16.2.1.4: the server's notice of leaving the group geographic area
+        (<group-geo-area-ind> false, <associated-group-id>) de-affiliates alice from that group, on MCPTT and MCData;
+        the notice of entering it affiliates her again."""
+        self.rules_home()
+        since = lambda t: [n for n in self.alerts(A)["notices"] if not n["alert_area"] and n["at"] >= t]
+        try:
+            t0 = time.time() * 1000
+            self.move(A, self.GROUP_AREA)
+            got = self.wait("the notices of entering the group area", lambda: (x := since(t0)) and {n["service"] for n in x if n["entered"]} >= {"mcptt", "mcdata"} and x, timeout=30)
+            self.check("alice is told she entered the group's area, on MCPTT and MCData, naming the group",
+                       all(n["group"] for n in got), notices=got)
+            self.check("she stays affiliated", self.affiliated(A, "mcptt") and self.affiliated(A, "mcdata"))
+            t1 = time.time() * 1000
+            self.move(A, self.HOME)
+            got = self.wait("the notices of leaving it", lambda: (x := since(t1)) and {n["service"] for n in x if not n["entered"]} >= {"mcptt", "mcdata"} and x, timeout=30)
+            self.check("the notices of leaving name the group", all(n["group"] == GROUP for n in got if not n["entered"]), notices=got)
+            self.wait("alice de-affiliated on both services", lambda: not self.affiliated(A, "mcptt") and not self.affiliated(A, "mcdata"), timeout=30)
+            self.check("leaving the area de-affiliates her from the group (MCPTT and MCData)", True)
+            self.move(A, self.GROUP_AREA)
+            self.wait("alice affiliated again on both services", lambda: self.affiliated(A, "mcptt") and self.affiliated(A, "mcdata"), timeout=30)
+            self.check("entering it again affiliates her again", True)
+        finally:
+            # Back home the notice of leaving de-affiliates her again: she affiliates by hand (9.2.1.2, 8.2.2).
+            self.move(A, self.HOME)
+            time.sleep(6)
+            for service in ("mcptt", "mcdata"):
+                if not self.affiliated(A, service):
+                    self.cmd(A, "affiliate", GROUP, service, ok=False)
+            self.wait("alice affiliated", lambda: self.affiliated(A, "mcptt") and self.affiliated(A, "mcdata"), timeout=30)
+
+    def s44_emergency_alert_area(self) -> None:
+        """TS 24.379 12.1.1.6 (TS 37.579-2 6.6.4): on the server's notice of entering an emergency alert area the phone
+        raises the alert itself, with no user request; the notice of leaving does not cancel it."""
+        self.rules_home()
+        t0 = time.time() * 1000
+        try:
+            self.move(A, self.HAZARD)
+            notice = self.wait("alice's notice", lambda: next((n for n in self.alerts(A)["notices"] if n["at"] >= t0 and n["alert_area"] and n["entered"] and n["service"] == "mcptt"), None), timeout=30)
+            self.check("the MCPTT notice of entering the emergency alert area", notice is not None)
+            own = self.wait("the automatic alert", lambda: (x := self.alerts(A)["own"]) and "mcptt" in x and x, timeout=15)
+            self.check("alice's alert is raised automatically on MCPTT, on the selected group (12.1.1.6 1)a)ii))", own["mcptt"] == [GROUP], own=own)
+            got = self.wait("bob receives it", lambda: self.alert_from(B, "alice"))
+            self.check("bob receives the automatic alert with alice's position", got is not None and abs(got["lat"] - 48.05) < 0.001)
+            t1 = time.time() * 1000
+            self.move(A, self.HOME)
+            self.wait("the notice of leaving", lambda: next((n for n in self.alerts(A)["notices"] if n["at"] >= t1 and n["alert_area"] and not n["entered"]), None), timeout=30)
+            self.check("leaving the area leaves the alert up (12.1.1.6 NOTE)", "mcptt" in self.alerts(A)["own"])
+        finally:
+            self.cmd(A, "alert", "off", ok=False)
+            self.move(A, self.HOME)
+
+    def s45_seal_location(self) -> None:
+        """TS 24.545 6.2.2.2.1, 6.2.2.2.2 and 6.2.20.2: the configuration from the location management server, periodic
+        reports of the position, positions stored while offline and sent back in a history location result report."""
+        self.rules_home()
+        r = self.cmd(A, "seal", "start")
+        self.check("the SEAL configuration is read: a periodic trigger and a report URI", r["started"] and r["periodic"] > 0 and r["report_uri"], seal=r)
+        try:
+            got = self.wait("two periodic reports accepted", lambda: (x := self.cmd(A, "seal", "status"))["reports_sent"] >= 2 and x, timeout=30)
+            self.check("the periodic reports are accepted (200)", got["last_status"] == 200, seal=got)
+            self.cmd(A, "seal", "offline")
+            got = self.wait("positions stored offline", lambda: (x := self.cmd(A, "seal", "status"))["stored"] >= 2 and x, timeout=30)
+            self.check("offline, the positions are stored", got["stored"] >= 2, seal=got)
+            r = self.cmd(A, "seal", "online")
+            self.check("back online, they go in a history location result report, accepted", r["history_sent"] >= 2 and r["stored"] == 0 and r["last_status"] == 200, seal=r)
+        finally:
+            self.cmd(A, "seal", "stop", ok=False)
+
     SCENARIOS = {"S1": s1_startup, "S2": s2_private_automatic, "S3": s3_private_manual, "S4": s4_group, "S5": s5_adhoc, "S6": s6_sds,
                  "S7": s7_refresh_and_recovery, "S8": s8_lifecycle, "S9": s9_impaired, "S10": s10_latency,
                  "S11": s11_product, "S12": s12_private_no_floor, "S13": s13_location,
@@ -1500,6 +1863,9 @@ class Lab:
                  "S19": s19_reg_event,
                  "S20": s20_implicit_floor, "S21": s21_service_settings, "S22": s22_monitor,
                  "S23": s23_remote_affiliation, "S24": s24_group_dynamic_data,
+                 "V1": v1_transmission_control, "V2": v2_adhoc, "V3": v3_priority_extras, "V4": v4_settings_and_gdd, "V5": v5_kms,
+                 "S40": s40_location_aliases, "S41": s41_rules_affiliation, "S42": s42_group_mandatory_area,
+                 "S43": s43_group_geographic_area, "S44": s44_emergency_alert_area, "S45": s45_seal_location,
                  "S25": s25_first_to_answer, "S26": s26_chat, "S27": s27_broadcast, "S28": s28_adhoc_criteria,
                  "S29": s29_floor_priority, "S30": s30_regroup, "S31": s31_temporary_group}
 

@@ -10,6 +10,8 @@ of `androidlab.py` is the exception). Test scripts: `tests/`; lab: `lab/androidl
 | Instrumented tests (`tools/instrumented-test.sh`) | AVD: Android 16 (API 36), google_apis, x86_64 | 11 passed (codec 2, UI 6, telecom 2, browser login 1) |
 | Instrumented tests, without telecom and browser login | redroid 15 | 8 passed. Redroid's Telecom has no telephony service, so its self-managed calls stall at random |
 | Lab scenarios S1-S11 (`tests/scenarios.py a1`) | Three redroid 15 clients on the OpenMCX lab, TLS | 144 of 144 checks passed, repeatedly, against several server builds |
+| JVM unit tests, phase 7 (MCVideo) | Docker, JDK 17 | 424 passed, 0 failed (2026-11-25, branch `android-p7`) |
+| MCVideo signalling scenarios V1-V5 (`tests/scenarios.py LAB V1 V2 V3 V4 V5`), phase 7 | Two redroid 15 clients and the Linux reference client, server `openmcx-all:mcdpre-800c657`; protected lab with XML confidentiality and integrity | 35 of 35, with S2, S3, S12 and S16 in the same run (79 of 79). See [VIDEO.md](VIDEO.md#signalling-on-redroid-phase-7) |
 
 In S9, 91-97% of the payloads arrived at each listener, all unchanged, with 52-57 reordered. In S10 the access time was
 4-10 ms and mouth-to-ear 47-72 ms. Some S10 mouth-to-ear samples are large negative numbers: a listener reported no
@@ -166,6 +168,39 @@ pass the MESSAGE on), the grant in the 200 (OK), the Retry-After of a 500 or 503
 server does not refuse it), Answer-Mode with parameters (the server sends a plain `Auto`), the Floor Indicator's call
 type and bit F, the Location field of the Floor Request, `<forwarding-sequence-number>` and the SDP version of a
 subsequent answer.
+
+## Phase 6: location rules, group geographic areas, SEAL location
+
+Lab `p6-a`: `androidlab.py create --location --functional-alias --priority --mcvideo --location-rules`, server image
+`openmcx-all:mcdpre-800c657`, three redroid 15 clients. With `--location`, every client now gets a fused fix at the
+fixture's position (Android's test provider). Without it, redroid has no fix, so S13's log-on reports carried no
+coordinate and bob's S14 alert had no position.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 430 passed, 0 failed (416 before this phase). New: `LocationRulesTest` (10), `LocationRuleProceduresTest` (2), `SealLocationTest` (2), and an `IdmsTest` assertion |
+| `:app:assembleDebug` | Built |
+| One run of S1-S6, S13, S14 and S40-S45 | 139 of 139. In an earlier run S5 lost the last 6 of 100 frames at both listeners; it then passed twice on its own, 12 of 12 each time |
+
+| # | Scenario | Checks | Result |
+|---|---|---|---|
+| S40 | Location based functional aliases (TS 24.379 §9A.2.1.4, TS 24.282 §22.2.1.4) | 5 | Entering the area activates incident-commander on MCPTT and MCData. The app says it was activated by location. The user's deactivation is refused (§9A.2.1.2 lock). Leaving the area deactivates it on both services |
+| S41 | Rules based affiliation (§9.2.1.7.2, TS 24.282 §8.2.6.2) | 6 | Entering the rule area de-affiliates alice from `operations` on MCPTT and MCData, and bob's group call does not reach her. Leaving it affiliates her again. Her de-affiliation is then refused (§9.2.1.2 lock) |
+| S42 | Group mandatory area (§9.2.1.7.3) | 4 | The group's area is read from the GMS. Outside it, alice de-affiliates and an affiliation is refused. Back inside, she affiliates again |
+| S43 | Group geographic area notices (§12.1.1.4, TS 24.282 §16.2.1.4) | 5 | The server's notices name the group on both services. Leaving de-affiliates her, and entering again affiliates her again |
+| S44 | Emergency alert area (§12.1.1.6, TS 37.579-2 6.6.4) | 4 | The notice raises alice's MCPTT alert with no user request. Bob receives it at the area's position. Leaving the area leaves the alert up |
+| S45 | SEAL location (TS 24.545 §6.2.2.2, §6.2.20.2) | 4 | The configuration is read from the LMS. Periodic reports are accepted with 200. Positions are stored offline, then sent in a history location result report |
+
+Not exercised in the lab, unit tests only:
+- the permitted geographic area;
+- a rule's functional alias criterion, when the alias is activated;
+- `<Speed>` and `<Heading>` areas;
+- conflicting rules;
+- MCVideo aliases with location criteria (the lab has none).
+
+Two problems were found in the lab and fixed:
+- The LMS refused the SEAL configuration with 403. The token had no `3gpp:mc:location_management_service` scope.
+- Area notices were indexed by position in a list capped at 20 entries. The scenarios now use each notice's time.
 
 ## Parity phase 2 (2026-11-25)
 

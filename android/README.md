@@ -130,6 +130,9 @@ Debug builds listen on the abstract socket `@mcxclient-control` for one JSON req
 | `affiliation-accept [<group>…]`, `affiliation-decline` | Answer a received negotiated-mode request (§9.2.1.5), all or some of its groups |
 | `gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]`, `gdd-resubscribe <group>`, `gdd-unsubscribe <group>` | Group dynamic data (§9.2.1.6) |
 | `procedures` | The state of the procedures above (also in `status`, key `procedures`) |
+| `affiliate <group> [mcptt\|mcdata\|mcvideo]`, `deaffiliate <group> […]` | The user's affiliation change of one group (§9.2.1.2, TS 24.282 §8.2.2), refused outside the group's area (§9.2.1.7.3) or while a locking rule holds it |
+| `location-position <lat> <lon>`, `location-position clear`, `location-rules` | Stand in for the phone's position; what the location rules hold (§9A.2.1.4, §9.2.1.7; [LOCATION.md](docs/LOCATION.md)) |
+| `seal start\|stop\|offline\|online\|status` | The SEAL location management client (TS 24.545) |
 | `ptt <wav> [seconds]`, `floor request\|release`, `audio-next <wav>` | Talk a file (the devices have no microphone) |
 | `sds <mcdata-id> <text> [--disposition delivery\|read\|delivery-read]`, `sds-group <group> <text> …`, `display <message-id>` | Short data |
 | `refresh register\|subscription\|token`, `drop-flow` | Force a refresh or a new flow |

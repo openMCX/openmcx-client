@@ -243,10 +243,12 @@ class IdmsClient(
          * service ("ptt", "data", "video"), the service itself and the CMS and GMS that serve its documents, plus
          * the KMS of each protected service.
          */
-        fun scope(services: List<String>, protectedServices: List<String> = emptyList()): String =
+        fun scope(services: List<String>, protectedServices: List<String> = emptyList(), location: Boolean = false): String =
             (listOf("openid") +
                 services.flatMap { listOf("3gpp:mc:${it}_service", "3gpp:mc:${it}_config_management_service",
                     "3gpp:mc:${it}_group_management_service") } +
-                protectedServices.map { "3gpp:mc:${it}_key_management_service" }).joinToString(" ")
+                protectedServices.map { "3gpp:mc:${it}_key_management_service" } +
+                // TS 33.180 table B.4.2.2-1: the location management server's scope, for a client that uses one (lms).
+                listOfNotNull("3gpp:mc:location_management_service".takeIf { location })).joinToString(" ")
     }
 }

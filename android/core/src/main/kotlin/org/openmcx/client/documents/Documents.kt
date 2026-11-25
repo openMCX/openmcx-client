@@ -13,6 +13,8 @@ import org.w3c.dom.Element
 import org.openmcx.client.security.KeyClient
 import kotlinx.serialization.json.*
 import org.openmcx.client.mcdata.GroupFdPolicy
+import org.openmcx.client.location.GroupAreas
+import org.openmcx.client.location.ProfileRules
 
 class DocumentError(message: String) : Exception(message)
 
@@ -35,6 +37,13 @@ data class UserProfile(
     val functionalAliases: List<String> = emptyList(),
     /** §8.3.2.1 item 8 e) v): the <Priority> of <MCPTT-group-call> in <Common>, the user's group call priority. */
     val groupCallPriority: Int? = null,
+    /**
+     * TS 24.484 §8.3.2.1 item 10 with TS 24.379 §9A.2.1.4, §9.2.1.7.2 and §9.2.1.2: the location criteria of the
+     * functional aliases, the affiliation rules of the <MCPTTGroupInfo> entries and the manual de-affiliation locks
+     * (none when the profile cannot be read for them: [locationRulesError]).
+     */
+    val locationRules: ProfileRules = ProfileRules(),
+    val locationRulesError: String? = null,
 ) {
     fun allows(action: String) = action in actions
 
@@ -67,7 +76,10 @@ data class UserProfile(
                     .flatMap { it.kids("entry") }.mapNotNull { it.uriEntry() },
                 groupCallPriority = common.flatMap { it.kids("MCPTT-group-call") }.firstNotNullOfOrNull { it.kid("Priority") }
                     ?.text()?.trim()?.toIntOrNull(),
-            )
+            ).let { profile ->
+                runCatching { ProfileRules.parse(text) }
+                    .fold({ profile.copy(locationRules = it) }, { profile.copy(locationRulesError = it.message) })
+            }
         }
 
         /**
@@ -99,7 +111,9 @@ data class UserProfile(
  * [regroupedInto] of a constituent's <on-network-regrouped> (§7.2.4.2, §6.3.14).
  */
 data class GroupDocument(val uri: String, val members: List<String>, val services: Set<String>, val protectMedia: Boolean,
-                         val fd: GroupFdPolicy? = null, val type: String = "prearranged", val preconfiguredUseOnly: Boolean = false,
+                         val fd: GroupFdPolicy? = null,
+                         /** TS 24.481 §7.2.4.2, §7.2.8: the group's permitted and mandatory geographic areas (TS 24.379 §9.2.1.7.3). */
+                         val areas: GroupAreas = GroupAreas(), val type: String = "prearranged", val preconfiguredUseOnly: Boolean = false,
                          val userPriorities: Map<String, Int> = emptyMap(), val temporaryConstituents: List<String> = emptyList(),
                          val regroupedInto: List<String> = emptyList()) {
     val chat get() = type == "chat"
@@ -137,6 +151,7 @@ data class GroupDocument(val uri: String, val members: List<String>, val service
                     .flatMap { it.descendants("constituent-MCPTT-group-ID") }.map { it.text() },
                 regroupedInto = service.descendants("on-network-regrouped").map { it.getAttribute("temporary-MCPTT-group-ID") }
                     .filter { it.isNotEmpty() },
+                areas = runCatching { GroupAreas.parse(text) }.getOrDefault(GroupAreas()),
             )
         }
     }
@@ -223,6 +238,15 @@ class DocumentClient(private val http: HttpClient, private val cms: String, priv
     /** TS 24.484 §8.3.1A: the user's MCPTT user profile document, mcptt-user-profile-<index>.xml. */
     suspend fun userProfile(mcpttId: String, index: Int, token: String): UserProfile =
         UserProfile.parse(fetch("$cms/org.3gpp.mcptt.user-profile/users/${enc(mcpttId)}/mcptt-user-profile-$index.xml", token))
+
+    /** A CMS document by its path under the XCAP root (the MCVideo user profile, TS 24.484 §9.3.1A). */
+    suspend fun cmsDocument(path: String, token: String): String = fetch("$cms/$path", token)
+    /**
+     * TS 24.484 §10.3.1A and §9.3.1A: the user's MCData or MCVideo user profile document ([service] `mcdata` or
+     * `mcvideo`), <service>-user-profile-<index>.xml, as text.
+     */
+    suspend fun serviceProfile(service: String, userId: String, index: Int, token: String): String =
+        fetch("$cms/org.3gpp.$service.user-profile/users/${enc(userId)}/$service-user-profile-$index.xml", token)
 
     /** TS 24.484 §8.4.2.8 (§9.4.2.8, §10.4.2.8): the service configuration document of `mcptt`, `mcvideo` or `mcdata`. */
     suspend fun serviceConfiguration(service: String, token: String): String =

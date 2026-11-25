@@ -32,7 +32,9 @@ import java.util.UUID
  * [chat]: a chat group (§10.1.2), joined rather than called; [constituents] of a regroup.
  */
 data class GroupItem(val id: String, val affiliated: Boolean, val selected: Boolean, val status: String? = null,
-                     val kind: String = "base", val chat: Boolean = false, val constituents: List<String> = emptyList()) {
+                     val kind: String = "base",
+                     /** Why a location rule changed its affiliation (TS 24.379 §9.2.1.7, §12.1.1.4), or null. */
+                     val rule: String? = null, val chat: Boolean = false, val constituents: List<String> = emptyList()) {
     val monitored: Boolean get() = kind == "monitored"
     /** A chat group needs no affiliation first: joining affiliates (TS 24.379 §9.2.2.3.6). */
     val callable: Boolean get() = kind != "available" || chat
@@ -80,7 +82,9 @@ data class CallItem(
  * this user may take it over) or `inactive`; [inUse] when it is presented on this user's outgoing calls.
  */
 /** A functional alias of this user: its status, whether its calls present it, and the outcome of the last change of it. */
-data class AliasItem(val id: String, val status: String, val inUse: Boolean, val service: String = "mcptt", val outcome: String? = null)
+data class AliasItem(val id: String, val status: String, val inUse: Boolean, val service: String = "mcptt", val outcome: String? = null,
+                     /** Activated by a location criterion of the user profile (TS 24.379 §9A.2.1.4). */
+                     val byLocation: Boolean = false)
 
 /** Another user's location, as their report gave it. */
 data class LocatedItem(val name: String, val latitude: Double?, val longitude: Double?, val cell: String?, val at: Long)
@@ -405,14 +409,23 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     // The base groups, then the monitored ones, then those of the user profile that may be monitored.
     val monitored = client.monitoredGroups
     val base = if (client.config.mcptt != null) client.wantedGroups(org.openmcx.client.body.McService.MCPTT).filter { it !in monitored } else emptyList()
+    // A base group a location rule or the group's area made this client leave stays listed, as not affiliated.
+    val rules = client.locationRules.state.value[org.openmcx.client.body.McService.MCPTT]
+    val left = if (client.config.mcptt != null) (client.baseGroups(org.openmcx.client.body.McService.MCPTT) + rules?.areaLeft.orEmpty())
+        .filter { it !in base && it !in monitored }.distinct() else emptyList()
+    val listed = ((base + left).map { it to "base" } + monitored.map { it to "monitored" } +
+        client.monitorableGroups.filter { it !in monitored && it !in base && it !in left }.map { it to "available" }).map { (id, kind) ->
+        GroupItem(id, Affiliation.counts(status.mcptt.affiliations[id]), Engine.selectedGroup.value == id, status.mcptt.affiliations[id], kind,
+            when (id) {
+                in rules?.areaLeft.orEmpty() -> "left: outside the group's area"
+                in rules?.ruleAffiliated.orEmpty() -> "by a location rule"
+                else -> null
+            }, chat = mcptt?.regroups?.configurationOf(id)?.chat == true)
+    }
     // The regroups and temporary groups the user was told of (TS 24.379 §16.2.1.3), after them: considered affiliated
     // (§16.2.2.4 step 3 h)) and called at once with their preconfigured group's configuration (§16.1).
     val regroups = mcptt?.regroups?.state?.value?.regroups?.values ?: emptyList()
-    val groups = (base.map { it to "base" } + monitored.map { it to "monitored" } +
-        client.monitorableGroups.filter { it !in monitored && it !in base }.map { it to "available" }).map { (id, kind) ->
-        GroupItem(id, Affiliation.counts(status.mcptt.affiliations[id]), Engine.selectedGroup.value == id, status.mcptt.affiliations[id], kind,
-            chat = mcptt?.regroups?.configurationOf(id)?.chat == true)
-    } + regroups.map { r ->
+    val groups = listed + regroups.map { r ->
         GroupItem(r.uri, true, Engine.selectedGroup.value == r.uri, "regrouped", if (r.temporary) "temporary" else "regroup",
             chat = mcptt?.regroups?.configurationOf(r.uri)?.chat == true,
             constituents = r.groups.ifEmpty { client.groupDocuments[r.uri]?.temporaryConstituents ?: emptyList() })
@@ -483,7 +496,8 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         val state = client.aliasesOf(service).value
         state.available.map { a ->
             AliasItem(a, when (a) { in state.active -> "active"; in state.takeOverPossible -> "take-over-possible"; else -> "inactive" },
-                a == state.inUse, service.name.lowercase(), state.lastOutcomes[a])
+                a == state.inUse, service.name.lowercase(), state.lastOutcomes[a],
+                a in client.locationRules.state.value[service]?.aliasesByLocation.orEmpty())
         }
     }
     val aliasNote = aliasState.lastAction?.let { action ->
