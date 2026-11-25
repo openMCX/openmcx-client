@@ -60,6 +60,16 @@ data class McpttInfo(
     val releaseReason: String? = null,
     /** In `<anyExt>`: the preconfigured group whose configuration an ad hoc group call uses (§17.2.2.1.1, 2xx step 3). */
     val preconfiguredGroupId: String? = null,
+    /** In `<anyExt>` (annex F.1.3): the type of an ambient listening call (§11.1.6), `remote-init` or `local-init`. */
+    val ambientListeningType: String? = null,
+    /**
+     * In `<anyExt>` (annex F.1.2, F.1.3): the elements of the private call services (call-back §11.1.5, remotely
+     * initiated calls §10.1.5 and §11.1.7, transfer §11.1.8, forwarding §11.1.9) other than <request-type> and
+     * <forwarding-sequence-number>, by name ([SERVICE_ELEMENTS]): <response-type>, <urgency-ind>, ...
+     */
+    val service: Map<String, String> = emptyMap(),
+    /** In `<anyExt>` (annex F.1.3): a call placed for a remotely initiated private call request (§11.1.1.2.1.1 14A) D)). */
+    val remotelyInitiatedCallRequest: Boolean? = null,
     val extra: Map<String, String> = emptyMap(),
 ) {
     fun encode(): String = Xml.document("mcpttinfo", NAMESPACE) {
@@ -81,7 +91,9 @@ data class McpttInfo(
             if (participantCriteria != null || emergencyAlertArea != null || groupGeoArea != null || adhocAlert != null ||
                 adhocAlertReceived != null || functionalAlias != null || calledFunctionalAlias != null ||
                 callToFunctionalAlias != null || requestType != null || forwardingSequenceNumber != null || releaseReason != null ||
-                preconfiguredGroupId != null) element("anyExt") {
+                preconfiguredGroupId != null || ambientListeningType != null || service.isNotEmpty() ||
+                remotelyInitiatedCallRequest != null) element("anyExt") {
+                leaf("ambient-listening-type", ambientListeningType)
                 leaf("call-participants-criterias", participantCriteria)
                 leaf("emergency-alert-area-ind", emergencyAlertArea?.toString())
                 leaf("group-geo-area-ind", groupGeoArea?.toString())
@@ -90,10 +102,12 @@ data class McpttInfo(
                 wrapped("functional-alias-URI", functionalAlias, "mcpttURI")
                 wrapped("called-functional-alias-URI", calledFunctionalAlias, "mcpttURI")
                 leaf("call-to-functional-alias-ind", callToFunctionalAlias?.toString())
+                // The service elements in the schema's order (annex F.1.2), <forwarding-sequence-number> among them.
                 leaf("request-type", requestType)
-                leaf("forwarding-sequence-number", forwardingSequenceNumber?.toString())
+                for (name in SERVICE_ELEMENTS) leaf(name, if (name == "forwarding-sequence-number") forwardingSequenceNumber?.toString() else service[name])
                 leaf("release-reason", releaseReason)
                 wrapped("preconfigured-group-id", preconfiguredGroupId, "mcpttURI")
+                remotelyInitiatedCallRequest?.let { wrapped("remotely-initiated-call-request-ind", it.toString(), "mcpttBoolean") }
             }
         }
     }
@@ -105,6 +119,16 @@ data class McpttInfo(
     companion object {
         const val NAMESPACE = "urn:3gpp:ns:mcpttInfo:1.0"
         const val CONTENT_TYPE = "application/vnd.3gpp.mcptt-info+xml"
+
+        /**
+         * TS 24.379 annex F.1.2: the private call service elements of <anyExt> after <request-type>, in schema order
+         * (as the OpenMCX servers write them); <forwarding-sequence-number> is [forwardingSequenceNumber].
+         */
+        val SERVICE_ELEMENTS = listOf("response-type", "urgency-ind", "time-of-request", "notify-remote-user",
+            "ric-app-level-priority", "ric-commencement-mode", "remotely-initiated-call-outcome", "call-transfer-ind",
+            "transfer-call-outcome", "transfer-announced-ind", "replaces-header-value", "call-forwarding-ind",
+            "forwarding-reason", "forwarded-by-mcptt-id", "forwarding-target-id", "forwarding-target-orig-id",
+            "forwarding-sequence-number", "forwarding-call-outcome", "forwarded-by-functional-alias")
 
         fun parse(text: String): McpttInfo {
             val root = Xml.parse(text)
@@ -145,6 +169,12 @@ data class McpttInfo(
                 releaseReason = ext("release-reason")?.trim(),
                 preconfiguredGroupId = params.child("anyExt")?.descendants("preconfigured-group-id")?.firstOrNull()
                     ?.let { it.child("mcpttURI") ?: it }?.text()?.trim(),
+                ambientListeningType = ext("ambient-listening-type")?.trim(),
+                service = SERVICE_ELEMENTS.filter { it != "forwarding-sequence-number" }
+                    .mapNotNull { name -> params.child("anyExt")?.descendants(name)?.firstOrNull()
+                        ?.let { (it.child("mcpttURI") ?: it.child("mcpttString") ?: it).text().trim() }?.let { name to it } }.toMap(),
+                remotelyInitiatedCallRequest = params.child("anyExt")?.descendants("remotely-initiated-call-request-ind")?.firstOrNull()
+                    ?.let { (it.child("mcpttBoolean") ?: it).text().trim() }?.let { it == "true" || it == "1" },
                 extra = params.children().filter { it.localName !in known }.associate { it.localName to it.text() },
             )
         }
