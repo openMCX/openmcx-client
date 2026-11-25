@@ -313,6 +313,11 @@ class DebugControl(private val context: Context) {
         "fd-media-answer" -> media().answerFile(args[0], args.getOrNull(1)?.toInt())
         "fd-media-policy" -> { val p = args[0]; require(p in setOf("ask", "accept", "decline")); media().fileDecision = { p }; p }
         "mcdata-media" -> JSONArray(media().communications.value.map(::mediaJson))
+        // TS 24.282 §18.3 (the Linux client's commands): mcdata-pre-establish | mcdata-pre-release | mcdata-pre-session;
+        // while established, sds-media and sds-session go over it by REFER (§9.2.5).
+        "mcdata-pre-establish" -> preJson(media().preSession.establish())
+        "mcdata-pre-release" -> preJson(media().preSession.release())
+        "mcdata-pre-session" -> media().preSession.status.value?.let(::preJson) ?: JSONObject.NULL
         // §13.2.4-§13.2.6: mcdata-release extend | now [reason…] | intent [query] [reason…] | accept | reject
         "mcdata-release" -> {
             val query = args.getOrNull(1) == "query"
@@ -756,6 +761,16 @@ class DebugControl(private val context: Context) {
         return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("dppk_id", sent.dppkId ?: JSONObject.NULL).put("plane", sent.plane)
     }
 
+    private fun preJson(p: org.openmcx.client.mcdata.PreSessionStatus): JSONObject = JSONObject().put("state", p.state)
+        .put("uri", p.uri ?: JSONObject.NULL).put("call_id", p.callId ?: JSONObject.NULL)
+        .put("communication", p.communication ?: JSONObject.NULL).put("communication_uri", p.communicationUri ?: JSONObject.NULL)
+        .put("communication_id", p.communicationId ?: JSONObject.NULL).put("last_state", p.lastState ?: JSONObject.NULL)
+        .put("established", p.established).put("terminated", p.terminated).put("setup", p.setup ?: JSONObject.NULL)
+        .put("session_expires", p.sessionExpires).put("refreshes", p.refreshes).put("resumed", p.resumed)
+        .put("reestablished", p.reestablished).put("error", p.error ?: JSONObject.NULL)
+        .put("release_reason", p.releaseReason ?: JSONObject.NULL).put("usable", Engine.mcdataMedia?.preSession?.usable == true)
+        .put("wanted", Engine.mcdataMedia?.preSession?.wanted == true)
+
     private fun media(): org.openmcx.client.mcdata.McdataMediaService = Engine.mcdataMedia ?: throw IllegalStateException("MCData not provisioned")
 
     /** An MCData ID, or a group as group=<group>: (target, is a group). */
@@ -816,7 +831,8 @@ class DebugControl(private val context: Context) {
         .put("emergency", c.emergency).put("imminent_peril", c.imminentPeril).put("message_id", c.messageId?.toString())
         .put("conversation_id", c.conversationId.toString()).put("security", c.security).put("release", c.release)
         .put("file", c.fileName).put("size", c.fileSize).put("sha256", c.sha256).put("path", c.filePath)
-        .put("messages", JSONArray(c.messages.map { it.take(120) }))
+        .put("messages", JSONArray(c.messages.map { it.take(120) })).put("pre_established", c.preEstablished)
+        .put("resource_priority", c.resourcePriority)
 
     private fun mcvideo(): McvideoService = Engine.mcvideo ?: throw IllegalStateException("MCVideo not provisioned")
 
@@ -1005,6 +1021,7 @@ class DebugControl(private val context: Context) {
             } ?: emptyList<JSONObject>()))
             .put("files", JSONArray(Engine.fd?.records?.value?.map(::fdJson) ?: emptyList<JSONObject>()))
             .put("media", JSONArray(Engine.mcdataMedia?.communications?.value?.map(::mediaJson) ?: emptyList<JSONObject>()))
+            .put("mcdata_pre_session", Engine.mcdataMedia?.preSession?.status?.value?.let(::preJson) ?: JSONObject.NULL)
             .put("outbox", JSONArray(Engine.mcdata?.outbox?.value?.map { m ->
                 JSONObject().put("message_id", m.messageId.toString()).put("target", m.target).put("group", m.group)
                     .put("text", m.text).put("status", m.status).put("dppk_id", m.dppkId ?: JSONObject.NULL).put("plane", m.plane)

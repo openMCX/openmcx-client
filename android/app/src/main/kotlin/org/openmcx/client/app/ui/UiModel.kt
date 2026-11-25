@@ -191,6 +191,8 @@ data class UiState(
     val incoming: CallItem? = null,
     val messages: List<MessageItem> = emptyList(),
     val sdsSession: SessionItem? = null,
+    /** The pre-established sessions (TS 24.282 §18.3, TS 24.379 §8): one line, null when there is none. */
+    val preSessions: String? = null,
     val fileOffers: List<FileOfferItem> = emptyList(),
     val history: List<HistoryEntry> = emptyList(),
     val error: String? = null,
@@ -479,7 +481,8 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     val active = calls.firstOrNull { it.state != "released" && it != incoming }
     val mcdata = Engine.mcdata
     // Where a message travelled when not by SIP MESSAGE: "media plane" (MSRP) or "session" (an SDS session).
-    fun plane(p: String) = when (p) { "media" -> " · media plane"; "session" -> " · session"; else -> "" }
+    fun plane(p: String) = when (p) { "media" -> " · media plane"; "session" -> " · session"
+        "pre-established" -> " · pre-established session"; "pre-established-session" -> " · session (pre-established)"; else -> "" }
     val media = Engine.mcdataMedia?.communications?.value ?: emptyList()
     val messages = buildList {
         mcdata?.inbox?.value?.forEach {
@@ -552,6 +555,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
             val target = c.group ?: c.peer ?: ""
             SessionItem(c.id, (if (c.group != null) "Group session: " else "Session with ") + target.short(), target, c.group != null, c.emergency, c.imminentPeril)
         },
+        preSessions = Engine.preSessionLine(),
         fileOffers = media.filter { it.kind == "fd" && it.state == "offered" && !it.outgoing }
             .map { FileOfferItem(it.id, it.peer ?: "", it.group, it.fileName ?: "file", it.fileSize) },
         history = Engine.history?.recent(50) ?: emptyList(),

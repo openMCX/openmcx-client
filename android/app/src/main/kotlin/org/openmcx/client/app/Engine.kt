@@ -15,7 +15,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.openmcx.client.app.attachments.AttachmentFiles
@@ -257,6 +259,15 @@ object Engine {
             }
             service.media = media
             mcdataMedia = media
+            // TS 24.282 §6.2.8.1.1 3)b): an emergency alert with an SDS session carries where the phone is.
+            media.alertLocation = { lastPosition() }
+            // TS 24.282 §18.3: the pre-established session the user asked for is made again once MCData is authorised
+            // on a new registration (kept by a target refresh when the participating function still has it).
+            scope.launch {
+                c.status.map { it.mcdata.authorisations }.distinctUntilChanged().collect { n ->
+                    if (n > 0) runCatching { media.preSession.resume() }
+                }
+            }
             // Ahead of MCPTT, which would take any INVITE it does not recognise.
             c.handlers.add(0, media)
             val files = FdService(scope, ClientFdPeer(c), it.fd, SocketFileHttpClient(ssl, endpoints, it.fd.transferTimeoutMs, config.httpProxy),
@@ -453,6 +464,14 @@ object Engine {
             org.openmcx.client.location.LocationService.MCDATA -> config.mcdata?.groups ?: emptyList()
             org.openmcx.client.location.LocationService.MCVIDEO -> config.mcvideo?.groups ?: emptyList()
         }
+    }
+
+    /** The pre-established sessions in one line for the Messages screen; null when none was asked for. */
+    fun preSessionLine(): String? {
+        val mcdataPre = mcdataMedia?.preSession?.status?.value?.takeIf { it.state != "released" || mcdataMedia?.preSession?.wanted == true }
+        val parts = listOfNotNull(mcdataPre?.let { "MCData pre-established session: ${it.state}" +
+            (it.communication?.let { c -> " ($c)" } ?: "") })
+        return parts.joinToString(" · ").ifEmpty { null }
     }
 
     /** The last position known without waiting: the debug override, else the phone's last fix. */

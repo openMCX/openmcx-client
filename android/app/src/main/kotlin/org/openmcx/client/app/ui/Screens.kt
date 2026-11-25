@@ -129,6 +129,7 @@ object Tags {
     const val SESSION_START = "session-start"
     const val SESSION_END = "session-end"
     const val SESSION = "session"
+    const val PRE_SESSION = "pre-session"
     fun fileOffer(id: Int, decision: String) = "file-offer-$id-$decision"
     const val IMPORT = "import"
     const val SCAN_QR = "scan-qr"
@@ -1357,6 +1358,9 @@ private fun MessagesScreen(state: UiState, actions: UiActions) {
         Row(Modifier.fillMaxWidth()) {
             SmallClear("Clear messages", enabled = state.messages.isNotEmpty(), tag = Tags.CLEAR_MESSAGES) { confirmClear = true }
         }
+        // The pre-established session (TS 24.282 §18.3): SDS goes over it while it is up.
+        state.preSessions?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = Mcx.Muted,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp).testTag(Tags.PRE_SESSION)) }
         // The open SDS session (TS 24.282 §9.2.4): what is sent to its target goes into it, until it is ended.
         val session = state.sdsSession
         if (session != null) Row(Modifier.fillMaxWidth().background(Mcx.Strip, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp)
