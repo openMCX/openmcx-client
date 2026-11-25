@@ -156,4 +156,73 @@ def s83_protected_msrp(lab) -> None:
     lab.check("bob opened alice's SEND and sealed his notice and SDS", b1[1] > b0[1] and b1[0] >= b0[0] + 2, before=b0, after=b1)
 
 
-SCENARIOS = {"S80": s80_ip_connectivity, "S81": s81_enhanced_status, "S82": s82_message_store, "S83": s83_protected_msrp}
+PATROL = "sip:patrol-car-12.fa@mcx.test"  # the MCData alias client-c (and client-d) may activate (--functional-alias)
+
+
+def inbox(lab, client: str, text: str):
+    return lab.wait(f"{client} receives '{text[:30]}'", lambda: next((m for m in lab.status(client)["inbox"] if m["text"] == text), None), timeout=20)
+
+
+def s84_adhoc_and_alias_media(lab) -> None:
+    """TS 24.282 clause 9.2.2.2.1 step 3A and clause 24.2.2.1.1: ad hoc group SDS on the signalling plane and over the
+    media plane (standalone, session) and an ad hoc group FD over the media plane, the participants listed, the ad hoc
+    group the server creates learned from its 2xx; clause 22 with 9.2.2.2.1 step 3A b ii: a functional alias among the
+    participants reaches the user who activated it, told the alias called. A one-to-one media-plane communication to an
+    alias goes to the server with <call-to-functional-alias-ind> (recorded: the server's answer)."""
+    if C not in lab.devices:
+        print("  [SKIP] S84 needs client-c"); lab.skipped.append("S84"); return
+    stamp = time.strftime("%H%M%S")
+    who = f"{MCDATA[B]},{MCDATA[C]}"
+    text = f"adhoc signalling {stamp}"
+    sent = lab.cmd(A, "sds-adhoc", who, text)
+    lab.check("alice's ad hoc group SDS is accepted, its ad hoc group named by the server", sent["status"] in (200, 202)
+              and sent["group"].startswith("sip:adhoc-"), sent=sent)
+    for c in (B, C):
+        m = inbox(lab, c, text)
+        lab.check(f"{c} receives it on the ad hoc group", m["group"] == sent["group"] and m["sender"] == MCDATA[A], got=m)
+    text = f"adhoc media {stamp} " + "x" * 1100
+    lab.cmd(A, "sds-media", f"adhoc={who}", text, timeout=60)
+    out = lab.wait("alice's ad hoc media SDS", lambda: next((x for x in reversed(lab.status(A)["media"]) if x["kind"] == "sds" and x["adhoc"]), None))
+    lab.check("alice's ad hoc standalone SDS over the media plane is delivered, the ad hoc group learned",
+              out["state"] == "delivered" and (out["group"] or "").startswith("sip:adhoc-"), communication=out)
+    for c in (B, C):
+        m = inbox(lab, c, text)
+        lab.check(f"{c} receives it over the media plane", m["plane"] == "media" and m["group"] == out["group"], got={k: m[k] for k in ("plane", "group")})
+    s = lab.cmd(A, "sds-session", f"adhoc={who}", timeout=40)
+    lab.check("alice's ad hoc SDS session is open", s["state"] == "open" and s["adhoc"], session=s)
+    for c in (B, C):
+        lab.wait(f"{c} joins", lambda c=c: any(x["kind"] == "session" and x["state"] == "open" and x["adhoc"] for x in lab.status(c)["media"]), timeout=15)
+    text = f"adhoc session {stamp}"
+    lab.cmd(A, "sds-session", "send", text)
+    for c in (B, C):
+        lab.check(f"{c} receives alice's session message", inbox(lab, c, text)["plane"] == "session")
+    lab.cmd(A, "sds-session", "close", "all")
+    # The ad hoc group FD over the media plane.
+    import tempfile, pathlib
+    local = pathlib.Path(tempfile.gettempdir()) / f"p4b-adhoc-{stamp}.bin"
+    local.write_bytes(b"a" * 900)
+    remote = f"/data/local/tmp/{local.name}"
+    lab.devices[A].adb("push", str(local), remote)
+    lab.devices[A].adb("shell", "chmod", "644", remote)
+    f = lab.cmd(A, "fd-media", f"adhoc={who}", remote, "name=adhoc.bin", "mandatory", timeout=60)
+    lab.check("alice's ad hoc group file is sent", f["state"] == "delivered", file=f)
+    for c in (B, C):
+        got = lab.wait(f"{c} receives the file", lambda c=c: next((x for x in lab.status(c)["media"] if x["kind"] == "fd" and x["file"] == "adhoc.bin"
+                       and x["state"] in ("received", "corrupt")), None), timeout=30)
+        lab.check(f"{c} receives the ad hoc group file whole", got["state"] == "received" and got["size"] == 900 and got["adhoc"], got=got)
+    # A functional alias among the participants (client-c activates patrol-car-12).
+    lab.cmd(C, "mcdata-fa", "activate", PATROL, ok=False)
+    lab.wait("client-c's alias active", lambda: PATROL in lab.status(C)["mcdata_functional_aliases"]["active"], timeout=20)
+    text = f"to the patrol car {stamp} " + "y" * 1100
+    lab.cmd(A, "sds-media", f"adhoc={PATROL}", text, timeout=60)
+    m = inbox(lab, C, text)
+    lab.check("the alias in an ad hoc list reaches client-c, told the alias called", m["called_alias"] == PATROL and m["plane"] == "media", got=m)
+    r = lab.cmd(A, "sds-media", f"fa={PATROL}", f"one-to-one to the alias {stamp} " + "z" * 1100, ok=False, timeout=60)
+    one = lab.wait("alice's alias communication ends", lambda: next((x for x in reversed(lab.status(A)["media"]) if x["kind"] == "sds" and not x["adhoc"]), None))
+    lab.check("a one-to-one media-plane SDS to an alias is sent with the alias named (the server's answer recorded)",
+              one["state"] in ("delivered", "refused", "failed"), reply=r, communication={k: one.get(k) for k in ("state", "status", "warning", "peer", "called_alias")})
+    lab.cmd(C, "mcdata-fa", "deactivate", PATROL, ok=False)
+
+
+SCENARIOS = {"S80": s80_ip_connectivity, "S81": s81_enhanced_status, "S82": s82_message_store, "S83": s83_protected_msrp,
+             "S84": s84_adhoc_and_alias_media}

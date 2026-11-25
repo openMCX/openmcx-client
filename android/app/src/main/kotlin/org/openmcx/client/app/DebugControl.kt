@@ -816,6 +816,7 @@ class DebugControl(private val context: Context) {
         .put("id", c.id).put("kind", c.kind).put("outgoing", c.outgoing).put("peer", c.peer).put("group", c.group)
         .put("state", c.state).put("status", c.status).put("warning", c.warning).put("error", c.error)
         .put("emergency", c.emergency).put("imminent_peril", c.imminentPeril).put("message_id", c.messageId?.toString())
+        .put("adhoc", c.adhoc).put("sender_alias", c.senderAlias).put("called_alias", c.calledAlias)
         .put("conversation_id", c.conversationId.toString()).put("security", c.security).put("release", c.release)
         .put("file", c.fileName).put("size", c.fileSize).put("sha256", c.sha256).put("path", c.filePath)
         .put("messages", JSONArray(c.messages.map { it.take(120) }))

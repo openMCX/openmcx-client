@@ -37,8 +37,9 @@ internal object FdMedia {
                      mandatory: Boolean, completion: Boolean, priority: String): MediaCommunication {
         val s = service.internals
         val emergency = priority == "emergency"; val imminent = priority == "imminent"
+        if (priority != "normal" && AdhocTarget.of(target) != null) throw SdsError("ad hoc group emergency and imminent peril communications are not implemented")
         if (imminent && !group) throw SdsError("imminent peril applies to group communications")
-        val c = MediaCommunication(s.nextId(), "fd", true, target.takeIf { !group }, target.takeIf { group })
+        val c = service.outgoing("fd", target, group)
         c.emergency = emergency; c.imminentPeril = imminent
         s.add(c)
         var local = s.protect(c, s.localMedia("sendonly", acceptTypes = listOf(McdataService.SIGNALLING)), target, group)

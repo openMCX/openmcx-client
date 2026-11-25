@@ -9,6 +9,7 @@ import org.json.JSONObject
 import org.openmcx.client.mcdata.DispositionRequest
 import org.openmcx.client.mcdata.IpconService
 import org.openmcx.client.mcdata.IpconSession
+import org.openmcx.client.mcdata.sendAdhoc
 
 /**
  * The debug control commands of the MCData procedures of [McdataExtras] (parity phase 4b), one per procedure, as the
@@ -16,7 +17,7 @@ import org.openmcx.client.mcdata.IpconSession
  */
 internal object McdataCommands {
     val NAMES = setOf("ipcon", "ipcon-ping", "ipcon-status", "sds-status", "sds-status-values", "sds-status-received",
-        "msgstore-ctrl", "msgstore")
+        "msgstore-ctrl", "msgstore", "sds-adhoc")
 
     suspend fun execute(cmd: String, args: List<String>): Any = when (cmd) {
         // TS 24.282 §20.2.1: ipcon <MCData ID> | ipcon fa=<functional alias> | ipcon close
@@ -55,6 +56,19 @@ internal object McdataCommands {
         }
         // TS 24.282 §21.2: msgstore <operation> ..., one message store or notification client procedure per operation
         "msgstore" -> msgstore(args)
+        // TS 24.282 §9.2.2.2.1 step 3A: sds-adhoc <ID,ID,...|criteria=<criteria>|group=<ad hoc group>> <text…> [--disposition d]
+        // (the media plane takes the same target as adhoc=<...> in sds-media, sds-session and fd-media; fa=<alias> there
+        // names a functional alias, TS 24.282 §22)
+        "sds-adhoc" -> {
+            val words = args.toMutableList()
+            val flag = words.indexOf("--disposition")
+            val d = if (flag >= 0) disposition(words.getOrNull(flag + 1)).also { words.subList(flag, minOf(flag + 2, words.size)).clear() } else null
+            require(words.size >= 2) { "usage: sds-adhoc <ID,ID,...|criteria=..|group=..> <text>" }
+            val sds = Engine.mcdata ?: throw IllegalStateException("MCData not provisioned")
+            val sent = sds.sendAdhoc(org.openmcx.client.mcdata.AdhocTarget.parse(words[0]), words.drop(1).joinToString(" "), d)
+            Engine.sent(sent)
+            JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("group", sent.target).put("plane", sent.plane)
+        }
         else -> throw IllegalArgumentException("unknown command $cmd")
     }
 

@@ -103,7 +103,11 @@ class McdataService(private val client: McxClient) : ServiceHandler {
     private fun event(text: String) = client.event("mcdata: $text")
     private fun now() = System.currentTimeMillis() / 1000
 
-    private fun message(parts: List<Part>): SipRequest {
+    /** What the ad hoc group SDS of Adhoc.kt reaches. */
+    internal val mcxClient: McxClient get() = client
+    internal val clientConfig get() = config
+
+    internal fun message(parts: List<Part>): SipRequest {
         val request = ua.newRequest("MESSAGE", config.psi, NameAddr(config.psi))
         request.headers.add("Accept-Contact", "*;+g.3gpp.mcdata.sds;require;explicit")
             .add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCDATA_SDS)}\";require;explicit")
@@ -120,13 +124,15 @@ class McdataService(private val client: McxClient) : ServiceHandler {
     suspend fun send(target: String, text: String, group: Boolean, disposition: DispositionRequest? = null,
                      conversationId: UUID = UUID.randomUUID(), inReplyTo: UUID? = null, toAlias: Boolean = false,
                      calledAlias: String? = null, payloadType: Int = PayloadType.TEXT): SentSds {
+        // §9.2.2.2.1 step 3A: an ad hoc group, written adhoc=... (Adhoc.kt).
+        AdhocTarget.of(target)?.let { return sendAdhoc(it, text, disposition, conversationId) }
         // §15.2.13: the payload content type, TEXT unless another is asked for (ENHANCED STATUS, §14.2.1.1).
         val data = DataPayload(listOf(Payload(payloadType, text.toByteArray(Charsets.UTF_8))))
         // TS 24.282 §9.2.1.1: above <max-payload-size-sds-cplane-bytes> the message goes over the media plane (§9.2.3).
         if (data.size > config.maxPayloadSizeSdsCplaneBytes) {
             val media = media ?: throw SdsError("payload of ${data.size} octets is above the signalling-plane limit")
-            if (toAlias) throw SdsError("an SDS to a functional alias over the media plane is not implemented")
-            return media.sendStandalone(target, text, group, disposition, conversationId, inReplyTo)
+            // §22 over the media plane: the INVITE names the alias, a 300 the user to invite (Adhoc.kt, AliasTarget).
+            return media.sendStandalone(if (toAlias) AliasTarget.PREFIX + target else target, text, group, disposition, conversationId, inReplyTo)
         }
         val signalling = SdsSignalling(now(), conversationId, UUID.randomUUID(), inReplyTo, disposition = disposition)
         // §9.2.2.2.1 steps 2b ii and 3b v: an alias presented only while it is active for this user, and a one-to-one
