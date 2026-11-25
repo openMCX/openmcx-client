@@ -69,6 +69,11 @@ has it: the lab scenarios run each server feature through this client.
 - File distribution over HTTP and over the media plane: offers, acceptance, rejection, deferral, extension and release
 - Emergency alerts, emergency and imminent-peril communications
 - IP connectivity, enhanced status, communication release
+- Pre-established session for SDS (TS 24.282 clauses 18.3 and 9.2.5, TS 24.582 clause 12): `mcdata-pre-establish`,
+  `mcdata-pre-release`; while it is established, standalone SDS over the media plane and SDS sessions (one-to-one and
+  group, normal priority) go over it by REFER, the participating function's re-INVITE reporting or offering the
+  communication; released by REFER "BYE" or the server's re-INVITE. Not built: ICE connectivity checks (the offer
+  carries the MSRP listener's host candidate), emergency and imminent peril communications over the session
 - Functional aliases (status subscription, outcome by NOTIFY, take-over once offered), message store (storage control and notification channels), location
 - End-to-end protected payloads and signalling
 

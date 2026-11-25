@@ -2608,6 +2608,44 @@ private:
 
   void mcdata_media_tick();
 
+  // ---- MCData pre-established session, mcdata/pre_established.cpp (TS 24.282 clause 18.3; SDS over it, clause
+  // 9.2.5; its media plane, TS 24.582 clause 12): one session at a time, established by "mcdata-pre-establish" and
+  // released by "mcdata-pre-release". While it is established and not in use, a standalone SDS over the media plane
+  // or an SDS session (one-to-one or group, normal priority) goes over it: a REFER, the participating function's
+  // re-INVITE, then the MSRP connection to the session's negotiated MSRP URI.
+  struct McdataPreSession {
+    // the INVITE dialog; the URI identifying the session (Contact of the 2xx); establishing, established, releasing
+    std::string dialog, uri;
+    std::string state = "establishing";
+    std::unique_ptr<msrp::Endpoint> listener; // the MSRP URI offered with "a=setup:actpass" (clause 18.3.1.1 1)f))
+    MsrpMedia local;                          // the offer (clause 18.3.1.1)
+    std::optional<MsrpMedia> remote;          // the participating function's answer
+    std::string ice_ufrag, ice_password;      // RFC 8839: the offer's ICE credentials (clause 18.3.2.1 10))
+    // The MCData communication using the session: "" (none), "requested" (REFER accepted), "established",
+    // "releasing" (REFER "BYE" sent); its MCData session identity (the Refer-To of the REFER "BYE", clause 9.2.5.4.1.1
+    // step 6) and the last <mcdata-communication-state> received.
+    std::string communication, communication_uri, last_state;
+    unsigned established = 0, terminated = 0; // communications established and terminated, for the user (MMI)
+  };
+
+  std::unique_ptr<McdataPreSession> mcdata_pre_;
+  bool mcdata_media_pre_ = false; // the open media plane communication uses the pre-established session
+
+  void mcdata_pre_establish();
+  void mcdata_pre_answered(const SipResponse &raw);
+  void mcdata_pre_release();
+  [[nodiscard]] bool mcdata_pre_usable() const;
+  MsrpMedia mcdata_pre_media(const std::string &direction) const;
+  std::string mcdata_pre_sdp(const std::string &setup) const;
+  void mcdata_pre_refer(const std::string &target, const mcdata::Info &info, const MsrpMedia &offer);
+  void mcdata_pre_leave();
+  void mcdata_pre_connect();
+  void mcdata_pre_drop_media();
+  std::optional<SipResponse> mcdata_pre_request(const SipMessage &message);
+  SipResponse mcdata_pre_reinvite(const SipMessage &message);
+  bool mcdata_pre_state(std::string_view dialog, SipCallState state);
+  void mcdata_pre_status();
+
   // ---- MCData file distribution over HTTP, mcdata/file_distribution.cpp (TS 24.282 clauses 10.2.2 to 10.2.4).
   static std::string sha256_hex(const std::string &data);
 
@@ -2685,6 +2723,25 @@ private:
   int mcdata_alias_subscription_result_ = 0;
   std::vector<std::pair<std::string, std::vector<std::string>>> mcdata_pending_alias_changes_;
   std::set<std::string> mcdata_takeover_possible_, mcdata_takeover_wanted_;
+
+  // MCData location rules (mcdata/location_rules.cpp): TS 24.282 clause 22.2.1.4 (functional aliases) and clause
+  // 8.2.6.2 (the MCData user profile's affiliation rules). Where the client was in each rule's areas at the last
+  // position (none before the first), the last position, the groups a rule affiliated, the aliases a location criterion
+  // activated and those the profile locks against a manual deactivation.
+  McpttProfileRules mcdata_location_rules_;
+  std::map<std::string, bool> mcdata_rule_area_inside_;
+  std::optional<location::Point> mcdata_last_position_;
+  std::set<std::string> mcdata_rule_affiliated_groups_, mcdata_aliases_by_location_, mcdata_alias_locks_;
+  void take_mcdata_profile_rules(const std::string &profile);
+  bool mcdata_rule_area_crossed(const std::string &key, const std::vector<location::Area> &areas, bool entry,
+                                double lat, double lon);
+  void mcdata_location_rules(const location::Point &position);
+  bool mcdata_rule_aliases_met(const McpttAffiliationRule &rule) const;
+  void mcdata_rules_aliases_changed(const std::set<std::string> &before);
+  void mcdata_apply_affiliation_rules(const std::map<std::string, std::pair<bool, bool>> &fulfilled,
+                                      const char *trigger);
+  void mcdata_check_manual_deaffiliation(const std::vector<std::string> &groups) const;
+  void mcdata_check_manual_alias_deactivation(const std::vector<std::string> &aliases) const;
 
   void mcdata_functional_alias(const std::string &action, const std::vector<std::string> &aliases);
 

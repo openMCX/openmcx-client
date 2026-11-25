@@ -7,11 +7,12 @@
 // Warning header field, when a refused refresh token is dropped, the scope of the authentication request, the percent-decoding of an XCAP selector, the
 // escaped text of a control command, the groups of an MCPTT user profile, and the retry delay of a refused initial service authorisation, the
 // implicit floor request word of a call command, the SDP answer parameters kept, the GMK of a call's group, the end of an MCData PCK context and
-// the floor control streams of a call that go on under a new CSK, and the reg event timing and contact rules.
+// the floor control streams of a call that go on under a new CSK, the reg event timing and contact rules, and the
+// MCData-Info and SDP parts of a pre-established session (TS 24.282 clause 18.3).
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.379 V19.7.0 (Rel-19), TS 24.380 V19.2.0 (Rel-19),
 // TS 33.180 V19.4.0 (Rel-19), TS 24.484 V19.6.0 (Rel-19), TS 24.229 V19.7.0 (Rel-19), RFC 3261, RFC 3680, RFC 3903,
-// RFC 3986, RFC 6749.
+// RFC 3986, RFC 6749, RFC 8445, RFC 8839, RFC 6544.
 
 #pragma once
 
@@ -819,6 +820,53 @@ inline std::string location_payload(std::string_view text) {
   const auto m = static_cast<std::uint32_t>(static_cast<std::int32_t>(std::floor(lon / 360.0 * 16777216.0))) & 0xFFFFFFu;
   return std::string{static_cast<char>(n >> 16), static_cast<char>((n >> 8) & 0xFF), static_cast<char>(n & 0xFF),
                      static_cast<char>(m >> 16), static_cast<char>((m >> 8) & 0xFF), static_cast<char>(m & 0xFF)};
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 annex D.1: an element added to the <anyExt> of the <mcdata-Params> of an application/vnd.3gpp.mcdata-info+xml
+// body (e.g. <pre-established-session-ind>, TS 24.282 clause 18.3.2.1 step 9): into the existing <anyExt>, or in a new
+// one closing <mcdata-Params>. Throws when the body has no <mcdata-Params>.
+inline std::string mcdata_info_with_any_ext(std::string xml, std::string_view element) {
+  const auto params_end = xml.find("</mcdata-Params>");
+  if (params_end == std::string::npos) throw std::invalid_argument("MCData-Info without <mcdata-Params>");
+  const auto ext_end = xml.rfind("</anyExt>", params_end);
+  const auto ext_open = xml.rfind("<anyExt>", params_end);
+  if (ext_end != std::string::npos && ext_open != std::string::npos && ext_open < ext_end)
+    xml.insert(ext_end, element);
+  else
+    xml.insert(params_end, "<anyExt>" + std::string(element) + "</anyExt>");
+  return xml;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clauses 9.2.5.2.1.1, 9.2.5.3.1.1, 9.2.5.4.1.1 and 9.2.5.4.1.2: the <mcdata-communication-state> of the
+// participating function's re-INVITE within a pre-established session ("establish-request", "establish-success",
+// "establish-fail", "terminate-request", "terminated"), white space trimmed; empty when there is none. TS 37.579-7
+// writes the state "terminate request" (tables 6.1.14.3.3-11 and others): read as "terminate-request".
+inline std::string mcdata_communication_state(std::string_view info_xml) {
+  auto value = std::string(xml_element_content(info_xml, "mcdata-communication-state"));
+  const auto first = value.find_first_not_of(" \t\r\n");
+  if (first == std::string::npos) return {};
+  value = value.substr(first, value.find_last_not_of(" \t\r\n") - first + 1);
+  if (value == "terminate request") value = "terminate-request";
+  return value;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clauses 18.3.2.1 step 1 and 18.3.1.1 with RFC 8839 sections 5.1 and 5.4 and RFC 6544 section 4.5: the ICE
+// attributes of the "m=message" section of the pre-established session's SDP offer: the client's credentials and its
+// one host candidate, the passive TCP candidate of its MSRP listener (the MCData UE gathers candidates only on the
+// interface it obtains MCData service on, the clause's NOTE). Each line ends with CRLF.
+inline std::string msrp_ice_attributes(std::string_view ufrag, std::string_view password, std::string_view address,
+                                       std::uint16_t port) {
+  // RFC 8445 section 5.1.2.1: priority = 2^24 * type preference (126, host) + 2^8 * local preference + (256 -
+  // component ID); RFC 6544 section 4.2: the local preference of a passive TCP host candidate, 2^13 * direction
+  // preference (4 for passive among host candidates) + other preference (8191).
+  constexpr std::uint32_t priority = (126u << 24) | (((4u << 13) | 8191u) << 8) | (256u - 1u);
+  std::string out = "a=ice-ufrag:" + std::string(ufrag) + "\r\na=ice-pwd:" + std::string(password) + "\r\n";
+  out += "a=candidate:1 1 TCP " + std::to_string(priority) + " " + std::string(address) + " " + std::to_string(port) +
+         " typ host tcptype passive\r\n";
+  return out;
 }
 
 } // namespace mcx::client_rules

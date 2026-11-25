@@ -417,7 +417,7 @@ Client::Client(Json cfg, bool disable_tls)
       sip_(client_sip_config(cfg_, disable_tls),
            {[this](const SipMessage &message) { return incoming(message); },
             [this](std::string_view id, SipCallState state, int code) {
-              if (pre_session_state(id, state)) return;
+              if (pre_session_state(id, state) || mcdata_pre_state(id, state)) return;
               if (mcvideo_closing(id, state) || mcvideo_call_state(id, state)) return;
               call_state(id, state, code);
             },
@@ -568,6 +568,7 @@ void Client::read_mcdata_profile() {
   mcdata_alert_entry_info_ = profile.group_alert_entry_info;
   mcdata_alert_entry_uri_ = profile.group_alert_uri;
   mcdata_profile_loaded_ = true;
+  take_mcdata_profile_rules(response.body); // TS 24.282 clauses 22.2.1.4 and 8.2.6.2 (mcdata/location_rules.cpp)
   status_["mcdata_profile"] = {{"user_id", profile.user_id},
                                {"profile_index", profile.profile_index},
                                {"actions", profile.actions},

@@ -46,6 +46,8 @@ SipResponse Client::incoming_clear(const SipMessage &message) {
     }
     // TS 24.379 clauses 8.3.1.2 and 8.4.1.2: requests in the pre-established session's dialog.
     if (auto answer = pre_session_request(message)) return *answer;
+    // TS 24.282 clauses 9.2.5, 18.3.3.1.2 and 18.3.4.1.2: requests in the MCData pre-established session's dialog.
+    if (auto answer = mcdata_pre_request(message)) return *answer;
     if (message.method == "MESSAGE") return incoming_clear_message(message);
     if (message.method == "INFO") return incoming_clear_info(message);
     if (message.method == "NOTIFY") return incoming_clear_notify(message);

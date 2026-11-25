@@ -290,7 +290,12 @@ SipResponse Client::mcdata_alias_notify(const SipMessage &message) {
         possible.insert(entry.alias);
       if (entry.status == "activated" || entry.status == "activating") standing.insert(entry.alias);
     }
+    const auto before = mcdata_aliases_active_;
     mcdata_aliases_active_ = active;
+    // TS 24.282 clause 8.2.6.2: rules with a functional alias criterion (mcdata/location_rules.cpp).
+    if (active != before) schedule([this, before] { mcdata_rules_aliases_changed(before); });
+    for (auto alias = mcdata_aliases_by_location_.begin(); alias != mcdata_aliases_by_location_.end();)
+      alias = active.contains(*alias) ? std::next(alias) : mcdata_aliases_by_location_.erase(alias);
     mcdata_aliases_standing_ = standing;
     if (!notified.publish_id.empty() && notified.publish_id == mcdata_alias_publish_open_)
       mcdata_alias_publish_open_.clear();

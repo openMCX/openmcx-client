@@ -407,8 +407,14 @@ void Client::mcdata_media_close(const std::vector<SipHeader> &bye_headers) {
   if (!mcdata_media_dialog_.empty()) {
     const auto dialog = mcdata_media_dialog_;
     mcdata_media_dialog_.clear();
-    schedule([this, dialog, bye_headers] { sip_.bye(dialog, {}, bye_headers); });
+    // TS 24.282 clause 9.2.5.4.1.1: a communication within the pre-established session is left by a REFER "BYE";
+    // the session stays.
+    if (mcdata_media_pre_)
+      schedule([this] { mcdata_pre_leave(); });
+    else
+      schedule([this, dialog, bye_headers] { sip_.bye(dialog, {}, bye_headers); });
   }
+  mcdata_media_pre_ = false;
   mcdata_media_.reset();
   ++mcdata_media_serial_; // the notifications of its messages now go by SIP MESSAGE (TS 24.282 clause 9.2.4.2.4)
   mcdata_media_pending_.clear();
@@ -600,6 +606,8 @@ void Client::mcdata_media_file_received(const std::string &transferred) {
 // TS 24.582 clauses 6.1.1.2.1 and 7.1.2.1: the MSRP loop: send the pending SDS or file once the connection is bound,
 // and end a standalone transfer once its SEND is answered.
 void Client::mcdata_media_tick() {
+  // TS 24.282 clause 18.3.1.1 1)f): the MSRP listener of the pre-established session's "actpass" offer.
+  if (mcdata_pre_ && mcdata_pre_->listener) mcdata_pre_->listener->poll();
   if (!mcdata_media_) return;
   mcdata_media_->poll();
   if (!mcdata_media_pending_.empty() && mcdata_media_->connected()) {
