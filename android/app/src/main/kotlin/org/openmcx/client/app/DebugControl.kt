@@ -884,6 +884,7 @@ class DebugControl(private val context: Context) {
         .put("adhoc", c.adhoc).put("sender_alias", c.senderAlias).put("called_alias", c.calledAlias)
         .put("conversation_id", c.conversationId.toString()).put("security", c.security).put("release", c.release)
         .put("file", c.fileName).put("size", c.fileSize).put("sha256", c.sha256).put("path", c.filePath)
+        .put("transferred_size", c.transferredSize).put("transferred_sha256", c.transferredSha256)
         .put("messages", JSONArray(c.messages.map { it.take(120) })).put("pre_established", c.preEstablished)
         .put("resource_priority", c.resourcePriority)
 

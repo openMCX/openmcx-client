@@ -52,7 +52,8 @@ internal object FdMedia {
         val signalling = FdSignalling(s.clock(), UUID.randomUUID(), UUID.randomUUID(), "", completionRequested = completion,
             mandatoryDownload = mandatory)
         c.messageId = signalling.messageId
-        c.fileName = name; c.fileSize = transferred.size.toLong(); c.sha256 = sha
+        c.fileName = name; c.fileSize = contents.size.toLong(); c.sha256 = FdService.sha256Bytes(contents)
+        c.transferredSize = transferred.size.toLong(); c.transferredSha256 = sha
         val info = s.requestInfo(if (group) "group-fd" else "one-to-one-fd", target, group, emergency, imminent)
         val parts = s.targetParts(target, group, info, local)
         parts += Part(McdataService.SIGNALLING, signalling.encode(mediaPlane = true))
@@ -88,6 +89,7 @@ internal object FdMedia {
         c.file = FdMediaOffer(signalling, metadata, selector)
         c.messageId = signalling.messageId
         c.fileName = metadata.name; c.fileSize = metadata.size; c.sha256 = metadata.sha256
+        c.transferredSize = metadata.size; c.transferredSha256 = metadata.sha256
         c.state = "offered"
         s.add(c)
         val decision = if (signalling.mandatoryDownload) "accept" else s.fileDecision(c)
@@ -145,6 +147,8 @@ internal object FdMedia {
             target.writeBytes(contents)
             c.filePath = target.path
         }
+        // The user's file is the opened one: its size and hash, not the protected series' of the selector.
+        c.fileSize = contents.size.toLong(); c.sha256 = if (contents === body) sha else FdService.sha256Bytes(contents)
         c.state = "received"; s.changed(c)
         s.event("communication ${c.id}: file ${offer.metadata.name} received (${contents.size} octets)")
         s.listener?.file(c, contents)

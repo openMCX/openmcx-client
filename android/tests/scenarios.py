@@ -2362,7 +2362,12 @@ class Lab:
         sent = self.cmd(B, "fd-media", MCDATA[A], remote, "name=report.bin", "mandatory", "completed", timeout=60)
         self.check("bob's file over the media plane is sent", sent["state"] == "delivered", sent=sent)
         got = self.last_media(A, "fd", False, "alice receives the file", lambda c: c["state"] in ("received", "corrupt", "failed"), timeout=30)
+        # The size and hash reported are of alice's file, in the clear. On a protected lab (--protected) the file selector
+        # and what went over MSRP are the protected series (RFC 5547, TS 33.180 §8.5.4), longer than the file.
         self.check("alice receives the mandatory file whole", got["state"] == "received" and got["sha256"] == sha and got["size"] == 3500, got=got)
+        self.check("the series transferred is " + ("the protected one" if self.protected else "the file itself"),
+                   (got.get("transferred_size") or 0) > 3500 and got.get("transferred_sha256") != sha if self.protected
+                   else got.get("transferred_size") == 3500 and got.get("transferred_sha256") == sha, got=got)
         self.check("alice's copy is stored", bool(got["path"]))
         # Non-mandatory: the user decides (§10.2.5.2.4 7)); alice declines, then defers.
         self.cmd(A, "fd-media-policy", "ask")
@@ -2374,7 +2379,8 @@ class Lab:
                                                                                 ok=False, timeout=90)))
                 sender.start()
                 offer = self.last_media(A, "fd", False, f"alice is offered {decision}.bin", lambda c: c["state"] == "offered" and c["file"] == f"{decision}.bin")
-                self.check(f"alice is asked about {decision}.bin", offer["size"] == 3500)
+                # Offered, only the selector is known: the protected series' size on a protected lab.
+                self.check(f"alice is asked about {decision}.bin", offer["size"] > 3500 if self.protected else offer["size"] == 3500, offer=offer)
                 self.cmd(A, "fd-media-answer", decision)
                 done = self.last_media(A, "fd", False, f"{decision}.bin {state}", lambda c: c["file"] == f"{decision}.bin" and c["state"] == state)
                 self.check(f"alice's {decision} is applied", done["state"] == state)

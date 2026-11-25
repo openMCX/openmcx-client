@@ -182,11 +182,17 @@ class MediaCommunication(
     @Volatile var preEstablished = false
     /** The Resource-Priority the communication was granted with (TS 24.282 §9.2.5.3.1.1 0)b)). */
     @Volatile var resourcePriority: String? = null
-    /** An FD: the file name, size and where it is kept. */
+    /**
+     * An FD: the file name, size and SHA-256 and where it is kept. [fileSize] and [sha256] are the user's file, in the
+     * clear; while a received file is only offered they are the file selector's, which for a protected file describe
+     * its protected series (RFC 5547, TS 33.180 §8.5.4), as [transferredSize] and [transferredSha256] always do.
+     */
     @Volatile var fileName: String? = null
     @Volatile var fileSize: Long? = null
     @Volatile var filePath: String? = null
     @Volatile var sha256: String? = null
+    @Volatile var transferredSize: Long? = null
+    @Volatile var transferredSha256: String? = null
     val messages = java.util.concurrent.CopyOnWriteArrayList<String>()
     internal var dialog: Dialog? = null
     internal var msrp: MsrpSession? = null

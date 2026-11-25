@@ -357,6 +357,7 @@ class McdataMediaServiceTest {
         assertTrue(chunks.all { it.contentType == McdataMediaService.FILE })
         assertEquals(contents.toList(), chunks.map { it.body }.reduce { a, b -> a + b }.toList())
         assertEquals("delivered", c.state)
+        assertEquals(5000L, c.fileSize); assertEquals(5000L, c.transferredSize)
         waitFor("BYE") { server.byes.size == 1 }
     }
 
@@ -390,6 +391,10 @@ class McdataMediaServiceTest {
             byteRange = ByteRange(1, 4000, 4000), contentType = McdataMediaService.FILE, body = contents))
         waitFor("received") { media.communications.value.single().state == "received" }
         assertEquals(contents.toList(), java.io.File(dir, "report.pdf").readBytes().toList())
+        // The user's file is reported, as is the series transferred (the same here, in the clear).
+        val got = media.communications.value.single()
+        assertEquals(4000L, got.fileSize); assertEquals(FdService.sha256Bytes(contents), got.sha256)
+        assertEquals(4000L, got.transferredSize); assertEquals(got.sha256, got.transferredSha256)
         // TS 24.282 §12.2.1.1: the completion notification goes on the signalling plane.
         waitFor("COMPLETED") { server.fdMessages.isNotEmpty() }
         val notice = FdNotification.decode(server.fdMessages.single().first { it.mediaType == McdataService.SIGNALLING }.content)
