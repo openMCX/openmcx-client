@@ -50,6 +50,8 @@ data class ClientConfig(
      * only (TS 24.484 §7.2.2.7 g) gives no private key and no pre-shared key identity for mutual).
      */
     val httpProxy: String? = null,
+    /** The SEAL location management server's base URI (`lms`, TS 24.545 clause 6.2.2), or null without one. */
+    val lms: String? = null,
 ) {
     data class Sip(
         val publicUserId: String, val privateUserId: String, val password: String,
@@ -234,6 +236,7 @@ data class ClientConfig(
                         idms.optStr("jwks_uri"))),
                 cms = root.str("cms"),
                 gms = root.str("gms"),
+                lms = root.optStr("lms")?.ifEmpty { null },
                 mcptt = (root["mcptt"] as? JsonObject)?.let {
                     Mcptt(it.str("user_id"), it.str("psi"), it.strings("groups"), it.optStr("answer_mode") ?: "automatic",
                         it.int("session_expires", 1800), it.int("manual_answer_timeout", 20),

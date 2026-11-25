@@ -13,6 +13,8 @@ import org.w3c.dom.Element
 import org.openmcx.client.security.KeyClient
 import kotlinx.serialization.json.*
 import org.openmcx.client.mcdata.GroupFdPolicy
+import org.openmcx.client.location.GroupAreas
+import org.openmcx.client.location.ProfileRules
 
 class DocumentError(message: String) : Exception(message)
 
@@ -33,6 +35,13 @@ data class UserProfile(
      * <entry> of <FunctionalAliasList> in the <anyExt> of <OnNetwork>.
      */
     val functionalAliases: List<String> = emptyList(),
+    /**
+     * TS 24.484 §8.3.2.1 item 10 with TS 24.379 §9A.2.1.4, §9.2.1.7.2 and §9.2.1.2: the location criteria of the
+     * functional aliases, the affiliation rules of the <MCPTTGroupInfo> entries and the manual de-affiliation locks
+     * (none when the profile cannot be read for them: [locationRulesError]).
+     */
+    val locationRules: ProfileRules = ProfileRules(),
+    val locationRulesError: String? = null,
 ) {
     fun allows(action: String) = action in actions
 
@@ -63,7 +72,10 @@ data class UserProfile(
                     .flatMap { it.kids("PrivateCallURI") }.mapNotNull { it.uriEntry() },
                 functionalAliases = root.kids("OnNetwork").flatMap { it.kids("anyExt") }.flatMap { it.kids("FunctionalAliasList") }
                     .flatMap { it.kids("entry") }.mapNotNull { it.uriEntry() },
-            )
+            ).let { profile ->
+                runCatching { ProfileRules.parse(text) }
+                    .fold({ profile.copy(locationRules = it) }, { profile.copy(locationRulesError = it.message) })
+            }
         }
 
         /**
@@ -89,7 +101,9 @@ data class UserProfile(
 
 /** A group document (TS 24.481 §7.2), the parts this client uses. */
 data class GroupDocument(val uri: String, val members: List<String>, val services: Set<String>, val protectMedia: Boolean,
-                         val fd: GroupFdPolicy? = null) {
+                         val fd: GroupFdPolicy? = null,
+                         /** TS 24.481 §7.2.4.2, §7.2.8: the group's permitted and mandatory geographic areas (TS 24.379 §9.2.1.7.3). */
+                         val areas: GroupAreas = GroupAreas()) {
     val mcptt get() = services.any { it.endsWith("icsi.mcptt") }
     val mcdata get() = services.any { it.endsWith("icsi.mcdata") }
 
@@ -111,6 +125,7 @@ data class GroupDocument(val uri: String, val members: List<String>, val service
                 services = service.descendants("service").map { it.getAttribute("enabler") }.toSet(),
                 protectMedia = service.descendants("protect-media").firstOrNull()?.text() == "true",
                 fd = fd,
+                areas = runCatching { GroupAreas.parse(text) }.getOrDefault(GroupAreas()),
             )
         }
     }
@@ -197,6 +212,13 @@ class DocumentClient(private val http: HttpClient, private val cms: String, priv
     /** TS 24.484 §8.3.1A: the user's MCPTT user profile document, mcptt-user-profile-<index>.xml. */
     suspend fun userProfile(mcpttId: String, index: Int, token: String): UserProfile =
         UserProfile.parse(fetch("$cms/org.3gpp.mcptt.user-profile/users/${enc(mcpttId)}/mcptt-user-profile-$index.xml", token))
+
+    /**
+     * TS 24.484 §10.3.1A and §9.3.1A: the user's MCData or MCVideo user profile document ([service] `mcdata` or
+     * `mcvideo`), <service>-user-profile-<index>.xml, as text.
+     */
+    suspend fun serviceProfile(service: String, userId: String, index: Int, token: String): String =
+        fetch("$cms/org.3gpp.$service.user-profile/users/${enc(userId)}/$service-user-profile-$index.xml", token)
 
     /** TS 24.484 §8.4.2.8 (§9.4.2.8, §10.4.2.8): the service configuration document of `mcptt`, `mcvideo` or `mcdata`. */
     suspend fun serviceConfiguration(service: String, token: String): String =
