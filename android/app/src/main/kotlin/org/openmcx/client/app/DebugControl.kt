@@ -349,6 +349,13 @@ class DebugControl(private val context: Context) {
         "mcdata-media" -> JSONArray(media().communications.value.map(::mediaJson))
         // TS 24.282 §18.3 (the Linux client's commands): mcdata-pre-establish | mcdata-pre-release | mcdata-pre-session;
         // while established, sds-media and sds-session go over it by REFER (§9.2.5).
+        // TS 24.379 §8 (the Linux client's commands): pre-establish [implicit] | pre-session-modify [implicit|explicit]
+        // [update] | pre-session-release | pre-session; while established, calls go over it by REFER (§10.1.1.2.2.1 ...).
+        "pre-establish" -> mcpttPreJson(mcptt().preSession.establish(implicitFloor = "implicit" in args))
+        "pre-session-modify" -> mcpttPreJson(mcptt().preSession.modify(
+            implicitFloor = if ("implicit" in args) true else if ("explicit" in args) false else null, update = "update" in args))
+        "pre-session-release" -> mcpttPreJson(mcptt().preSession.release())
+        "pre-session" -> mcptt().preSession.status.value?.let(::mcpttPreJson) ?: JSONObject.NULL
         "mcdata-pre-establish" -> preJson(media().preSession.establish())
         "mcdata-pre-release" -> preJson(media().preSession.release())
         "mcdata-pre-session" -> media().preSession.status.value?.let(::preJson) ?: JSONObject.NULL
@@ -795,6 +802,15 @@ class DebugControl(private val context: Context) {
         return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("dppk_id", sent.dppkId ?: JSONObject.NULL).put("plane", sent.plane)
     }
 
+    private fun mcpttPreJson(p: org.openmcx.client.mcptt.McpttPreSessionStatus): JSONObject = JSONObject().put("state", p.state)
+        .put("uri", p.uri ?: JSONObject.NULL).put("call_id", p.callId ?: JSONObject.NULL).put("control", p.control)
+        .put("implicit", p.implicit).put("call", p.callIdOver ?: JSONObject.NULL).put("calls", p.calls)
+        .put("last_control", p.lastControl ?: JSONObject.NULL).put("floor_priority", p.floorPriority ?: JSONObject.NULL)
+        .put("refreshes", p.refreshes).put("modified", p.modified).put("resumed", p.resumed).put("reestablished", p.reestablished)
+        .put("error", p.error ?: JSONObject.NULL).put("release_reason", p.releaseReason ?: JSONObject.NULL)
+        .put("audio_port", p.audioPort ?: JSONObject.NULL).put("floor_port", p.floorPort ?: JSONObject.NULL)
+        .put("usable", Engine.mcptt?.preSession?.usable == true).put("wanted", Engine.mcptt?.preSession?.wanted == true)
+
     private fun preJson(p: org.openmcx.client.mcdata.PreSessionStatus): JSONObject = JSONObject().put("state", p.state)
         .put("uri", p.uri ?: JSONObject.NULL).put("call_id", p.callId ?: JSONObject.NULL)
         .put("communication", p.communication ?: JSONObject.NULL).put("communication_uri", p.communicationUri ?: JSONObject.NULL)
@@ -991,7 +1007,7 @@ class DebugControl(private val context: Context) {
         .put("openable", AttachmentFiles.openable(r) != null).put("release", r.release)
 
     private fun callJson(call: Call): JSONObject = JSONObject()
-        .put("id", call.id).put("type", call.type.sessionType).put("outgoing", call.outgoing)
+        .put("id", call.id).put("pre_established", call.preEstablished).put("session_uri", call.sessionUri).put("type", call.type.sessionType).put("outgoing", call.outgoing)
         .put("peer", call.peer).put("group", call.groupId).put("state", call.state).put("reason", call.releaseReason)
         .put("floor", call.media?.let { if (it.isStarted) it.floor.state.value.name else null })
         .put("floor_control", call.floorControl).put("muted", call.media?.muted == true).put("priority", call.priority)
@@ -1073,6 +1089,7 @@ class DebugControl(private val context: Context) {
             } ?: emptyList<JSONObject>()))
             .put("files", JSONArray(Engine.fd?.records?.value?.map(::fdJson) ?: emptyList<JSONObject>()))
             .put("media", JSONArray(Engine.mcdataMedia?.communications?.value?.map(::mediaJson) ?: emptyList<JSONObject>()))
+            .put("pre_session", Engine.mcptt?.preSession?.status?.value?.let(::mcpttPreJson) ?: JSONObject.NULL)
             .put("mcdata_pre_session", Engine.mcdataMedia?.preSession?.status?.value?.let(::preJson) ?: JSONObject.NULL)
             .put("outbox", JSONArray(Engine.mcdata?.outbox?.value?.map { m ->
                 JSONObject().put("message_id", m.messageId.toString()).put("target", m.target).put("group", m.group)

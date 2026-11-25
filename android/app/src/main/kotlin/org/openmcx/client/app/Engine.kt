@@ -241,6 +241,12 @@ object Engine {
             }
             mcptt = service
             c.handlers += service
+            // TS 24.379 §8: the pre-established session the user asked for is made again on each new MCPTT authorisation.
+            scope.launch {
+                c.status.map { it.mcptt.authorisations }.distinctUntilChanged().collect { n ->
+                    if (n > 0) runCatching { service.preSession.resume() }
+                }
+            }
         }
         config.mcdata?.let {
             val service = McdataService(c)
@@ -484,7 +490,9 @@ object Engine {
     /** The pre-established sessions in one line for the Messages screen; null when none was asked for. */
     fun preSessionLine(): String? {
         val mcdataPre = mcdataMedia?.preSession?.status?.value?.takeIf { it.state != "released" || mcdataMedia?.preSession?.wanted == true }
-        val parts = listOfNotNull(mcdataPre?.let { "MCData pre-established session: ${it.state}" +
+        val mcpttPre = mcptt?.preSession?.status?.value?.takeIf { it.state != "released" || mcptt?.preSession?.wanted == true }
+        val parts = listOfNotNull(mcpttPre?.let { "MCPTT pre-established session: ${it.state}" + (if (it.control == "in-use") " (in use)" else "") },
+            mcdataPre?.let { "MCData pre-established session: ${it.state}" +
             (it.communication?.let { c -> " ($c)" } ?: "") })
         return parts.joinToString(" · ").ifEmpty { null }
     }
