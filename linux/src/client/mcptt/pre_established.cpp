@@ -198,6 +198,8 @@ std::optional<SipResponse> Client::pre_session_request(const SipMessage &message
     }
     response.local_media = pre_session_->local;
     response.local_media->key_mgmt.clear();
+    // TS 24.380 clause 14.3.3: the client returns the offered "mc_priority".
+    response.local_media->floor_priority = message.remote_media->floor_priority;
     event("first_to_answer_key_reinvite", {{"pck_id", status_.value("private_key_id", Json(nullptr))}});
     return response;
   }
@@ -205,6 +207,7 @@ std::optional<SipResponse> Client::pre_session_request(const SipMessage &message
     if (info_part != message.parts.end())
       update_priority(parse_mcptt_info(info_part->body), parse_emergency_location_parts(message.parts));
     response.local_media = pre_session_->local;
+    response.local_media->floor_priority = message.remote_media->floor_priority; // TS 24.380 clause 14.3.3
     event("pre_session_priority_reinvite",
           {{"resource_priority", std::string(get_header(message.headers, "Resource-Priority"))}});
     return response;
@@ -561,6 +564,16 @@ SipResponse Client::pre_session_call_offer(const SipMessage &message) {
     answer.control = MediaControl::none;
     answer.control_removed = message.remote_media->control_removed; // RFC 3264 section 6: one m-line per offered
     if (answer.ice) answer.ice->control.clear();
+    local_.audio_ssrc = answer.audio_ssrc;
+  } else if (message.remote_media->no_floor_control) {
+    // TS 24.380 clauses 14.2.6 and 14.3.7: an offer with "mc_no_floor_ctrl" is a call without floor control; the
+    // control channel stays (the Connect and Disconnect of the session, clause 9.2) and the answer says
+    // "mc_no_floor_ctrl" with none of the floor control attributes. No floor participant runs (clause 9.2.2.3.2).
+    local_.no_floor_control = answer.no_floor_control = true;
+    answer.floor_priority.reset();
+    answer.implicit_request = answer.granted = answer.queueing = false;
+    answer.granted_audio_ssrc = 0;
+    answer.floor_ssrc = 0;
     local_.audio_ssrc = answer.audio_ssrc;
   }
   if (private_call) {
