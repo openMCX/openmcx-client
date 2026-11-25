@@ -1717,6 +1717,13 @@ class Lab:
         for c in (B, C):
             got = self.last_media(c, "fd", False, f"{c} receives the group file", lambda x: x["file"] == "group.bin" and x["state"] in ("received", "corrupt"), timeout=30)
             self.check(f"{c} receives the group file on {GROUP}", got["state"] == "received" and got["group"] == GROUP and got["size"] == 1500, got=got)
+        # FD over HTTP, released by its originator (TS 24.282 §6.2.2.4): the FD HTTP TERMINATION and the server's answer (§6.3.6.1).
+        http = self.cmd(B, "fd-send", MCDATA[A], remote, "http.bin", "application/octet-stream", timeout=120)
+        self.check("bob's file over HTTP is sent", http["state"] == "sent", http=http)
+        self.cmd(B, "fd-terminate", http["id"])
+        done = self.wait("bob's release answered", lambda: next((r for r in self.cmd(B, "fd-files") if r["id"] == http["id"]
+                         and r.get("release") in ("terminated", "termination failed")), None), timeout=20)
+        self.check("the server terminates bob's distribution", done["release"] == "terminated", record=done)
 
     def s65_media_priority(self) -> None:
         # TS 24.282 §6.2.8.1.1: an emergency group SDS session; §6.2.8.1.3: its cancel by re-INVITE. Needs --priority.
