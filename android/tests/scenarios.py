@@ -528,7 +528,10 @@ class Lab:
         self.hangup(A)
         self.idle_everywhere([A, B, C])
         types = self.fgs_types(A)
-        self.check("alice's service is back to special use only after the call", types == self.special_use(A), types=hex(types))
+        # The microphone type stays (held from the service's start, for a remotely initiated ambient listening call,
+        # TS 24.379 §11.1.6.2.1.2); phoneCall goes.
+        self.check("alice's service is back to special use (and the microphone) after the call",
+                   types & ~FGS_MICROPHONE == self.special_use(A), types=hex(types))
         # A message notification, and history that outlives the process.
         text = f"Notify me {time.strftime('%H%M%S')}"
         self.cmd(A, "sds", MCDATA[B], text)
@@ -1236,6 +1239,314 @@ class Lab:
 
     def ringing(self, client: str) -> dict:
         return self.wait(f"{client} rings", lambda: (c := self.call(client)) and c.get("state") == "ringing" and c, timeout=15)
+
+    # Phase 3: MCPTT call services (TS 24.379 V19.7.0 §10.1.5, §11.1.5 to §11.1.9), on a lab made with
+    # --private-services (and --priority for S36's imminent peril notification).
+
+    def last_received(self, client: str, start: str, containing: str = "") -> str | None:
+        """The last message [client] received whose start line begins with [start] (and that contains [containing])."""
+        blocks = [b for b in self.sip_trace(client).split("----- ") if " recv\n" in b.split("\n", 1)[0] + "\n"]
+        found = [b for b in blocks if b.split("\n", 1)[1].startswith(start) and containing in b] if blocks else []
+        return found[-1] if found else None
+
+    def services(self, client: str) -> dict:
+        return self.cmd(client, "call-services")
+
+    def all_calls(self, client: str) -> list:
+        return self.status(client)["calls"]
+
+    def call_threaded(self, client: str, *args: str, timeout: float = 40) -> tuple[threading.Thread, dict]:
+        result: dict = {}
+        t = threading.Thread(target=lambda: result.update(r=self.cmd(client, *args, ok=False, timeout=timeout)))
+        t.start()
+        return t, result
+
+    def received_burst_from(self, listener: str, talker: str, timeout: float = 15) -> tuple[dict | None, dict | None]:
+        """The talker's last sent burst, and the listener's burst with its SSRC once it has as many frames."""
+        def both():
+            talking = self.call(talker) or {}
+            sent = [b for b in (talking.get("bursts") or []) if b["direction"] == "sent"]
+            # The burst is over (the WAV ended and the floor was released) before it is compared.
+            if not sent or sent[-1]["frames"] <= 50 or talking.get("floor") == "HAS_PERMISSION":
+                return None
+            got = next((b for b in (self.call(listener) or {}).get("bursts", []) if b["ssrc"] == sent[-1]["ssrc"]), None)
+            return (sent[-1], got) if got and got["frames"] >= sent[-1]["frames"] else None
+        try:
+            return self.wait(f"{listener} hears {talker}", both, timeout=timeout)
+        except Failed:
+            sent = [b for b in ((self.call(talker) or {}).get("bursts") or []) if b["direction"] == "sent"]
+            return (sent[-1] if sent else None), None
+
+    def reached(self, client: str) -> dict:
+        """The call that reaches [client]: answered if it rings. The OpenMCX server gives the invitee of a forwarded
+        call Answer-Mode Auto whatever Priv-Answer-Mode the caller sent, so it may connect at once."""
+        call = self.wait(f"{client} gets the call", lambda: (c := self.call(client)) and c.get("state") in ("ringing", "established") and c,
+                         timeout=15)
+        if call["state"] == "ringing":
+            self.cmd(client, "answer")
+        return self.established(client)
+
+    def hang_up_all(self, clients) -> None:
+        for c in clients:
+            if self.call(c):
+                self.cmd(c, "hangup", ok=False)
+
+    def hidden_call(self, client: str) -> dict | None:
+        return next((c for c in self.all_calls(client) if c.get("hidden")), None)
+
+    def s32_ambient_remote(self) -> None:
+        # TS 24.379 §11.1.6.2.1.1 (remote-init): alice listens to bob with bob's screen off; §11.1.6.2.1.2: bob's app answers
+        # at once and tells bob nothing, takes the floor the server grants (§6.4) and sends the microphone (here a WAV),
+        # with the foreground service's microphone type; alice receives the speech unchanged and may release the call.
+        if not self.needs("private_services", "S32"):
+            return
+        self.devices[B].adb("shell", "input", "keyevent", "KEYCODE_SLEEP", check=False)
+        try:
+            self.cmd(B, "ambient-source", SPEECH[B])
+            call = self.cmd(A, "ambient", "remote", MCPTT[B])
+            self.check("alice's ambient listening call is established", call["state"] == "established"
+                       and call["ambient_role"] == "listening", call=call)
+            invite = self.last_sent(A, "INVITE ", "ambient-listening") or ""
+            self.check("alice's INVITE: session type ambient-listening, remote-init, Priv-Answer-Mode Auto, recvonly",
+                       "<ambient-listening-type>remote-init</ambient-listening-type>" in invite and "Priv-Answer-Mode: Auto" in invite
+                       and "a=recvonly" in invite and MCPTT[B] in invite)
+            self.check("the server gives alice the release capability (annex D.3)", call["may_release"], call=call)
+            hidden = self.wait("bob's hidden call", lambda: (h := self.hidden_call(B)) and h["state"] == "established" and h, timeout=15)
+            self.check("bob's call is the hidden listened-to side", hidden["ambient_role"] == "listened-to", call=hidden)
+            self.check("bob's app shows no call (no active call)", self.call(B) is None or self.call(B).get("hidden"))
+            received = self.last_received(B, "INVITE ", "ambient-listening") or ""
+            self.check("bob's INVITE came with a null alert", "Alert-Info: <file:///dev/null>" in received)
+            call_id = next((l.split(":", 1)[1].strip() for l in received.splitlines() if l.lower().startswith("call-id:")), "?")
+            answered = self.last_sent(B, "SIP/2.0 200", "a=sendonly")
+            self.check("bob answered at once (200, no 180), sendonly", answered is not None and call_id in answered
+                       and self.last_sent(B, "SIP/2.0 180", call_id) is None)
+            types = self.fgs_types(B)
+            self.check("bob's service holds the microphone type with the screen off", bool(types & FGS_MICROPHONE), types=hex(types))
+            notes = self.devices[B].adb("shell", "dumpsys", "notification", "--noredact", check=False)
+            self.check("bob gets no call notification", "Ambient" not in notes and MCPTT[A].split("@")[0].removeprefix("sip:") not in notes.lower())
+            sent, got = self.received_burst_from(A, B, timeout=20)
+            self.check("bob was granted the floor without a request and sent speech", sent is not None and sent["frames"] > 50,
+                       sent=sent and sent["frames"])
+            self.check("alice heard bob's speech unchanged", got is not None and got["hashes"] == sent["hashes"],
+                       sent=sent and sent["frames"], received=got and got["frames"])
+            self.hangup(A)
+            self.wait("bob's hidden call ends", lambda: self.hidden_call(B) is None, timeout=10)
+            self.idle_everywhere([A, B])
+            # bob may not listen to alice remotely (no <allow-request-remote-initiated-ambient-listening>): 403.
+            r = self.cmd(B, "ambient", "remote", MCPTT[A], ok=False, timeout=30)
+            self.check("bob's remote-init ambient listening call is refused", not r.get("ok"), result=r)
+            self.idle_everywhere([A, B])
+        finally:
+            self.devices[B].adb("shell", "input", "keyevent", "KEYCODE_WAKEUP", check=False)
+
+    def s33_ambient_local(self) -> None:
+        # TS 24.379 §11.1.6.2.1.1 (local-init): bob lets alice listen; his offer is sendonly and his implicit floor request;
+        # alice's app answers automatically (Priv-Answer-Mode Auto) and is told (the listening user); the speech arrives.
+        if not self.needs("private_services", "S33"):
+            return
+        self.cmd(B, "ambient-source", SPEECH[B])
+        call = self.cmd(B, "ambient", "local", MCPTT[A])
+        self.check("bob's local-init ambient listening call is established", call["state"] == "established"
+                   and call["ambient_role"] == "listened-to" and not call["hidden"], call=call)
+        invite = self.last_sent(B, "INVITE ", "ambient-listening") or ""
+        self.check("bob's INVITE: local-init, sendonly, an implicit floor request",
+                   "<ambient-listening-type>local-init</ambient-listening-type>" in invite and "a=sendonly" in invite and "mc_implicit_request" in invite)
+        alice = self.established(A)
+        self.check("alice is the listening user, shown the call", alice["ambient_role"] == "listening" and not alice["hidden"], call=alice)
+        sent, got = self.received_burst_from(A, B, timeout=20)
+        self.check("alice heard bob's speech unchanged", got is not None and sent is not None and got["hashes"] == sent["hashes"],
+                   sent=sent and sent["frames"], received=got and got["frames"])
+        # §11.1.6.4.2: the server gives the listening invitee the release capability.
+        self.check("alice may release the call", alice["may_release"], call=alice)
+        self.hangup(A)
+        self.idle_everywhere([A, B])
+
+    def s34_call_back(self) -> None:
+        # TS 24.379 §11.1.5.2.1: alice asks bob to call back (urgency high); §11.1.5.2.2: bob stores it and confirms;
+        # §11.1.5.2.3: bob calls back with manual commencement, which fulfils it at both ends; a second request is withdrawn.
+        if not self.needs("private_services", "S34"):
+            return
+        self.cmd(A, "callback", MCPTT[B], "high")
+        message = self.last_sent(A, "MESSAGE ", "private-call-call-back-request") or ""
+        self.check("alice's MESSAGE: the request, urgency, time of request, bob listed",
+                   "<urgency-ind>high</urgency-ind>" in message and "<time-of-request>" in message and MCPTT[B] in message)
+        stored = self.wait("bob stores the request", lambda: self.services(B)["callbacks_received"].get(MCPTT[A]), timeout=10)
+        self.check("bob has alice's request with its urgency", stored["urgency"] == "high", stored=stored)
+        self.wait("alice's request is confirmed", lambda: "PCCB-I3" in self.services(A)["callbacks_sent"].get(MCPTT[B], ""), timeout=10)
+        self.check("alice's request is confirmed (PCCB-I3)", True)
+        t, result = self.call_threaded(B, "callback-fulfil", MCPTT[A])
+        ring = self.ringing(A)
+        self.check("bob's call back rings at alice (manual commencement)", ring["peer"] == MCPTT[B], call=ring)
+        self.cmd(A, "answer")
+        t.join(30)
+        self.check("the call back is established", (result.get("r") or {}).get("ok"), result=result.get("r"))
+        self.established(B)
+        self.talk_and_verify(B, [A], seconds=2)
+        self.check("both call-back entries are gone", not self.services(A)["callbacks_sent"] and not self.services(B)["callbacks_received"])
+        self.hangup(B)
+        self.idle_everywhere([A, B])
+        self.cmd(A, "callback", MCPTT[C])
+        self.wait("client-c stores it", lambda: MCPTT[A] in self.services(C)["callbacks_received"], timeout=10)
+        self.cmd(A, "callback-cancel", MCPTT[C])
+        self.wait("client-c's entry is withdrawn", lambda: MCPTT[A] not in self.services(C)["callbacks_received"], timeout=10)
+        self.wait("alice's request is gone", lambda: MCPTT[C] not in self.services(A)["callbacks_sent"], timeout=10)
+        self.check("the cancelled request is gone at both ends", True)
+        r = self.cmd(B, "callback", MCPTT[A], ok=False)
+        self.check("bob may not ask for call-backs", not r.get("ok"), result=r)
+
+    def s35_remote_private(self) -> None:
+        # TS 24.379 §11.1.7.2.1: alice asks bob's phone to call client-c, silently and with automatic commencement;
+        # §11.1.7.2.2: bob's app places the call with <remotely-initiated-call-request-ind> and reports the success to
+        # alice; with alice as the target, the call is the outcome and no report follows (NOTE).
+        if not self.needs("private_services", "S35"):
+            return
+        self.cmd(A, "remote-call", MCPTT[B], MCPTT[C], "auto", "silent")
+        bob = self.established(B)
+        self.check("bob's phone called client-c", bob["peer"] == MCPTT[C] and bob["outgoing"] and bob["service"] == "remote", call=bob)
+        invite = self.last_sent(B, "INVITE ", MCPTT[C]) or ""
+        self.check("bob's INVITE: <remotely-initiated-call-request-ind>, Answer-Mode Auto",
+                   "remotely-initiated-call-request-ind" in invite and "Answer-Mode: Auto" in invite)
+        self.established(C)
+        handled = self.services(B)["handled"][-1]
+        self.check("bob was not told (notify-remote-user false)", handled["notify"] is False, handled=handled)
+        outcome = self.wait("alice learns the outcome", lambda: next((o for o in self.services(A)["outcomes"]
+                            if o["type"] == "remotely-initiated-private-call-response"), None), timeout=15)
+        self.check("alice is told of the success", outcome["outcome"] == "success" and outcome["target"] == MCPTT[C], outcome=outcome)
+        self.talk_and_verify(C, [B], seconds=2)
+        self.hangup(B)
+        self.idle_everywhere([A, B, C])
+        before = len(self.services(A)["outcomes"])
+        self.cmd(A, "remote-call", MCPTT[B], MCPTT[A])
+        alice = self.established(A)
+        self.check("bob's phone called alice herself", alice["peer"] == MCPTT[B], call=alice)
+        time.sleep(3)
+        self.check("no report when alice is the one called", len(self.services(A)["outcomes"]) == before)
+        self.hangup(A)
+        self.idle_everywhere([A, B])
+        r = self.cmd(B, "remote-call", MCPTT[A], MCPTT[C], ok=False)
+        self.check("bob may not ask for remotely initiated calls", not r.get("ok"), result=r)
+
+    def s36_remote_group(self) -> None:
+        # TS 24.379 §10.1.5.2.1: alice asks bob's phone to call the group; §10.1.5.2.2: bob's app calls it and reports.
+        # TS 24.379 §12.1.1.3: client-c, out of the call, gets the imminent peril notification MESSAGE when alice raises
+        # it, and answers 200 (the app answered 488 before).
+        if not self.needs("private_services", "S36"):
+            return
+        self.cmd(A, "remote-group-call", MCPTT[B], GROUP)
+        bob = self.established(B)
+        self.check("bob's phone called the group", bob["group"] == GROUP and bob["outgoing"], call=bob)
+        for c in (A, C):
+            self.established(c)
+        outcome = self.wait("alice learns the outcome", lambda: next((o for o in self.services(A)["outcomes"]
+                            if o["type"] == "remotely-initiated-group-call-response"), None), timeout=15)
+        self.check("alice is told of the success for the group", outcome["outcome"] == "success" and outcome["target"] == GROUP, outcome=outcome)
+        self.talk_and_verify(B, [A, C], seconds=2)
+        if self.meta.get("priority"):
+            self.hangup(C)
+            self.wait("client-c left", lambda: self.call(C) is None, timeout=10)
+            self.cmd(A, "priority", "imminent", "on")
+            state = self.wait("client-c is told of the imminent peril", lambda: self.services(C)["group_states"].get(GROUP), timeout=15)
+            self.check("client-c keeps the group's imminent peril state", state.get("imminent_peril"), state=state)
+            notice = self.last_received(C, "MESSAGE ", "imminentperil-ind") or ""
+            call_id = next((l.split(":", 1)[1].strip() for l in notice.splitlines() if l.lower().startswith("call-id:")), "?")
+            self.check("client-c answered the notification 200, not 488", self.last_sent(C, "SIP/2.0 200", call_id) is not None
+                       and self.last_sent(C, "SIP/2.0 488", call_id) is None)
+            self.cmd(A, "priority", "imminent", "off")
+            self.wait("client-c is told of the cancellation", lambda: GROUP not in self.services(C)["group_states"], timeout=15)
+            self.check("the cancellation clears client-c's imminent peril state", True)
+        else:
+            print("  [SKIP] S36's imminent peril notification needs a lab made with --priority")
+            self.skipped_parts.append("S36 imminent peril notification (no --priority)")
+        self.hang_up_all([B, A, C])
+        self.idle_everywhere([A, B, C])
+
+    def s37_transfer(self) -> None:
+        # TS 24.379 §11.1.8.2.1: alice transfers her call with bob to client-c; §11.1.8.2.2: bob's app keeps the call with
+        # alice, calls client-c with <call-transfer-ind> and the Priv-Answer-Mode of the call transferred, and reports;
+        # on the success alice's app ends her call with bob.
+        if not self.needs("private_services", "S37"):
+            return
+        self.cmd(A, "private", MCPTT[B], "auto")
+        self.established(B)
+        self.cmd(A, "transfer", MCPTT[C])
+        carol = self.established(C)
+        # The OpenMCX server does not pass <call-transfer-ind> on to the target.
+        self.check("client-c gets the transferred call from bob", carol["peer"] == MCPTT[B], call=carol)
+        invite = self.last_sent(B, "INVITE ", MCPTT[C]) or ""
+        self.check("bob's INVITE: <call-transfer-ind> true, Priv-Answer-Mode Auto",
+                   "<call-transfer-ind>true</call-transfer-ind>" in invite and "Priv-Answer-Mode: Auto" in invite)
+        self.wait("alice's call ends", lambda: self.call(A) is None, timeout=15)
+        outcome = next((o for o in self.services(A)["outcomes"] if o["type"] == "transfer-private-call-response"), None)
+        self.check("alice is told of the success", outcome is not None and outcome["outcome"] == "success", outcome=outcome)
+        bob = self.wait("bob's one call is with client-c", lambda: (cs := self.all_calls(B)) and len(cs) == 1 and cs[0]["peer"] == MCPTT[C] and cs[0], timeout=10)
+        self.check("bob is left in the call with client-c", bob["state"] == "established", call=bob)
+        self.talk_and_verify(B, [C], seconds=2)
+        self.talk_and_verify(C, [B], seconds=2)
+        self.hangup(B)
+        self.idle_everywhere([A, B, C])
+        self.cmd(B, "private", MCPTT[A], "auto")
+        r = self.cmd(B, "transfer", MCPTT[C], ok=False)
+        self.check("bob may not transfer", not r.get("ok"), result=r)
+        self.hangup(B)
+        self.idle_everywhere([A, B])
+
+    def s38_forward_manual(self) -> None:
+        # TS 24.379 §11.1.9.2.1: alice's call rings at bob, who forwards it to client-c; the server asks alice's app to
+        # call client-c (§11.1.9.2.2) with <call-forwarding-ind>, the sequence number one higher and alice's answer mode
+        # (Manual) in Priv-Answer-Mode; bob's INVITE is declined with 480 and warning 175.
+        if not self.needs("private_services", "S38"):
+            return
+        t, result = self.call_threaded(A, "private", MCPTT[B], "manual")
+        self.ringing(B)
+        self.cmd(B, "forward", MCPTT[C])
+        decline = self.wait("bob declines with 175", lambda: self.last_sent(B, "SIP/2.0 480", "175"), timeout=10)
+        self.check("bob's INVITE is answered 480 with warning 175", decline is not None)
+        message = self.last_sent(B, "MESSAGE ", "forward-private-call-request") or ""
+        self.check("bob's request: manual-input, forwarded by bob, client-c the target",
+                   "<forwarding-reason>manual-input</forwarding-reason>" in message and MCPTT[C] in message)
+        t.join(30)
+        carol = self.reached(C)
+        self.check("alice's forwarded call reaches client-c", carol["peer"] == MCPTT[A], call=carol)
+        invite = self.last_sent(A, "INVITE ", "call-forwarding-ind") or ""
+        self.check("alice's INVITE: <call-forwarding-ind>, sequence number 1, Priv-Answer-Mode Manual",
+                   "<forwarding-sequence-number>1</forwarding-sequence-number>" in invite and "Priv-Answer-Mode: Manual" in invite)
+        alice = self.established(A)
+        self.check("alice's call is the forwarded one", alice["service"] == "forwarding" and alice["peer"] == MCPTT[C], call=alice)
+        self.talk_and_verify(A, [C], seconds=2)
+        outcome = self.wait("bob learns the outcome", lambda: next((o for o in self.services(B)["outcomes"]
+                            if o["type"] == "forward-private-call-response"), None), timeout=15)
+        self.check("bob is told the forwarding succeeded", outcome["outcome"] == "success", outcome=outcome)
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+
+    def s39_forward_by_server(self) -> None:
+        # TS 24.379 §6.3.2.5, §11.1.1.3.2 steps 6 and 11: the server forwards a private call to client-c that is not
+        # answered within 4 s, and one to the unregistered "offline" at once, to bob; each time alice's app gets the
+        # forwarding request and calls bob (§11.1.9.2.2) and reports to the forwarding user.
+        if not self.needs("private_services", "S39"):
+            return
+        t, result = self.call_threaded(A, "private", MCPTT[C], "manual")
+        self.ringing(C)
+        t.join(30)
+        r = result.get("r") or {}
+        self.check("alice's call to client-c ends with 480 and warning 175 after 4 s", not r.get("ok") and "480" in (r.get("error") or ""), result=r)
+        bob = self.reached(B)
+        self.check("the forwarded call reaches bob", bob["peer"] == MCPTT[A], call=bob)
+        alice = self.established(A)
+        self.check("alice's call to bob is the forwarded one", alice["service"] == "forwarding" and alice["peer"] == MCPTT[B], call=alice)
+        self.talk_and_verify(A, [B], seconds=2)
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+        offline = MCPTT[A].replace("alice", "offline")
+        r = self.cmd(A, "private", offline, "auto", ok=False, timeout=30)
+        self.check("alice's call to offline is forwarded at once", not r.get("ok") and "480" in (r.get("error") or ""), result=r)
+        bob = self.reached(B)
+        self.check("alice's forwarded call reaches bob", bob["peer"] == MCPTT[A], call=bob)
+        invite = self.last_sent(A, "INVITE ", "call-forwarding-ind") or ""
+        self.check("alice's INVITE to bob: Priv-Answer-Mode Auto, sequence number 1",
+                   "Priv-Answer-Mode: Auto" in invite and "<forwarding-sequence-number>1</forwarding-sequence-number>" in invite)
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
 
     def s25_first_to_answer(self) -> None:
         # TS 24.379 §11.1.1.2.1.1 steps 10 a) and 15, §11.1.1.2.1.2 step 8: both invitees ring (the server sets
@@ -2184,7 +2495,9 @@ class Lab:
                  "S25": s25_first_to_answer, "S26": s26_chat, "S27": s27_broadcast, "S28": s28_adhoc_criteria,
                  "S29": s29_floor_priority, "S30": s30_regroup, "S31": s31_temporary_group,
                  "S60": s60_long_sds, "S61": s61_media_group_sds, "S62": s62_one_to_one_session, "S63": s63_group_session,
-                 "S64": s64_media_fd, "S65": s65_media_priority, "S66": s66_media_release, "S67": s67_media_reference_client}
+                 "S64": s64_media_fd, "S65": s65_media_priority, "S66": s66_media_release, "S67": s67_media_reference_client,
+                 "S32": s32_ambient_remote, "S33": s33_ambient_local, "S34": s34_call_back, "S35": s35_remote_private,
+                 "S36": s36_remote_group, "S37": s37_transfer, "S38": s38_forward_manual, "S39": s39_forward_by_server}
 
 
 def main() -> None:

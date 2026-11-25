@@ -194,6 +194,19 @@ object Tags {
     fun alertCancelOf(person: String) = "alert-cancel-of-$person"
     fun groupOptions(group: String) = "group-options-$group"
     fun callEmergency(target: String) = "call-emergency-$target"
+    fun callBack(target: String) = "call-back-$target"
+    fun callBackFulfil(from: String) = "call-back-fulfil-$from"
+    fun callBackCancel(target: String) = "call-back-cancel-$target"
+    fun ambient(target: String) = "ambient-$target"
+    fun ambientLocal(target: String) = "ambient-local-$target"
+    fun remoteGroup(target: String) = "remote-group-$target"
+    fun transferTo(target: String) = "transfer-to-$target"
+    fun forwardTo(target: String) = "forward-to-$target"
+    const val TRANSFER = "transfer"
+    const val FORWARD = "forward"
+    const val REMOTE_CALL = "remote-call"
+    const val SERVICE_NOTE = "service-note"
+    const val FORWARD_TARGET = "forward-target"
     fun callImminent(group: String) = "call-imminent-$group"
     const val CALL_PRIORITY = "call-priority"
     const val CALL_EMERGENCY = "call-emergency"
@@ -286,7 +299,7 @@ fun McxApp(state: UiState, actions: UiActions, initialTab: Int = 0) {
                     TextButton(onClick = actions::logOff) { Text("Log off") }
                 }
             }
-            state.incoming?.let { IncomingCall(it, actions) }
+            state.incoming?.let { IncomingCall(it, actions, state.privateTargets, state.forwardTarget) }
             state.affiliationRequest?.let { AffiliationRequestPrompt(it, actions) }
             if (!state.provisioned) Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = actions::scanProvisioning, modifier = Modifier.weight(1f),
@@ -386,6 +399,28 @@ private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit
             state.settingsNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Mcx.Muted, modifier = Modifier.testTag(Tags.SETTINGS_NOTE)) }
             state.notifiedAnswerModes.forEach { (who, mode) ->
                 Text("$who answers $mode", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+            }
+            // TS 24.379 §11.1.9.2.1: the user forwards a ringing private call; this target is offered first.
+            if (state.privateTargets.isNotEmpty()) {
+                var open by remember { mutableStateOf(false) }
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Call forwarding")
+                        Text("Ringing private calls can be forwarded with Forward to…; this person is offered first.",
+                            style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                    }
+                    Box {
+                        TextButton(onClick = { open = true }, modifier = Modifier.testTag(Tags.FORWARD_TARGET)) {
+                            Text(state.forwardTarget?.short() ?: "No one")
+                        }
+                        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                            DropdownMenuItem(text = { Text("No one") }, onClick = { open = false; actions.setForwardTarget(null) })
+                            state.privateTargets.forEach { t ->
+                                DropdownMenuItem(text = { Text(t.short()) }, onClick = { open = false; actions.setForwardTarget(t) })
+                            }
+                        }
+                    }
+                }
             }
             Section("Provisioning")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
@@ -548,7 +583,7 @@ private fun Logo() {
 }
 
 @Composable
-private fun IncomingCall(call: CallItem, actions: UiActions) {
+private fun IncomingCall(call: CallItem, actions: UiActions, targets: List<String> = emptyList(), forwardTarget: String? = null) {
     Column(Modifier.fillMaxWidth().padding(12.dp).background(Mcx.Card, RoundedCornerShape(16.dp)).border(1.dp, Mcx.Line, RoundedCornerShape(16.dp))
         .padding(16.dp)) {
         Text("Incoming ${call.type.sessionType} call", style = MaterialTheme.typography.titleMedium, color = Mcx.Muted)
@@ -562,6 +597,21 @@ private fun IncomingCall(call: CallItem, actions: UiActions) {
             OutlinedButton(onClick = actions::reject, modifier = Modifier.weight(1f).heightIn(min = 56.dp).testTag(Tags.REJECT),
                 shape = RoundedCornerShape(16.dp), border = BorderStroke(1.5.dp, Mcx.Ink)) {
                 Text("Decline", color = Mcx.Ink, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+            }
+        }
+        // TS 24.379 §11.1.9.2.1: a ringing private call may be forwarded to another user instead of answered; the
+        // target chosen in Settings first.
+        val choices = (listOfNotNull(forwardTarget) + targets).distinct().filter { it.short() != call.title }
+        if (call.type == CallType.PRIVATE && !call.firstToAnswer && choices.isNotEmpty()) {
+            var open by remember { mutableStateOf(false) }
+            Box(Modifier.padding(top = 8.dp)) {
+                TextButton(onClick = { open = true }, modifier = Modifier.testTag(Tags.FORWARD)) { Text("Forward to…", color = Mcx.Ink) }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    choices.forEach { t ->
+                        DropdownMenuItem(text = { Text(t.short()) }, modifier = Modifier.testTag(Tags.forwardTo(t)),
+                            onClick = { open = false; actions.forward(t) })
+                    }
+                }
             }
         }
     }
@@ -613,7 +663,7 @@ private fun AffiliationRequestPrompt(request: AffiliationRequestItem, actions: U
 private fun TalkScreen(state: UiState, actions: UiActions) {
     val call = state.call
     if (call != null) {
-        CallPanel(call, actions, state.user, state.speaker, state.callFailure)
+        CallPanel(call, actions, state.user, state.speaker, state.callFailure, state.privateTargets)
         return
     }
     val adhoc = remember { mutableStateListOf<String>() }
@@ -667,7 +717,31 @@ private fun TalkScreen(state: UiState, actions: UiActions) {
                 Text(t.short(), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 OutlinedButton(onClick = { actions.callPrivate(t) }, enabled = state.registered,
                     modifier = Modifier.testTag(Tags.callPrivate(t))) { Text("Call") }
-                CallOptions(t, state.registered, actions)
+                CallOptions(t, state.registered, actions, state.groups.firstOrNull { it.selected }?.id)
+            }
+        }
+        // TS 24.379 §11.1.5.2.2: call-back requests received, each called back with manual commencement (§11.1.5.2.3);
+        // §11.1.5.2.1: those sent, until called back or withdrawn.
+        if (state.callBacks.isNotEmpty() || state.callBacksSent.isNotEmpty()) item { Section("Call-back requests") }
+        items(state.callBacks) { r ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("${r.from.short()} asks you to call back", style = MaterialTheme.typography.titleMedium)
+                    Text("Urgency ${r.urgency}" + (r.time?.let { " · ${it.substringAfter('T')} UTC" } ?: ""),
+                        style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                }
+                Button(onClick = { actions.fulfilCallBack(r.from) }, enabled = state.registered,
+                    modifier = Modifier.testTag(Tags.callBackFulfil(r.from))) { Text("Call back") }
+            }
+        }
+        items(state.callBacksSent) { (target, how) ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("You asked ${target.short()} to call back", style = MaterialTheme.typography.titleMedium)
+                    Text(how, style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                }
+                OutlinedButton(onClick = { actions.cancelCallBack(target) }, enabled = state.registered,
+                    modifier = Modifier.testTag(Tags.callBackCancel(target))) { Text("Withdraw") }
             }
         }
         item {
@@ -678,6 +752,10 @@ private fun TalkScreen(state: UiState, actions: UiActions) {
                 OutlinedButton(onClick = { actions.callFirstToAnswer(adhoc.toList()) }, enabled = state.registered && adhoc.size >= 2,
                     modifier = Modifier.testTag(Tags.FIRST_TO_ANSWER)) { Text("First to answer") }
             }
+            // TS 24.379 §11.1.7.2.1: the first user selected is asked to call the second (a remotely initiated call).
+            if (adhoc.size == 2) OutlinedButton(onClick = { actions.remoteCall(adhoc[0], adhoc[1]) }, enabled = state.registered,
+                modifier = Modifier.testTag(Tags.REMOTE_CALL)) { Text("Have ${adhoc[0].short()} call ${adhoc[1].short()}") }
+            state.serviceNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Mcx.Ink, modifier = Modifier.testTag(Tags.SERVICE_NOTE)) }
             if (state.adhocCallChoices.isNotEmpty()) AdhocCriteriaPicker(state, actions)
             Text("Press PTT with no call to call the selected group.", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
         }
@@ -823,7 +901,8 @@ private val FloorLabel = TextStyle(fontFamily = Condensed, fontWeight = FontWeig
 
 /** The active call: who, the floor with the talk time left, a press-and-hold PTT key and the recent talkers. */
 @Composable
-fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Boolean? = null, failure: String? = null) {
+fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Boolean? = null, failure: String? = null,
+              transferTargets: List<String> = emptyList()) {
     // Without floor control both talk at once: the big key mutes the microphone instead of requesting the floor.
     val duplex = !call.floorControl
     val look = if (!duplex) floorLook(call) else if (call.muted)
@@ -860,6 +939,10 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
         Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(when {
+                    call.ambientRole == "listening" -> "Ambient listening"
+                    call.ambientRole == "listened-to" -> "Ambient listening: you are heard"
+                    call.service == "transfer" -> "Transferred call"
+                    call.service == "forwarding" -> "Forwarded call"
                     call.firstToAnswer -> "First-to-answer call"
                     call.broadcast -> if (call.type == CallType.ADHOC) "Ad hoc broadcast call" else "Broadcast call"
                     else -> when (call.type) { CallType.PRIVATE -> "Private call"; CallType.PREARRANGED -> "Group call"
@@ -968,6 +1051,23 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
                 shape = RoundedCornerShape(14.dp), border = BorderStroke(1.5.dp, Mcx.OnStop)) {
                 Text(if (emergency) "Cancel emergency" else "Emergency", color = Mcx.OnStop, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
             }
+            // TS 24.379 §11.1.8.2.1: hand the other party of a private call over to a third user.
+            val transferable = transferTargets.filter { it.short() != call.title && it.short() != user }
+            if (call.type == CallType.PRIVATE && call.ambientRole == null && !emergency && transferable.isNotEmpty()) {
+                var open by remember { mutableStateOf(false) }
+                Box(Modifier.weight(1f)) {
+                    OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(Tags.TRANSFER),
+                        shape = RoundedCornerShape(14.dp), border = BorderStroke(1.5.dp, Mcx.Ink)) {
+                        Text("Transfer", color = Mcx.Ink, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                    }
+                    DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                        transferable.forEach { t ->
+                            DropdownMenuItem(text = { Text("Transfer to ${t.short()}") }, modifier = Modifier.testTag(Tags.transferTo(t)),
+                                onClick = { open = false; actions.transfer(t) })
+                        }
+                    }
+                }
+            }
             if (call.type != CallType.PRIVATE && !emergency) {
                 val peril = call.priority == "imminent"
                 OutlinedButton(onClick = { actions.callPriority(false, !peril) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag(Tags.CALL_IMMINENT),
@@ -989,7 +1089,8 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
                 contentAlignment = Alignment.Center) {
                 VideoButton("Video call", Modifier.testTag(Tags.VIDEO)) { actions.videoCall(call.members.firstOrNull { it.short() != user } ?: call.title) }
             }
-            Button(onClick = actions::hangup, modifier = Modifier.weight(1f).height(56.dp).testTag(Tags.HANGUP), shape = RoundedCornerShape(16.dp),
+            // §11.1.6.2.1.3 step 1: an ambient listening call is ended here only with the server's release capability.
+            Button(onClick = actions::hangup, enabled = call.mayRelease, modifier = Modifier.weight(1f).height(56.dp).testTag(Tags.HANGUP), shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Mcx.Stop, contentColor = Color.White)) {
                 Text("Hang up", fontWeight = FontWeight.Bold, fontSize = 17.sp)
             }
@@ -1126,7 +1227,7 @@ private fun WarningIcon(colour: Color, size: Dp) = Canvas(Modifier.size(size)) {
 
 /** ▾ beside a private Call: connect at once (the default) or ring the other phone first. */
 @Composable
-private fun CallOptions(target: String, enabled: Boolean, actions: UiActions) {
+private fun CallOptions(target: String, enabled: Boolean, actions: UiActions, group: String? = null) {
     var open by remember { mutableStateOf(false) }
     Box {
         MoreButton("More ways to call ${target.short()}", Tags.callOptions(target), enabled) { open = true }
@@ -1140,6 +1241,19 @@ private fun CallOptions(target: String, enabled: Boolean, actions: UiActions) {
                 onClick = { open = false; actions.callPrivateEmergency(target) })
             DropdownMenuItem(text = { Text("Where are they? (location)") }, modifier = Modifier.testTag(Tags.locate(target)),
                 onClick = { open = false; actions.locate(target) })
+            // TS 24.379 §11.1.5.2.1: ask them to call back.
+            DropdownMenuItem(text = { Text("Ask them to call back") }, modifier = Modifier.testTag(Tags.callBack(target)),
+                onClick = { open = false; actions.requestCallBack(target) })
+            // §11.1.6.2.1.1: listen to their surroundings without them doing anything, or let them listen to yours.
+            DropdownMenuItem(text = { Text("Listen in (ambient listening)") }, modifier = Modifier.testTag(Tags.ambient(target)),
+                onClick = { open = false; actions.ambientListen(target, local = false) })
+            DropdownMenuItem(text = { Text("Let them listen to me (ambient)") }, modifier = Modifier.testTag(Tags.ambientLocal(target)),
+                onClick = { open = false; actions.ambientListen(target, local = true) })
+            // §10.1.5.2.1: have their phone call the selected group.
+            group?.let { g ->
+                DropdownMenuItem(text = { Text("Have them call ${g.short()}") }, modifier = Modifier.testTag(Tags.remoteGroup(target)),
+                    onClick = { open = false; actions.remoteGroupCall(target, g) })
+            }
         }
     }
 }

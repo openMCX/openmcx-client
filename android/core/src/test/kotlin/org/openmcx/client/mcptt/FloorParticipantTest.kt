@@ -43,6 +43,22 @@ class FloorParticipantTest {
     private fun taken(seq: Int, party: String) = FloorMessage(FloorType.TAKEN, 1, true,
         listOf(FloorField.SEQUENCE to FloorMessage.u16(seq), FloorField.GRANTED_PARTY to party.toByteArray()))
 
+    /**
+     * TS 24.379 §6.4 (§11.1.6.2.1.2): a client asked to take the floor (the listened-to user of a remotely initiated
+     * ambient listening call) takes a Floor Granted that comes without a request; any other ignores it.
+     */
+    @Test
+    fun expectedGrantWithoutRequest() = runTest {
+        val p = participant()
+        p.start()
+        p.receive(granted(0x11223344L))
+        assertEquals(FloorState.NO_PERMISSION, p.state.value)
+        p.grantExpected = true
+        p.receive(granted(0x11223344L))
+        assertEquals(FloorState.HAS_PERMISSION, p.state.value)
+        assertEquals("granted 11223344 30", events.last())
+    }
+
     @Test
     fun requestGrantTalkRelease() = runTest {
         val p = participant()

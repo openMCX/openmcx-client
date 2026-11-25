@@ -152,7 +152,15 @@ object Engine {
         scope.launch { runCatching { c.procedures?.settingsPublish() }.onFailure { log.add("settings PUBLISH: ${it.message}") } }
     }
 
+    /** The forwarding target the Forward action offers first (TS 24.379 §11.1.9.2.1), kept across restarts. */
+    val forwardTarget = MutableStateFlow<String?>(null)
+    fun setForwardTarget(target: String?) {
+        forwardTarget.value = target
+        prefs?.edit()?.putString(FORWARD_TARGET, target)?.apply()
+    }
+
     private const val RING_FIRST = "ring_first"
+    private const val FORWARD_TARGET = "forward_target"
     private const val KNOWN_ALIASES = "known_aliases:"
     private val _inCall = MutableStateFlow(false)
     /** True while a call is up: the service then declares the phoneCall and microphone types. */
@@ -206,10 +214,17 @@ object Engine {
             val service = McpttService(c, MediaCodecAmrWb, audio)
             prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
             if (prefs?.getBoolean(RING_FIRST, false) == true) service.answerMode = "manual"
+            forwardTarget.value = prefs?.getString(FORWARD_TARGET, null)
             val bridge = TelecomBridge(context, scope, service).also { telecom = it }
+            // TS 24.379 §11.1.5.2.2, §11.1.7.2.2 1): the requests the user is told of, and the outcomes of the user's own.
+            service.services.listener = { record -> notify.callService(record) }
             service.listener = object : CallListener {
                 override fun incoming(call: Call) { bridge.track(call); notify.incomingCall(call) }
                 override fun changed(call: Call) {
+                    // The listened-to user of a remotely initiated ambient listening call is told nothing (TS 24.379
+                    // §11.1.6.2.1.2): no Telecom call, notification, location trigger or history entry. The foreground
+                    // service keeps the microphone (inCall).
+                    if (call.hidden) { _inCall.value = service.calls.value.any { it.state != "released" }; return }
                     if (call.outgoing) bridge.track(call)
                     if (call.state != "ringing") notify.cancelIncoming(call)
                     notify.callChanged(call)

@@ -211,6 +211,35 @@ def location_rules(site: dict, generated: Path) -> None:
             group["mandatory_area"] = [{"polygon": RULES_MANDATORY_AREA}]
 
 
+def private_services(site: dict, generated: Path) -> None:
+    """The fixture's private call service rights (openmcx-server tools/prepare-prearranged-test.py --private-call
+    --private-services) for a lab of three Android clients, where client-c is a call target of its own:
+      client-a  requests call-backs (and cancels them), remotely initiated private and group calls and transfers,
+                forwards by hand, listens remotely and locally (ambient listening, TS 24.379 §11.1.6), may also call
+                "offline"; client-b forwards by hand, forces automatic commencement (a transferred user's call repeats
+                the answer mode in Priv-Answer-Mode, §11.1.1.2.1.1 14A a)) and may be listened to by its own request
+                (local-init); client-c takes calls from anyone (a transfer target) and is forwarded to client-b when it
+                does not answer in 4 s (§6.3.2.5); "offline", never registered, is forwarded to client-b at once
+                (§11.1.1.3.2 step 6). client-c's immediate forwarding of the fixture is dropped, else no call reaches it."""
+    ids = {r: json.loads((generated / f"{r}.json").read_text())["mcptt"]["user_id"] for r in CLIENTS}
+    offline = next((u["mcptt_id"] for u in site["users"] if u.get("username") == "offline"), None)
+    for user in site["users"]:
+        policy = user.setdefault("private_call", {})
+        if user["mcptt_id"] == ids["client-a"]:
+            policy.update(callback=True, callback_cancel=True, remote_init=True, transfer=True, forward_manual=True,
+                          ambient_remote=True, ambient_local=True)
+            policy["targets"] = sorted(set(policy.get("targets", [])) | {ids["client-b"], ids["client-c"]} | ({offline} if offline else set()))
+            user.setdefault("group_call", {})["remote_init"] = True
+        elif user["mcptt_id"] == ids["client-b"]:
+            policy.update(forward_manual=True, force_auto_answer=True, ambient_local=True)
+        elif user["mcptt_id"] == ids["client-c"]:
+            policy.pop("forward_immediate", None)
+            policy.pop("incoming_from", None)
+            policy.update(forward_no_answer=ids["client-b"], forward_no_answer_timeout_ms=4000)
+        elif offline and user["mcptt_id"] == offline:
+            policy.update(forward_no_answer=ids["client-b"])
+
+
 def host_ip() -> str:
     """The host's address on its default route: what a phone on the same LAN reaches."""
     out = subprocess.run(["ip", "-4", "route", "get", "1.1.1.1"], capture_output=True, text=True, check=True).stdout
@@ -355,6 +384,13 @@ def create(args) -> None:
         # take it over), "patrol-car-12" for client-c and client-d, "incident-commander" for client-a.
         # With the private call policy, as the regression's functional-alias lab: calls to an alias are private calls.
         command += ["--functional-alias"] + ([] if args.priority else ["--private-call"])
+    if args.private_services and not args.priority and not args.functional_alias:
+        # The private call policy (TS 24.484 <private-call> rulesets), which the private call services build on.
+        command.append("--private-call")
+    if args.private_services:
+        # Private call services (TS 24.379 §10.1.5, §11.1.5 to §11.1.9) and ambient listening (§11.1.6): the
+        # fixture's rights, adapted to three Android clients below (private_services).
+        command.append("--private-services")
     if args.priority:
         # Emergency, imminent peril and emergency alerts (TS 24.379 §6.2.8, §12.1): client-a and client-b may raise
         # them, client-a may cancel an alert (its own or another user's). With the private call policy: emergency
@@ -459,6 +495,8 @@ def create(args) -> None:
         for group in site["groups"]:
             if isinstance(group.get("mcvideo"), dict):
                 group["mcvideo"].setdefault("floor_priority_caps", {})[video_id] = int(cap or level)
+    if args.private_services:
+        private_services(site, generated)
     if args.location_rules:
         if not (args.location and args.functional_alias):
             sys.exit("--location-rules needs --location and --functional-alias")
@@ -606,7 +644,7 @@ def create(args) -> None:
     meta_doc = {"openmcx": str(openmcx), "project": f"mcxandroid-{args.name}", "debug_sip": args.debug_sip,
                 "server_image": args.server_image, "mcvideo": args.mcvideo, "protected": args.protected, "transport_keys": args.transport_keys, "location": args.location, "location_rules": args.location_rules,
                 "priority": args.priority, "floor_queue": args.floor_queue, "mcvideo_priority": args.mcvideo_priority or [],
-                "chat": args.chat, "broadcast": args.broadcast, "regroup": args.regroup,
+                "chat": args.chat, "broadcast": args.broadcast, "regroup": args.regroup, "private_services": args.private_services,
                 "reference_clients": args.reference_client or [], "client_image": args.client_image,
                 "admin": args.admin, "admin_image": args.admin_image, "keycloak": args.keycloak,
                 "mcptt_server": mcptt_server_name(compose["services"]), "fixture_args": args.fixture_arg or [],
@@ -998,6 +1036,9 @@ def main() -> None:
     c.add_argument("--location", action="store_true",
                    help="location reporting (TS 24.379 clause 13): configurations, reports, requests and the LMS")
     c.add_argument("--chat", action="store_true", help="a chat group (TS 24.379 clause 10.1.2) in every user profile")
+    c.add_argument("--private-services", action="store_true",
+                   help="call-back, remotely initiated calls, transfer, forwarding and ambient listening rights "
+                        "(TS 24.379 clauses 10.1.5, 11.1.5 to 11.1.9; see private_services)")
     c.add_argument("--broadcast", action="store_true", help="broadcast group calls by client-a and client-b (TS 24.379 clause 6.2.8.2)")
     c.add_argument("--regroup", action="store_true",
                    help="regroups and temporary groups (TS 24.379 clause 16, TS 24.481 clause 6.3.14): constituent groups "

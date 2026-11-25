@@ -75,7 +75,15 @@ data class CallItem(
     val firstToAnswer: Boolean = false,
     /** An ad hoc call's participant criteria (§17.2.2.1.1 step 12). */
     val criteria: String? = null,
+    /** An ambient listening call (TS 24.379 §11.1.6): "listening" or "listened-to"; whether this phone may release it. */
+    val ambientRole: String? = null,
+    val mayRelease: Boolean = true,
+    /** The private call service the call is for (transfer, forwarding, remote, call-back), if any. */
+    val service: String? = null,
 )
+
+/** A call-back request another user sent this user (TS 24.379 §11.1.5.2.2). */
+data class CallBackItem(val from: String, val urgency: String, val time: String?)
 
 /**
  * One of this user's functional aliases (TS 24.379 §9A.2.1): `active`, `take-over-possible` (held by someone else,
@@ -254,6 +262,13 @@ data class UiState(
     val fileLimits: Map<String, Long> = emptyMap(),
     /** The network and SIM as label and value, for Settings (NetworkStatus). */
     val network: List<Pair<String, String>> = emptyList(),
+    /** Call-back requests received (§11.1.5.2.2), and those sent with their state (§11.1.5.2.1). */
+    val callBacks: List<CallBackItem> = emptyList(),
+    val callBacksSent: List<Pair<String, String>> = emptyList(),
+    /** The last private call service notice: a request carried out, or the outcome of the user's own. */
+    val serviceNote: String? = null,
+    /** The forwarding target the Forward action offers first (Settings). */
+    val forwardTarget: String? = null,
 ) {
     fun fileLimit(target: String, group: Boolean): Long? = fileLimits[if (group) target else ONE_TO_ONE]
 
@@ -295,6 +310,19 @@ interface UiActions {
     fun callAdhocCriteria(criteria: String) {}
     /** A first-to-answer call to two or more users (§11.1.1.2.1.1). */
     fun callFirstToAnswer(targets: List<String>) {}
+    /** TS 24.379 §11.1.5.2.1: ask [target] to call back; cancel it; §11.1.5.2.3: call back [from]. */
+    fun requestCallBack(target: String) {}
+    fun cancelCallBack(target: String) {}
+    fun fulfilCallBack(from: String) {}
+    /** §11.1.6.2.1.1: listen to [target] (remote-init), or let [target] listen ([local], local-init). */
+    fun ambientListen(target: String, local: Boolean) {}
+    /** §11.1.7.2.1: ask [remote] to call [target]; §10.1.5.2.1: ask [remote] to call [group]. */
+    fun remoteCall(remote: String, target: String) {}
+    fun remoteGroupCall(remote: String, group: String) {}
+    /** §11.1.8.2.1: transfer the private call to [target]; §11.1.9.2.1: forward the ringing private call to [target]. */
+    fun transfer(target: String) {}
+    fun forward(target: String) {}
+    fun setForwardTarget(target: String?) {}
     /** A broadcast group call (§10.1.1.2.1.1, §6.2.8.2). */
     fun callGroupBroadcast(group: String) {}
     fun answer() {}
@@ -474,11 +502,13 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
             else CallDisplay.groupCall(title, call.outgoing, call.callingAlias)
         return CallItem(call.id, shown.title, call.type, call.state, state, floor?.talker, call.floorEvents.lastOrNull(), limit, call.startedAt, members,
             call.floorControl, call.media?.muted == true, call.priority, floor?.queuePosition?.value, shown.subtitle,
-            call.broadcast, call.firstToAnswer, call.criteria)
+            call.broadcast, call.firstToAnswer, call.criteria, call.ambientRole, call.mayRelease, call.service)
     }
-    val calls = mcptt?.calls?.value ?: emptyList()
+    // A hidden ambient listening call (the listened-to user of a remote-init call, TS 24.379 §11.1.6.2.1.2) is not shown.
+    val calls = mcptt?.calls?.value?.filter { !it.hidden } ?: emptyList()
     val incoming = calls.firstOrNull { !it.outgoing && it.state == "ringing" }
-    val active = calls.firstOrNull { it.state != "released" && it != incoming }
+    val active = calls.lastOrNull { it.state != "released" && it != incoming }
+    val services = mcptt?.services?.state?.value
     val mcdata = Engine.mcdata
     // Where a message travelled when not by SIP MESSAGE: "media plane" (MSRP) or "session" (an SDS session).
     fun plane(p: String) = when (p) { "media" -> " · media plane"; "session" -> " · session"
@@ -649,9 +679,31 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
                 media?.stats?.picturesReceived?.get() ?: 0, v.events.lastOrNull(), v.ambientRole, v.mayRelease)
         },
         videoFailure = Engine.videoFailure.value,
+        callBacks = services?.callBacksReceived?.values?.map { CallBackItem(it.from, it.urgency, it.time) } ?: emptyList(),
+        callBacksSent = services?.callBacksSent?.entries?.map { it.key to it.value.substringAfter(": ") } ?: emptyList(),
+        serviceNote = services?.let { s -> (s.outcomes + s.handled).maxByOrNull { it.at }?.let(::serviceText) },
+        forwardTarget = Engine.forwardTarget.value,
         attachment = pending,
         fileLimits = fileLimits,
     )
+}
+
+/** A private call service record, as the Call tab says it. */
+fun serviceText(r: org.openmcx.client.mcptt.ServiceRecord): String {
+    val who = r.peer.short(); val target = r.target?.short()
+    val outcome = r.outcome?.let { if (it == "success") ": done" else ": failed" } ?: ""
+    return when (r.type) {
+        org.openmcx.client.mcptt.PrivateServiceRules.CALL_BACK -> "$who asks you to call back"
+        org.openmcx.client.mcptt.PrivateServiceRules.CALL_BACK_CANCEL -> "$who withdrew the call-back request"
+        org.openmcx.client.mcptt.PrivateServiceRules.REMOTE_PRIVATE -> "$who asked this phone to call $target$outcome"
+        org.openmcx.client.mcptt.PrivateServiceRules.REMOTE_GROUP -> "$who asked this phone to call $target$outcome"
+        org.openmcx.client.mcptt.PrivateServiceRules.TRANSFER -> "$who transferred you to $target$outcome"
+        org.openmcx.client.mcptt.PrivateServiceRules.FORWARD -> "Call forwarded by $who to $target$outcome"
+        "transfer-private-call-response" -> "Transfer of $who to $target$outcome"
+        "forward-private-call-response" -> "Forwarding to $target$outcome"
+        "remotely-initiated-private-call-response", "remotely-initiated-group-call-response" -> "$who's call to $target$outcome"
+        else -> "${r.type.replace('-', ' ')}$outcome"
+    }
 }
 
 /** The actions against the engine. */
@@ -726,6 +778,24 @@ object EngineActions : UiActions {
     override fun callAdhocCriteria(criteria: String) = place("the ad hoc group") { Engine.mcptt?.adhocCall(emptyList(), criteria) }
     override fun callFirstToAnswer(targets: List<String>) = place("the first to answer") { Engine.mcptt?.firstToAnswerCall(targets) }
     override fun callGroupBroadcast(group: String) = place(group) { Engine.mcptt?.broadcastCall(group) }
+    /** A private call service request; its refusal is shown on the Call tab. */
+    private fun request(what: String, block: suspend () -> Unit) {
+        Engine.callFailure.value = null
+        Engine.scope.launch {
+            runCatching { block() }.onFailure { Engine.log.add("$what: ${it.message}"); Engine.callFailure.value = "$what: ${it.message}" }
+        }
+    }
+    override fun requestCallBack(target: String) = request("Call-back request to ${target.short()}") { Engine.mcptt?.services?.requestCallBack(target) }
+    override fun cancelCallBack(target: String) = request("Call-back cancel to ${target.short()}") { Engine.mcptt?.services?.cancelCallBack(target) }
+    override fun fulfilCallBack(from: String) = place(from) { Engine.mcptt?.services?.fulfilCallBack(from) }
+    override fun ambientListen(target: String, local: Boolean) = place(target) { Engine.mcptt?.ambientCall(target, local) }
+    override fun remoteCall(remote: String, target: String) =
+        request("${remote.short()} calling ${target.short()}") { Engine.mcptt?.services?.remotePrivateCall(remote, target) }
+    override fun remoteGroupCall(remote: String, group: String) =
+        request("${remote.short()} calling ${group.short()}") { Engine.mcptt?.services?.remoteGroupCall(remote, group) }
+    override fun transfer(target: String) = request("Transfer to ${target.short()}") { Engine.mcptt?.services?.transfer(target) }
+    override fun forward(target: String) = request("Forward to ${target.short()}") { Engine.mcptt?.services?.forward(target) }
+    override fun setForwardTarget(target: String?) = Engine.setForwardTarget(target)
     override fun answer() { Engine.mcptt?.answer() }
     override fun reject() { Engine.mcptt?.reject() }
     override fun hangup() = launch { Engine.mcptt?.hangup() }

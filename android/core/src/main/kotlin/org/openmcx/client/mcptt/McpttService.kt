@@ -56,7 +56,10 @@ enum class CallType(val sessionType: String) {
 
     companion object {
         const val FIRST_TO_ANSWER = "first-to-answer"
-        fun of(sessionType: String?) = if (sessionType == FIRST_TO_ANSWER) PRIVATE else entries.firstOrNull { it.sessionType == sessionType }
+        /** An ambient listening call (§11.1.6) is a private call; its type and our role are in [Call.ambientType]. */
+        const val AMBIENT = "ambient-listening"
+        fun of(sessionType: String?) = if (sessionType == FIRST_TO_ANSWER || sessionType == AMBIENT) PRIVATE
+            else entries.firstOrNull { it.sessionType == sessionType }
     }
 }
 
@@ -118,6 +121,46 @@ class Call internal constructor(
     internal var keys: Pair<org.openmcx.client.security.KeyMessage?, org.openmcx.client.security.KeyMessage?> = null to null
     /** A first-to-answer invitee's PCK I_MESSAGE for its answer's a=key-mgmt (§11.1.1.2.1.2 step 5). */
     internal var answerKeyMgmt: String? = null
+    /** An ambient listening call (§11.1.6): its type, `remote-init` or `local-init`, and our role, `listening` or `listened-to`. */
+    @Volatile var ambientType: String? = null
+    @Volatile var ambientRole: String? = null
+    /** §11.1.6.2.1.3 step 1: an ambient listening call is released here only with the release capability (annex D.3). */
+    @Volatile var mayRelease: Boolean = true
+    /**
+     * The listened-to user of a remotely initiated ambient listening call is given no indication of it (§11.1.6.2.1.2,
+     * TS 23.379 §10.14.3.2): the call is not shown and is not [McpttService.active].
+     */
+    val hidden: Boolean get() = ambientType == "remote-init" && ambientRole == "listened-to"
+    /** The answer mode of this private call ("Auto" or "Manual"), which its transfer or forwarding repeats (§11.1.1.2.1.1 14A) a), 14C) a)). */
+    @Volatile var answerMode: String? = null
+    /** Its <forwarding-sequence-number> (§11.1.1.2.1.1 14B), 14C) a1)). */
+    @Volatile var forwardingSequence: Int = 0
+    /** An incoming call's <mcptt-request-uri>: the MCPTT ID called, the forwarding user of a manual forwarding (§11.1.9.2.1 2) d) i) E)). */
+    @Volatile var requestUri: String? = null
+    /** The private call service the call is placed for or received as: `transfer`, `forwarding`, `remote` or `call-back`. */
+    @Volatile var service: String? = null
+    /** A ringing call declined with this status and warning (manual forwarding, §11.1.9.2.1: 480 with warning 175). */
+    internal var declineWith: Pair<Int, String>? = null
+}
+
+/**
+ * What a call placed for a private call service carries (TS 24.379 §11.1.1.2.1.1 14A) to 14C)): the service elements
+ * of <anyExt> (<call-transfer-ind>, <call-forwarding-ind>, ...), a Priv-Answer-Mode in place of the commencement
+ * mode, the Resource-Priority asked for (<ric-app-level-priority>), <remotely-initiated-call-request-ind>, the
+ * <forwarding-sequence-number>; [alongside]: placed while the user's call with the requester goes on (the transferred
+ * user, §11.1.8.2.2). [outcome] completes with the success of the origination: true on 180, 183 or 2xx, and on 480 with
+ * warning 175 or 191 (the call was forwarded), false otherwise.
+ */
+class ServiceCall(
+    val kind: String,
+    val service: Map<String, String> = emptyMap(),
+    val privAnswerMode: String? = null,
+    val resourcePriority: String? = null,
+    val remoteRequest: Boolean = false,
+    val forwardingSequence: Int? = null,
+    val alongside: Boolean = false,
+) {
+    val outcome = CompletableDeferred<Boolean>()
 }
 
 /** Tells the UI and the service about call events. */
@@ -154,7 +197,14 @@ class McpttService(
         get() = client.answerModeOf(McService.MCPTT) ?: config.answerMode
         set(value) = client.setAnswerMode(McService.MCPTT, value)
 
-    val active: Call? get() = _calls.value.firstOrNull { it.state != "released" }
+    /**
+     * The user's call: the newest one not released (a transferred user's call to the target is newer than its call
+     * with the requester, §11.1.8.2.2); a hidden ambient listening call (§11.1.6.2.1.2) is never the user's call.
+     */
+    val active: Call? get() = _calls.value.lastOrNull { it.state != "released" && !it.hidden }
+
+    /** The call-back, remotely initiated call, transfer and forwarding procedures (TS 24.379 §10.1.5, §11.1.5, §11.1.7-§11.1.9). */
+    val services = PrivateServices(client, this)
 
     /** Regroups and temporary groups (TS 24.379 §16, TS 24.481 §6.3.14): their notices and the requests for them. */
     val regroups = Regroups(client)
@@ -495,8 +545,12 @@ class McpttService(
     private suspend fun originate(type: CallType, peer: String?, group: String?, targets: List<String>, commencement: Commencement?,
                                   floorControl: Boolean = true, priority: String = "normal", toAlias: Boolean = false,
                                   calledAlias: String? = null, implicit: Implicit? = null, broadcast: Boolean = false,
-                                  firstToAnswer: Boolean = false, criteria: String? = null, requestUriOverride: String? = null): Call {
-        if (active != null) throw CallError("already in a call")
+                                  firstToAnswer: Boolean = false, criteria: String? = null, requestUriOverride: String? = null,
+                                  extra: ServiceCall? = null, ambientType: String? = null): Call {
+        if (active != null && extra?.alongside != true) throw CallError("already in a call")
+        // TS 23.379 §10.14.3.3: a call request of the listened-to user ends a hidden ambient listening call; the server
+        // releases it before setting up the new call.
+        _calls.value.filter { it.hidden }.forEach { release(it, "call-request-initiated-by-listened-to-client") }
         val groupCall = type == CallType.PREARRANGED || type == CallType.CHAT
         // §10.1.1.2.1.1, §10.1.2.2.1.1: no call on a group whose document says <preconfigured-group-use-only>.
         if (groupCall && !GroupCallRules.callsAllowed(group?.let { client.groupDocuments[it]?.preconfiguredUseOnly }))
@@ -516,6 +570,9 @@ class McpttService(
         val call = Call(ids.incrementAndGet(), type, true, peer, group).also {
             it.floorControl = floorControl; it.priority = priority; it.broadcast = broadcast; it.firstToAnswer = firstToAnswer
             it.invitees = if (firstToAnswer) targets else emptyList(); it.criteria = criteria; it.associatedGroup = associated
+            it.ambientType = ambientType
+            it.ambientRole = when (ambientType) { "remote-init" -> "listening"; "local-init" -> "listened-to"; else -> null }
+            it.service = extra?.kind
         }
         val protection = protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
         _calls.value = _calls.value + call
@@ -524,17 +581,28 @@ class McpttService(
         val floored = if (floorControl) bound else bound.copy(floorControl = false, audioSsrc = McpttSdp.newFloorSsrc())
         // TS 24.380 §14.3.3: a group call offers the floor priority asked for ("mc_priority").
         val prioritised = if (groupCall && floorControl) floored.copy(floorPriority = floorPriorityOffer(group)) else floored
+        // TS 24.379 §6.2.1 item 2c: an ambient listening call's speech is recvonly for the listening user, sendonly
+        // for the listened-to user.
+        val directed = when (call.ambientRole) { "listening" -> prioritised.copy(direction = "recvonly")
+            "listened-to" -> prioritised.copy(direction = "sendonly"); else -> prioritised }
         val local = when {
-            pck != null -> prioritised.copy(protected = true, keyMgmt = pck.second)
-            gmk != null -> prioritised.copy(protected = true)
-            else -> prioritised
+            pck != null -> directed.copy(protected = true, keyMgmt = pck.second)
+            gmk != null -> directed.copy(protected = true)
+            else -> directed
         }
         // TS 24.379 §6.4, TS 24.380 §14.2.5: the initial INVITE may request the floor implicitly; §14.2.4: with
         // "mc_granted" when the floor granted in the 200 (OK) is accepted (offer_granted). Only this offer carries them
         // (§14.5): the call's own media ([local]) has neither, so no re-INVITE repeats them.
-        val implicitRequest = floorControl && (implicit?.request ?: config.implicitFloorRequest)
-        val grantedOffer = implicitRequest && (implicit?.granted ?: config.offerGranted)
-        val offered = if (implicitRequest) local.copy(implicitRequest = true, granted = grantedOffer, audioSsrc = McpttSdp.newFloorSsrc()) else local
+        // §11.1.6.2.1.1 steps 12, 13 (§6.4): an ambient listening call's offer is always an implicit request: the
+        // listened-to originator's own floor request (local-init), else a request to grant the floor to the invited user.
+        val implicitRequest = floorControl && call.ambientRole != "listening" &&
+            (call.ambientRole == "listened-to" || (implicit?.request ?: config.implicitFloorRequest))
+        val grantedOffer = implicitRequest && call.ambientType == null && (implicit?.granted ?: config.offerGranted)
+        val offered = when {
+            implicitRequest -> local.copy(implicitRequest = true, granted = grantedOffer, audioSsrc = McpttSdp.newFloorSsrc())
+            call.ambientRole == "listening" -> local.copy(implicitRequest = true)
+            else -> local
+        }
         call.implicitFloorRequest = if (implicitRequest) "offered" else null
         call.grantedOffered = grantedOffer
         val media = newMedia(call, ports, local)
@@ -547,26 +615,37 @@ class McpttService(
             val request = ua.newRequest("INVITE", target, NameAddr(target))
             commonHeaders(request, initialInvite = true)
             request.headers.add("Session-Expires", config.sessionExpires.coerceAtLeast(90).toString()).add("Min-SE", "90")
-            when (commencement) {
-                Commencement.AUTOMATIC -> request.headers.add("Answer-Mode", "Auto")
-                Commencement.MANUAL -> request.headers.add("Answer-Mode", "Manual")
-                Commencement.FORCED -> request.headers.add("Priv-Answer-Mode", "Auto")
-                null -> Unit
+            // §11.1.1.2.1.1 14A) a), 14C) a): a transferred or forwarded call repeats the answer mode of the call it
+            // follows in Priv-Answer-Mode; §11.1.6.2.1.1 step 14: an ambient listening call is always Priv-Answer-Mode Auto.
+            val privAnswerMode = extra?.privAnswerMode ?: "Auto".takeIf { ambientType != null }
+            when {
+                privAnswerMode != null -> request.headers.add("Priv-Answer-Mode", privAnswerMode)
+                commencement == Commencement.AUTOMATIC -> request.headers.add("Answer-Mode", "Auto")
+                commencement == Commencement.MANUAL -> request.headers.add("Answer-Mode", "Manual")
+                commencement == Commencement.FORCED -> request.headers.add("Priv-Answer-Mode", "Auto")
             }
-            resource?.let { request.headers.add("Resource-Priority", it) }
+            call.answerMode = privAnswerMode ?: when (commencement) { Commencement.MANUAL -> "Manual"; null -> null; else -> "Auto" }
+            // §11.1.7.2.2 3) b), §10.1.5.2.2: the Resource-Priority of a remotely initiated call's <ric-app-level-priority>.
+            (resource ?: extra?.resourcePriority)?.let { request.headers.add("Resource-Priority", it) }
             // §9A, §11.1.1.2.1.1 step 14c: the alias this user presents (private and ad hoc calls, as the reference client),
             // the call to an alias, and the alias called once the server selected its MCPTT ID.
-            val presented = client.aliases.value.inUse.takeIf { type != CallType.PREARRANGED && type != CallType.CHAT }
+            val presented = client.aliases.value.inUse.takeIf { type != CallType.PREARRANGED && type != CallType.CHAT && ambientType == null }
             call.callingAlias = presented
             call.calledAlias = calledAlias ?: peer.takeIf { toAlias }
-            // §11.1.1.2.1.1 14B) a): a private call the user initiates (not a forwarded one, which this client does not
-            // make) has <forwarding-sequence-number> 0.
+            // §11.1.1.2.1.1 14B) a): a private call the user initiates has <forwarding-sequence-number> 0; 14C) a1): a
+            // forwarded one the forwarded call's, incremented; a transferred or remotely initiated one none.
             // §11.1.1.2.1.1 step 15 a): a first-to-answer call's session type; 14B a) is for private calls only.
-            val info = priorityInfo(McpttInfo(sessionType = if (firstToAnswer) CallType.FIRST_TO_ANSWER else type.sessionType,
+            // §11.1.6.2.1.1 steps 7, 8: an ambient listening call's session type and <ambient-listening-type>.
+            val sequence = extra?.forwardingSequence ?: if (type == CallType.PRIVATE && !firstToAnswer && ambientType == null && extra == null) 0 else null
+            call.forwardingSequence = sequence ?: 0
+            val info = priorityInfo(McpttInfo(sessionType = when { firstToAnswer -> CallType.FIRST_TO_ANSWER; ambientType != null -> CallType.AMBIENT
+                    else -> type.sessionType },
+                ambientListeningType = ambientType, service = extra?.service ?: emptyMap(),
+                remotelyInitiatedCallRequest = if (extra?.remoteRequest == true) true else null,
                 requestUri = group, clientId = client.config.clientId, broadcast = if (broadcast) true else null,
                 associatedGroupId = associated, participantCriteria = criteria,
                 functionalAlias = presented, callToFunctionalAlias = if (toAlias) true else null, calledFunctionalAlias = calledAlias,
-                forwardingSequenceNumber = if (type == CallType.PRIVATE && !firstToAnswer) 0 else null), priority)
+                forwardingSequenceNumber = sequence), priority)
             val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(offered, call.origin).toByteArray()),
                 Part(McpttInfo.CONTENT_TYPE, info.encode().toByteArray()))
             if (targets.isNotEmpty()) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(targets).toByteArray())
@@ -579,7 +658,11 @@ class McpttService(
                 (if (floorControl) "" else " without floor control") + (local.floorPriority?.let { ", floor priority $it" } ?: "") +
                 if (priority != "normal") " ($priority)" else "")
             val response = ua.send(invite, provisional = { r ->
-                if (r.status == 180 || r.status == 183) { call.state = "ringing"; changed(call) }
+                if (r.status == 180 || r.status == 183) {
+                    extra?.outcome?.complete(true) // §11.1.7.2.2, §11.1.8.2.2, §11.1.9.2.2: progress is success
+                    // §11.1.6.2.1.1: the listened-to originator of a local-init call sees nothing ring.
+                    if (call.ambientRole != "listened-to") { call.state = "ringing"; changed(call) }
+                }
             })
             val sent = ua.lastSent[invite.callId] ?: invite
             call.invite = sent
@@ -592,8 +675,13 @@ class McpttService(
             }
             if (!response.isSuccess) {
                 val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""
+                // 480 with warning 175 or 191: the call is forwarded, the origination a success (§11.1.9.2.2).
+                extra?.outcome?.complete(PrivateServiceRules.forwarded(response.status, response.headers["Warning"]))
                 throw CallError("${response.status} ${response.reason}$warning", response.status)
             }
+            extra?.outcome?.complete(true)
+            // §11.1.6.2.1.1 (200 (OK)): the release capability of an ambient listening call (annex D.3).
+            if (ambientType != null) call.mayRelease = PrivateServiceRules.ambientReleaseAllowed(response.headers.values("Feature-Caps"))
             val dialog = Dialog.fromResponse(sent, response)
             call.dialog = dialog
             ua.ack(dialog, sent)
@@ -618,7 +706,7 @@ class McpttService(
             // TS 24.380 §14.4: the answer's "mc_implicit_request" and "mc_granted" count only when our offer had them.
             val accepted = ClientRules.answerParameterKept(remote.implicitRequest, implicitRequest)
             val grantedByAnswer = accepted && ClientRules.answerParameterKept(remote.granted, grantedOffer)
-            if (implicitRequest) {
+            if (implicitRequest && call.ambientRole == null) {
                 call.implicitFloorRequest = when { grantedByAnswer -> "granted"; accepted -> "accepted"; else -> "not accepted" }
                 event("call ${call.id}: implicit floor request ${call.implicitFloorRequest}")
             }
@@ -637,10 +725,42 @@ class McpttService(
             changed(call)
             return call
         } catch (e: Exception) {
+            extra?.outcome?.complete(false)
             release(call, e.message ?: "failed")
             throw e
         }
     }
+
+    /**
+     * An ambient listening call (TS 24.379 §11.1.6.2.1.1): listen to [target] without them doing anything (`remote-init`,
+     * needs <allow-request-remote-initiated-ambient-listening>), or let [target] listen to this phone ([local],
+     * `local-init`, needs <allow-request-locally-initiated-ambient-listening>). Automatic commencement (Priv-Answer-Mode
+     * Auto, step 14), one target in the resource list (step 9), the speech recvonly or sendonly; the listened-to user
+     * holds the floor for the whole call.
+     */
+    suspend fun ambientCall(target: String, local: Boolean = false): Call {
+        if (target == config.userId) throw CallError("an ambient listening call is to another user")
+        val right = if (local) "allow-request-locally-initiated-ambient-listening" else "allow-request-remote-initiated-ambient-listening"
+        client.profile?.let { if (!it.allows(right)) throw CallError("the user profile does not allow this ambient listening call ($right)") }
+        return originate(CallType.PRIVATE, target, null, listOf(target), null, ambientType = if (local) "local-init" else "remote-init")
+    }
+
+    /**
+     * A private call placed for a private call service (call-back fulfilment, remotely initiated, transfer, forwarding),
+     * with what [extra] says it carries.
+     */
+    internal suspend fun serviceCall(target: String, commencement: Commencement?, extra: ServiceCall): Call =
+        originate(CallType.PRIVATE, target, null, listOf(target), commencement, extra = extra)
+
+    /** A prearranged group call placed for a remotely initiated group call request (§10.1.5.2.2). */
+    internal suspend fun serviceGroupCall(group: String, extra: ServiceCall): Call {
+        val doc = regroups.configurationOf(group)
+        val type = if (doc?.chat == true) CallType.CHAT else CallType.PREARRANGED
+        return originate(type, null, group, emptyList(), null, extra = extra)
+    }
+
+    /** The calls not released, hidden ones included. */
+    internal val current: List<Call> get() = _calls.value.filter { it.state != "released" }
 
     // Terminating calls.
 
@@ -666,6 +786,8 @@ class McpttService(
             "INFO", "MESSAGE" -> {
                 // TS 24.379 §16.2.1.3, §16.2.1.4: a regroup notice.
                 if (call == null && request.method == "MESSAGE" && regroups.handle(tx)) return true
+                // §10.1.5.2.2, §11.1.5.2.2, §11.1.7.2.2, §11.1.8.2, §11.1.9.2: a private call service request or response.
+                if (call == null && request.method == "MESSAGE" && services.handle(tx)) return true
                 if (call == null) return false
                 tx.respond(200)
                 infoOf(request)?.let { notePriority(call, it) }
@@ -682,10 +804,19 @@ class McpttService(
         val sdp = parts.firstOrNull { it.mediaType == "application/sdp" }?.text
         val type = CallType.of(info?.sessionType)
         if (info == null || sdp == null || type == null) { tx.respond(400, "Bad Request"); return }
-        // §11.1.1.2.1.2 step 8 c): busy on another call, 486 (Busy Here); the same for any other call type here.
-        if (active != null) { tx.respond(486); return }
+        val ambient = info.sessionType == CallType.AMBIENT
+        // The server releases a hidden ambient listening call before it invites the listened-to user to another call
+        // (§11.1.6.4.3): what is left of it here goes.
+        if (!ambient) _calls.value.filter { it.hidden }.forEach { release(it, "released for another call") }
+        // §11.1.1.2.1.2 step 8 c), §11.1.6.2.1.2 step 1 a): busy on another call, 486 (Busy Here); the same for any
+        // other call type here. A transferred user's call to the target may arrive while it is in the call with the
+        // requester (two at most).
+        if (current.isNotEmpty() && !(current.size == 1 && request.headers["Replaces"] != null)) { tx.respond(486); return }
         val firstToAnswer = info.sessionType == CallType.FIRST_TO_ANSWER
         val remote = try { McpttSdp.remote(sdp) } catch (e: SdpNegotiationError) { tx.respond(488); return }
+        // §11.1.6.2.1.2: an ambient listening call names one calling user, no group, no emergency, imminent peril,
+        // alert or broadcast (488 otherwise), and is answered automatically (Priv-Answer-Mode Auto, else 400).
+        if (ambient) PrivateServiceRules.ambientRefusal(info, config.userId, request.headers["Priv-Answer-Mode"])?.let { tx.respond(it); return }
         // §11.1.2: only a private call (a first-to-answer call included, §11.1.2.1) comes without floor control.
         if (!remote.floorControl && type != CallType.PRIVATE) { tx.respond(488); return }
         val call = Call(ids.incrementAndGet(), type, false, info.callingUserId,
@@ -699,6 +830,19 @@ class McpttService(
             it.associatedGroup = info.associatedGroupId
             // The MCPTT session identity, the controlling function's Contact (isfocus), to rejoin an ad hoc call left.
             it.sessionUri = request.headers["Contact"]?.let { c -> runCatching { NameAddr.parse(c).uri }.getOrNull() }
+            if (ambient) {
+                it.ambientType = info.ambientListeningType
+                it.ambientRole = if (info.ambientListeningType == "remote-init") "listened-to" else "listening"
+                it.mayRelease = PrivateServiceRules.ambientReleaseAllowed(request.headers.values("Feature-Caps"))
+            }
+            // §11.1.1.2.1.1 14A) a), 14C) a): the answer mode and forwarding count of the call, for its transfer or
+            // forwarding; §11.1.9.2.1 2) d) i) E): the MCPTT ID it was addressed to.
+            it.answerMode = PrivateServiceRules.answerMode(request.headers["Priv-Answer-Mode"]) ?: PrivateServiceRules.answerMode(request.headers["Answer-Mode"])
+                ?: if (answerMode == "manual") "Manual" else "Auto"
+            it.forwardingSequence = info.forwardingSequenceNumber ?: 0
+            it.requestUri = info.requestUri
+            it.service = when { info.service["call-transfer-ind"] == "true" -> "transfer"; info.service["call-forwarding-ind"] == "true" -> "forwarding"
+                else -> null }
         }
         // TS 33.180 7.4 with TS 24.379 §11.1.1.2.1.2: a protected private call's offer carries the caller's PCK, which
         // must authenticate as from the calling MCPTT ID, else 488 with warning 136; a protected group call needs the
@@ -739,9 +883,12 @@ class McpttService(
         // Commencement mode (§11.1.1.2.1.2 steps 9-10), the header values by token (RFC 5373 §2: "Auto;require" is Auto).
         // Step 8 a): a first-to-answer call is always notified to the user, who answers it (the server's Priv-Answer-Mode
         // is Manual, NOTE 5); step 8 d) the client's time out is the manual answer timeout, then 480.
-        val manual = firstToAnswer || ClientRules.manualCommencement(request.headers["Answer-Mode"], request.headers["Priv-Answer-Mode"],
-            answerMode, type == CallType.PRIVATE)
-        listener?.incoming(call)
+        val manual = !ambient && (firstToAnswer || ClientRules.manualCommencement(request.headers["Answer-Mode"], request.headers["Priv-Answer-Mode"],
+            answerMode, type == CallType.PRIVATE))
+        // §11.1.6.2.1.2: the listened-to user of a remotely initiated ambient listening call is not told.
+        if (!call.hidden) listener?.incoming(call)
+        // §11.1.5.2.3: a call from the user this user asked to call back fulfils the request.
+        if (type == CallType.PRIVATE && !ambient) info.callingUserId?.let { services.calledBy(it) }
         if (manual) {
             tx.respond(180, extra = listOf("Require" to "timer", "Contact" to client.sessionContact(McService.MCPTT)))
             call.state = "ringing"
@@ -755,8 +902,10 @@ class McpttService(
             when (decision) {
                 true -> Unit
                 false -> {
-                    tx.respond(480, extra = listOf("Warning" to "399 ${ua.sentBy} \"110 user declined the call invitation\""))
-                    release(call, "declined"); return
+                    // §11.1.9.2.1 NOTE 1: a call forwarded by the user is declined with 480 and warning 175.
+                    val (status, warning) = call.declineWith ?: (480 to "110 user declined the call invitation")
+                    tx.respond(status, extra = listOf("Warning" to "399 ${ua.sentBy} \"$warning\""))
+                    release(call, if (call.declineWith != null) "forwarded" else "declined"); return
                 }
                 null -> {
                     if (!tx.finalSent) tx.respond(480)
@@ -771,7 +920,9 @@ class McpttService(
         val (ports, bound) = try { bindMedia() } catch (e: Exception) { tx.respond(480); release(call, "no media ports"); return }
         // §11.1.2.3: an offer without floor control is answered without it, announcing our speech SSRC.
         val floored = if (remote.floorControl) bound else bound.copy(floorControl = false, audioSsrc = McpttSdp.newFloorSsrc())
-        val local = floored.copy(protected = remote.protected)
+        // §6.2.1 item 2c: the listened-to user's speech sendonly, the listening user's recvonly.
+        val local = floored.copy(protected = remote.protected, direction = when (call.ambientRole) {
+            "listened-to" -> "sendonly"; "listening" -> "recvonly"; else -> "sendrecv" })
         // A first-to-answer invitee is the initiator of its own PCK (§11.1.1.2.1.2 step 5 NOTE 4).
         val protection = try { protection(call.keys.first, localInitiator = call.firstToAnswer, gmk = call.keys.second, call = call) }
             catch (e: CallError) { ports.close(); tx.respond(480); release(call, e.message ?: "no keys"); return }
@@ -786,6 +937,9 @@ class McpttService(
             "Session-Expires" to "$offered;refresher=uas", "Allow" to ALLOW))
         call.dialog = Dialog.fromRequest(tx.request, tx.localTag)
         media.start(remote, indicator = { indicatorOf(call, local, remote) })
+        // §6.4: the INVITE of a remotely initiated ambient listening call asks to grant the floor to this client; the
+        // speech then goes out without the user (the microphone, kept by the foreground service, TS 23.379 §10.14.3.2).
+        if (call.ambientRole == "listened-to") media.floor.grantExpected = true
         tx.send(response)
         call.state = "established"
         startRefresh(call) // we are the refresher (§6.2.3.1.1 step 5)
@@ -915,6 +1069,8 @@ class McpttService(
      */
     suspend fun hangup(call: Call? = active, releaseAll: Boolean = true) {
         call ?: throw CallError("no call")
+        // §11.1.6.2.1.3 step 1: an ambient listening call is released only with the release capability (annex D.3).
+        if (call.ambientType != null && !call.mayRelease && call.dialog != null) throw CallError("this ambient listening call may not be released here")
         val dialog = call.dialog
         if (call.type == CallType.ADHOC && dialog != null) lastAdhoc = call
         when {
