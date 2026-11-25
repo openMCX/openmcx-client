@@ -30,7 +30,9 @@ data class LocalMedia(val address: String, val audioPort: Int, val floorPort: In
                        */
                       val implicitRequest: Boolean = false,
                       /** "mc_granted" (§14.2.4): we accept the floor granted in the SIP 200 (OK); only with [implicitRequest]. */
-                      val granted: Boolean = false)
+                      val granted: Boolean = false,
+                      /** The "mc_priority" of an offer (TS 24.380 §14.3.3): the highest floor priority asked for; null: none. */
+                      val floorPriority: Int? = null)
 
 /** What the other side (the MCPTT server) negotiated. */
 data class RemoteMedia(
@@ -125,16 +127,18 @@ object McpttSdp {
         origin = origin.next(local.address),
         connection = "IN IP4 ${local.address}",
         media = listOfNotNull(audio(local, PAYLOAD_TYPE, false),
-            if (local.floorControl) floor(local, null, local.queueing, local.implicitRequest, local.granted) else null),
+            if (local.floorControl) floor(local, local.floorPriority, local.queueing, local.implicitRequest, local.granted) else null),
         attributes = listOfNotNull(local.keyMgmt?.let { "key-mgmt" to "mikey $it" }),
     ).encode()
 
     /** Answer [offer]: its payload type and octet alignment, its floor priority echoed, queueing when both support it (§14.2.2). */
-    fun answer(offer: RemoteMedia, local: LocalMedia, origin: Origin = Origin()): String = SessionDescription(
+    fun answer(offer: RemoteMedia, local: LocalMedia, origin: Origin = Origin(), keyMgmt: String? = null): String = SessionDescription(
         origin = origin.next(local.address),
         connection = "IN IP4 ${local.address}",
         media = listOfNotNull(audio(local, offer.payloadType, offer.octetAligned),
             if (offer.floorControl && local.floorControl) floor(local, offer.floorPriority, offer.queueing && local.queueing) else null),
+        // TS 24.379 §11.1.1.2.1.2 step 5: a first-to-answer invitee's answer carries the PCK it made.
+        attributes = listOfNotNull(keyMgmt?.let { "key-mgmt" to "mikey $it" }),
     ).encode()
 
     /** The remote side of [sdp] (an offer or an answer). */

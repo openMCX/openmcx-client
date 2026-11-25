@@ -27,7 +27,9 @@ internal class FakeSipCore(
                             /** A status other than 200 for a request (e.g. one service's authorisation PUBLISH), or null. */
                             val statusFor: (SipRequest) -> Int? = { null },
                             /** Header fields added to the answer of a request (e.g. Retry-After with a refusal). */
-                            val headersFor: (SipRequest) -> List<Pair<String, String>> = { emptyList() }) : Connection {
+                            val headersFor: (SipRequest) -> List<Pair<String, String>> = { emptyList() },
+                            /** A body (content type and bytes) for the answer of a request (e.g. an INVITE's SDP), or null. */
+                            val bodyFor: (SipRequest) -> Pair<String, ByteArray>? = { null }) : Connection {
     val requests = CopyOnWriteArrayList<SipRequest>()
     val answers = LinkedBlockingQueue<SipResponse>()
     private val toClient = LinkedBlockingQueue<ByteArray>()
@@ -80,7 +82,9 @@ internal class FakeSipCore(
         }
         headersFor(request).forEach { (name, value) -> headers.add(name, value) }
         statusFor(request)?.let { toClient.put(SipResponse(it, "Refused", headers).encode()); return }
-        toClient.put(SipResponse(200, "OK", headers).encode())
+        val body = bodyFor(request)
+        if (body != null) headers.add("Content-Type", body.first)
+        toClient.put(SipResponse(200, "OK", headers, body?.second ?: ByteArray(0)).encode())
         if (request.method == "SUBSCRIBE" && event == "presence" && request.headers["Expires"] == "0")
             notify(request, "presence", "terminated;reason=timeout", null, null)
     }
@@ -114,6 +118,9 @@ internal class FakeSipCore(
         extra.forEach { (name, value) -> headers.add(name, value) }
         toClient.put(SipRequest("MESSAGE", contact(), headers, body.toByteArray()).encode())
     }
+
+    /** Any request from the core to the client (an INVITE, a BYE, a CANCEL), as built by the test. */
+    fun send(request: SipRequest) = toClient.put(request.encode())
 
     fun regSubscribe(): SipRequest = requests.first { it.method == "SUBSCRIBE" && it.headers["Event"] == "reg" }
 

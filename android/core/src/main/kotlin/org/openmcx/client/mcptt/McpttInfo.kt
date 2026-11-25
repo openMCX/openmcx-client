@@ -28,6 +28,8 @@ data class McpttInfo(
     /** The emergency alert indication (§12.1), and whose alert an authorised user cancels. */
     val alert: Boolean? = null,
     val imminentPeril: Boolean? = null,
+    /** A broadcast group call (TS 24.379 §6.2.8.2, annex F.1: `<broadcast-ind>`, an xs:boolean without a wrapper). */
+    val broadcast: Boolean? = null,
     val associatedGroupId: String? = null,
     val originatedBy: String? = null,
     val clientId: String? = null,
@@ -51,6 +53,13 @@ data class McpttInfo(
     val requestType: String? = null,
     /** In `<anyExt>` (annex F.1.3 af)): the number of forwardings of a private call (§11.1.1.2.1.1 14B), 14C)). */
     val forwardingSequenceNumber: Int? = null,
+    /**
+     * In `<anyExt>` (annex F.1.2 `releaseReasonType`): why the server ends the call, e.g. "not selected for call" for a
+     * first-to-answer invitee that another one beat (§11.1.1.2.1.2, SIP BYE step 1 a)).
+     */
+    val releaseReason: String? = null,
+    /** In `<anyExt>`: the preconfigured group whose configuration an ad hoc group call uses (§17.2.2.1.1, 2xx step 3). */
+    val preconfiguredGroupId: String? = null,
     val extra: Map<String, String> = emptyMap(),
 ) {
     fun encode(): String = Xml.document("mcpttinfo", NAMESPACE) {
@@ -64,13 +73,15 @@ data class McpttInfo(
             emergency?.let { wrapped("emergency-ind", it.toString(), "mcpttBoolean") }
             alert?.let { wrapped("alert-ind", it.toString(), "mcpttBoolean") }
             imminentPeril?.let { wrapped("imminentperil-ind", it.toString(), "mcpttBoolean") }
+            leaf("broadcast-ind", broadcast?.toString())
             wrapped("associated-group-id", associatedGroupId, "mcpttURI")
             wrapped("originated-by", originatedBy, "mcpttURI")
             wrapped("mcptt-client-id", clientId, "mcpttString")
             alertReceived?.let { wrapped("alert-ind-rcvd", it.toString(), "mcpttBoolean") }
             if (participantCriteria != null || emergencyAlertArea != null || groupGeoArea != null || adhocAlert != null ||
                 adhocAlertReceived != null || functionalAlias != null || calledFunctionalAlias != null ||
-                callToFunctionalAlias != null || requestType != null || forwardingSequenceNumber != null) element("anyExt") {
+                callToFunctionalAlias != null || requestType != null || forwardingSequenceNumber != null || releaseReason != null ||
+                preconfiguredGroupId != null) element("anyExt") {
                 leaf("call-participants-criterias", participantCriteria)
                 leaf("emergency-alert-area-ind", emergencyAlertArea?.toString())
                 leaf("group-geo-area-ind", groupGeoArea?.toString())
@@ -81,6 +92,8 @@ data class McpttInfo(
                 leaf("call-to-functional-alias-ind", callToFunctionalAlias?.toString())
                 leaf("request-type", requestType)
                 leaf("forwarding-sequence-number", forwardingSequenceNumber?.toString())
+                leaf("release-reason", releaseReason)
+                wrapped("preconfigured-group-id", preconfiguredGroupId, "mcpttURI")
             }
         }
     }
@@ -100,7 +113,7 @@ data class McpttInfo(
                 it.child("mcpttURI") ?: it.child("mcpttString") ?: it.child("mcpttBoolean") ?: it
             }?.text()
             val known = setOf("mcptt-access-token", "session-type", "mcptt-request-uri", "mcptt-calling-user-id",
-                "mcptt-called-party-id", "mcptt-calling-group-id", "emergency-ind", "alert-ind", "imminentperil-ind", "associated-group-id",
+                "mcptt-called-party-id", "mcptt-calling-group-id", "emergency-ind", "alert-ind", "imminentperil-ind", "broadcast-ind", "associated-group-id",
                 "originated-by", "mcptt-client-id", "alert-ind-rcvd", "anyExt")
             fun ext(name: String) = params.child("anyExt")?.descendants(name)?.firstOrNull()?.text()
             fun flag(name: String) = ext(name)?.trim()?.let { it == "true" || it == "1" }
@@ -114,6 +127,7 @@ data class McpttInfo(
                 emergency = value("emergency-ind")?.toBooleanStrictOrNull(),
                 alert = value("alert-ind")?.toBooleanStrictOrNull(),
                 imminentPeril = value("imminentperil-ind")?.toBooleanStrictOrNull(),
+                broadcast = params.childText("broadcast-ind")?.trim()?.let { it == "true" || it == "1" },
                 associatedGroupId = value("associated-group-id"),
                 originatedBy = value("originated-by"),
                 clientId = value("mcptt-client-id"),
@@ -128,6 +142,9 @@ data class McpttInfo(
                 callToFunctionalAlias = flag("call-to-functional-alias-ind"),
                 requestType = ext("request-type"),
                 forwardingSequenceNumber = ext("forwarding-sequence-number")?.trim()?.toIntOrNull(),
+                releaseReason = ext("release-reason")?.trim(),
+                preconfiguredGroupId = params.child("anyExt")?.descendants("preconfigured-group-id")?.firstOrNull()
+                    ?.let { it.child("mcpttURI") ?: it }?.text()?.trim(),
                 extra = params.children().filter { it.localName !in known }.associate { it.localName to it.text() },
             )
         }

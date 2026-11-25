@@ -804,6 +804,18 @@ class McxClient(
             .onFailure { event("service configuration $service: ${it.message}") }
     }
 
+    /** Read [group]'s document now (a regroup's preconfigured group, a temporary group: TS 24.379 §16.1, TS 24.481 §6.3.14). */
+    suspend fun refreshGroupDocument(group: String): GroupDocument? {
+        val token = tokens?.accessToken ?: return null
+        readGroupDocument(group, token)
+        return groupDocuments[group]
+    }
+
+    /** A request to this user's tree of the GMS (TS 24.481 §6.3.14.2, §6.3.15.2), with the access token. */
+    suspend fun gmsUserRequest(method: String, document: String, contentType: String? = null, body: ByteArray? = null) =
+        documents.gmsUserRequest(method, config.mcptt?.userId ?: throw IllegalStateException("MCPTT not provisioned"), document,
+            tokens?.accessToken ?: throw IllegalStateException("not signed in"), contentType, body)
+
     private suspend fun readGroupDocument(group: String, token: String) {
         runCatching { documents.group(group, token) }
             .onSuccess {
