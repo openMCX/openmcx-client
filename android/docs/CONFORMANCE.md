@@ -43,6 +43,22 @@ debug command ([README](../README.md#debug-control-endpoint)).
 | Negotiated mode, received: 200 at once, the user prompted (Accept, Decline; `affiliation-accept [<group>...]`, `affiliation-decline`); accepted, affiliation to the groups not affiliated and de-affiliation from those affiliated, as §9.2.1.2 | TS 24.379 §9.2.1.5 | `ServiceProcedures.handle`, `answerAffiliationRequest`, `McxClient.changeAffiliation`; `ui/Screens.kt` `AffiliationRequestPrompt` | `ServiceProceduresTest.negotiatedRequestReceived`. Not in the lab: the OpenMCX servers do not send it |
 | Group dynamic data: SUBSCRIBE naming the group with the per-group filter of §9.3.2.2 (the items asked for), fetch, re-subscribe, de-subscribe; the §9.3.1.2 document (status, aliases, call ongoing, members) | TS 24.379 §9.2.1.6, §9.3.1.2, §9.3.2.2 | `ServiceProcedures.gddSubscribe`, `body/Presence.kt` `GroupDynamicData` | `ServiceProceduresTest.groupDynamicDataSubscription`, `ProceduresBodiesTest`; S24 |
 
+## Location rules, group geographic areas, SEAL location
+
+Driven by the phone's position: the fused fix, or the debug override `location-position` (`client/LocationRuleProcedures.kt`,
+`location/LocationRules.kt`, `location/SealLocation.kt`, `client/SealLocationClient.kt`; LOCATION.md).
+
+| Requirement | Clause | Code | Evidence |
+|---|---|---|---|
+| Location based functional alias status change: entering or leaving an area of `<LocationCriteriaForActivation>` / `<LocationCriteriaForDeactivation>` starts the status change procedure; an alias already in that state is left; the first position only places the client | TS 24.379 §9A.2.1.4, TS 24.282 §22.2.1.4, TS 24.281 §20.2.1.4; TS 24.484 §8.3.2.1 item 10 | `LocationRuleEngine.position`, `LocationRuleProcedures` | `LocationRulesTest`, `LocationRuleProceduresTest.profileRulesByPosition`; S40 (MCPTT and MCData) |
+| A manual deactivation of an alias a met location criterion holds is suppressed when `<manual-deactivation-not-allowed-if-location-criteria-met>` is true | TS 24.379 §9A.2.1.2, TS 24.282 §22.2.1.2, TS 24.281 §20.2.1.2 | `LocationRuleEngine.manualDeactivationRefusal`; `DebugControl` `fa deactivate` | `LocationRulesTest`; S40 |
+| Rules based affiliation: a `<RulesForAffiliation>` / `<RulesForDeaffiliation>` rule is fulfilled when a location criterion (an area entered or left) and a functional alias criterion are met; evaluated on each position and when an alias becomes active; an area with `<Speed>` or `<Heading>` is never met; both rules at once for a group: nothing | TS 24.379 §9.2.1.7.2, TS 24.282 §8.2.6.2; TS 24.484 §8.3.2.1 items 10 e), f), §10.3.2.1 item 9 b vii | `LocationRuleEngine.position`, `aliasesChanged`; `McxClient.changeAffiliation` | `LocationRulesTest`, `LocationRuleProceduresTest`; S41 (MCPTT and MCData) |
+| A manual de-affiliation from a group a fulfilled rule affiliated is suppressed when `<manual-deaffiliation-not-allowed-if-affiliation-rules-are-met>` is true | TS 24.379 §9.2.1.2, TS 24.282 §8.2.2 | `LocationRuleEngine.manualDeaffiliationRefusal`; `DebugControl` `deaffiliate` | `LocationRulesTest`, `LocationRuleProceduresTest`; S41 |
+| Group configuration rules: outside the group's `<mandatory-geographic-area>` de-affiliate, back inside affiliate again; no affiliation outside the `<permitted-geographic-area>` or the mandatory one (MCPTT only, as the Linux client) | TS 24.379 §9.2.1.7.3; TS 24.481 §7.2.4.2 | `LocationRuleEngine.allowedHere`, `groupAreasAt`; `GroupAreas` | `LocationRulesTest.groupConfigurationRules`; S42 |
+| Group geographic area notice: 200, then affiliate to (`<group-geo-area-ind>` true) or de-affiliate from (false) the `<associated-group-id>` group only, by the affiliation status change procedure | TS 24.379 §12.1.1.4, TS 24.282 §16.2.1.4 | `EmergencyAlerts.area` | `LocationRuleProceduresTest.groupGeographicAreaNotice`; S43 (MCPTT and MCData) |
+| Emergency alert area notice: the alert raised by the client itself, unless its alert is up; the notice of leaving leaves it up | TS 24.379 §12.1.1.6, TS 24.282 §16.2.1.5 | `EmergencyAlerts.area` | S14, S44 |
+| SEAL location management client: the configuration read from the location management server, periodic reports, positions stored while offline and sent in a history location result report; the access token carries the location management scope | TS 24.545 §6.2.2.2.1, §6.2.2.2.2, §6.2.20.2; TS 33.180 table B.4.2.2-1 | `SealLocationClient`, `SealLocation`, `IdmsClient.scope` | `SealLocationTest`, `IdmsTest`; S45 |
+
 ## Keeping registered
 
 | Requirement | Clause | Code | Evidence |
@@ -126,8 +142,12 @@ debug command ([README](../README.md#debug-control-endpoint)).
   presented. MCPTT: private and ad hoc calls present it, and a private call can go to an alias (§11.1.1.2.1.1 step 14c,
   the server's 300 then the call). MCVideo: calls present it, and a private video call can go to an alias. MCData: SDS
   present it, and a one-to-one SDS can go to an alias (§9.2.2.2.1 step 2b ii). The aliases come from the provisioning,
-  else from the MCPTT user profile's <FunctionalAliasList> (TS 24.484 §8.3.2.1). Not implemented: location-based
-  activation, the per-alias user status subscription, and MCData file distribution to an alias.
+  else from the MCPTT user profile's <FunctionalAliasList> (TS 24.484 §8.3.2.1). Location based activation is in
+  "Location rules" above. Not implemented: the per-alias user status subscription, and MCData file distribution to an alias.
+- **Location rules (limits):** the group configuration rules of §9.2.1.7.3 are evaluated for MCPTT only (TS 24.282
+  §8.2.6.3 is not, as in the Linux client); MCVideo evaluates its aliases' location criteria but no affiliation rules
+  and does not act on the MCVideo group geographic area notice (TS 24.281 §11.2.1.4: the McvideoInfo fields are
+  phase 7's); no hysteresis (TS 24.282 §8.2.6.2 NOTE).
 - **Not implemented:**
   - pre-established sessions
   - broadcast group calls
