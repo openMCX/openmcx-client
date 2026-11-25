@@ -1403,7 +1403,10 @@ class McxClient(
             val dialog = subscription.dialog ?: continue
             if (!send) continue
             val request = ua.inDialog(dialog, "SUBSCRIBE")
-            request.headers.add("P-Preferred-Service", icsi(McService.MCPTT)).add("Event", DocumentSubscriptions.EVENT).add("Expires", "0")
+            // TS 37.579-1 table 5.5.2.14-1: Accept application/xcap-diff+xml in every xcap-diff SUBSCRIBE, this one too
+            // (RFC 6665 §7.2 leaves it optional; RFC 5875 makes xcap-diff the default), as the Linux client.
+            request.headers.add("P-Preferred-Service", icsi(McService.MCPTT)).add("Event", DocumentSubscriptions.EVENT)
+                .add("Accept", DocumentSubscriptions.ACCEPT).add("Expires", "0")
             val status = runCatching { ua.send(request).status }.getOrNull()
             event("document subscription ended (SUBSCRIBE Expires 0): $status")
         }

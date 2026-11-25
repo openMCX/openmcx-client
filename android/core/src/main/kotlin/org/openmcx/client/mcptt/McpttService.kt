@@ -27,6 +27,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import org.openmcx.client.body.Multipart
 import org.openmcx.client.body.Part
 import org.openmcx.client.body.ResourceLists
+import org.openmcx.client.client.ClientRules
 import org.openmcx.client.client.Icsi
 import org.openmcx.client.client.McxClient
 import org.openmcx.client.client.ServiceHandler
@@ -510,13 +511,9 @@ class McpttService(
         call.invite = request
         _calls.value = _calls.value + call
         event("call ${call.id}: incoming ${type.sessionType} call from ${info.callingUserId}${call.groupId?.let { " on $it" } ?: ""}")
-        // Commencement mode (§11.1.1.2.1.2 steps 9-10).
-        val manual = when {
-            request.headers["Priv-Answer-Mode"].equals("Auto", true) -> false
-            request.headers["Answer-Mode"].equals("Manual", true) -> true
-            request.headers["Answer-Mode"].equals("Auto", true) -> answerMode == "manual" && type == CallType.PRIVATE
-            else -> answerMode == "manual"
-        }
+        // Commencement mode (§11.1.1.2.1.2 steps 9-10), the header values by token (RFC 5373 §2: "Auto;require" is Auto).
+        val manual = ClientRules.manualCommencement(request.headers["Answer-Mode"], request.headers["Priv-Answer-Mode"],
+            answerMode, type == CallType.PRIVATE)
         listener?.incoming(call)
         if (manual) {
             tx.respond(180, extra = listOf("Require" to "timer", "Contact" to client.sessionContact(McService.MCPTT)))
