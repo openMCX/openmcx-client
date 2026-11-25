@@ -120,6 +120,11 @@ Debug builds listen on the abstract socket `@mcxclient-control` for one JSON req
 | `broadcast [<group>] [emergency\|imminent]` | Broadcast group call (§6.2.8.2) |
 | `adhoc [broadcast] criteria <criteria>`, `adhoc-modify add\|remove <mcptt-id>…`, `adhoc-modify criteria <criteria>`, `adhoc-leave`, `adhoc-release` | Ad hoc call by criteria (§17.2.2.1.1), its modification (§17.2.6.1.1), leave (§17.2.4.1.1) and release (§17.2.3.1.1) |
 | `floor-priority <0..255>\|none` | The floor priority offered in group calls (TS 24.380 §14.3.3) |
+| `ambient remote\|local <mcptt-id>`, `ambient-source <wav>\|none` | Ambient listening call (TS 24.379 §11.1.6.2.1.1): listen to the user (remote-init) or be listened to (local-init); what this phone sends when it is listened to |
+| `callback <mcptt-id> [low\|normal\|high]`, `callback-cancel <mcptt-id>`, `callback-fulfil <mcptt-id>` | Call-back request and its cancel (§11.1.5.2.1); call back a received request (§11.1.5.2.3) |
+| `remote-call <remote-id> <target-id> [auto\|manual\|force-auto] [silent] [priority=<ns.value>]`, `remote-group-call <remote-id> <group> [silent] [priority=<ns.value>]` | Ask another user's phone to place a private (§11.1.7.2.1) or group call (§10.1.5.2.1) |
+| `transfer <mcptt-id> [fa]`, `forward <mcptt-id> [fa]` | Transfer the established private call (§11.1.8.2.1); forward the ringing one (§11.1.9.2.1) |
+| `call-services` | Call-back requests sent and received, the service requests carried out and the outcomes reported, the groups' emergency and imminent peril states (§12.1.1.3); also in `status`, key `call_services` |
 | `regroup create <tgi> <preconfigured> <group>,…`, `regroup users <tgi> <preconfigured> <mcptt-id>,…`, `regroup remove <tgi>`, `regroups` | Regroups (TS 24.379 §16.2.1, §16.3.1) and the notices received |
 | `temporary-create <document> <tgi> <group>,… [chat] [protected]`, `temporary-delete <document>`, `group-document <group>` | Temporary groups at the GMS (TS 24.481 §6.3.14.2, §6.3.15.2); a group document as read |
 | `answer-mode automatic\|manual` | The local answer mode, then the settings-only PUBLISH (TS 24.379 §7.2.3) |

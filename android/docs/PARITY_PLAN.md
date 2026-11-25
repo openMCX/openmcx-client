@@ -78,8 +78,12 @@ first-to-answer calls.
 ### Phase 3: MCPTT call services (L)
 
 - Ambient listening, locally and remotely initiated (TS 24.379 11.1.6).
-- Remotely initiated private and group calls (11.1.8, 10.1.3).
-- Call-back request (11.1.9), call transfer (11.1.10) and call forwarding (11.1.11).
+- Remotely initiated private and group calls (11.1.7, 10.1.5).
+- Call-back request (11.1.5), call transfer (11.1.8) and call forwarding (11.1.9). (The clause numbers are those of
+  V19.7.0.)
+
+Done on branch `android-p3`, except the announced transfer (11.1.8.2.3); see [CONFORMANCE.md](CONFORMANCE.md) and
+[TEST_REPORT.md](TEST_REPORT.md), S32-S39.
 
 Each needs a UI decision. Remotely initiated calls and the listened-to side of ambient listening give the user no
 indication: the foreground service and microphone permission must allow that without a screen.
