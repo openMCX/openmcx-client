@@ -283,3 +283,40 @@ Server gaps found (openmcx-server, not changed here):
 - **A declined media-plane FD.** The server takes the recipient's 480 with warning 110 or 231, then ends the
   originator's INVITE with 487, without the warning.
 - **An SDS above the group's limit.** The server ends the originator's leg before answering the SEND.
+
+## Phase 4b: IP connectivity, enhanced status, message store, ad hoc
+
+Branch `android-p4b`, server image `openmcx-all:mcdpre-800c657`, three redroid 15 clients.
+- Lab `p4b-a`: `androidlab.py create --priority --functional-alias --reference-client client-d --client-image
+  openmcx-client:mcdemerg-ce06d65 --fixture-arg=--msgstore`.
+- Lab `p4b-p`: `androidlab.py create --priority --protected` (payloads under PCK/GMK, MCData signalling under the CSK).
+
+The fixture's IP connectivity addresses are 10.77.0.1 (alice), .2 (bob), .3 (client-c). `--msgstore` lets alice store
+private and group communications and client-c none. client-c (and client-d) may activate the MCData alias
+`patrol-car-12.fa`.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 537 passed, 0 failed. New: `IpConnectivityTest` (5), `EnhancedStatusTest` (3), `MessageStoreTest` (3), `MsrpSignallingProtectionTest` (2), `AdhocMediaTest` (4) |
+| `:app:testDebugUnitTest` | 13 passed |
+| `:app:assembleDebug` | Built |
+| `p4b-a`: S1, S6, S60-S67, S80-S82, S84 | 131 of 131; S84 and S64 again after the last fix, 28 of 28 |
+| `p4b-p`: S1, S6, S60-S63, S65, S66, S80, S81, S83, S84 | All pass: 107 of 108 in the first run, then S84 after the ad hoc file fix (S1, S83, S84: all pass) |
+| `p4b-p`: S64 | 9 of 14: the protected file arrives and is opened, but the scenario compares the selector's size and hash (of the protected series) with the clear file's |
+
+| # | Scenario | Checks | Result |
+|---|---|---|---|
+| S80 | IP connectivity (TS 24.282 §20.2.1, §20.2.2; TS 24.582 §13) | 8 | Alice opens a session with bob. Both tunnel ends are the MCData server's relay. Alice's three pings of 120 octets reach bob's endpoint, and its replies come back; bob's two pings are answered too. Alice's BYE ends bob's leg. client-c's session with bob is refused 403 (bob takes one-to-one communications from alice only) |
+| S81 | Enhanced status (§14.2.1) | 6 | The group document allows it and lists "On scene", "En route", "Available". Alice's "On scene" is rendered by bob and client-c. An id the group does not list (sent with `force`) is discarded by bob. A group without `<mcdata-allow-enhanced-status>` is refused locally |
+| S82 | Message store and notification channel (§21.2, §21.3.2.2) | 10 | Alice enables storage (200); client-c is refused 403 warning 234. Alice's channel and subscription exist. Bob's SDS stored in her box is notified, reads From bob, Direction In, and its payload has the text. It is marked \Seen, found by a search on From, deleted, and gone after a synchronisation. Storage is disabled again |
+| S83 | Protected MSRP bodies (§6.6.3.2), `p4b-p` only | 7 | Both phones protect their signalling. Alice's message in an SDS session reaches bob; bob's in-session DELIVERED reaches alice; bob's long standalone SDS reaches alice over MSRP. Each side's counters show the SENDs sealed and opened |
+| S84 | Ad hoc SDS and FD, functional aliases over the media plane (§9.2.2.2.1 3A, §24.2.2.1.1, §22) | 14 | Alice's ad hoc SDS to bob and client-c (signalling plane) arrives on the server's ad hoc group. So do her long ad hoc SDS over MSRP, her ad hoc session message and her ad hoc file (900 octets, whole). With `patrol-car-12.fa` among the participants, client-c receives the message, told the alias called. Alice's one-to-one SDS to the alias is sent with it named; the server refuses it (see below) |
+
+Found:
+- **Client fault, fixed here:** on a protected lab, the receiver of an ad hoc file tried to open it as a protected
+  series ("DPPK-ID is neither a PCK-ID nor a GMK-ID"); ad hoc files are in the clear.
+- **Server, not changed:** a one-to-one media-plane communication to a functional alias is refused. The server treats
+  the alias as a user (403 warning 229 for alice, whose one-to-one list does not hold it). On the signalling plane and
+  for IP connectivity it answers 300.
+- **Server, still there:** an app restart on a protected lab makes MCData refuse every request with 403 warning 140
+  (CONFORMANCE.md, "Deviations and limits"). The protected lab was brought down and up again after each new APK.
