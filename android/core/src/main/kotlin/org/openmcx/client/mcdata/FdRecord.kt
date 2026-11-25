@@ -42,6 +42,10 @@ data class FdRecord(
     /** Whether ACCEPTED has been sent for an incoming file. */
     val accepted: Boolean = false,
     val at: Long = System.currentTimeMillis(),
+    /** TS 24.282 §13.2: where the release of the distribution stands (release pending, extended, terminated...). */
+    val release: String? = null,
+    /** TS 24.282 §13.2.4.5.2.1: the controlling function's PSI, for an extension request (§13.2.4.5.2.2 3)a)). */
+    val controllerPsi: String? = null,
 ) {
     val incoming get() = direction == FdDirection.INCOMING
     /** An incoming file the user can still fetch. */
@@ -58,6 +62,7 @@ data class FdRecord(
         put("completion_requested", completionRequested); put("mandatory", mandatory)
         applicationId?.let { put("application_id", it) }
         put("accepted", accepted); put("at", at)
+        release?.let { put("release", it) }; controllerPsi?.let { put("controller_psi", it) }
     }
 
     companion object {
@@ -74,6 +79,7 @@ data class FdRecord(
                 notifications = (o["notifications"] as? JsonObject)?.mapValues { FdNotificationType.valueOf(it.value.jsonPrimitive.content) } ?: emptyMap(),
                 completionRequested = b("completion_requested"), mandatory = b("mandatory"),
                 applicationId = l("application_id")?.toInt(), accepted = b("accepted"), at = l("at") ?: 0,
+                release = s("release"), controllerPsi = s("controller_psi"),
             )
         }
     }

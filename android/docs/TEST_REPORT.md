@@ -247,3 +247,39 @@ Not exercised in the lab, unit tests only: a received BYE with "not selected for
 when two answers cross), a protected first-to-answer call, the Floor Release's G-bit after a dual-floor revoke, the
 floor priority from the group document or the user profile (the lab's comes from the provisioning), and
 `<preconfigured-group-use-only>` refused locally (the regroup lab's preconfigured group is never called directly).
+
+## Phase 4: the MCData media plane
+
+Lab `p4-a`: `androidlab.py create --priority --reference-client client-d --client-image openmcx-client:mcdemerg-ce06d65`,
+server image `openmcx-all:mcdpre-800c657`, three redroid 15 clients and the Linux client as client-d. The fixture's
+`--mcdata` policy applies:
+- alice may send one-to-one up to 300 bytes, and bob without a limit;
+- bob receives from alice only;
+- the group takes SDS up to 400 bytes and files up to 2000 bytes, and client-c may not transmit on it;
+- client-d may not transmit at all;
+- bob may release any user's communication.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 494 passed, 0 failed. New: `MsrpTest` (9), `McdataMediaServiceTest` (17), 3 in `FdServiceTest` |
+| `:app:assembleDebug` | Built |
+| One run of S1, S6 and S60-S67 | 93 of 93 (S64 with its HTTP release part) |
+
+| # | Scenario | Checks | Result |
+|---|---|---|---|
+| S60 | Long one-to-one SDS (3000 octets, above the 1000 octet signalling limit; TS 24.282 §9.2.1.1, §9.2.3) | 7 | Bob's SDS goes over MSRP in two chunks, with the BYE cause 200. Alice gets it whole, marked as media plane. The server releases her leg. She sends DELIVERED by MESSAGE (the server answers 403 216, see below) |
+| S61 | Group standalone SDS over the media plane | 6 | Bob and client-c receive it on `operations`, and both send DELIVERED. One above the group's 400 byte limit is discarded by the server (TS 24.582 §6.3.1.3) |
+| S62 | One-to-one SDS session (§9.2.4) | 7 | Alice and bob each send in the session. Bob's DELIVERED goes in the session (TS 24.582 §6.1.2.5.1) and reaches alice. Alice's BYE ends bob's leg |
+| S63 | Group SDS session | 8 | Bob and client-c join. Alice's and bob's messages reach the other two, bob named by the Sender IE. The originator leaving ends the session for everyone |
+| S64 | FD over the media plane (§10.2.5), and over HTTP the release (§6.2.2.4) | 14 | A 3500 octet mandatory file arrives with its hash and is stored. Decline and Later are sent as 480 with warning 110 and 231. The group file reaches bob and client-c. Bob's FD over HTTP is terminated, the server answering success |
+| S65 | Emergency and imminent peril sessions (§6.2.8.1.1, §6.2.8.1.3, §6.2.8.1.9, §6.2.8.3.2) | 10 | The members learn the group's emergency, then its cancel by re-INVITE. Imminent peril is raised. A one-to-one emergency session is set up. Imminent peril one-to-one is refused locally |
+| S66 | Communication release (§13.2.4 to §13.2.6) | 8 | Bob's intent to release reaches alice with his reason, and alice's remaining data (0) reaches bob. Alice's extension request goes to bob, who grants it. Client-c's release is refused 403. Bob's release ends every leg |
+| S67 | The Linux reference client as a recipient | 3 | client-d receives alice's media-plane group SDS, her group session message and a group file whose hash checks |
+
+Server gaps found (openmcx-server, not changed here):
+- **Notifications of a standalone SDS sent over the media plane.** The server refuses them with 403 warning 216
+  ("unable to correlate"). It records the relayed message only on the signalling plane (`dispatched_`, `sds.cpp`), so
+  TS 24.282 §12.2.3 step 5 finds nothing. Notifications sent inside an SDS session are relayed (S62).
+- **A declined media-plane FD.** The server takes the recipient's 480 with warning 110 or 231, then ends the
+  originator's INVITE with 487, without the warning.
+- **An SDS above the group's limit.** The server ends the originator's leg before answering the SEND.

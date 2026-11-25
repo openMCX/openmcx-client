@@ -91,6 +91,10 @@ indication: the foreground service and microphone permission must allow that wit
   **Decision:** Android never listens (one outbound flow), so the phone has to be the MSRP active side
   (`a=setup:active`, RFC 6135) and connect to the server. The Linux client listens. The server's support for an active
   UE must be checked first: if it only connects out to the UE, it needs a change.
+
+  **Found (branch `android-p4`):** no server change is needed. The MCData server listens on both legs
+  (`media_offer`, `a=setup:passive`) and refuses a passive offer with 488. The phone offers `actpass` (TS 24.282
+  §9.2.3.2.1 1g), as the Linux client does, and it answers an offer with `active`. In both cases it connects.
 - **SDS on the MSRP stack:** standalone SDS over the media plane above the signalling-plane limit (`McdataService.send`
   refuses those today), and SDS sessions, one-to-one and group.
 - **FD over the media plane.** Also, over HTTP, FD release and extension.

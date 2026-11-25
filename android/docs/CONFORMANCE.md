@@ -118,7 +118,7 @@ Driven by the phone's position: the fused fix, or the debug override `location-p
 | mcdata-info in schema order | TS 24.282 Annex D.1 | `mcdata/McdataInfo.kt` | `McdataInfoTest` |
 | One-to-one standalone SDS: MESSAGE to the PSI with mcdata-info, resource-lists, signalling and payload | TS 24.282 §9.2.2.2.1 | `McdataService.send` | S6 |
 | Group standalone SDS, with the client ID | TS 24.282 §9.2.2.2.1 step 3 | `McdataService.send` | S6 |
-| Payload limit on the signalling plane | TS 24.282 §9.2.1.1 | `McdataService.send` | Not exercised (local refusal) |
+| Payload limit on the signalling plane: above `max_payload_size_sds_cplane_bytes` the SDS goes over the media plane | TS 24.282 §9.2.1.1 | `McdataService.send` | S60 |
 | Receiving: sender from `mcdata-calling-user-id`, group from `mcdata-calling-group-id`, 200 OK, deduplication by message ID | TS 24.282 §9.2.2.2.2, §9.2.1.2 | `McdataService.received` | S6 |
 | Disposition: DELIVERED, READ, DELIVERED AND READ with TDU1; Sender IE always present | TS 24.282 §9.2.1.3, §12.2.1.1 | `McdataService.notify`, `display` | S6 |
 | Receiving notifications, several per MESSAGE (aggregated) | TS 24.282 §12.2.1.2 | `McdataService.handle` | S6 (the group case) |
@@ -135,6 +135,39 @@ Driven by the phone's position: the fused fix, or the debug override `location-p
 | Temporary group formation (POST of the GMOP group regroup creation request to the user's tree, `<on-network-temporary>`) and tear down (DELETE); the OpenMCX servers notify it as a regroup of its own preconfigured group | TS 24.481 §6.3.14.2, §6.3.15.2, §7.3.4.3 | `Regroups.temporaryCreate`, `temporaryDelete`, `TemporaryGroups` | `GroupCallRulesTest.temporaryGroupRequest`; S31 (bob refused with 403) |
 | Group documents: the type (chat, from `<on-network-invite-members>` or the OpenMCX extension), `<preconfigured-group-use-only>`, the members' `<user-priority>`, `<on-network-temporary>`, `<on-network-regrouped>` | TS 24.481 §7.2.2, §7.2.4.2 | `GroupDocument.parse` | `GroupCallRulesTest.groupDocumentPhase2Parts` |
 | The Call tab lists the regroups and temporary groups with their constituent groups, called like groups | — | `ui/UiModel.kt` `snapshot`, `ui/Screens.kt` `TalkScreen` | S30, S31 (through the debug control) |
+
+## MCData media plane (phase 4)
+
+MSRP (RFC 4975) in `core/…/msrp/`; the procedures in `core/…/mcdata/McdataMediaService.kt`, `FdMedia.kt`, `Release.kt`.
+
+**The phone is the MSRP active endpoint.** It never listens (one outbound flow), so it always connects:
+- **Offers.** Its offers carry `a=setup:actpass` (TS 24.282 §9.2.3.2.1 1g). The MCData server always answers `passive`:
+  it listens on both legs (openmcx-server `media_offer`), and it answers 488 to an offer that would make it connect.
+  The phone then connects and binds the connection (TS 24.582 §6.1.1.2.1 step 2a, RFC 6135 §4).
+- **Answers.** Offered a stream, the phone answers `active`, port 9 (RFC 4145) and connects.
+- **Limit.** A peer that answers or offers `active` would need the phone to listen. That communication fails, or is
+  refused with 488. So a test that wants the UE as the passive endpoint (the suite's D.12.3) cannot pass.
+- **Transport.** The OpenMCX server's MSRP is TCP (`msrp:`). `msrps:` is supported with the flow's TLS context, but
+  untested.
+
+| Requirement | Clause | Code | Evidence |
+|---|---|---|---|
+| MSRP SEND, REPORT and responses; Byte-Range; continuation flags; incremental decoding of binary bodies | RFC 4975 §6, §7, §9 | `msrp/Msrp.kt` | `MsrpTest` |
+| Active endpoint: connect, bind with an empty SEND and wait for its 200 | RFC 6135 §4; TS 24.582 §6.1.1.2.1 steps 1-4 | `MsrpSession.connect` | `MsrpTest`; S60 |
+| Chunking (2048 octets), abort (`#`) on a refused chunk, the reassembly of received chunks | RFC 4975 §5.1, §7.1.1 | `MsrpSession.send`, `receivedSend` | `MsrpTest`; S60, S64 |
+| Transaction responses (Failure-Report no or partial), the success REPORT (Success-Report yes), 481 for another session | RFC 4975 §7.1.2, §7.3.1 | `MsrpSession` | `MsrpTest` |
+| Several MCData bodies in one multipart/mixed SEND | TS 24.582 §6.4.1 | `MsrpSession.sendParts` | `McdataMediaServiceTest`; S60-S63 |
+| SDP: `m=message` TCP/MSRP `*`, `a=path`, `a=setup`, `a=accept-types`, direction, `a=key-mgmt`, the RFC 5547 file attributes | TS 24.282 §9.2.3.2.1, §9.2.3.2.2, §10.2.5.2.1 | `mcdata/MsrpSdp.kt` | `McdataMediaServiceTest` |
+| Standalone SDS over the media plane, one-to-one and group: INVITE (`a=sendonly`), one SEND of signalling and payload, BYE with Reason cause 200 "transmission succeeded" | TS 24.282 §9.2.3.2.3; TS 24.582 §6.1.1.2 | `McdataMediaService.sendStandalone`; `sds-media` | `McdataMediaServiceTest`; S60, S61, S67 |
+| Receiving it: answer `active`, `a=recvonly`, Require timer, the SDS tag and ICSI in Contact; the message delivered as on the signalling plane, its notification by MESSAGE | TS 24.282 §9.2.3.2.2, §9.2.3.2.4; TS 24.582 §6.1.1.3.2 | `McdataMediaService.handle`, `answer` | `McdataMediaServiceTest`; S60, S61 |
+| SDS sessions, one-to-one and group (`a=sendrecv`): opening, sending with the Sender IE, release by BYE; received ones joined | TS 24.282 §9.2.4.2.3, §9.2.4.2.4, §6.2.8.1.17; TS 24.582 §6.1.2.4 | `openSession`, `sessionSend`, `close`; `sds-session` | `McdataMediaServiceTest`; S62, S63, S67 |
+| Notifications of a message received in a session go in the session while it lasts | TS 24.582 §6.1.2.5 | `ReceivedSds.inBand`, `McdataService.notify` | `McdataMediaServiceTest`; S62 |
+| Emergency and imminent peril sessions: `<emergency-ind>`/`<imminentperil-ind>` and the Resource-Priority in the INVITE; raised or cancelled by re-INVITE; the server's re-INVITE followed | TS 24.282 §6.2.8.1.1, §6.2.8.1.3, §6.2.8.1.9, §6.2.8.1.11, §6.2.8.3.2, §6.2.8.4.2, §6.2.8.4.3 | `openSession`, `setPriority`, `reinvited`; `sds-session-priority` | `McdataMediaServiceTest`; S65 |
+| FD over the media plane, sending and receiving (see [ATTACHMENTS.md](ATTACHMENTS.md#fd-over-the-media-plane-phase-4)) | TS 24.282 §10.2.5.2; TS 24.582 §7 | `FdMedia`; `fd-media`, `fd-media-answer` | `McdataMediaServiceTest`; S64, S67 |
+| Communication release: received intent to release (the remaining data query answered), extension request and response; sent extension request, the authorised user's release, intent to release, extension response | TS 24.282 §13.2.4 to §13.2.6, §15.1.10.1 | `Release.kt`; `mcdata-release` | `McdataMediaServiceTest`; S66 |
+| FD over HTTP: release and extension (FD HTTP TERMINATION) | TS 24.282 §6.2.2.4, §13.2.4.5, §13.2.5.3, §13.2.6.3, §15.1.13.1 | `FdService.terminate`; `fd-terminate`, `fd-release`, `fd-extend`, `fd-release-intent`, `fd-extension-response` | `FdServiceTest`; S64 |
+| PCK in `a=key-mgmt` (one-to-one) and GMK (group) for media-plane payloads and files | TS 33.180 §8.3, §8.4, §8.5.4 | `McdataMediaService.protect` | Not in a lab (the protected lab is phase 7b's) |
+| **Not implemented:** MCData signalling protection of MSRP bodies (TS 24.282 §6.6.3.2); ad hoc group SDS and FD over the media plane; SDS to a functional alias over the media plane; the MDEG, MDEPC and related state machines of §6.2.8 (only the session's emergency and imminent peril flags are kept); the emergency alert with a session (`alert`, sent but not tracked); pre-established sessions (phase 5); IP connectivity, enhanced status, the message store and notification channels | | | |
 
 ## MCVideo (phase 7)
 
@@ -224,7 +257,7 @@ Driven by the phone's position: the fused fix, or the debug override `location-p
   - pre-established sessions
   - group-broadcast and user-broadcast groups as their own call kind (a broadcast call on them is made as on any
     group); originating protected first-to-answer calls (§11.1.1.2.1.1, the 200 step 2 PCK)
-  - MCData on the media plane (MSRP), file distribution and data streaming
+  - MCData data streaming, IP connectivity, enhanced status, the message store (the media plane: phase 4 above)
   - end-to-end media and floor protection (TS 33.180 keys)
   - off-network operation
   - **P-Access-Network-Info (planned).** The client never sends the header. TS 24.229 §5.1.2A.1.1 requires it "if

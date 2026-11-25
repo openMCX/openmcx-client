@@ -300,6 +300,25 @@ class DebugControl(private val context: Context) {
         "sds" -> sds(args, group = false)
         "sds-group" -> sds(args, group = true)
         "display" -> (Engine.mcdata ?: throw IllegalStateException("MCData not provisioned")).display(java.util.UUID.fromString(args[0]))
+        // The MCData media plane (MSRP; the phone is the active endpoint). Targets are an MCData ID or group=<group>.
+        // TS 24.282 §9.2.3.2.3: sds-media <target> <text…> [--disposition none|delivery|read|delivery-read]
+        "sds-media" -> sdsMedia(args)
+        // §9.2.4.2.3: sds-session <target> [emergency|imminent] [alert] | send [delivery|read|both] <text…> | close [all]
+        "sds-session" -> sdsSession(args)
+        // §6.2.8: sds-session-priority emergency|imminent on|off (a re-INVITE in the open session)
+        "sds-session-priority" -> mediaJson(media().setPriority(args[0] == "emergency", args.getOrNull(1) != "off"))
+        // §10.2.5.2.3: fd-media <target> <path on the device> [name=<name>] [type=<MIME>] [mandatory] [completed] [emergency|imminent]
+        "fd-media" -> fdMedia(args)
+        // §10.2.5.2.4 7): fd-media-answer accept|decline|defer [<id>]; fd-media-policy ask|accept|decline
+        "fd-media-answer" -> media().answerFile(args[0], args.getOrNull(1)?.toInt())
+        "fd-media-policy" -> { val p = args[0]; require(p in setOf("ask", "accept", "decline")); media().fileDecision = { p }; p }
+        "mcdata-media" -> JSONArray(media().communications.value.map(::mediaJson))
+        // §13.2.4-§13.2.6: mcdata-release extend | now [reason…] | intent [query] [reason…] | accept | reject
+        "mcdata-release" -> {
+            val query = args.getOrNull(1) == "query"
+            val reason = args.drop(if (query) 2 else 1).joinToString(" ").ifBlank { null }
+            JSONObject().put("status", media().release(args[0], reason, query))
+        }
         "events" -> JSONArray(Engine.log.last(args.firstOrNull()?.toInt() ?: 50))
         // File distribution. Paths are on the device (adb push to /data/local/tmp, then chmod 644).
         "fd-send" -> fdSend(args, group = false)
@@ -309,6 +328,12 @@ class DebugControl(private val context: Context) {
         "fd-cancel" -> { fd().cancel(args[0]); "ok" }
         "fd-files" -> JSONArray(fd().records.value.map(::fdJson))
         "fd-discover" -> fd().discover(args.firstOrNull())
+        // TS 24.282 §6.2.2.4, §13.2.5.3.2.1, §13.2.4.5.2.2, §13.2.6.3.2.1, §13.2.6.3.2.3: the release of an FD over HTTP.
+        "fd-terminate" -> fdJson(fd().terminate(args[0], "cancel"))
+        "fd-release" -> fdJson(fd().terminate(args[0], "release"))
+        "fd-extend" -> fdJson(fd().terminate(args[0], "extend"))
+        "fd-release-intent" -> fdJson(fd().terminate(args[0], "release-intent", reason = args.drop(1).joinToString(" ").ifBlank { null }))
+        "fd-extension-response" -> fdJson(fd().terminate(args[1], "extension-response", accept = args[0] == "accept"))
         "fd-config" -> Engine.client!!.config.mcdata!!.fd.let { c ->
             JSONObject().put("content_server", c.contentServer).put("service_max_bytes", c.serviceMaxBytes)
                 .put("user_max_bytes", c.userMaxBytes).put("device_max_bytes", c.deviceMaxBytes)
@@ -728,8 +753,70 @@ class DebugControl(private val context: Context) {
         }
         val sent = service.send(words.first(), words.drop(1).joinToString(" "), group, disposition, toAlias = toAlias)
         Engine.sent(sent)
-        return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("dppk_id", sent.dppkId ?: JSONObject.NULL)
+        return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("dppk_id", sent.dppkId ?: JSONObject.NULL).put("plane", sent.plane)
     }
+
+    private fun media(): org.openmcx.client.mcdata.McdataMediaService = Engine.mcdataMedia ?: throw IllegalStateException("MCData not provisioned")
+
+    /** An MCData ID, or a group as group=<group>: (target, is a group). */
+    private fun mediaTarget(word: String) = if (word.startsWith("group=")) word.removePrefix("group=") to true else word to false
+
+    private fun disposition(word: String?) = when (word) {
+        "delivery" -> DispositionRequest.DELIVERY; "read" -> DispositionRequest.READ
+        "delivery-read", "both" -> DispositionRequest.DELIVERY_AND_READ; else -> null
+    }
+
+    private suspend fun sdsMedia(args: List<String>): Any {
+        val words = args.toMutableList()
+        val flag = words.indexOf("--disposition")
+        val disposition = if (flag >= 0) disposition(words.getOrNull(flag + 1)).also { words.subList(flag, minOf(flag + 2, words.size)).clear() } else null
+        val (target, group) = mediaTarget(words.first())
+        val sent = media().sendStandalone(target, words.drop(1).joinToString(" "), group, disposition)
+        Engine.sent(sent)
+        return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("plane", sent.plane)
+            .put("communication", media().communications.value.lastOrNull()?.let(::mediaJson))
+    }
+
+    private suspend fun sdsSession(args: List<String>): Any = when (args.firstOrNull()) {
+        "send" -> {
+            val d = disposition(args.getOrNull(1))
+            val text = args.drop(if (d != null) 2 else 1).joinToString(" ")
+            require(text.isNotBlank()) { "sds-session send [delivery|read|both] <text>" }
+            val sent = media().sessionSend(text, d)
+            Engine.sent(sent)
+            JSONObject().put("message_id", sent.messageId.toString())
+        }
+        "close" -> {
+            // TS 24.282 §13.2.2.2.4.3 step 3A: "close all" asks for the end of the communication for every participant.
+            media().close(reason = if (args.getOrNull(1) == "all") "SIP;cause=200;text=\"User requested release\"" else null)
+            "released"
+        }
+        null -> media().session?.let(::mediaJson) ?: JSONObject.NULL
+        else -> {
+            val (target, group) = mediaTarget(args[0])
+            val priority = when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }
+            mediaJson(media().openSession(target, group, priority, alert = "alert" in args))
+        }
+    }
+
+    private suspend fun fdMedia(args: List<String>): Any {
+        val (target, group) = mediaTarget(args[0])
+        val source = java.io.File(args[1])
+        if (!source.canRead()) throw IllegalArgumentException("cannot read ${args[1]}")
+        fun option(name: String) = args.firstOrNull { it.startsWith("$name=") }?.removePrefix("$name=")
+        val name = option("name") ?: source.name
+        val priority = when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }
+        return mediaJson(media().sendFile(target, group, name, source.readBytes(), option("type") ?: AttachmentFiles.mediaType(null, name),
+            mandatory = "mandatory" in args, completion = "completed" in args, priority = priority))
+    }
+
+    private fun mediaJson(c: org.openmcx.client.mcdata.MediaCommunication): JSONObject = JSONObject()
+        .put("id", c.id).put("kind", c.kind).put("outgoing", c.outgoing).put("peer", c.peer).put("group", c.group)
+        .put("state", c.state).put("status", c.status).put("warning", c.warning).put("error", c.error)
+        .put("emergency", c.emergency).put("imminent_peril", c.imminentPeril).put("message_id", c.messageId?.toString())
+        .put("conversation_id", c.conversationId.toString()).put("security", c.security).put("release", c.release)
+        .put("file", c.fileName).put("size", c.fileSize).put("sha256", c.sha256).put("path", c.filePath)
+        .put("messages", JSONArray(c.messages.map { it.take(120) }))
 
     private fun mcvideo(): McvideoService = Engine.mcvideo ?: throw IllegalStateException("MCVideo not provisioned")
 
@@ -851,7 +938,7 @@ class DebugControl(private val context: Context) {
         .put("size", r.metadata.size).put("sha256", r.metadata.sha256).put("url", r.url).put("state", r.state.name.lowercase())
         .put("transferred", r.transferred).put("error", r.error).put("mandatory", r.mandatory)
         .put("notifications", JSONObject(r.notifications.mapValues { it.value.name.lowercase() }))
-        .put("openable", AttachmentFiles.openable(r) != null)
+        .put("openable", AttachmentFiles.openable(r) != null).put("release", r.release)
 
     private fun callJson(call: Call): JSONObject = JSONObject()
         .put("id", call.id).put("type", call.type.sessionType).put("outgoing", call.outgoing)
@@ -914,11 +1001,13 @@ class DebugControl(private val context: Context) {
                     .put("sender_alias", m.senderAlias).put("called_alias", m.calledAlias)
                     .put("disposition", m.disposition?.name).put("displayed", m.displayed).put("notified", m.notified?.name)
                     .put("protected", m.dppkId != null).put("dppk_id", m.dppkId ?: JSONObject.NULL).put("authenticated", m.authenticated)
+                    .put("plane", m.plane).put("length", m.text.length)
             } ?: emptyList<JSONObject>()))
             .put("files", JSONArray(Engine.fd?.records?.value?.map(::fdJson) ?: emptyList<JSONObject>()))
+            .put("media", JSONArray(Engine.mcdataMedia?.communications?.value?.map(::mediaJson) ?: emptyList<JSONObject>()))
             .put("outbox", JSONArray(Engine.mcdata?.outbox?.value?.map { m ->
                 JSONObject().put("message_id", m.messageId.toString()).put("target", m.target).put("group", m.group)
-                    .put("text", m.text).put("status", m.status).put("dppk_id", m.dppkId ?: JSONObject.NULL)
+                    .put("text", m.text).put("status", m.status).put("dppk_id", m.dppkId ?: JSONObject.NULL).put("plane", m.plane)
                     .put("notifications", JSONObject(m.notifications.mapValues { it.value.name }))
             } ?: emptyList<JSONObject>()))
     }

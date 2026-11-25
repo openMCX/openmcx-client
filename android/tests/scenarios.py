@@ -299,6 +299,11 @@ class Lab:
             except Exception:
                 pass
             try:
+                if self.cmd(c, "sds-session", ok=False).get("result"):
+                    self.cmd(c, "sds-session", "close", ok=False)
+            except Exception:
+                pass
+            try:
                 if self.cmd(c, "video-status", ok=False).get("result", {}).get("active"):
                     self.cmd(c, "video-hangup", ok=False)
             except Exception:
@@ -1919,6 +1924,248 @@ class Lab:
         finally:
             self.cmd(A, "seal", "stop", ok=False)
 
+    # The MCData media plane (MSRP; docs/CONFORMANCE.md "MCData media plane"). The phone is the active endpoint: it
+    # connects to the MCData server's stream. The a1-style fixture's MCData policy (prepare-prearranged-test.py --mcdata):
+    # alice may send one-to-one up to 300 bytes, bob without a limit; bob receives from alice only; the group takes 400
+    # byte SDS and 2000 byte files, client-c may not transmit on it; bob may release any user's communication.
+
+    def media(self, client: str, kind: str | None = None, outgoing: bool | None = None) -> list[dict]:
+        return [c for c in self.status(client)["media"] if (kind is None or c["kind"] == kind)
+                and (outgoing is None or c["outgoing"] == outgoing)]
+
+    def last_media(self, client: str, kind: str, outgoing: bool, what: str, predicate=lambda c: True, timeout: float = 15) -> dict:
+        return self.wait(what, lambda: next((c for c in reversed(self.media(client, kind, outgoing)) if predicate(c)), None), timeout=timeout)
+
+    def notification_sent(self, client: str, message_id: str, kind: str) -> None:
+        """The client sent its notification by SIP MESSAGE; the server's answer (403 216 for a media-plane SDS) is noted."""
+        line = self.wait(f"{client} sends {kind} for {message_id}", lambda: next((e for e in self.cmd(client, "events", "200")
+                         if f"sent {kind} for {message_id}" in e), None), timeout=20)
+        answer = line.rsplit(": ", 1)[-1]
+        self.check(f"{client} sends the {kind} notification by MESSAGE (the server answers {answer})", answer in ("200", "403"), event=line)
+
+    def s60_long_sds(self) -> None:
+        stamp = time.strftime("%H%M%S")
+        # TS 24.282 §9.2.1.1: above the signalling-plane limit (1000 octets) the SDS goes over the media plane (§9.2.3).
+        text = f"{stamp} " + "media plane " * 250
+        sent = self.cmd(B, "sds", MCDATA[A], text, "--disposition", "delivery", timeout=60)
+        out = self.status(B)["outbox"]
+        self.check("bob's long SDS went over the media plane", any(m["message_id"] == sent["message_id"] and m["plane"] == "media" for m in out))
+        sds = self.last_media(B, "sds", True, "bob's media communication")
+        self.check("bob's standalone SDS was delivered and released", sds["state"] == "delivered", communication=sds["state"])
+        got = self.inbox_message(A, text)
+        self.check("alice receives it whole over the media plane", got["plane"] == "media" and got["length"] == len(text), plane=got["plane"], length=got["length"])
+        self.check("alice sees bob as the sender", got["sender"] == MCDATA[B])
+        self.check("alice's copy has bob's message ID", got["message_id"] == sent["message_id"])
+        # §9.2.1.3: the DELIVERED notification goes by SIP MESSAGE (the standalone session is over). The MCData server
+        # correlates notifications with the SDS it relayed on the signalling plane only (dispatched_, TS 24.282 §12.2.3
+        # step 5), so it refuses this one with 403 warning 216: a server gap, checked here as the client's part.
+        self.notification_sent(A, sent["message_id"], "DELIVERED")
+        a = self.last_media(A, "sds", False, "alice's terminating leg released", lambda c: c["state"] == "released")
+        self.check("alice's terminating leg is released by the server", a["state"] == "released")
+
+    def s61_media_group_sds(self) -> None:
+        stamp = time.strftime("%H%M%S")
+        # TS 24.282 §9.2.3: a group standalone SDS over the media plane (sds-media forces it; the group allows 400 bytes).
+        text = f"Group media {stamp}"
+        sent = self.cmd(A, "sds-media", f"group={GROUP}", text, "--disposition", "delivery")
+        self.check("alice's group SDS over the media plane is delivered", sent["communication"]["state"] == "delivered", sent=sent)
+        for c in (B, C):
+            got = self.inbox_message(c, text)
+            self.check(f"{c} receives it on {GROUP} over the media plane", got["plane"] == "media" and got["group"] == GROUP
+                       and got["sender"] == MCDATA[A], got=got)
+        for c in (B, C):
+            self.notification_sent(c, sent["message_id"], "DELIVERED")
+        # Above the group's 400 byte limit, the server discards it (TS 24.582 §6.3.1.3 step 2, 217): nobody receives it.
+        big = f"Too big {stamp} " + "x" * 600
+        self.cmd(A, "sds-media", f"group={GROUP}", big, ok=False)  # the server may end the leg before its 200
+        time.sleep(2)
+        self.check("an SDS above the group's limit is not delivered", not any(m["text"] == big for m in self.status(B)["inbox"]))
+
+    def s62_one_to_one_session(self) -> None:
+        stamp = time.strftime("%H%M%S")
+        # TS 24.282 §9.2.4: alice opens a one-to-one SDS session with bob; both send in it.
+        opened = self.cmd(A, "sds-session", MCDATA[B])
+        self.check("alice's SDS session is open", opened["state"] == "open", session=opened)
+        bob = self.last_media(B, "session", False, "bob's session open", lambda c: c["state"] == "open")
+        self.check("bob's session is from alice", bob["peer"] == MCDATA[A])
+        text = f"In session {stamp}"
+        sent = self.cmd(A, "sds-session", "send", "delivery", text)
+        got = self.inbox_message(B, text)
+        self.check("bob receives it in the session", got["plane"] == "session" and got["sender"] == MCDATA[A], got=got)
+        # TS 24.582 §6.1.2.5.1: bob's DELIVERED goes in the session.
+        n = self.notifications(A, sent["message_id"], 1)
+        self.check("alice learns bob delivered it (in the session)", n.get(MCDATA[B]) == "DELIVERED", notifications=n)
+        self.check("bob sent it in the session, not by MESSAGE", any("in the SDS session" in e for e in self.cmd(B, "events", "80")))
+        reply = f"Reply in session {stamp}"
+        self.cmd(B, "sds-session", "send", reply)
+        got = self.inbox_message(A, reply)
+        self.check("alice receives bob's reply in the session", got["plane"] == "session" and got["sender"] == MCDATA[B], got=got)
+        self.cmd(A, "sds-session", "close")
+        self.last_media(B, "session", False, "bob's session released", lambda c: c["state"] == "released")
+        self.check("closing it releases bob's leg too", True)
+
+    def s63_group_session(self) -> None:
+        stamp = time.strftime("%H%M%S")
+        # TS 24.282 §9.2.4: a group SDS session; the server relays every message to the other legs (TS 24.582 §6.3.2.3).
+        opened = self.cmd(A, "sds-session", f"group={GROUP}")
+        self.check("alice's group SDS session is open", opened["state"] == "open", session=opened)
+        for c in (B, C):
+            leg = self.last_media(c, "session", False, f"{c}'s session open", lambda x: x["state"] == "open")
+            self.check(f"{c} joins the session on {GROUP}", leg["group"] == GROUP and leg["peer"] == MCDATA[A], leg=leg)
+        text = f"Group session {stamp}"
+        self.cmd(A, "sds-session", "send", text)
+        for c in (B, C):
+            got = self.inbox_message(c, text)
+            self.check(f"{c} receives alice's message in the session", got["plane"] == "session" and got["group"] == GROUP, got=got)
+        reply = f"Bob to the group {stamp}"
+        self.cmd(B, "sds-session", "send", reply)
+        for c in (A, C):
+            got = self.inbox_message(c, reply)
+            self.check(f"{c} receives bob's message, bob named by the Sender IE", got["sender"] == MCDATA[B] and got["plane"] == "session", got=got)
+        self.cmd(A, "sds-session", "close")
+        for c in (B, C):
+            self.last_media(c, "session", False, f"{c}'s session released", lambda x: x["state"] == "released", timeout=20)
+        self.check("the session ends for everyone when alice, the originator, leaves", True)
+
+    def s64_media_fd(self) -> None:
+        # TS 24.282 §10.2.5: files over the media plane. Bob may send one-to-one without a limit (the service: 4000 bytes).
+        local = Path("/tmp") / f"p4-media-{time.strftime('%H%M%S')}.bin"
+        local.write_bytes(bytes((i * 31) % 256 for i in range(3500)))
+        remote = f"/data/local/tmp/{local.name}"
+        for c in (A, B):
+            self.devices[c].adb("push", str(local), remote)
+            self.devices[c].adb("shell", "chmod", "644", remote)
+        import hashlib
+        sha = hashlib.sha256(local.read_bytes()).hexdigest()
+        sent = self.cmd(B, "fd-media", MCDATA[A], remote, "name=report.bin", "mandatory", "completed", timeout=60)
+        self.check("bob's file over the media plane is sent", sent["state"] == "delivered", sent=sent)
+        got = self.last_media(A, "fd", False, "alice receives the file", lambda c: c["state"] in ("received", "corrupt", "failed"), timeout=30)
+        self.check("alice receives the mandatory file whole", got["state"] == "received" and got["sha256"] == sha and got["size"] == 3500, got=got)
+        self.check("alice's copy is stored", bool(got["path"]))
+        # Non-mandatory: the user decides (§10.2.5.2.4 7)); alice declines, then defers.
+        self.cmd(A, "fd-media-policy", "ask")
+        try:
+            for decision, state in (("decline", "declined"), ("defer", "deferred")):
+                # The server holds bob's INVITE until alice decides (TS 24.282 §10.2.5.3): bob's command waits.
+                result: dict = {}
+                sender = threading.Thread(target=lambda: result.update(self.cmd(B, "fd-media", MCDATA[A], remote, f"name={decision}.bin",
+                                                                                ok=False, timeout=90)))
+                sender.start()
+                offer = self.last_media(A, "fd", False, f"alice is offered {decision}.bin", lambda c: c["state"] == "offered" and c["file"] == f"{decision}.bin")
+                self.check(f"alice is asked about {decision}.bin", offer["size"] == 3500)
+                self.cmd(A, "fd-media-answer", decision)
+                done = self.last_media(A, "fd", False, f"{decision}.bin {state}", lambda c: c["file"] == f"{decision}.bin" and c["state"] == state)
+                self.check(f"alice's {decision} is applied", done["state"] == state)
+                sender.join(100)
+                out = self.last_media(B, "fd", True, f"bob's {decision}.bin ends", lambda c: c["file"] == f"{decision}.bin" and c["state"] != "inviting")
+                # The server takes alice's 480 (warning 110 or 231) and ends bob's INVITE with 487, the warning not passed on.
+                self.check(f"bob's file is refused after alice's {decision}", out["state"] == "refused" and (out.get("status") or 0) >= 400, out=out)
+        finally:
+            self.cmd(A, "fd-media-policy", "accept", ok=False)
+        # A group file, mandatory (the group takes 2000 bytes).
+        small = local.with_name(local.stem + "-group.bin")
+        small.write_bytes(b"g" * 1500)
+        remote_small = f"/data/local/tmp/{small.name}"
+        self.devices[A].adb("push", str(small), remote_small)
+        self.devices[A].adb("shell", "chmod", "644", remote_small)
+        sent = self.cmd(A, "fd-media", f"group={GROUP}", remote_small, "name=group.bin", "mandatory", timeout=60)
+        self.check("alice's group file over the media plane is sent", sent["state"] == "delivered", sent=sent)
+        for c in (B, C):
+            got = self.last_media(c, "fd", False, f"{c} receives the group file", lambda x: x["file"] == "group.bin" and x["state"] in ("received", "corrupt"), timeout=30)
+            self.check(f"{c} receives the group file on {GROUP}", got["state"] == "received" and got["group"] == GROUP and got["size"] == 1500, got=got)
+        # FD over HTTP, released by its originator (TS 24.282 §6.2.2.4): the FD HTTP TERMINATION and the server's answer (§6.3.6.1).
+        http = self.cmd(B, "fd-send", MCDATA[A], remote, "http.bin", "application/octet-stream", timeout=120)
+        self.check("bob's file over HTTP is sent", http["state"] == "sent", http=http)
+        self.cmd(B, "fd-terminate", http["id"])
+        done = self.wait("bob's release answered", lambda: next((r for r in self.cmd(B, "fd-files") if r["id"] == http["id"]
+                         and r.get("release") in ("terminated", "termination failed")), None), timeout=20)
+        self.check("the server terminates bob's distribution", done["release"] == "terminated", record=done)
+
+    def s65_media_priority(self) -> None:
+        # TS 24.282 §6.2.8.1.1: an emergency group SDS session; §6.2.8.1.3: its cancel by re-INVITE. Needs --priority.
+        opened = self.cmd(A, "sds-session", f"group={GROUP}", "emergency")
+        self.check("alice's emergency group session is open", opened["state"] == "open" and opened["emergency"], session=opened)
+        for c in (B, C):
+            leg = self.last_media(c, "session", False, f"{c}'s session open", lambda x: x["state"] == "open")
+            self.check(f"{c} learns the group's emergency", leg["emergency"], leg=leg)
+        cancelled = self.cmd(A, "sds-session-priority", "emergency", "off")
+        self.check("alice cancels the group's emergency", not cancelled["emergency"], session=cancelled)
+        for c in (B, C):
+            leg = self.last_media(c, "session", False, f"{c} learns the cancel", lambda x: x["state"] == "open" and not x["emergency"])
+            self.check(f"{c} learns the emergency is cancelled", not leg["emergency"])
+        # §6.2.8.1.9: the imminent peril of the group in the same session.
+        r = self.cmd(A, "sds-session-priority", "imminent", "on")
+        self.check("alice raises the group's imminent peril", r["imminent_peril"], session=r)
+        self.cmd(A, "sds-session", "close")
+        # TS 24.282 §6.2.8.3.2: an emergency one-to-one session with bob.
+        opened = self.cmd(A, "sds-session", MCDATA[B], "emergency")
+        self.check("alice's emergency one-to-one session is open", opened["emergency"], session=opened)
+        leg = self.last_media(B, "session", False, "bob's emergency session", lambda x: x["state"] == "open")
+        self.check("bob's session is an emergency one", leg["emergency"], leg=leg)
+        self.cmd(A, "sds-session", "close")
+        refused = self.cmd(A, "sds-session", MCDATA[B], "imminent", ok=False)
+        self.check("imminent peril is refused for a one-to-one session", not refused.get("ok"), refused=refused)
+
+    def s66_media_release(self) -> None:
+        # TS 24.282 §13.2.6: bob (release_any_user) announces the release of alice's group session, asking for the
+        # remaining data; alice answers (§13.2.4.2.1 step 2c) and asks for an extension, bob grants it; then bob releases it.
+        self.cmd(A, "sds-session", f"group={GROUP}")
+        self.last_media(B, "session", False, "bob's session open", lambda x: x["state"] == "open")
+        self.last_media(C, "session", False, "client-c's session open", lambda x: x["state"] == "open")
+        r = self.cmd(B, "mcdata-release", "intent", "query", "shift change")
+        self.check("bob's intent to release is accepted", r["status"] == 200, result=r)
+        a = self.last_media(A, "session", True, "alice is told of the release", lambda x: (x.get("release") or "").startswith("release pending"))
+        self.check("alice learns the release is pending, with bob's reason", "shift change" in a["release"], release=a["release"])
+        b = self.last_media(B, "session", False, "bob gets alice's remaining data", lambda x: (x.get("release") or "").startswith("remaining data"))
+        self.check("bob learns alice's remaining data", b["release"] == "remaining data: 0", release=b["release"])
+        r = self.cmd(A, "mcdata-release", "extend")
+        self.check("alice's extension request is accepted", r["status"] == 200, result=r)
+        self.last_media(B, "session", False, "bob is asked for an extension", lambda x: x.get("release") == "extension requested")
+        self.cmd(B, "mcdata-release", "accept")
+        a = self.last_media(A, "session", True, "alice's extension granted", lambda x: x.get("release") == "extended")
+        self.check("alice's session is extended", a["state"] == "open")
+        # Client-c may not release another user's communication: 403.
+        refused = self.cmd(C, "mcdata-release", "now", ok=False)
+        self.check("client-c's release is refused (403)", "403" in json.dumps(refused) or (refused.get("result") or {}).get("status") == 403, refused=refused)
+        r = self.cmd(B, "mcdata-release", "now", "end of incident")
+        self.check("bob's release is accepted", r["status"] == 200, result=r)
+        for c in (A, C):
+            self.last_media(c, "session", c == A, f"{c}'s leg released", lambda x: x["state"] == "released", timeout=20)
+        self.check("every leg is released", True)
+
+    def s67_media_reference_client(self) -> None:
+        """Interoperation with the Linux client (--reference-client client-d), which listens where Android connects: it
+        receives the Android client's media-plane SDS, session messages and files (it may not transmit in the fixture)."""
+        refs = meta(self.name).get("reference_clients") or []
+        if "client-d" not in refs:
+            print("  [SKIP] S67 needs --reference-client client-d"); self.skipped.append("S67"); return
+        from androidlab import RUNS, compose_bin
+        status_file = RUNS / self.name / "fixture" / "artifacts" / "client-d" / "status.json"
+        def received(text):
+            return self.wait(f"client-d receives '{text}'", lambda: next((m for m in json.loads(status_file.read_text()).get("mcdata_media_received") or []
+                             if any(p.get("text") == text for p in m.get("payloads", []))), None), timeout=15)
+        stamp = time.strftime("%H%M%S")
+        text = f"To the Linux client {stamp}"
+        self.cmd(A, "sds-media", f"group={GROUP}", text)
+        got = received(text)
+        self.check("client-d (Linux) receives alice's media-plane group SDS", got["from"] == MCDATA[A] and got["group"] == GROUP, got=got)
+        self.cmd(A, "sds-session", f"group={GROUP}")
+        time.sleep(2)
+        text = f"Session to the Linux client {stamp}"
+        self.cmd(A, "sds-session", "send", text)
+        got = received(text)
+        self.check("client-d (Linux) receives alice's message in the group session", got["from"] == MCDATA[A], got=got)
+        self.cmd(A, "sds-session", "close")
+        local = Path("/tmp") / f"p4-ref-{stamp}.bin"
+        local.write_bytes(b"r" * 1200)
+        remote = f"/data/local/tmp/{local.name}"
+        self.devices[A].adb("push", str(local), remote)
+        self.devices[A].adb("shell", "chmod", "644", remote)
+        self.cmd(A, "fd-media", f"group={GROUP}", remote, f"name=ref-{stamp}.bin", "mandatory", timeout=60)
+        f = self.wait("client-d receives the file", lambda: next((x for x in json.loads(status_file.read_text()).get("mcdata_media_files") or []
+                      if x.get("name") == f"ref-{stamp}.bin" and x.get("state") not in (None, "offered")), None), timeout=30)
+        self.check("client-d (Linux) receives alice's group file whole", f.get("state") == "received" and f.get("hash_verified") is True, file=f)
+
     SCENARIOS = {"S1": s1_startup, "S2": s2_private_automatic, "S3": s3_private_manual, "S4": s4_group, "S5": s5_adhoc, "S6": s6_sds,
                  "S7": s7_refresh_and_recovery, "S8": s8_lifecycle, "S9": s9_impaired, "S10": s10_latency,
                  "S11": s11_product, "S12": s12_private_no_floor, "S13": s13_location,
@@ -1935,7 +2182,9 @@ class Lab:
                  "S40": s40_location_aliases, "S41": s41_rules_affiliation, "S42": s42_group_mandatory_area,
                  "S43": s43_group_geographic_area, "S44": s44_emergency_alert_area, "S45": s45_seal_location,
                  "S25": s25_first_to_answer, "S26": s26_chat, "S27": s27_broadcast, "S28": s28_adhoc_criteria,
-                 "S29": s29_floor_priority, "S30": s30_regroup, "S31": s31_temporary_group}
+                 "S29": s29_floor_priority, "S30": s30_regroup, "S31": s31_temporary_group,
+                 "S60": s60_long_sds, "S61": s61_media_group_sds, "S62": s62_one_to_one_session, "S63": s63_group_session,
+                 "S64": s64_media_fd, "S65": s65_media_priority, "S66": s66_media_release, "S67": s67_media_reference_client}
 
 
 def main() -> None:

@@ -88,6 +88,9 @@ object Engine {
     /** File distribution (attachments in Messages). */
     @Volatile var fd: FdService? = null
         private set
+    /** MCData over the media plane (MSRP): long SDS, SDS sessions, files (TS 24.282 §9.2.3, §9.2.4, §10.2.5). */
+    @Volatile var mcdataMedia: org.openmcx.client.mcdata.McdataMediaService? = null
+        private set
     /** Test audio in debug builds: WAV files in place of the microphone, received speech to files. */
     @Volatile var fileAudio: FileAudio? = null
         private set
@@ -237,6 +240,25 @@ object Engine {
             }
             mcdata = service
             c.handlers += service
+            // The media plane: the phone connects to the server's MSRP stream (it never listens), TLS with the flow's keys.
+            val media = org.openmcx.client.mcdata.McdataMediaService(scope, org.openmcx.client.mcdata.ClientMediaPeer(c), service,
+                org.openmcx.client.msrp.SocketMsrpConnector(ssl, endpoints))
+            media.fileDirectory = File(AttachmentFiles.fdDirectory(context), "media")
+            // TS 24.282 §10.2.5.2.4 7)a): a file that is not a mandatory download waits for the user (Messages, or fd-media-answer).
+            media.fileDecision = { "ask" }
+            media.listener = object : org.openmcx.client.mcdata.MediaListener {
+                override fun changed(communication: org.openmcx.client.mcdata.MediaCommunication) {
+                    if (communication.kind == "fd" && !communication.outgoing && communication.state == "offered")
+                        log.add("file ${communication.fileName} offered by ${communication.peer} over the media plane")
+                    if (communication.kind == "fd" && communication.state in setOf("received", "delivered"))
+                        store.put(HistoryEntry("file", "media-${communication.startedAt}-${communication.id}", if (communication.outgoing) "out" else "in",
+                            communication.peer ?: communication.group, communication.group, "${communication.fileName} (media plane)", System.currentTimeMillis()))
+                }
+            }
+            service.media = media
+            mcdataMedia = media
+            // Ahead of MCPTT, which would take any INVITE it does not recognise.
+            c.handlers.add(0, media)
             val files = FdService(scope, ClientFdPeer(c), it.fd, SocketFileHttpClient(ssl, endpoints, it.fd.transferTimeoutMs, config.httpProxy),
                 AttachmentFiles.fdDirectory(context), AttachmentStore(context))
             files.onOffer = { record ->
@@ -507,7 +529,7 @@ object Engine {
 
     /** Empties the event log and the SIP trace (the Logs tab's Clear logs). */
     /** Clear the Message tab: short data and files (not the History tab). */
-    fun clearMessages() { mcdata?.clear(); fd?.clear() }
+    fun clearMessages() { mcdata?.clear(); fd?.clear(); mcdataMedia?.clear() }
 
     /** Clear the History tab. */
     fun clearHistory() { history?.clear() }
