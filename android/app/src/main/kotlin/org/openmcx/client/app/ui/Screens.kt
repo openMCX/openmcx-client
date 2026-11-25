@@ -126,6 +126,10 @@ object Tags {
     const val MESSAGE_TEXT = "message-text"
     const val MESSAGE_TARGET = "message-target"
     const val SEND = "send"
+    const val SESSION_START = "session-start"
+    const val SESSION_END = "session-end"
+    const val SESSION = "session"
+    fun fileOffer(id: Int, decision: String) = "file-offer-$id-$decision"
     const val IMPORT = "import"
     const val SCAN_QR = "scan-qr"
     const val SPEAKER = "speaker"
@@ -1304,12 +1308,32 @@ private fun MessagesScreen(state: UiState, actions: UiActions) {
         Row(Modifier.fillMaxWidth()) {
             SmallClear("Clear messages", enabled = state.messages.isNotEmpty(), tag = Tags.CLEAR_MESSAGES) { confirmClear = true }
         }
+        // The open SDS session (TS 24.282 §9.2.4): what is sent to its target goes into it, until it is ended.
+        val session = state.sdsSession
+        if (session != null) Row(Modifier.fillMaxWidth().background(Mcx.Strip, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp)
+            .testTag(Tags.SESSION), verticalAlignment = Alignment.CenterVertically) {
+            Text(session.title + when { session.emergency -> " · emergency"; session.imminent -> " · imminent peril"; else -> "" },
+                style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+            TextButton(onClick = actions::closeSession, modifier = Modifier.testTag(Tags.SESSION_END)) { Text("End") }
+        }
+        // Files offered over the media plane wait for the user (TS 24.282 §10.2.5.2.4 7)).
+        for (offer in state.fileOffers) Row(Modifier.fillMaxWidth().padding(top = 4.dp).background(Mcx.Card, RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("${offer.name}${offer.size?.let { " (${AttachmentFiles.readableSize(it)})" } ?: ""} from ${offer.from.short()}",
+                style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+            for ((decision, label) in listOf("accept" to "Accept", "decline" to "Decline", "defer" to "Later"))
+                TextButton(onClick = { actions.answerFileOffer(offer.id, decision) }, modifier = Modifier.testTag(Tags.fileOffer(offer.id, decision))) { Text(label) }
+        }
         LazyColumn(Modifier.weight(1f)) {
             items(state.messages, key = { it.id }) { m -> MessageRow(m, actions) }
         }
         // Pill-shaped fields, as chat apps draw them.
-        OutlinedTextField(target, { target = it }, label = { Text("To (group or MCData ID)") }, singleLine = true,
-            shape = RoundedCornerShape(28.dp), modifier = Modifier.fillMaxWidth().testTag(Tags.MESSAGE_TARGET))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(target, { target = it }, label = { Text("To (group or MCData ID)") }, singleLine = true,
+                shape = RoundedCornerShape(28.dp), modifier = Modifier.weight(1f).testTag(Tags.MESSAGE_TARGET))
+            TextButton(onClick = { actions.openSession(target, group) }, enabled = state.registered && session == null && target.isNotBlank(),
+                modifier = Modifier.testTag(Tags.SESSION_START)) { Text("Session") }
+        }
         if (attachment != null) PendingAttachment(attachment, limit, tooLarge, actions)
         Row(verticalAlignment = Alignment.CenterVertically) {
             // The paperclip sits inside the message box, at its right edge.
@@ -1320,7 +1344,9 @@ private fun MessagesScreen(state: UiState, actions: UiActions) {
             val canSend = state.registered && target.isNotBlank() && (text.isNotBlank() || fileReady)
             IconButton(onClick = {
                 if (fileReady) actions.sendAttachment(target, group)
-                if (text.isNotBlank()) actions.send(target, group, text)
+                if (text.isNotBlank()) {
+                    if (session != null && session.target == target) actions.sessionSend(text) else actions.send(target, group, text)
+                }
                 text = ""
             }, enabled = canSend, modifier = Modifier.testTag(Tags.SEND).semantics { contentDescription = "Send" }) {
                 SendIcon(if (canSend) Mcx.Ink else Mcx.Line, 28.dp)

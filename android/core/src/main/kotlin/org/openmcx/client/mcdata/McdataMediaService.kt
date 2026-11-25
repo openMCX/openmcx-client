@@ -137,6 +137,7 @@ class MediaCommunication(
     @Volatile var peer: String?,
     val group: String?,
     val conversationId: UUID = UUID.randomUUID(),
+    val startedAt: Long = System.currentTimeMillis(),
 ) {
     /** inviting, connecting, open, sent, delivered, offered, receiving, received, released, failed, refused. */
     @Volatile var state: String = "inviting"

@@ -80,6 +80,12 @@ data class AliasItem(val id: String, val status: String, val inUse: Boolean, val
 /** Another user's location, as their report gave it. */
 data class LocatedItem(val name: String, val latitude: Double?, val longitude: Double?, val cell: String?, val at: Long)
 
+/** The open SDS session (TS 24.282 §9.2.4) in Messages. */
+data class SessionItem(val id: Int, val title: String, val target: String, val group: Boolean, val emergency: Boolean, val imminent: Boolean)
+
+/** A file offered over the media plane that waits for the user (TS 24.282 §10.2.5.2.4 7)a)). */
+data class FileOfferItem(val id: Int, val from: String, val group: String?, val name: String, val size: Long?)
+
 data class MessageItem(
     val id: String,
     val incoming: Boolean,
@@ -175,6 +181,8 @@ data class UiState(
     val call: CallItem? = null,
     val incoming: CallItem? = null,
     val messages: List<MessageItem> = emptyList(),
+    val sdsSession: SessionItem? = null,
+    val fileOffers: List<FileOfferItem> = emptyList(),
     val history: List<HistoryEntry> = emptyList(),
     val error: String? = null,
     val provisioned: Boolean = false,
@@ -241,6 +249,12 @@ data class UiState(
 
 /** What the screens can ask for. */
 interface UiActions {
+    /** TS 24.282 §9.2.4: open an SDS session with [target], send in it, end it. */
+    fun openSession(target: String, group: Boolean) {}
+    fun sessionSend(text: String) {}
+    fun closeSession() {}
+    /** TS 24.282 §10.2.5.2.4 7): accept, decline or defer a file offered over the media plane. */
+    fun answerFileOffer(id: Int, decision: String) {}
     fun selectGroup(group: String) {}
     fun callGroup(group: String) {}
     fun callPrivate(target: String) {}
@@ -437,14 +451,22 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     val incoming = calls.firstOrNull { !it.outgoing && it.state == "ringing" }
     val active = calls.firstOrNull { it.state != "released" && it != incoming }
     val mcdata = Engine.mcdata
+    // Where a message travelled when not by SIP MESSAGE: "media plane" (MSRP) or "session" (an SDS session).
+    fun plane(p: String) = when (p) { "media" -> " · media plane"; "session" -> " · session"; else -> "" }
+    val media = Engine.mcdataMedia?.communications?.value ?: emptyList()
     val messages = buildList {
         mcdata?.inbox?.value?.forEach {
             add(MessageItem(it.messageId.toString(), true, it.sender, it.group, it.text,
-                if (it.displayed) "read" else "new", it.at, it.displayed))
+                (if (it.displayed) "read" else "new") + plane(it.plane), it.at, it.displayed))
         }
         mcdata?.outbox?.value?.forEach { m ->
             val status = if (m.notifications.isEmpty()) "sent" else m.notifications.entries.joinToString { "${it.key.short()} ${it.value.name.lowercase().replace('_', ' ')}" }
-            add(MessageItem(m.messageId.toString(), false, m.target, if (m.group) m.target else null, m.text, status, m.at, true))
+            add(MessageItem(m.messageId.toString(), false, m.target, if (m.group) m.target else null, m.text, status + plane(m.plane), m.at, true))
+        }
+        // Files over the media plane (TS 24.282 §10.2.5), shown as a line with their state.
+        media.filter { it.kind == "fd" && it.state != "offered" }.forEach { c ->
+            add(MessageItem("media-${c.id}-${c.startedAt}", !c.outgoing, c.peer ?: c.group ?: "", c.group,
+                "File: ${c.fileName} (${c.fileSize?.let(AttachmentFiles::readableSize) ?: "?"})", "${c.state} · media plane", c.startedAt, true))
         }
         Engine.fd?.records?.value?.forEach { r ->
             add(MessageItem(r.id, r.incoming, r.peer, r.group, r.metadata.name, fileStatus(r), r.at, true, fileItem(r)))
@@ -499,6 +521,12 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         call = active?.let(::item),
         incoming = incoming?.let(::item),
         messages = messages,
+        sdsSession = Engine.mcdataMedia?.session?.let { c ->
+            val target = c.group ?: c.peer ?: ""
+            SessionItem(c.id, (if (c.group != null) "Group session: " else "Session with ") + target.short(), target, c.group != null, c.emergency, c.imminentPeril)
+        },
+        fileOffers = media.filter { it.kind == "fd" && it.state == "offered" && !it.outgoing }
+            .map { FileOfferItem(it.id, it.peer ?: "", it.group, it.fileName ?: "file", it.fileSize) },
         history = Engine.history?.recent(50) ?: emptyList(),
         error = status.lastError ?: listOfNotNull(status.mcptt.refused, status.mcdata.refused, status.mcvideo.refused)
             .joinToString(". ").ifEmpty { null },
@@ -663,6 +691,10 @@ object EngineActions : UiActions {
     override fun send(target: String, group: Boolean, text: String) = launch {
         Engine.mcdata?.send(target, text, group, DispositionRequest.DELIVERY_AND_READ)?.let(Engine::sent)
     }
+    override fun openSession(target: String, group: Boolean) = launch { Engine.mcdataMedia?.openSession(target, group) }
+    override fun sessionSend(text: String) = launch { Engine.mcdataMedia?.sessionSend(text, DispositionRequest.DELIVERY_AND_READ)?.let(Engine::sent) }
+    override fun closeSession() = launch { Engine.mcdataMedia?.close() }
+    override fun answerFileOffer(id: Int, decision: String) { Engine.mcdataMedia?.answerFile(decision, id) }
     override fun displayed(messageId: String) { Engine.mcdata?.display(UUID.fromString(messageId)) }
     override fun setSpeaker(on: Boolean) { Engine.telecom?.setSpeaker(on) }
     override fun clearLogs() = Engine.clearLogs()
