@@ -191,9 +191,12 @@ Driven by the phone's position: the fused fix, or the debug override `location-p
   - **The in-progress imminent peril notification is answered 488:** the joining INVITE above made the server send
     bob a MESSAGE with the group's imminent peril state (TS 24.379 §6.3.3.1.11); the Android MCPTT client handles
     such MESSAGEs only for emergency alerts and answers this one 488 (client gap, TS 24.379 §12.1.1.3, not fixed here).
-  - **MCPTT ad hoc calls on a protected lab:** in S5 the Floor Idle of the ad hoc call fails its authentication at the
-    clients ("packet failed authentication, dropped"), so no floor is granted (S5 4/6 there, 12/12 unprotected).
-    Protected floor control of an ad hoc call is not done (no MCPTT floor or key code changed in phase 7).
+  - **MCPTT ad hoc calls on a protected lab:** the MCPTT server keeps an ad hoc call's floor control in the clear
+    (`src/server/adhoc.cpp`, `adhoc_call_policy`: `protect_floor` false), while the client, provisioned with protected
+    floor control, protects it under the CSK as TS 33.180 §9.4.2 has it for floor control between client and server.
+    Each side drops the other's packets: the client's "packet failed authentication", the server's `floor_rejected`
+    "RTCP length mismatch" for every Floor Ack, then `floor_ack_timeout`; no floor is granted (S5 4/6 there, 12/12
+    unprotected). A server fault; the MCVideo client already keeps ad hoc transmission control clear to match it.
 - **Server-driven choices** (see the wire contracts):
   - An explicit floor request by default; the implicit one (`mcptt.implicit_floor_request`) is accepted by the server,
     which grants the floor by Floor Granted and does not use `mc_granted`.
