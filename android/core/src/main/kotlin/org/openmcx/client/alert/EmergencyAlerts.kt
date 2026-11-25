@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import org.openmcx.client.body.Multipart
+import org.openmcx.client.body.McService
 import org.openmcx.client.body.Part
 import org.openmcx.client.client.Icsi
 import org.openmcx.client.client.McxClient
@@ -33,7 +34,9 @@ data class OwnAdhocAlert(val group: String, val criteria: String)
 
 /** The server's notice that this user entered or left an emergency alert area or a group's geographic area. */
 data class AreaNotice(val service: LocationService, val alertArea: Boolean, val entered: Boolean, val group: String?,
-                      val alerted: String? = null, val at: Long = System.currentTimeMillis())
+                      val alerted: String? = null, val at: Long = System.currentTimeMillis(),
+                      /** A group geographic area notice: affiliated to (true) or de-affiliated from (false) [group]. */
+                      val affiliation: Boolean? = null)
 
 interface AlertListener {
     /** Another user's alert raised ([active]) or cancelled. */
@@ -50,7 +53,8 @@ interface AlertListener {
  * - the ad hoc group emergency alert (TS 24.379 §12.1A, and TS 24.281 for MCVideo) to the users that participant
  *   criteria select (`affiliated:<group>` or `member:<group>`, comma separated);
  * - the server's area notices (TS 24.379 §6.3.2.4, TS 24.282 §17.2.4): entering an emergency alert area raises an
- *   alert on [defaultGroup] (§12.1.1.6), unless this user's alert is already active.
+ *   alert on [defaultGroup] (§12.1.1.6, TS 24.282 §16.2.1.5), unless this user's alert is already active; entering or
+ *   leaving a group geographic area affiliates to or de-affiliates from the group it names (§12.1.1.4, TS 24.282 §16.2.1.4).
  * Each alert carries where the phone is, as an Emergency location report.
  */
 class EmergencyAlerts(
@@ -250,13 +254,27 @@ class EmergencyAlerts(
         val entered = (info.alertArea ?: info.groupArea)!!
         var notice = AreaNotice(service, alertArea, entered, info.associatedGroup)
         if (alertArea && entered && groupAlerts && _alerting.value.isEmpty()) {
-            // §12.1.1.6 (TS 24.282 §16.2.1.4): entering an emergency alert area raises an alert, unless one is active.
+            // §12.1.1.6 (TS 24.282 §16.2.1.5): entering an emergency alert area raises an alert, unless one is active.
             val target = defaultGroup()
             val where = position()
             notice = notice.copy(alerted = target)
             if (target != null && where != null) client.scope.launch {
                 runCatching { send(target, true, where) }.onFailure { event("area alert on $target: ${it.message}") }
             } else notice = notice.copy(alerted = null).also { event("area alert: no ${if (target == null) "group" else "position"}") }
+        }
+        if (!alertArea && groupAlerts) {
+            // TS 24.379 §12.1.1.4 step 2 (TS 24.282 §16.2.1.4 step 2): affiliate to (entered) or de-affiliate from (left)
+            // the group the participating function indicates in <associated-group-id>, by the affiliation status change
+            // procedure (§9.2.1.2, TS 24.282 §8.2.2): that group only, the user's other groups kept.
+            val group = info.associatedGroup
+            val mc = when (service) { LocationService.MCPTT -> McService.MCPTT; LocationService.MCDATA -> McService.MCDATA; LocationService.MCVIDEO -> McService.MCVIDEO }
+            if (group == null) event("group geographic area notice without <associated-group-id>")
+            else client.scope.launch {
+                runCatching { if (entered) client.changeAffiliation(mc, listOf(group), emptyList()) else client.changeAffiliation(mc, emptyList(), listOf(group)) }
+                    .onSuccess { event("group geographic area of $group ${if (entered) "entered: affiliated" else "left: de-affiliated"}") }
+                    .onFailure { event("group geographic area of $group: affiliation change: ${it.message}") }
+            }
+            notice = notice.copy(affiliation = if (group == null) null else entered)
         }
         notices += notice
         while (notices.size > 20) notices.removeAt(0)

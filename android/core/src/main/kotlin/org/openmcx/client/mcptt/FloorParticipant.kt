@@ -198,9 +198,10 @@ class FloorParticipant(
         offer = null
     }
 
-    private suspend fun startRelease() {
+    private suspend fun startRelease(dualFloor: Boolean = false) {
         _state.value = FloorState.PENDING_RELEASE
-        retransmit(FloorMessage.release(serverSsrc, indicator = indicator()), t100Ms, c100) {
+        val bits = indicator().let { if (dualFloor) it or FloorIndicator.DUAL_FLOOR else it }
+        retransmit(FloorMessage.release(serverSsrc, indicator = bits), t100Ms, c100) {
             // T100 expired C100 times: consider the floor released (§6.2.4.6.3).
             if (_state.value == FloorState.PENDING_RELEASE) _state.value = FloorState.NO_PERMISSION
         }
@@ -306,10 +307,13 @@ class FloorParticipant(
                 }
                 if (_state.value != FloorState.PENDING_REQUEST) { currentMediaSsrc = null; talker = null; listener.idle() }
             }
+            // §6.2.4.5.4: the permission is revoked (pre-empted by a higher priority request, §4.1.1.4, or the talk time
+            // ran out): 1-2 the user is told with the reason, 3 the media stops, 4-5 the Floor Release with the G-bit
+            // (Dual floor) of the Floor Revoke, 6-7 T100 and 'U: pending Release'.
             FloorType.REVOKE -> if (_state.value == FloorState.HAS_PERMISSION) {
                 listener.stopTalking()
                 listener.revoked(message.rejectCause)
-                startRelease()
+                startRelease(dualFloor = (message.floorIndicator ?: 0) and FloorIndicator.DUAL_FLOOR != 0)
             }
             FloorType.ACK -> Unit
         }

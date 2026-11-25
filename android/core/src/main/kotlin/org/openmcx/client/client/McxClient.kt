@@ -212,7 +212,8 @@ class McxClient(
                 "video".takeIf { config.mcvideo != null }),
             if (config.security == null) emptyList()
             else listOfNotNull("ptt".takeIf { config.mcptt != null }, "data".takeIf { config.mcdata != null },
-                "video".takeIf { config.mcvideo != null })),
+                "video".takeIf { config.mcvideo != null }),
+            location = config.lms != null),
         clock = clock, endpoints = config.idms.endpoints)
 
     /**
@@ -295,7 +296,7 @@ class McxClient(
     /** The CSKs go (TS 33.180 9.2.1: a new one with the next service authorisation). */
     private fun dropCsks() { csks.clear(); cskUploads.clear() }
 
-    private val documents = DocumentClient(http, config.cms, config.gms)
+    internal val documents = DocumentClient(http, config.cms, config.gms)
 
     @Volatile var tokens: Tokens? = null
         internal set // set by the module's tests too
@@ -332,6 +333,10 @@ class McxClient(
     }
 
     private val allProcedures: List<ServiceProcedures> get() = listOfNotNull(procedures, videoProcedures)
+    /** Location based functional aliases and rules based affiliation (TS 24.379 §9A.2.1.4, §9.2.1.7; TS 24.282 §22.2.1.4, §8.2.6.2). */
+    val locationRules: LocationRuleProcedures by lazy { LocationRuleProcedures(this) }
+    /** The SEAL location management client (TS 24.545), reporting the position the location rules last had. */
+    val seal: SealLocationClient by lazy { SealLocationClient(this, http, config.lms) { locationRules.position } }
     private var registration: SipRequest? = null
     /** The IMS AKA registration of this life of the client, when it registered with IMS AKA. */
     @Volatile var imsAka: ImsAkaRegistrar? = null
@@ -417,6 +422,7 @@ class McxClient(
 
     /** Start and keep the client up: on any failure, back off and start again. */
     fun start() {
+        locationRules.start()
         scope.launch {
             var backoff = config.recovery.firstRetryMs
             while (isActive) {
@@ -824,6 +830,18 @@ class McxClient(
                 event("service configuration $service: $it" + if (service == "mcptt") ", floor queue $mcpttFloorQueue" else "") }
             .onFailure { event("service configuration $service: ${it.message}") }
     }
+
+    /** Read [group]'s document now (a regroup's preconfigured group, a temporary group: TS 24.379 §16.1, TS 24.481 §6.3.14). */
+    suspend fun refreshGroupDocument(group: String): GroupDocument? {
+        val token = tokens?.accessToken ?: return null
+        readGroupDocument(group, token)
+        return groupDocuments[group]
+    }
+
+    /** A request to this user's tree of the GMS (TS 24.481 §6.3.14.2, §6.3.15.2), with the access token. */
+    suspend fun gmsUserRequest(method: String, document: String, contentType: String? = null, body: ByteArray? = null) =
+        documents.gmsUserRequest(method, config.mcptt?.userId ?: throw IllegalStateException("MCPTT not provisioned"), document,
+            tokens?.accessToken ?: throw IllegalStateException("not signed in"), contentType, body)
 
     private suspend fun readGroupDocument(group: String, token: String) {
         runCatching { documents.group(group, token) }

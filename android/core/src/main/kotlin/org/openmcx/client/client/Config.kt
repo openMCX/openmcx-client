@@ -50,6 +50,8 @@ data class ClientConfig(
      * only (TS 24.484 §7.2.2.7 g) gives no private key and no pre-shared key identity for mutual).
      */
     val httpProxy: String? = null,
+    /** The SEAL location management server's base URI (`lms`, TS 24.545 clause 6.2.2), or null without one. */
+    val lms: String? = null,
 ) {
     data class Sip(
         val publicUserId: String, val privateUserId: String, val password: String,
@@ -126,6 +128,12 @@ data class ClientConfig(
          * `mcptt.offer_granted`). The clause leaves the offer to the client ("when it is acceptable").
          */
         val offerGranted: Boolean = false,
+        /**
+         * TS 24.380 §14.3.3: the highest floor priority this client asks for in its group calls' "mc_priority"
+         * (`floor_priority`, 0 to 255); without it the group document's <user-priority>, else the user profile's
+         * <MCPTT-group-call>/<Priority> ([org.openmcx.client.mcptt.GroupCallRules.floorPriorityOffer]).
+         */
+        val floorPriority: Int? = null,
     )
 
     data class Mcdata(
@@ -248,6 +256,7 @@ data class ClientConfig(
                         idms.optStr("jwks_uri"))),
                 cms = root.str("cms"),
                 gms = root.str("gms"),
+                lms = root.optStr("lms")?.ifEmpty { null },
                 mcptt = (root["mcptt"] as? JsonObject)?.let {
                     Mcptt(it.str("user_id"), it.str("psi"), it.strings("groups"), it.optStr("answer_mode") ?: "automatic",
                         it.int("session_expires", 1800), it.int("manual_answer_timeout", 20),
@@ -255,7 +264,8 @@ data class ClientConfig(
                         it.bool("subscribe_configuration", true), it.bool("subscribe_group_documents", true),
                         it.bool("documents_on_notify", false), it.optStr("cms_subscription_psi")?.also(::sipUri),
                         it.optStr("gms_subscription_psi")?.also(::sipUri), it.optStr("ue_id"),
-                        it.flag("implicit_floor_request"), it.flag("offer_granted"))
+                        it.flag("implicit_floor_request"), it.flag("offer_granted"),
+                        (it["floor_priority"] as? JsonPrimitive)?.intOrNull?.takeIf { p -> p in 0..255 })
                 },
                 mcdata = (root["mcdata"] as? JsonObject)?.let {
                     Mcdata(it.str("user_id"), it.str("psi"), it.strings("groups"), it.int("max_payload_size_sds_cplane_bytes", 1000),

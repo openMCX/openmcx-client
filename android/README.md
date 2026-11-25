@@ -115,6 +115,13 @@ Debug builds listen on the abstract socket `@mcxclient-control` for one JSON req
 | `events [N]` | The last N client events, including the SIP start lines |
 | `private <mcptt-id> [auto\|manual\|force] [no-floor] [emergency] [implicit\|explicit] [granted] [<wav>]`, `group [<group>] [emergency\|imminent] [implicit\|explicit] [granted] [<wav>]`, `adhoc <id> <id>…` | Place a call; `implicit` requests the floor in the INVITE (TS 24.380 §14.2.5), `granted` adds `mc_granted` (§14.2.4), the WAV is the burst sent once granted; without either, `mcptt.implicit_floor_request` and `mcptt.offer_granted` decide |
 | `answer`, `reject`, `hangup` | Call control |
+| `first-to-answer <mcptt-id> <mcptt-id>… [emergency] [no-floor]` | First-to-answer call (TS 24.379 §11.1.1.2.1.1) |
+| `chat [<group>] [emergency\|imminent]`, `rejoin [chat\|adhoc]` | Join a chat group call (§10.1.2.2.1.1), leave with `hangup`; join again, or rejoin the ad hoc call left (§17.2.5.1.1) |
+| `broadcast [<group>] [emergency\|imminent]` | Broadcast group call (§6.2.8.2) |
+| `adhoc [broadcast] criteria <criteria>`, `adhoc-modify add\|remove <mcptt-id>…`, `adhoc-modify criteria <criteria>`, `adhoc-leave`, `adhoc-release` | Ad hoc call by criteria (§17.2.2.1.1), its modification (§17.2.6.1.1), leave (§17.2.4.1.1) and release (§17.2.3.1.1) |
+| `floor-priority <0..255>\|none` | The floor priority offered in group calls (TS 24.380 §14.3.3) |
+| `regroup create <tgi> <preconfigured> <group>,…`, `regroup users <tgi> <preconfigured> <mcptt-id>,…`, `regroup remove <tgi>`, `regroups` | Regroups (TS 24.379 §16.2.1, §16.3.1) and the notices received |
+| `temporary-create <document> <tgi> <group>,… [chat] [protected]`, `temporary-delete <document>`, `group-document <group>` | Temporary groups at the GMS (TS 24.481 §6.3.14.2, §6.3.15.2); a group document as read |
 | `answer-mode automatic\|manual` | The local answer mode, then the settings-only PUBLISH (TS 24.379 §7.2.3) |
 | `settings-publish [remove]`, `settings-subscribe [fetch]`, `settings-resubscribe`, `settings-unsubscribe` | Service settings (§7.2.3, §7.2.4) |
 | `monitor <group>…`, `monitor none` | Groups of the user profile affiliated besides the provisioned ones (§9.2.1.2) |
@@ -126,6 +133,9 @@ Debug builds listen on the abstract socket `@mcxclient-control` for one JSON req
 | `video-affiliate <group>`, `video-deaffiliate <group>` | MCVideo affiliation to or de-affiliation from one group, the others kept (TS 24.281 §8.2.1.2) |
 | `video-affiliation-accept [<group>…]`, `video-affiliation-decline` | Answer a received MCVideo negotiated-mode request (§8.2.1.5), all or some of its groups |
 | `video-affiliation-subscribe <mcvideo-id> [fetch]`, `video-affiliation-unsubscribe <mcvideo-id>`, `video-affiliate-remote <mcvideo-id> <group> affiliate\|deaffiliate mandatory\|negotiated`, `video-procedures` | The MCVideo instance of the procedures above (§8.2.1.2 to §8.2.1.4) and its state |
+| `affiliate <group> [mcptt\|mcdata\|mcvideo]`, `deaffiliate <group> […]` | The user's affiliation change of one group (§9.2.1.2, TS 24.282 §8.2.2), refused outside the group's area (§9.2.1.7.3) or while a locking rule holds it |
+| `location-position <lat> <lon>`, `location-position clear`, `location-rules` | Stand in for the phone's position; what the location rules hold (§9A.2.1.4, §9.2.1.7; [LOCATION.md](docs/LOCATION.md)) |
+| `seal start\|stop\|offline\|online\|status` | The SEAL location management client (TS 24.545) |
 | `ptt <wav> [seconds]`, `floor request\|release`, `audio-next <wav>` | Talk a file (the devices have no microphone) |
 | `sds <mcdata-id> <text> [--disposition delivery\|read\|delivery-read]`, `sds-group <group> <text> …`, `display <message-id>` | Short data |
 | `refresh register\|subscription\|video-subscription\|token`, `drop-flow` | Force a refresh or a new flow |

@@ -45,11 +45,18 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class CallError(message: String, val status: Int? = null) : Exception(message)
 
+/**
+ * The call types of TS 24.379: private (§11.1; a first-to-answer call is a private call once an invitee answered,
+ * §11.1.1, its session type "first-to-answer" kept in [Call.firstToAnswer]), prearranged (§10.1.1), chat (§10.1.2)
+ * and ad hoc (§17) group calls. A broadcast group call (§6.2.8.2) is a prearranged or ad hoc call with
+ * [Call.broadcast].
+ */
 enum class CallType(val sessionType: String) {
-    PRIVATE("private"), PREARRANGED("prearranged"), ADHOC("adhoc");
+    PRIVATE("private"), PREARRANGED("prearranged"), ADHOC("adhoc"), CHAT("chat");
 
     companion object {
-        fun of(sessionType: String?) = entries.firstOrNull { it.sessionType == sessionType }
+        const val FIRST_TO_ANSWER = "first-to-answer"
+        fun of(sessionType: String?) = if (sessionType == FIRST_TO_ANSWER) PRIVATE else entries.firstOrNull { it.sessionType == sessionType }
     }
 }
 
@@ -92,8 +99,25 @@ class Call internal constructor(
     internal val origin = McpttSdp.Origin()
     /** Our initial INVITE's offer had "mc_granted" (TS 24.380 §14.2.4). */
     @Volatile var grantedOffered: Boolean = false
+    /** A first-to-answer call (§11.1.1.2.1.1 step 15, §11.1.1.2.1.2 step 8): [invitees] the users it was made to. */
+    @Volatile var firstToAnswer: Boolean = false
+    @Volatile var invitees: List<String> = emptyList()
+    /** A broadcast group call (TS 24.379 §6.2.8.2, `<broadcast-ind>`): only its initiator talks (TS 24.380 bit B). */
+    @Volatile var broadcast: Boolean = false
+    /** An ad hoc group call's participant criteria (§17.2.2.1.1 step 12), as last accepted (§17.2.6.1.1 step 2a). */
+    @Volatile var criteria: String? = null
+    /** The constituent group a call on a regroup or temporary group is placed from (§10.1.1.2.1.1 step 14 d)). */
+    @Volatile var associatedGroup: String? = null
+    /** The MCPTT session identity (the 200 (OK)'s Contact): rejoining an ad hoc call targets it (§17.2.5.1.1). */
+    @Volatile var sessionUri: String? = null
+    /** The floor priority negotiated ("mc_priority", TS 24.380 §14.3.3) that our Floor Requests carry. */
+    @Volatile var floorPriority: Int? = null
+    /** The outcome of the last modification of an ad hoc call's participants or criteria (§17.2.6.1.1). */
+    @Volatile var lastModification: String? = null
     /** A protected incoming call's keys, opened before it is answered: its PCK (private) or GMK (group). */
     internal var keys: Pair<org.openmcx.client.security.KeyMessage?, org.openmcx.client.security.KeyMessage?> = null to null
+    /** A first-to-answer invitee's PCK I_MESSAGE for its answer's a=key-mgmt (§11.1.1.2.1.2 step 5). */
+    internal var answerKeyMgmt: String? = null
 }
 
 /** Tells the UI and the service about call events. */
@@ -131,6 +155,9 @@ class McpttService(
         set(value) = client.setAnswerMode(McService.MCPTT, value)
 
     val active: Call? get() = _calls.value.firstOrNull { it.state != "released" }
+
+    /** Regroups and temporary groups (TS 24.379 §16, TS 24.481 §6.3.14): their notices and the requests for them. */
+    val regroups = Regroups(client)
 
     init {
         ua.onAck = { ack -> onAck(ack) }
@@ -320,10 +347,10 @@ class McpttService(
     /**
      * TS 24.380 §6.2.4.3.5 1 b): the Floor Indicator of the call's Floor Request and Floor Release: emergency (a group
      * or private emergency call) or imminent peril, else normal; bit F when the call negotiated queueing.
-     * No broadcast group calls are made by this client.
+     * Bit B for a broadcast group call (§6.2.8.2).
      */
     private fun indicatorOf(call: Call, local: LocalMedia, remote: RemoteMedia): Int = ClientRules.floorIndicator(
-        broadcast = false, emergency = call.priority == "emergency", imminent = call.priority == "imminent",
+        broadcast = call.broadcast, emergency = call.priority == "emergency", imminent = call.priority == "imminent",
         queueing = local.queueing && remote.queueing)
 
     private fun floor(call: Call, text: String) { call.floorEvents += text; event("call ${call.id} floor $text"); changed(call) }
@@ -359,8 +386,47 @@ class McpttService(
      * Prearranged group call (TS 24.379 §10.1.1.2.1.1); with [priority] `emergency` or `imminent`, an emergency or
      * imminent peril group call (§6.2.8.1).
      */
-    suspend fun groupCall(group: String, priority: String = "normal", implicit: Implicit? = null): Call =
-        originate(CallType.PREARRANGED, null, group, emptyList(), null, priority = priority, implicit = implicit)
+    suspend fun groupCall(group: String, priority: String = "normal", implicit: Implicit? = null, broadcast: Boolean = false): Call {
+        val doc = regroups.configurationOf(group)
+        // A chat group's calls are chat group calls (§10.1.2): joining is the same request.
+        if (doc?.chat == true && !broadcast) return chatCall(group, priority, implicit)
+        return originate(CallType.PREARRANGED, null, group, emptyList(), null, priority = priority, implicit = implicit, broadcast = broadcast)
+    }
+
+    /**
+     * Initiate or join a chat group call (TS 24.379 §10.1.2.2.1.1): the INVITE with session type "chat" naming the group;
+     * the same request joins the call once it is ongoing, and the server invites nobody. Leaving is [hangup] (BYE,
+     * §10.1.2.2.3.1), and rejoining is joining again.
+     */
+    suspend fun chatCall(group: String, priority: String = "normal", implicit: Implicit? = null): Call =
+        originate(CallType.CHAT, null, group, emptyList(), null, priority = priority, implicit = implicit)
+
+    /**
+     * A broadcast group call (TS 24.379 §10.1.1.2.1.1 with §6.2.8.2): a prearranged group call with <broadcast-ind>
+     * "true"; only the initiator talks, and the server ends the call when its transmission ends.
+     */
+    suspend fun broadcastCall(group: String, priority: String = "normal"): Call = groupCall(group, priority, broadcast = true)
+
+    /**
+     * A first-to-answer call (TS 24.379 §11.1.1.2.1.1 steps 2, 10 a) and 15): to two or more users; the server rings
+     * them all and the call continues as a private call with the first to answer, named in the 200 (OK)'s
+     * <mcptt-called-party-id> (200 step 4).
+     */
+    suspend fun firstToAnswerCall(targets: List<String>, emergency: Boolean = false, floorControl: Boolean = true,
+                                  implicit: Implicit? = null): Call {
+        val list = GroupCallRules.firstToAnswerTargets(targets, config.userId)
+        val profile = client.profile
+        if (!GroupCallRules.mayRequestFirstToAnswer(profile != null, profile?.allows("allow-request-first-to-answer-call") == true))
+            throw CallError("the user profile does not allow first-to-answer calls")
+        return originate(CallType.PRIVATE, null, null, list, null, floorControl, if (emergency) "emergency" else "normal",
+            implicit = implicit, firstToAnswer = true)
+    }
+
+    /** The highest floor priority to offer in group calls (TS 24.380 §14.3.3); the user's choice over the configured one. */
+    @Volatile var floorPriority: Int? = null
+
+    private fun floorPriorityOffer(group: String?): Int? = GroupCallRules.floorPriorityOffer(floorPriority ?: config.floorPriority,
+        group?.let { client.groupDocuments[it]?.userPriorities?.get(config.userId) }, client.profile?.groupCallPriority)
 
     /**
      * The implicit floor request of one call (TS 24.380 §14.2.5) and whether its offer has "mc_granted" (§14.2.4),
@@ -368,32 +434,100 @@ class McpttService(
      */
     data class Implicit(val request: Boolean, val granted: Boolean)
 
-    /** Ad hoc group call (TS 24.379 §17.2.2.1.1): the participants are chosen here. */
-    suspend fun adhocCall(participants: List<String>): Call = originate(CallType.ADHOC, null, null, participants, null)
+    /**
+     * Ad hoc group call (TS 24.379 §17.2.2.1.1): the participants are chosen here (step 11), or the criteria the
+     * server determines them by (step 12, <call-participants-criterias>); [broadcast] makes it a broadcast ad hoc group
+     * call (step 9).
+     */
+    suspend fun adhocCall(participants: List<String>, criteria: String? = null, broadcast: Boolean = false): Call {
+        if (participants.isEmpty() == (criteria == null)) throw CallError("an ad hoc call names its participants or the criteria for them")
+        return originate(CallType.ADHOC, null, null, participants, null, criteria = criteria?.let(GroupCallRules::adhocCriteria),
+            broadcast = broadcast)
+    }
+
+    /** The last ad hoc call left (§17.2.4), which [rejoinAdhoc] rejoins by its session identity. */
+    @Volatile var lastAdhoc: Call? = null
+        private set
+
+    /** Rejoin the ad hoc call left (§17.2.5.1.1): §17.2.2.1.1 with the Request-URI the MCPTT session identity. */
+    suspend fun rejoinAdhoc(): Call {
+        val left = lastAdhoc ?: throw CallError("no ad hoc call to rejoin")
+        val uri = left.sessionUri ?: throw CallError("the ad hoc call's session identity is not known")
+        return originate(CallType.ADHOC, null, left.groupId, emptyList(), null, requestUriOverride = uri)
+    }
+
+    /**
+     * Modify an established ad hoc call (TS 24.379 §17.2.6.1.1): a re-INVITE with the mcptt-info as established (step 1)
+     * and either a resource list of the users to [invite] and to [remove] ("method" INVITE or BYE, step 2) or the new
+     * [criteria] (step 2a), with the established media (step 3). Needs <allow-to-modify-adhoc-group-call-participants-info>.
+     */
+    suspend fun modifyAdhoc(invite: List<String> = emptyList(), remove: List<String> = emptyList(), criteria: String? = null,
+                            call: Call? = active): String {
+        call ?: throw CallError("no call")
+        if (call.type != CallType.ADHOC || call.state != "established") throw CallError("no established ad hoc call")
+        val dialog = call.dialog ?: throw CallError("the call is not established")
+        val media = call.media ?: throw CallError("no media")
+        client.profile?.let { if (!it.allows("allow-to-modify-adhoc-group-call-participants-info")) throw CallError("the user profile does not allow modifying ad hoc calls") }
+        val entries = try { GroupCallRules.adhocModificationEntries(invite, remove, criteria?.let(GroupCallRules::adhocCriteria)) }
+            catch (e: IllegalArgumentException) { throw CallError(e.message ?: "invalid modification") }
+        val newCriteria = criteria?.let(GroupCallRules::adhocCriteria)
+        val info = McpttInfo(sessionType = "adhoc", callingGroupId = call.groupId, clientId = client.config.clientId,
+            participantCriteria = newCriteria ?: call.criteria, functionalAlias = call.callingAlias)
+        val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(media.local, call.origin).toByteArray()),
+            Part(McpttInfo.CONTENT_TYPE, info.encode().toByteArray()))
+        if (entries.isNotEmpty()) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(entries).toByteArray())
+        val request = ua.inDialog(dialog, "INVITE")
+        commonHeaders(request)
+        val (contentType, body) = Multipart.encode(parts)
+        request.headers.add("Content-Type", contentType)
+        val reinvite = SipRequest(request.method, request.uri, request.headers, body)
+        val response = ua.send(reinvite, dialog)
+        if (response.isSuccess) ua.ack(dialog, ua.lastSent[reinvite.callId] ?: reinvite)
+        val outcome = "${response.status}" + (response.headers["Warning"]?.let { " $it" } ?: "")
+        call.lastModification = outcome
+        if (response.isSuccess && newCriteria != null) call.criteria = newCriteria
+        event("call ${call.id}: ad hoc modification ${entries.ifEmpty { listOf("criteria $newCriteria") }}: $outcome")
+        changed(call)
+        if (!response.isSuccess) throw CallError("${response.status} ${response.reason}" + (response.headers["Warning"]?.let { " ($it)" } ?: ""), response.status)
+        return outcome
+    }
 
     private suspend fun originate(type: CallType, peer: String?, group: String?, targets: List<String>, commencement: Commencement?,
                                   floorControl: Boolean = true, priority: String = "normal", toAlias: Boolean = false,
-                                  calledAlias: String? = null, implicit: Implicit? = null): Call {
+                                  calledAlias: String? = null, implicit: Implicit? = null, broadcast: Boolean = false,
+                                  firstToAnswer: Boolean = false, criteria: String? = null, requestUriOverride: String? = null): Call {
         if (active != null) throw CallError("already in a call")
+        val groupCall = type == CallType.PREARRANGED || type == CallType.CHAT
+        // §10.1.1.2.1.1, §10.1.2.2.1.1: no call on a group whose document says <preconfigured-group-use-only>.
+        if (groupCall && !GroupCallRules.callsAllowed(group?.let { client.groupDocuments[it]?.preconfiguredUseOnly }))
+            throw CallError("calls are not allowed on the preconfigured group $group")
+        // §10.1.1.2.1.1 step 14 d), §10.1.2.2.1.1 step 13 d): the constituent group of a regroup or temporary group.
+        val associated = if (groupCall && group != null) regroups.callingConstituent(group) else null
+        if (firstToAnswer && protectedMedia) throw CallError("protected first-to-answer calls are not supported")
         val resource = resourcePriority(priority)
         // TS 33.180 7.4 (TS 24.379 §11.1.1.2.1.1): a protected private call's media under a new PCK for the called
         // MCPTT ID, offered in a=key-mgmt; 7.3: a protected group call's media under the group's GMK. A call to a
         // functional alias has no MCPTT ID to key the PCK for yet; an ad hoc group call has no GMK (as MCVideo).
-        val pck = if (protectedMedia && type == CallType.PRIVATE && !toAlias) {
+        val pck = if (protectedMedia && type == CallType.PRIVATE && !toAlias && !firstToAnswer) {
             val keys = client.keysOf(McService.MCPTT) ?: throw CallError("no MCPTT keys for a protected call")
             keys.makePck(peer ?: throw CallError("no one to call"))
         } else null
-        val gmk = if (protectedMedia && type == CallType.PREARRANGED) awaitGroupKey(group ?: throw CallError("no group")) else null
-        val call = Call(ids.incrementAndGet(), type, true, peer, group).also { it.floorControl = floorControl; it.priority = priority }
+        val gmk = if (protectedMedia && groupCall) awaitGroupKey(group ?: throw CallError("no group")) else null
+        val call = Call(ids.incrementAndGet(), type, true, peer, group).also {
+            it.floorControl = floorControl; it.priority = priority; it.broadcast = broadcast; it.firstToAnswer = firstToAnswer
+            it.invitees = if (firstToAnswer) targets else emptyList(); it.criteria = criteria; it.associatedGroup = associated
+        }
         val protection = protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
         _calls.value = _calls.value + call
         val (ports, bound) = bindMedia()
         // §11.1.2.2 steps 12-13: no media-floor control section; the speech SSRC is announced instead.
         val floored = if (floorControl) bound else bound.copy(floorControl = false, audioSsrc = McpttSdp.newFloorSsrc())
+        // TS 24.380 §14.3.3: a group call offers the floor priority asked for ("mc_priority").
+        val prioritised = if (groupCall && floorControl) floored.copy(floorPriority = floorPriorityOffer(group)) else floored
         val local = when {
-            pck != null -> floored.copy(protected = true, keyMgmt = pck.second)
-            gmk != null -> floored.copy(protected = true)
-            else -> floored
+            pck != null -> prioritised.copy(protected = true, keyMgmt = pck.second)
+            gmk != null -> prioritised.copy(protected = true)
+            else -> prioritised
         }
         // TS 24.379 §6.4, TS 24.380 §14.2.5: the initial INVITE may request the floor implicitly; §14.2.4: with
         // "mc_granted" when the floor granted in the 200 (OK) is accepted (offer_granted). Only this offer carries them
@@ -408,7 +542,9 @@ class McpttService(
         pck?.let { event("call ${call.id}: PCK %08x for $peer".format(it.first.csbId)) }
         call.media = media
         try {
-            val request = ua.newRequest("INVITE", config.psi, NameAddr(config.psi))
+            // §17.2.5.1.1: a rejoin goes to the MCPTT session identity; every other call to the participating function's PSI.
+            val target = requestUriOverride ?: config.psi
+            val request = ua.newRequest("INVITE", target, NameAddr(target))
             commonHeaders(request, initialInvite = true)
             request.headers.add("Session-Expires", config.sessionExpires.coerceAtLeast(90).toString()).add("Min-SE", "90")
             when (commencement) {
@@ -420,14 +556,17 @@ class McpttService(
             resource?.let { request.headers.add("Resource-Priority", it) }
             // §9A, §11.1.1.2.1.1 step 14c: the alias this user presents (private and ad hoc calls, as the reference client),
             // the call to an alias, and the alias called once the server selected its MCPTT ID.
-            val presented = client.aliases.value.inUse.takeIf { type != CallType.PREARRANGED }
+            val presented = client.aliases.value.inUse.takeIf { type != CallType.PREARRANGED && type != CallType.CHAT }
             call.callingAlias = presented
             call.calledAlias = calledAlias ?: peer.takeIf { toAlias }
             // §11.1.1.2.1.1 14B) a): a private call the user initiates (not a forwarded one, which this client does not
             // make) has <forwarding-sequence-number> 0.
-            val info = priorityInfo(McpttInfo(sessionType = type.sessionType, requestUri = group, clientId = client.config.clientId,
+            // §11.1.1.2.1.1 step 15 a): a first-to-answer call's session type; 14B a) is for private calls only.
+            val info = priorityInfo(McpttInfo(sessionType = if (firstToAnswer) CallType.FIRST_TO_ANSWER else type.sessionType,
+                requestUri = group, clientId = client.config.clientId, broadcast = if (broadcast) true else null,
+                associatedGroupId = associated, participantCriteria = criteria,
                 functionalAlias = presented, callToFunctionalAlias = if (toAlias) true else null, calledFunctionalAlias = calledAlias,
-                forwardingSequenceNumber = if (type == CallType.PRIVATE) 0 else null), priority)
+                forwardingSequenceNumber = if (type == CallType.PRIVATE && !firstToAnswer) 0 else null), priority)
             val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(offered, call.origin).toByteArray()),
                 Part(McpttInfo.CONTENT_TYPE, info.encode().toByteArray()))
             if (targets.isNotEmpty()) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(targets).toByteArray())
@@ -435,7 +574,9 @@ class McpttService(
             request.headers.add("Content-Type", contentType)
             val invite = SipRequest(request.method, request.uri, request.headers, body)
             call.invite = invite
-            event("call ${call.id}: ${type.sessionType} call to ${peer ?: group ?: targets}${if (floorControl) "" else " without floor control"}" +
+            event("call ${call.id}: ${info.sessionType}${if (broadcast) " broadcast" else ""} call to ${peer ?: group ?: targets}" +
+                (criteria?.let { " by criteria $it" } ?: "") + (associated?.let { " from $it" } ?: "") +
+                (if (floorControl) "" else " without floor control") + (local.floorPriority?.let { ", floor priority $it" } ?: "") +
                 if (priority != "normal") " ($priority)" else "")
             val response = ua.send(invite, provisional = { r ->
                 if (r.status == 180 || r.status == 183) { call.state = "ringing"; changed(call) }
@@ -460,12 +601,19 @@ class McpttService(
             val sdp = parts2.firstOrNull { it.mediaType == "application/sdp" } ?: throw CallError("200 without SDP")
             parts2.firstOrNull { it.mediaType == McpttInfo.CONTENT_TYPE }?.let {
                 val answerInfo = McpttInfo.parse(it.text)
-                if (type == CallType.ADHOC) call.groupId = answerInfo.callingGroupId // D8: the ad hoc group identity
-                if (type == CallType.PRIVATE && answerInfo.requestUri != null) call.peer = answerInfo.requestUri
+                if (type == CallType.ADHOC) call.groupId = answerInfo.callingGroupId ?: call.groupId // D8: the ad hoc group identity
+                // §11.1.1.2.1.1, 200 step 4: the invitee that answered a first-to-answer call.
+                if (firstToAnswer) call.peer = answerInfo.calledPartyId ?: answerInfo.requestUri ?: call.peer
+                else if (type == CallType.PRIVATE && answerInfo.requestUri != null) call.peer = answerInfo.requestUri
+                if (answerInfo.broadcast == true) call.broadcast = true
                 notePriority(call, answerInfo, quiet = true)
             }
+            // The MCPTT session identity, for a rejoin (§17.2.5.1.1).
+            call.sessionUri = response.headers["Contact"]?.let { runCatching { NameAddr.parse(it).uri }.getOrNull() }
             val remote = McpttSdp.remote(sdp.text)
             if (remote.floorControl != floorControl) throw CallError("floor control not negotiated as offered")
+            // TS 24.380 §14.3.3: the Floor Request priority is the one negotiated.
+            call.floorPriority = GroupCallRules.negotiatedFloorPriority(local.floorPriority, remote.floorPriority)
             if (remote.protected != local.protected) throw CallError("media protection not negotiated as offered")
             // TS 24.380 §14.4: the answer's "mc_implicit_request" and "mc_granted" count only when our offer had them.
             val accepted = ClientRules.answerParameterKept(remote.implicitRequest, implicitRequest)
@@ -475,7 +623,7 @@ class McpttService(
                 event("call ${call.id}: implicit floor request ${call.implicitFloorRequest}")
             }
             // §14.3.6: the RTP SSRC of a grant in the answer is its "mc_ssrc", else the one our offer announced.
-            media.start(remote, priority = null, implicit = accepted,
+            media.start(remote, priority = call.floorPriority, implicit = accepted,
                 grantedSsrc = if (grantedByAnswer) remote.grantedSsrc ?: offered.audioSsrc else null,
                 indicator = { indicatorOf(call, local, remote) })
             // The microphone opens while the grant is awaited, as on a PTT press (pttPress).
@@ -510,10 +658,14 @@ class McpttService(
             "BYE" -> {
                 if (call == null) { tx.respond(481); return true }
                 tx.respond(200)
-                event("call ${call.id}: released by the server")
-                release(call, request.headers["Reason"] ?: "released by the server")
+                // §11.1.1.2.1.2 (SIP BYE) 1): a first-to-answer invitee not selected; b) the user may be told why.
+                val notSelected = GroupCallRules.firstToAnswerRelease(call.firstToAnswer, infoOf(request)?.releaseReason)
+                event("call ${call.id}: released by the server" + (notSelected?.let { " ($it)" } ?: ""))
+                release(call, notSelected ?: request.headers["Reason"] ?: "released by the server")
             }
             "INFO", "MESSAGE" -> {
+                // TS 24.379 §16.2.1.3, §16.2.1.4: a regroup notice.
+                if (call == null && request.method == "MESSAGE" && regroups.handle(tx)) return true
                 if (call == null) return false
                 tx.respond(200)
                 infoOf(request)?.let { notePriority(call, it) }
@@ -530,15 +682,23 @@ class McpttService(
         val sdp = parts.firstOrNull { it.mediaType == "application/sdp" }?.text
         val type = CallType.of(info?.sessionType)
         if (info == null || sdp == null || type == null) { tx.respond(400, "Bad Request"); return }
+        // §11.1.1.2.1.2 step 8 c): busy on another call, 486 (Busy Here); the same for any other call type here.
         if (active != null) { tx.respond(486); return }
+        val firstToAnswer = info.sessionType == CallType.FIRST_TO_ANSWER
         val remote = try { McpttSdp.remote(sdp) } catch (e: SdpNegotiationError) { tx.respond(488); return }
-        // §11.1.2: only a private call comes without floor control.
+        // §11.1.2: only a private call (a first-to-answer call included, §11.1.2.1) comes without floor control.
         if (!remote.floorControl && type != CallType.PRIVATE) { tx.respond(488); return }
         val call = Call(ids.incrementAndGet(), type, false, info.callingUserId,
             if (type == CallType.PRIVATE) null else info.callingGroupId).also {
             it.floorControl = remote.floorControl
             it.callingAlias = info.functionalAlias
             it.calledAlias = info.calledFunctionalAlias
+            it.firstToAnswer = firstToAnswer
+            it.broadcast = info.broadcast == true
+            // §6.3.4.1.2 step 6 b): a call on a regroup names the member's constituent group.
+            it.associatedGroup = info.associatedGroupId
+            // The MCPTT session identity, the controlling function's Contact (isfocus), to rejoin an ad hoc call left.
+            it.sessionUri = request.headers["Contact"]?.let { c -> runCatching { NameAddr.parse(c).uri }.getOrNull() }
         }
         // TS 33.180 7.4 with TS 24.379 §11.1.1.2.1.2: a protected private call's offer carries the caller's PCK, which
         // must authenticate as from the calling MCPTT ID, else 488 with warning 136; a protected group call needs the
@@ -550,6 +710,16 @@ class McpttService(
             if (type == CallType.PREARRANGED && group != null) {
                 gmk = runCatching { awaitGroupKey(group) }.getOrNull()
                 if (gmk == null) { tx.respond(488); event("protected call on $group without its group key"); return }
+            } else if (type == CallType.PRIVATE && firstToAnswer) try {
+                // §11.1.1.2.1.2 step 5: for a first-to-answer call the invitee makes the PCK, for the caller, and offers
+                // it in its answer (NOTE 4: the invitee is the initiator of the I_MESSAGE).
+                val keys = client.keysOf(McService.MCPTT) ?: throw CallError("no MCPTT keys")
+                val made = keys.makePck(info.callingUserId ?: throw CallError("no caller"))
+                pck = made.first
+                call.answerKeyMgmt = made.second
+            } catch (e: Exception) {
+                event("first-to-answer call from ${info.callingUserId}: no PCK: ${e.message}")
+                tx.respond(488); return
             } else if (type == CallType.PRIVATE) try {
                 val keys = client.keysOf(McService.MCPTT) ?: throw CallError("no MCPTT keys")
                 pck = keys.acceptPck(info.callingUserId ?: throw CallError("no caller"), remote.keyMgmt ?: throw CallError("protected call without a PCK"))
@@ -564,9 +734,12 @@ class McpttService(
         call.incoming = tx
         call.invite = request
         _calls.value = _calls.value + call
-        event("call ${call.id}: incoming ${type.sessionType} call from ${info.callingUserId}${call.groupId?.let { " on $it" } ?: ""}")
+        event("call ${call.id}: incoming ${info.sessionType}${if (call.broadcast) " broadcast" else ""} call from ${info.callingUserId}" +
+            (call.groupId?.let { " on $it" } ?: "") + (call.associatedGroup?.let { " through $it" } ?: ""))
         // Commencement mode (§11.1.1.2.1.2 steps 9-10), the header values by token (RFC 5373 §2: "Auto;require" is Auto).
-        val manual = ClientRules.manualCommencement(request.headers["Answer-Mode"], request.headers["Priv-Answer-Mode"],
+        // Step 8 a): a first-to-answer call is always notified to the user, who answers it (the server's Priv-Answer-Mode
+        // is Manual, NOTE 5); step 8 d) the client's time out is the manual answer timeout, then 480.
+        val manual = firstToAnswer || ClientRules.manualCommencement(request.headers["Answer-Mode"], request.headers["Priv-Answer-Mode"],
             answerMode, type == CallType.PRIVATE)
         listener?.incoming(call)
         if (manual) {
@@ -599,14 +772,15 @@ class McpttService(
         // §11.1.2.3: an offer without floor control is answered without it, announcing our speech SSRC.
         val floored = if (remote.floorControl) bound else bound.copy(floorControl = false, audioSsrc = McpttSdp.newFloorSsrc())
         val local = floored.copy(protected = remote.protected)
-        val protection = try { protection(call.keys.first, localInitiator = false, gmk = call.keys.second, call = call) }
+        // A first-to-answer invitee is the initiator of its own PCK (§11.1.1.2.1.2 step 5 NOTE 4).
+        val protection = try { protection(call.keys.first, localInitiator = call.firstToAnswer, gmk = call.keys.second, call = call) }
             catch (e: CallError) { ports.close(); tx.respond(480); release(call, e.message ?: "no keys"); return }
         val media = newMedia(call, ports, local)
         media.protection = protection
         call.media = media
         val offered = tx.request.headers["Session-Expires"]?.substringBefore(';')?.trim()?.toIntOrNull() ?: 90
         call.sessionExpires = offered
-        val answer = McpttSdp.answer(remote, local, call.origin)
+        val answer = McpttSdp.answer(remote, local, call.origin, keyMgmt = call.answerKeyMgmt)
         val response = tx.response(200, body = answer.toByteArray(), contentType = "application/sdp", extra = listOf(
             "Contact" to client.sessionContact(McService.MCPTT), "Require" to "timer", "Supported" to "timer",
             "Session-Expires" to "$offered;refresher=uas", "Allow" to ALLOW))
@@ -734,15 +908,20 @@ class McpttService(
     fun answer(): Boolean = _calls.value.firstOrNull { it.state == "ringing" && !it.outgoing }?.answered?.complete(true) ?: false
     fun reject(): Boolean = _calls.value.firstOrNull { it.state == "ringing" && !it.outgoing }?.answered?.complete(false) ?: false
 
-    /** Leave or release the call (§6.2.4.1, §17.2.3.1.1). */
-    suspend fun hangup(call: Call? = active) {
+    /**
+     * Leave or release the call (§6.2.4.1, §10.1.2.2.3.1 for a chat call, §17.2.3.1.1). The originator of an ad hoc
+     * call releases it for all ([releaseAll], the BYE's Reason "User requested release"), or only leaves it (§17.2.4.1.1,
+     * a BYE without it); a left ad hoc call can be rejoined ([rejoinAdhoc]).
+     */
+    suspend fun hangup(call: Call? = active, releaseAll: Boolean = true) {
         call ?: throw CallError("no call")
         val dialog = call.dialog
+        if (call.type == CallType.ADHOC && dialog != null) lastAdhoc = call
         when {
             dialog != null -> {
                 call.media?.let { m -> if (m.floor.state.value == FloorState.HAS_PERMISSION) m.floor.release() }
                 val bye = ua.inDialog(dialog, "BYE")
-                if (call.type == CallType.ADHOC && call.outgoing) bye.headers.add("Reason", "SIP;cause=200;text=\"User requested release\"")
+                if (call.type == CallType.ADHOC && call.outgoing && releaseAll) bye.headers.add("Reason", "SIP;cause=200;text=\"User requested release\"")
                 runCatching { withTimeoutOrNull(5_000) { ua.send(bye, dialog) } }
                 release(call, "released")
             }

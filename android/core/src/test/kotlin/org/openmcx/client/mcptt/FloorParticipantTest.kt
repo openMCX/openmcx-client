@@ -102,6 +102,30 @@ class FloorParticipantTest {
         assertEquals(listOf("granted 00000005 30", "stop", "revoked 2"), events)
     }
 
+    /**
+     * TS 24.380 §6.2.4.5.4: a pre-empted talker (a higher priority request, §4.1.1.4) is revoked: the media stops, the user
+     * is told with the cause, and the Floor Release repeats the Floor Revoke's G-bit (Dual floor, items 4 and 5), with the
+     * call's indicator; then 'U: pending Release' until the Floor Taken of the new talker (§6.2.4.6).
+     */
+    @Test
+    fun preemptedTalkerReleasesWithTheDualFloorBit() = runTest {
+        val p = FloorParticipant(backgroundScope, server, { sent += it }, listener, priority = 10,
+            indicator = { FloorIndicator.EMERGENCY })
+        p.start(); p.request(); runCurrent()
+        assertEquals(10, sent.single().priority)
+        p.receive(granted(5))
+        sent.clear()
+        p.receive(FloorMessage(FloorType.REVOKE, 1, false, listOf(FloorField.REJECT_CAUSE to FloorMessage.u16(4),
+            FloorField.FLOOR_INDICATOR to FloorMessage.u16(FloorIndicator.EMERGENCY or FloorIndicator.DUAL_FLOOR))))
+        runCurrent()
+        val release = sent.single { it.type == FloorType.RELEASE }
+        assertEquals(FloorIndicator.EMERGENCY or FloorIndicator.DUAL_FLOOR, release.floorIndicator)
+        assertTrue("revoked 4" in events)
+        p.receive(taken(9, "sip:bob.mcptt@mcx.test"))
+        assertEquals(FloorState.NO_PERMISSION, p.state.value)
+        assertEquals("sip:bob.mcptt@mcx.test", p.talker)
+    }
+
     @Test
     fun staleSequenceNumbersAreIgnored() = runTest {
         val p = participant()

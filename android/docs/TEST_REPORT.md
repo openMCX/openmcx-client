@@ -177,3 +177,73 @@ pass the MESSAGE on), the grant in the 200 (OK), the Retry-After of a 500 or 503
 server does not refuse it), Answer-Mode with parameters (the server sends a plain `Auto`), the Floor Indicator's call
 type and bit F, the Location field of the Floor Request, `<forwarding-sequence-number>` and the SDP version of a
 subsequent answer.
+
+## Phase 6: location rules, group geographic areas, SEAL location
+
+Lab `p6-a`: `androidlab.py create --location --functional-alias --priority --mcvideo --location-rules`, server image
+`openmcx-all:mcdpre-800c657`, three redroid 15 clients. With `--location`, every client now gets a fused fix at the
+fixture's position (Android's test provider). Without it, redroid has no fix, so S13's log-on reports carried no
+coordinate and bob's S14 alert had no position.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 430 passed, 0 failed (416 before this phase). New: `LocationRulesTest` (10), `LocationRuleProceduresTest` (2), `SealLocationTest` (2), and an `IdmsTest` assertion |
+| `:app:assembleDebug` | Built |
+| One run of S1-S6, S13, S14 and S40-S45 | 139 of 139. In an earlier run S5 lost the last 6 of 100 frames at both listeners; it then passed twice on its own, 12 of 12 each time |
+
+| # | Scenario | Checks | Result |
+|---|---|---|---|
+| S40 | Location based functional aliases (TS 24.379 §9A.2.1.4, TS 24.282 §22.2.1.4) | 5 | Entering the area activates incident-commander on MCPTT and MCData. The app says it was activated by location. The user's deactivation is refused (§9A.2.1.2 lock). Leaving the area deactivates it on both services |
+| S41 | Rules based affiliation (§9.2.1.7.2, TS 24.282 §8.2.6.2) | 6 | Entering the rule area de-affiliates alice from `operations` on MCPTT and MCData, and bob's group call does not reach her. Leaving it affiliates her again. Her de-affiliation is then refused (§9.2.1.2 lock) |
+| S42 | Group mandatory area (§9.2.1.7.3) | 4 | The group's area is read from the GMS. Outside it, alice de-affiliates and an affiliation is refused. Back inside, she affiliates again |
+| S43 | Group geographic area notices (§12.1.1.4, TS 24.282 §16.2.1.4) | 5 | The server's notices name the group on both services. Leaving de-affiliates her, and entering again affiliates her again |
+| S44 | Emergency alert area (§12.1.1.6, TS 37.579-2 6.6.4) | 4 | The notice raises alice's MCPTT alert with no user request. Bob receives it at the area's position. Leaving the area leaves the alert up |
+| S45 | SEAL location (TS 24.545 §6.2.2.2, §6.2.20.2) | 4 | The configuration is read from the LMS. Periodic reports are accepted with 200. Positions are stored offline, then sent in a history location result report |
+
+Not exercised in the lab, unit tests only:
+- the permitted geographic area;
+- a rule's functional alias criterion, when the alias is activated;
+- `<Speed>` and `<Heading>` areas;
+- conflicting rules;
+- MCVideo aliases with location criteria (the lab has none).
+
+Two problems were found in the lab and fixed:
+- The LMS refused the SEAL configuration with 403. The token had no `3gpp:mc:location_management_service` scope.
+- Area notices were indexed by position in a list capped at 20 entries. The scenarios now use each notice's time.
+
+## Parity phase 2 (2026-11-25)
+
+[PARITY_PLAN.md](PARITY_PLAN.md) phase 2 (branch `android-p2`): MCPTT call types, floor priority and pre-emption,
+regroups and temporary groups. Three labs, each three redroid 15 clients (`redroid/redroid:15.0.0_64only-latest`) on
+`openmcx-all:mcdpre-800c657`, TLS, run one after the other:
+
+- `p2-a`: `lab/androidlab.py create --name p2-a` (the default fixture), the regression and S28;
+- `p2-f`: `--priority --chat --broadcast` (the private call policy: client-a may make first-to-answer calls; bob may
+  pre-empt the floor at priority 75 or more, his floor priority 90, the others' 10);
+- `p2-g`: `--regroup` (constituent groups north with client-a and client-b, south with client-c; client-a may regroup
+  and form temporary groups).
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 439 passed, 0 failed (416 before this phase) |
+| App unit tests (`:app:testDebugUnitTest`) | 13 passed |
+| `:app:assembleDebug` | Built |
+| S1-S6 (regression, `p2-a`) | 76 of 76 |
+| S28 on `p2-a` | 19 of 19 |
+| S1, S25-S29 on `p2-f` | 90 of 90 |
+| S30, S31 on `p2-g` | 41 of 41 |
+
+| # | Scenario | Checks | Result |
+|---|---|---|---|
+| S25 | First-to-answer (TS 24.379 §11.1.1.2.1.1, §11.1.1.2.1.2) | 23 | alice's INVITE names bob and client-c with session type first-to-answer, no Answer-Mode or forwarding sequence number; both ring (before, the app answered such an INVITE with 400, TS 37.579-2 6.2.21); bob, then client-c in a second round, answers first and takes the call, the other's invitation ends; speech both ways unchanged; bob, without the right, is refused |
+| S26 | Chat group call (§10.1.2.2.1.1, §10.1.2.2.3.1) | 16 | alice joins with session type chat and nobody is invited; bob and client-c join the same call; bob leaves and joins again while the others stay; speech unchanged; the call ends when one participant remains (the server's §6.3.8.1 item 2) |
+| S27 | Broadcast group call (§6.2.8.2) | 10 | `<broadcast-ind>` true in alice's INVITE; bob and client-c receive a broadcast call; bob is denied the floor (cause 5, receive only); alice's burst reaches both, and the server ends the call with it |
+| S28 | Ad hoc call by criteria and its modification (§17.2.2.1.1, §17.2.6.1.1, §17.2.4.1.1, §17.2.5.1.1) | 19 | the criteria `affiliated:sip:operations@mcx.test` and no resource list; bob and client-c are called; client-c removed (`;method=BYE`) and added again; the criteria changed; bob leaves and rejoins by the session identity and talks |
+| S29 | Floor priority and pre-emption (TS 24.380 §14.3.3, §6.2.4.5.4) | 7 | bob's offer has `mc_priority=90`, negotiated 90; while alice (10) talks, bob's request revokes her and he is granted; alice sees the revoke, then bob take the floor; client-c (10) does not pre-empt alice |
+| S30 | Regroup (§16.2.1.1-§16.2.1.4, §10.1.1.2.1.1 step 14 d)) | 24 | bob is refused (160); alice's regroup of north and south is created and all three are told, with both groups; a call on north is refused (148); alice's call on the regroup names north in `<associated-group-id>` and reaches bob and client-c; speech both ways; the removal is told to all and north carries a call again |
+| S31 | Temporary group (TS 24.481 §6.3.14.2, §6.3.15.2) | 17 | bob is refused (403); alice's temporary group of north and south is formed (200), the three are told; its document lists both constituents; a call on it reaches bob and client-c with the speech unchanged; the tear down (200) is told to all |
+
+Not exercised in the lab, unit tests only: a received BYE with "not selected for call" (the OpenMCX server sends it only
+when two answers cross), a protected first-to-answer call, the Floor Release's G-bit after a dual-floor revoke, the
+floor priority from the group document or the user profile (the lab's comes from the provisioning), and
+`<preconfigured-group-use-only>` refused locally (the regroup lab's preconfigured group is never called directly).

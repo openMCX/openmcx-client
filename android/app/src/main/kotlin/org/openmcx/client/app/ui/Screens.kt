@@ -213,6 +213,10 @@ object Tags {
     fun adhocChoice(criteria: String) = "adhoc-choice-$criteria"
     const val ALERT_RESULT = "alert-result"
     fun callGroup(group: String) = "call-group-$group"
+    fun callBroadcast(group: String) = "call-broadcast-$group"
+    const val FIRST_TO_ANSWER = "first-to-answer"
+    const val ADHOC_CRITERIA = "adhoc-criteria"
+    fun adhocCriteria(criteria: String) = "adhoc-criteria-$criteria"
     fun monitor(group: String) = "monitor-$group"
     fun groupStatus(group: String) = "group-status-$group"
     const val SETTINGS_NOTE = "settings-note"
@@ -565,11 +569,15 @@ private fun groupStatusText(g: GroupItem): String {
         "affiliated" -> "affiliated"
         else -> g.status
     }
-    return when (g.kind) {
+    val constituents = g.constituents.takeIf { it.isNotEmpty() }?.joinToString(prefix = " of ") { it.short() }.orEmpty()
+    return (if (g.chat && !g.regrouped) "chat, " else "") + when (g.kind) {
+        // TS 24.379 §16.2.1.3, TS 24.481 §6.3.14: the regroup or temporary group, and the groups it combines.
+        "regroup" -> "regroup" + (if (g.chat) " (chat)" else "") + constituents
+        "temporary" -> "temporary group" + (if (g.chat) " (chat)" else "") + constituents
         "monitored" -> "monitored, $affiliation"
         "available" -> if (g.status == null) "not monitored" else "not monitored, $affiliation"
         else -> affiliation
-    }
+    } + (g.rule?.let { " ($it)" } ?: "")
 }
 
 /**
@@ -631,7 +639,7 @@ private fun TalkScreen(state: UiState, actions: UiActions) {
                             modifier = Modifier.testTag(Tags.groupStatus(g.id)))
                     }
                 }
-                if (g.kind != "base") {
+                if (g.kind == "monitored" || g.kind == "available") {
                     // Monitor a group of the user profile besides the base groups (TS 24.379 §9.2.1.2).
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Switch(checked = g.monitored, onCheckedChange = { actions.setMonitored(g.id, it) }, enabled = state.registered,
@@ -640,9 +648,10 @@ private fun TalkScreen(state: UiState, actions: UiActions) {
                     }
                 }
                 if (g.callable) {
+                    // A chat group call is joined (TS 24.379 §10.1.2.2.1.1); the same request starts it.
                     Button(onClick = { actions.callGroup(g.id) }, enabled = state.registered,
-                        modifier = Modifier.testTag(Tags.callGroup(g.id))) { Text("Call") }
-                    GroupOptions(g.id, state.registered, actions)
+                        modifier = Modifier.testTag(Tags.callGroup(g.id))) { Text(if (g.chat) "Join" else "Call") }
+                    GroupOptions(g.id, state.registered, actions, broadcast = !g.chat)
                 }
             }
         }
@@ -657,8 +666,14 @@ private fun TalkScreen(state: UiState, actions: UiActions) {
             }
         }
         item {
-            Button(onClick = { actions.callAdhoc(adhoc.toList()) }, enabled = state.registered && adhoc.isNotEmpty(),
-                modifier = Modifier.padding(vertical = 8.dp)) { Text("Ad hoc call with ${adhoc.size} selected") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = { actions.callAdhoc(adhoc.toList()) }, enabled = state.registered && adhoc.isNotEmpty(),
+                    modifier = Modifier.padding(vertical = 8.dp)) { Text("Ad hoc call with ${adhoc.size} selected") }
+                // TS 24.379 §11.1.1.2.1.1: the first of two or more users to answer takes the call.
+                OutlinedButton(onClick = { actions.callFirstToAnswer(adhoc.toList()) }, enabled = state.registered && adhoc.size >= 2,
+                    modifier = Modifier.testTag(Tags.FIRST_TO_ANSWER)) { Text("First to answer") }
+            }
+            if (state.adhocCallChoices.isNotEmpty()) AdhocCriteriaPicker(state, actions)
             Text("Press PTT with no call to call the selected group.", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
         }
         if (state.alertServices.isNotEmpty()) {
@@ -733,7 +748,7 @@ private fun FunctionalAliases(state: UiState, actions: UiActions) {
                 Text(when (alias.service) { "mcdata" -> "MCData"; "mcvideo" -> "MCVideo"; else -> "MCPTT" }, color = Mcx.Muted,
                     style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
                 val (label, ink) = when (alias.status) {
-                    "active" -> (if (alias.inUse) "Active · on your calls" else "Active") to Mcx.OkInk
+                    "active" -> ((if (alias.inUse) "Active · on your calls" else "Active") + if (alias.byLocation) " · by location" else "") to Mcx.OkInk
                     "take-over-possible" -> "Held by another user" to Mcx.WarnInk
                     else -> "Not active" to Mcx.Muted
                 }
@@ -839,7 +854,12 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
     Column(Modifier.fillMaxSize().background(Mcx.Ivory)) {
         Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(when (call.type) { CallType.PRIVATE -> "Private call"; CallType.PREARRANGED -> "Group call"; CallType.ADHOC -> "Ad hoc call" },
+                Text(when {
+                    call.firstToAnswer -> "First-to-answer call"
+                    call.broadcast -> if (call.type == CallType.ADHOC) "Ad hoc broadcast call" else "Broadcast call"
+                    else -> when (call.type) { CallType.PRIVATE -> "Private call"; CallType.PREARRANGED -> "Group call"
+                        CallType.ADHOC -> if (call.criteria != null) "Ad hoc call by criteria" else "Ad hoc call"; CallType.CHAT -> "Chat group call" }
+                },
                     color = Mcx.Muted, style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
                 if (call.startedAt > 0) Text(clock(now - call.startedAt), color = Mcx.Muted, style = MaterialTheme.typography.labelLarge.merge(Tabular))
             }
@@ -1215,13 +1235,42 @@ private fun EmergencyAlert(state: UiState, actions: UiActions) {
     )
 }
 
-/** A group's other calls: emergency and imminent peril (TS 24.379 §6.2.8.1). */
+/**
+ * An ad hoc group call by participant criteria (TS 24.379 §17.2.2.1.1 step 12): the server determines who is called,
+ * from the criteria chosen here (the members of, or those affiliated to, one of the user's groups).
+ */
 @Composable
-private fun GroupOptions(group: String, enabled: Boolean, actions: UiActions) {
+private fun AdhocCriteriaPicker(state: UiState, actions: UiActions) {
+    var choosing by remember { mutableStateOf(false) }
+    OutlinedButton(onClick = { choosing = true }, enabled = state.registered, modifier = Modifier.testTag(Tags.ADHOC_CRITERIA)) {
+        Text("Ad hoc call by criteria…")
+    }
+    if (choosing) AlertDialog(
+        onDismissRequest = { choosing = false },
+        title = { Text("Ad hoc group call") },
+        text = {
+            Column {
+                Text("Call everyone who is:", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                state.adhocCallChoices.forEach { c ->
+                    TextButton(onClick = { choosing = false; actions.callAdhocCriteria(c.criteria) },
+                        modifier = Modifier.fillMaxWidth().testTag(Tags.adhocCriteria(c.criteria))) { Text(c.label, modifier = Modifier.fillMaxWidth()) }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = { choosing = false }) { Text("Cancel") } },
+    )
+}
+
+/** A group's other calls: broadcast (TS 24.379 §6.2.8.2), emergency and imminent peril (§6.2.8.1). */
+@Composable
+private fun GroupOptions(group: String, enabled: Boolean, actions: UiActions, broadcast: Boolean = true) {
     var open by remember { mutableStateOf(false) }
     Box {
         MoreButton("More ways to call ${group.short()}", Tags.groupOptions(group), enabled) { open = true }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            if (broadcast) DropdownMenuItem(text = { Text("Broadcast call (only you talk)") }, modifier = Modifier.testTag(Tags.callBroadcast(group)),
+                onClick = { open = false; actions.callGroupBroadcast(group) })
             DropdownMenuItem(text = { Text("Emergency group call", color = Mcx.OnStop) }, modifier = Modifier.testTag(Tags.callEmergency(group)),
                 onClick = { open = false; actions.callGroupPriority(group, "emergency") })
             DropdownMenuItem(text = { Text("Imminent peril group call", color = Mcx.OnRequesting) }, modifier = Modifier.testTag(Tags.callImminent(group)),

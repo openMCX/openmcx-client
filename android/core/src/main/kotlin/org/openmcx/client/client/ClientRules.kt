@@ -21,7 +21,8 @@ object ClientRules {
 
     /**
      * TS 24.379 §11.1.1.2.1.2 steps 9 and 10 (TS 24.281 the same): manual commencement of an incoming call. A
-     * Priv-Answer-Mode "Auto" forces the automatic answer; Answer-Mode "Manual" asks for the manual one; Answer-Mode
+     * Priv-Answer-Mode "Auto" forces the automatic answer and "Manual" the manual one (step 10 c), as the server sets
+     * for each invitee of a first-to-answer call, §11.1.1.4.1); Answer-Mode "Manual" asks for the manual one; Answer-Mode
      * "Auto" may still be answered manually by a private call's called user who set manual; otherwise the local
      * setting. The header values by token ([answerModeToken]).
      */
@@ -29,6 +30,7 @@ object ClientRules {
         val answer = answerModeToken(answerMode)
         return when {
             answerModeToken(privAnswerMode) == "auto" -> false
+            answerModeToken(privAnswerMode) == "manual" -> true
             answer == "manual" -> true
             answer == "auto" -> localMode == "manual" && privateCall
             else -> localMode == "manual"
