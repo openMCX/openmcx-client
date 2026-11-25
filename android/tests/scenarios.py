@@ -93,6 +93,15 @@ class Lab:
         for c in clients:
             self.wait(f"{c} has no call", lambda c=c: self.call(c) is None, timeout=10)
 
+    def group_call_over(self) -> None:
+        """Every member of the group has left the group call, not only the two phones checked: when the initiator
+        leaves, the MCPTT server BYEs the others but keeps the session until each has answered, and a new group call
+        INVITE in that time joins the session being released, which then ends with its last answer (see
+        TEST_REPORT.md, "S16"). The reference client cannot be asked, so it gets a grace period."""
+        self.idle_everywhere(list(self.devices))
+        if meta(self.name).get("reference_clients"):
+            time.sleep(2)
+
     # Speech: talk and verify every listener got the talker's payloads unchanged.
     def talk_and_verify(self, talker: str, listeners: list[str], seconds: float = 3.0) -> None:
         before = {l: len(self.call(l)["bursts"]) for l in listeners}
@@ -751,7 +760,7 @@ class Lab:
         self.check("alice cancels the emergency in the call; bob's phone follows", priority(A) == "normal")
         self.check("alice's location reporting is back to normal", self.location_of(A)["emergency"] is False)
         self.hangup(A)
-        self.idle_everywhere([A, B])
+        self.group_call_over()
         self.cmd(A, "group", GROUP, "imminent", timeout=30)
         self.established(B)
         self.wait("bob's phone shows imminent peril", lambda: priority(B) == "imminent")
@@ -764,7 +773,7 @@ class Lab:
         self.wait("the emergency ends at alice's phone", lambda: priority(A) == "normal")
         self.check("bob cancels it", priority(B) == "normal")
         self.hangup(A)
-        self.idle_everywhere([A, B])
+        self.group_call_over()
         self.cmd(A, "private", MCPTT[B], "auto", "emergency", timeout=30)
         self.established(B)
         self.wait("bob's phone shows the emergency private call", lambda: priority(B) == "emergency")
@@ -1286,7 +1295,11 @@ class Lab:
         group; bob leaves (§22.2.4.1.1) and re-joins at the session identity (§22.2.5.1.1); alice releases it for
         everyone (§22.2.3.1.1, Reason "User requested release"). Then emergency and imminent peril ad hoc group calls
         (§6.2.8.1.19, §6.2.8.1.23, <adhoc-emergency-ind>, <imminentperil-ind>) that bob receives as such. client-c, when the lab has the reference client, is the third participant."""
-        others = ["sip:bob.mcvideo@mcx.test"] + (["sip:client-c.mcvideo@mcx.test"] if meta(self.name).get("reference_clients") else [])
+        # A third participant (client-c: the reference client or the redroid one), so that the call outlives bob's
+        # leaving (TS 24.281 §6.3.8.1 item 2: a group call with one participant left is released).
+        third = bool(meta(self.name).get("reference_clients")) or C in self.devices
+        others = ["sip:bob.mcvideo@mcx.test"] + (["sip:client-c.mcvideo@mcx.test"] if third else [])
+        android = [c for c in (A, B, C) if c in self.devices]
         call = self.cmd(A, "video-adhoc", *others, timeout=30)
         group = call["group"] or ""
         self.check("alice's ad hoc group video call is up, and the server names its ad hoc group",
@@ -1314,7 +1327,7 @@ class Lab:
         self.check("the MCVideo server keeps the ad hoc call for the others (its policy, clause 6.3.8.1 item 3)",
                    (self.video(B) or {}).get("state") == "established")
         self.video_hangup(B)
-        self.video_idle([A, B])
+        self.video_idle(android)
         if not meta(self.name).get("priority"):
             return
         for level in ("emergency", "imminent"):
@@ -1327,7 +1340,7 @@ class Lab:
             self.cmd(A, "video-adhoc-release")
             self.video_idle([A])
             self.video_hangup(B)
-            self.video_idle([A, B])
+            self.video_idle(android)
 
     def v3_priority_extras(self) -> None:
         """On a lab made with --priority: an authorised user cancels another user's emergency alert with the emergency
