@@ -47,6 +47,8 @@ class FdServiceTest {
         var refreshes = 0
         var policies = mapOf<String, GroupFdPolicy>()
         override suspend fun send(parts: List<Part>): SipResponse { sent += parts; log += "sip"; return answer(parts) }
+        val headers = mutableListOf<List<Pair<String, String>>>()
+        override suspend fun send(parts: List<Part>, headers: List<Pair<String, String>>): SipResponse { this.headers += headers; return send(parts) }
         override fun token() = token
         override suspend fun refreshToken() { refreshes++; token = "t${refreshes + 1}" }
         override fun groupPolicy(group: String) = policies[group]
@@ -371,5 +373,56 @@ class FdServiceTest {
         assertEquals("_etc_passwd", FdService.localName("/etc/passwd"))
         assertEquals("日本.pdf", FdService.localName("日本.pdf"))
         assertEquals("file", FdService.localName(".."))
+    }
+
+    // Release and extension (TS 24.282 §6.2.2.4, §13.2.4.5, §13.2.6.3).
+
+    @Test fun ownDistributionIsTerminatedAndTheServersAnswerRecorded() = runTest {
+        val peer = FakePeer(); val files = FakeFiles()
+        val fd = service(backgroundScope, peer, files)
+        val (file, metadata) = staged()
+        val sent = fd.send("sip:bob@mcx.test", false, file, metadata)
+        fd.terminate(sent.id, "cancel")
+        val parts = peer.sent.last()
+        val info = McdataInfo.parse(parts.single { it.mediaType == McdataInfo.CONTENT_TYPE }.text)
+        assertEquals("one-to-one-fd", info.requestType)
+        assertEquals(peer.clientId, info.clientId)
+        assertEquals(listOf("sip:bob@mcx.test"), ResourceLists.parse(parts.single { it.mediaType == ResourceLists.CONTENT_TYPE }.text))
+        val termination = FdHttpTermination.decode(signalling(parts))
+        assertEquals(TerminationType.REQUEST, termination.type)
+        assertEquals(sent.url, termination.fileUrl)
+        assertEquals(sent.id, termination.messageId.toString())
+        // TS 24.282 §6.3.6.1: the server's answer.
+        fd.receive(request(listOf(Part(McdataService.SIGNALLING, FdHttpTermination(UUID.fromString(sent.conversationId),
+            UUID.fromString(sent.id), TerminationType.RESPONSE, releaseSucceeded = true).encode()))))
+        assertEquals("terminated", fd.record(sent.id)!!.release)
+    }
+
+    @Test fun intentToReleaseThenExtensionRequestWithTheControllerPsi() = runTest {
+        val peer = FakePeer(); val files = FakeFiles()
+        val fd = service(backgroundScope, peer, files)
+        val (file, metadata) = staged()
+        val sent = fd.send("sip:ops@mcx.test", true, file, metadata)
+        fd.receive(request(listOf(Part(McdataInfo.CONTENT_TYPE, McdataInfo(controllerPsi = "sip:controller@mcx.test").encode().toByteArray()),
+            Part(McdataService.SIGNALLING, FdHttpTermination(UUID.fromString(sent.conversationId), UUID.fromString(sent.id),
+                TerminationType.INTENT_TO_RELEASE).encode()))))
+        assertEquals("release pending", fd.record(sent.id)!!.release)
+        fd.terminate(sent.id, "extend")
+        val info = McdataInfo.parse(peer.sent.last().single { it.mediaType == McdataInfo.CONTENT_TYPE }.text)
+        assertEquals("sip:controller@mcx.test", info.controllerPsi)
+        assertEquals("group-fd", info.requestType)
+        assertEquals(TerminationType.EXTENSION_REQUEST, FdHttpTermination.decode(signalling(peer.sent.last())).type)
+        // The authorised user's intent to release carries the Reason (§13.2.6.3.2.1 step 3); its extension response the answer.
+        fd.terminate(sent.id, "release-intent", reason = "quota")
+        assertEquals(listOf("Reason" to "SIP;cause=200;text=\"quota\""), peer.headers.last())
+        fd.terminate(sent.id, "extension-response", accept = false)
+        assertEquals(false, FdHttpTermination.decode(signalling(peer.sent.last())).extensionAccepted)
+    }
+
+    @Test fun fdHttpTerminationCodec() {
+        val m = FdHttpTermination(UUID.randomUUID(), UUID.randomUUID(), TerminationType.EXTENSION_RESPONSE, extensionAccepted = true,
+            fileUrl = "https://x/f")
+        assertEquals(m, FdHttpTermination.decode(m.encode()))
+        assertEquals(0x0d, m.encode()[0].toInt())
     }
 }

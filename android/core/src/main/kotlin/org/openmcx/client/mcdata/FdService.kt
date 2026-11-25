@@ -45,6 +45,8 @@ interface FdPeer {
     val clientId: String
     /** Send a MESSAGE with the FD feature tag and ICSI (TS 24.282 §6.2.4.1) to the MCData PSI. */
     suspend fun send(parts: List<Part>): SipResponse
+    /** [send] with header fields (a Reason, TS 24.282 §13.2.6.3.2.1 step 3). */
+    suspend fun send(parts: List<Part>, headers: List<Pair<String, String>>): SipResponse = send(parts)
     fun token(): String?
     suspend fun refreshToken()
     fun groupPolicy(group: String): GroupFdPolicy?
@@ -58,13 +60,15 @@ class ClientFdPeer(private val client: McxClient) : FdPeer {
     private val mcdata = client.config.mcdata!!
     override val userId get() = mcdata.userId
     override val clientId get() = client.config.clientId
-    override suspend fun send(parts: List<Part>): SipResponse {
+    override suspend fun send(parts: List<Part>): SipResponse = send(parts, emptyList())
+    override suspend fun send(parts: List<Part>, headers: List<Pair<String, String>>): SipResponse {
         val request = client.ua.newRequest("MESSAGE", mcdata.psi, NameAddr(mcdata.psi))
         val (type, body) = Multipart.encode(parts)
         request.headers.add("Accept-Contact", "*;+g.3gpp.mcdata.fd;require;explicit")
             .add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCDATA_FD)}\";require;explicit")
             .add("P-Preferred-Service", Icsi.MCDATA_FD)
             .add("Content-Type", type)
+        headers.forEach { (k, v) -> request.headers.add(k, v) }
         return client.ua.send(SipRequest(request.method, request.uri, request.headers, body))
     }
     override fun token() = client.tokens?.accessToken
@@ -343,6 +347,63 @@ class FdService(
         return rejected
     }
 
+    // Release and extension (TS 24.282 §6.2.2.4, §13.2.1.2, §13.2.4.5, §13.2.5.3, §13.2.6.3).
+
+    /**
+     * An FD HTTP TERMINATION to the MCData server for the distribution [id]: "cancel" this user's own (§6.2.2.4,
+     * termination request), "release" another user's as an authorised user (§13.2.5.3.2.1), "extend" after the server's
+     * intent to release (§13.2.4.5.2.2, with the stored controller PSI), "release-intent" as the authorised user
+     * (§13.2.6.3.2.1, with the Reason), "extension-response" to the originator's extension request (§13.2.6.3.2.3,
+     * [accept]). mcdata-info carries the client ID, and the request type of an own distribution or the originator
+     * (§13.2.1.2 step 5a); a one-to-one release names the recipient in resource-lists (§13.2.2.3.2.1.1 2)a)).
+     */
+    suspend fun terminate(id: String, action: String, accept: Boolean? = null, reason: String? = null): FdRecord {
+        val record = record(id) ?: throw FdError("no file distribution $id")
+        val type = when (action) {
+            "cancel" -> TerminationType.REQUEST
+            "release" -> TerminationType.AUTHORISED_USER_REQUEST
+            "extend" -> TerminationType.EXTENSION_REQUEST
+            "release-intent" -> TerminationType.INTENT_TO_RELEASE
+            "extension-response" -> TerminationType.EXTENSION_RESPONSE
+            else -> throw FdError("action: cancel, release, extend, release-intent or extension-response")
+        }
+        if (type == TerminationType.EXTENSION_RESPONSE && accept == null) throw FdError("accept or reject the extension")
+        val own = !record.incoming
+        val message = FdHttpTermination(UUID.fromString(record.conversationId), UUID.fromString(record.id), type,
+            extensionAccepted = if (type == TerminationType.EXTENSION_RESPONSE) accept else null, fileUrl = record.url)
+        val info = McdataInfo(
+            requestType = if (own) (if (record.group != null) "group-fd" else "one-to-one-fd") else null,
+            requestUri = if (own) record.group else record.peer,
+            clientId = peer.clientId,
+            controllerPsi = record.controllerPsi.takeIf { type == TerminationType.EXTENSION_REQUEST })
+        val parts = mutableListOf(Part(McdataInfo.CONTENT_TYPE, info.encode().toByteArray()))
+        if (own && record.group == null) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOf(record.peer)).toByteArray())
+        parts += Part(McdataService.SIGNALLING, message.encode())
+        val response = peer.send(parts, listOfNotNull(reason?.let { "Reason" to "SIP;cause=200;text=\"$it\"" }))
+        event("FD $action of $id: ${status(response)}")
+        if (!response.isSuccess) throw FdError("FD $action: ${status(response)}")
+        return update(id) { it.copy(release = if (type == TerminationType.REQUEST) "terminating" else "$action requested") }!!
+    }
+
+    /**
+     * The server's FD HTTP TERMINATION: the answer to a release (§6.3.6.1), a transmission stopped by policy
+     * (§13.2.3.3.4), the intent to release (§13.2.4.5.2.1, with the controller PSI for an extension request) and the
+     * answer to an extension request (§13.2.4.5.2.3).
+     */
+    private fun termination(info: McdataInfo?, message: FdHttpTermination) {
+        val id = message.messageId.toString()
+        val state = when (message.type) {
+            TerminationType.RESPONSE -> if (message.releaseSucceeded == true) "terminated" else "termination failed"
+            TerminationType.TRANSMISSION_STOPPED -> "stopped"
+            TerminationType.INTENT_TO_RELEASE -> "release pending"
+            TerminationType.EXTENSION_RESPONSE -> if (message.extensionAccepted == true) "extended" else "extension refused"
+            TerminationType.EXTENSION_REQUEST -> "extension requested"
+            else -> message.type.name.lowercase()
+        }
+        event("FD $id: $state")
+        update(id) { it.copy(release = state, controllerPsi = info?.controllerPsi ?: it.controllerPsi) }
+    }
+
     /** An FD NOTIFICATION to the originator (§12.2.1.1). */
     private suspend fun notify(record: FdRecord, type: FdNotificationType) {
         val notice = FdNotification(type, clock(), UUID.fromString(record.conversationId), UUID.fromString(record.id),
@@ -396,6 +457,7 @@ class FdService(
                 FD_SIGNALLING -> offer(info ?: return 400, FdSignalling.decode(part.content))
                 FD_NOTIFICATION -> notification(info, FdNotification.decode(part.content))
                 FD_NETWORK_NOTIFICATION -> networkNotification(FdNetworkNotification.decode(part.content))
+                FdHttpTermination.MESSAGE_TYPE -> termination(info, FdHttpTermination.decode(part.content))
                 else -> event("ignored FD message type ${MessageType.of(part.content)}")
             }
         } catch (e: McdataCodecError) {
