@@ -178,10 +178,11 @@ void Client::mcdata_open_session(const std::string &target, bool group, const st
     std::vector<SipHeader> priority_headers;
     for (const auto &header : headers)
       if (header.name == "Resource-Priority") priority_headers.push_back(header);
-    std::vector<BodyPart> entry_extra;
+    std::vector<BodyPart> extra_parts;
     for (const auto &part : parts)
-      if (part.content_type == mcdata::location_mime) entry_extra.push_back(part);
-    mcdata_pre_refer(target, info, offer, entry_extra, priority_headers, emergency ? "emergency" : imminent ? "imminent" : "");
+      if (part.content_type == mcdata::location_mime) extra_parts.push_back(part);
+    mcdata_pre_refer(target, info, offer, extra_parts, priority_headers,
+                     emergency ? "emergency" : imminent ? "imminent" : "");
   } else {
     mcdata_media_dialog_ = sip_.invite_sdp(
         request_uri, msrp_sdp(offer, 1), mcdata_seal_signalling(parts),

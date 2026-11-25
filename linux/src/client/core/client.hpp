@@ -2651,7 +2651,7 @@ private:
   MsrpMedia mcdata_pre_media(const std::string &direction) const;
   std::string mcdata_pre_sdp(const std::string &setup) const;
   void mcdata_pre_refer(const std::string &target, const mcdata::Info &info, const MsrpMedia &offer,
-                        const std::vector<BodyPart> &entry_extra = {}, const std::vector<SipHeader> &extra_headers = {},
+                        const std::vector<BodyPart> &extra_parts = {}, const std::vector<SipHeader> &extra_headers = {},
                         const std::string &priority = {});
   void mcdata_pre_priority_granted(const SipMessage &reinvite, const mcdata::Info &info);
   void mcdata_pre_priority_refused(const SipResponse &response);

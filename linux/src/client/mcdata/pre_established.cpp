@@ -189,24 +189,24 @@ bool Client::mcdata_pre_usable() const {
 // mcdata_session_priority_state, clauses 6.2.8.1.1, 6.2.8.1.9, 6.2.8.3.2): the indications are in the entry's
 // MCData-Info, the one the participating function forwards (clause 9.2.5.1.1 9)a)), and in an MCData-Info body of the
 // REFER itself (clause 9.2.5.2.1.1 1a)a) for a one-to-one communication; clauses 9.2.5.3.2.1 6A)-6B) have the
-// participating function read "the" MCData-Info of the REFER for a group one); entry_extra (the location information
-// of an emergency alert, clause 6.2.8.1.1 3)b)) goes into the entry's body; extra_headers (Resource-Priority, clause
-// 9.2.5.3.1.1 3B), 3D)) into the REFER.
+// participating function read "the" MCData-Info of the REFER for a group one); extra_parts (the location information
+// of an emergency alert, clause 6.2.8.1.1 3)b)) go into the REFER's body (not into the entry: its URI, with the
+// escaped and protected bodies, would exceed what a resource list entry carries); extra_headers (Resource-Priority,
+// clause 9.2.5.3.1.1 3B), 3D)) into the REFER.
 void Client::mcdata_pre_refer(const std::string &target, const mcdata::Info &info, const MsrpMedia &offer,
-                              const std::vector<BodyPart> &entry_extra, const std::vector<SipHeader> &extra_headers,
+                              const std::vector<BodyPart> &extra_parts, const std::vector<SipHeader> &extra_headers,
                               const std::string &priority) {
   auto &pre = *mcdata_pre_;
   const auto ids = sip_.dialog_identifiers(pre.dialog);
   if (!ids || pre.uri.empty()) throw std::runtime_error("the pre-established session has no dialog identifiers");
   std::vector<BodyPart> entry_parts{{"application/sdp", msrp_sdp(offer, 1), random_id().substr(0, 16) + "@mcx"},
                                     {mcdata::info_mime, mcdata::info_xml(info), random_id().substr(0, 16) + "@mcx"}};
-  for (const auto &part : entry_extra)
-    entry_parts.push_back({part.content_type, part.body, random_id().substr(0, 16) + "@mcx"});
   auto entry_body = mcdata_seal_signalling(std::move(entry_parts));
   const ReferEntry entry{target, {}, std::move(entry_body)};
   const auto content_id = random_id().substr(0, 16) + "@mcx";
   std::vector<BodyPart> body{refer_resource_list_part(entry, content_id, "mcdata-entry")};
   if (!priority.empty()) body.push_back({mcdata::info_mime, mcdata::info_xml(info)});
+  for (const auto &part : extra_parts) body.push_back(part);
   auto list = mcdata_encrypt_xml(std::move(body), mcdata_xml_key());
   std::vector<SipHeader> headers{{"Refer-To", cid_refer_to(content_id)},
                                  {"Refer-Sub", "false"},
