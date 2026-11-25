@@ -138,3 +138,31 @@ Fixed:
 
 Not checked: Android 12L (API 32), which has no redroid image. The redroid 11 image does not boot on a host whose
 `binder_linux` creates no `/dev/binder` nodes; the emulator was used instead.
+
+## Parity phases 0 and 1 (2026-11-25)
+
+[PARITY_PLAN.md](PARITY_PLAN.md) phases 0 and 1 (branch `android-p01`). The lab: `lab/androidlab.py create --name p01-a
+--server-image openmcx-all:mcdpre-800c657 --monitor-group` (the server images of `openmcx-server` main bc650a2), three
+redroid 15 clients (`redroid/redroid:15.0.0_64only-latest`), TLS.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 416 passed, 0 failed (389 before these phases) |
+| `:app:assembleDebug` | Built |
+| S1-S6 (regression) | 76 of 76 |
+| S20-S24 | 67 of 67 |
+| One run of S1-S6 and S20-S24 after the last fix | 143 of 143 |
+
+| # | Scenario | Checks | Result |
+|---|---|---|---|
+| S20 | Implicit floor request (TS 24.380 §14.2.5, §6.2.4.2.2) | 19 | The INVITE's offer has `mc_implicit_request` (and `mc_granted` only next to it, when asked, §14.2.4); the server accepts the request and grants the floor by Floor Granted, once; alice's burst reaches bob and client-c unchanged but for at most its first half second, which goes out while their legs are still being set up. An explicit call's offer has neither parameter. The OpenMCX controlling function does not use `mc_granted` (§14.3.4), so the grant in the 200 (OK) is covered by `FloorParticipantTest` only |
+| S21 | Service settings (TS 24.379 §7.2.3, §7.2.4) | 13 | The settings subscription is accepted and its NOTIFY names alice's client and answer mode; `answer-mode manual` sends the settings-only PUBLISH (no access token, the client ID, SIP-If-Match) and the subscription notifies the change; a private call then rings and is declined; fetch, re-subscribe and de-subscribe answered 200; bob's settings removal (Expires 0) logs him off MCPTT, and log-off and log-on bring him back |
+| S22 | Monitored group (TS 24.379 §9.2.1.2) | 15 | alice and bob monitor `sip:monitor@mcx.test` and are affiliated to both groups; bob's call on it reaches alice, not client-c, with the speech unchanged; `monitor none` leaves it, `operations` stays |
+| S23 | Affiliation of other users (§9.2.1.2 to §9.2.1.4) | 13 | The subscription to bob's affiliation is refused by the server with 403 (§9.2.2.2.4: no user is authorised for another's); alice's own is accepted and notified; a mandatory-mode de-affiliation of her client (Expires 0, no PIDF) and affiliation (the targeted client, no status, a p-id) are applied by the server; the negotiated-mode MESSAGE with the affiliation command gets a final answer, and the server does not relay it to bob |
+| S24 | Group dynamic data (§9.2.1.6) | 7 | The subscription with the per-group filter is accepted; the NOTIFY lists alice and bob as affiliated members, and a call on the group is notified as ongoing; re-subscribe, de-subscribe and a fetch with an item filter answered 200 |
+
+Not exercised in the lab, unit tests only: a received negotiated-mode request (§9.2.1.5; the OpenMCX servers do not
+pass the MESSAGE on), the grant in the 200 (OK), the Retry-After of a 500 or 503 to the service authorisation (the lab
+server does not refuse it), Answer-Mode with parameters (the server sends a plain `Auto`), the Floor Indicator's call
+type and bit F, the Location field of the Floor Request, `<forwarding-sequence-number>` and the SDP version of a
+subsequent answer.

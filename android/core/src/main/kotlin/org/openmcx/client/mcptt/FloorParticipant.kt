@@ -55,6 +55,12 @@ class FloorParticipant(
     private val t101Ms: Long = 1000, private val c101: Int = 3,
     private val t104Ms: Long = 1000, private val c104: Int = 3,
     private val t132Ms: Long = 2000,
+    /**
+     * The Floor Indicator of our Floor Request and Floor Release (TS 24.380 §6.2.4.3.5 1 b), table 8.2.3.15-2): the call
+     * type bit and bit F with negotiated queueing ([org.openmcx.client.client.ClientRules.floorIndicator]); asked at
+     * each message, as the call's emergency or imminent peril state can change.
+     */
+    private val indicator: () -> Int = { FloorIndicator.NORMAL },
 ) {
     private val lock = Mutex()
     private val _state = MutableStateFlow(FloorState.START_STOP)
@@ -87,11 +93,42 @@ class FloorParticipant(
     /** The call is established: floor messages may flow (§6.2.4.2). */
     suspend fun start() = lock.withLock { if (_state.value == FloorState.START_STOP) _state.value = FloorState.NO_PERMISSION }
 
+    /**
+     * TS 24.380 §6.2.4.2.2 step 4: the call was set up with an implicit floor request that the answer accepted
+     * ("mc_implicit_request", §14.3.5): T101 starts with C101 at 1 and the participant enters 'U: pending Request', as
+     * if its Floor Request had been sent; at T101's expiry the Floor Request goes (§6.2.4.4.3), up to C101.
+     *
+     * With [grantedSsrc] (the 200 (OK)'s "mc_granted" to our offer's, §14.2.4, §14.3.4) the floor is granted by the
+     * answer itself: 'U: has permission' as on a Floor Granted (§6.2.4.4.2), with that RTP SSRC; a Floor Granted that
+     * follows (the NOTE of §14.2.4) is then a repeat, acknowledged and not a second grant.
+     */
+    suspend fun startImplicit(grantedSsrc: Long?) = lock.withLock {
+        if (_state.value != FloorState.START_STOP) return@withLock
+        if (grantedSsrc != null) {
+            _state.value = FloorState.HAS_PERMISSION
+            currentMediaSsrc = grantedSsrc; talker = null
+            listener.granted(grantedSsrc, null)
+            return@withLock
+        }
+        _state.value = FloorState.PENDING_REQUEST
+        timer?.cancel()
+        timer = scope.launch {
+            delay(t101Ms)
+            repeat(c101 - 1) {
+                send(FloorMessage.request(serverSsrc, priority, indicator()))
+                delay(t101Ms)
+            }
+            lock.withLock {
+                if (_state.value == FloorState.PENDING_REQUEST) { _state.value = FloorState.NO_PERMISSION; listener.requestFailed() }
+            }
+        }
+    }
+
     /** The user pressed PTT. */
     suspend fun request() = lock.withLock {
         if (_state.value != FloorState.NO_PERMISSION) return@withLock
         _state.value = FloorState.PENDING_REQUEST
-        retransmit(FloorMessage.request(serverSsrc, priority), t101Ms, c101) {
+        retransmit(FloorMessage.request(serverSsrc, priority, indicator()), t101Ms, c101) {
             // T101 expired C101 times (§6.2.4.4.4).
             if (_state.value == FloorState.PENDING_REQUEST) { _state.value = FloorState.NO_PERMISSION; listener.requestFailed() }
         }
@@ -163,7 +200,7 @@ class FloorParticipant(
 
     private suspend fun startRelease() {
         _state.value = FloorState.PENDING_RELEASE
-        retransmit(FloorMessage.release(serverSsrc), t100Ms, c100) {
+        retransmit(FloorMessage.release(serverSsrc, indicator = indicator()), t100Ms, c100) {
             // T100 expired C100 times: consider the floor released (§6.2.4.6.3).
             if (_state.value == FloorState.PENDING_RELEASE) _state.value = FloorState.NO_PERMISSION
         }
@@ -203,7 +240,7 @@ class FloorParticipant(
                             if (_state.value == FloorState.QUEUED && _offered.value) {
                                 queueTimer = null // this job: leaveQueue must not cancel it before the release is sent
                                 leaveQueue()
-                                send(FloorMessage.release(serverSsrc))
+                                send(FloorMessage.release(serverSsrc, indicator = indicator()))
                                 _state.value = FloorState.NO_PERMISSION
                                 listener.queuedGrantLapsed()
                             }

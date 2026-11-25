@@ -25,7 +25,9 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 internal class FakeSipCore(
                             /** A status other than 200 for a request (e.g. one service's authorisation PUBLISH), or null. */
-                            val statusFor: (SipRequest) -> Int? = { null }) : Connection {
+                            val statusFor: (SipRequest) -> Int? = { null },
+                            /** Header fields added to the answer of a request (e.g. Retry-After with a refusal). */
+                            val headersFor: (SipRequest) -> List<Pair<String, String>> = { emptyList() }) : Connection {
     val requests = CopyOnWriteArrayList<SipRequest>()
     val answers = LinkedBlockingQueue<SipResponse>()
     private val toClient = LinkedBlockingQueue<ByteArray>()
@@ -76,6 +78,7 @@ internal class FakeSipCore(
             "PUBLISH" -> headers.add("SIP-ETag", "e${requests.size}").add("Expires", request.headers["Expires"] ?: "0")
             "SUBSCRIBE" -> headers.add("Expires", if (event == "reg") "3761" else request.headers["Expires"]!!)
         }
+        headersFor(request).forEach { (name, value) -> headers.add(name, value) }
         statusFor(request)?.let { toClient.put(SipResponse(it, "Refused", headers).encode()); return }
         toClient.put(SipResponse(200, "OK", headers).encode())
         if (request.method == "SUBSCRIBE" && event == "presence" && request.headers["Expires"] == "0")
@@ -98,6 +101,18 @@ internal class FakeSipCore(
         if (type != null) headers.add("Content-Type", type)
         toClient.put(SipRequest("NOTIFY", subscribe.headers["Contact"]!!.substringAfter('<').substringBefore('>'), headers,
             body?.toByteArray() ?: ByteArray(0)).encode())
+    }
+
+    /** A MESSAGE from the core to the client's contact, out of any dialog. */
+    fun message(type: String, body: String, from: String = "sip:mcptt@mcx.test", extra: List<Pair<String, String>> = emptyList()) {
+        val headers = Headers()
+            .add("Via", "SIP/2.0/TLS 127.0.0.1:5061;branch=z9hG4bKcorem${cseq.get()}")
+            .add("Max-Forwards", "70")
+            .add("From", "<$from>;tag=corem").add("To", "<sip:alice@mcx.test>")
+            .add("Call-ID", "message${cseq.get()}@core").add("CSeq", "${cseq.getAndIncrement()} MESSAGE")
+            .add("Content-Type", type)
+        extra.forEach { (name, value) -> headers.add(name, value) }
+        toClient.put(SipRequest("MESSAGE", contact(), headers, body.toByteArray()).encode())
     }
 
     fun regSubscribe(): SipRequest = requests.first { it.method == "SUBSCRIBE" && it.headers["Event"] == "reg" }

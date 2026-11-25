@@ -2,7 +2,7 @@
 
 For each requirement this lists the clause, the code that implements it, and the evidence that it works. The evidence
 is a JVM unit test (`core/src/test`), an instrumented test (`app/src/androidTest`) or a check in the Android-only lab
-scenarios (`tests/scenarios.py`, S1–S11). Paths are relative to `android/`. Clause numbers are from ETSI TS 124 379 and TS 124 282 V19.7.0. Clauses of TS 24.380, 24.482 and 24.484 are cited from
+scenarios (`tests/scenarios.py`, S1–S24). Paths are relative to `android/`. Clause numbers are from ETSI TS 124 379 and TS 124 282 V19.7.0. Clauses of TS 24.380, 24.482 and 24.484 are cited from
 the published specifications and not re-checked against a local copy; they are marked *(not checked locally)*.
 
 ## Start-up
@@ -17,12 +17,31 @@ the published specifications and not re-checked against a local copy; they are m
 | Mutual TLS to the SIP core, client key held in the Android Keystore | TS 33.180, TS 24.379 §7.1 | `sip/Flow.kt` `SocketConnector`, `app/…/security/ClientCredentials.kt` | S1 (every client) |
 | REGISTER with `+sip.instance`, `reg-id`, `ob`, MCPTT and MCData feature tags and ICSIs | TS 24.379 §7.2.1, TS 24.282 §7.2.1, RFC 5626 §5 | `McxClient.register` | S1 |
 | Digest authentication for every request, in-dialog ones included (MD5/SHA-256, with or without qop) | RFC 3261 §22, RFC 7616 | `sip/Digest.kt`, `UserAgent.send` | `SipTest` (RFC 2617 and RFC 7616 vectors); S1, S7 |
-| MCPTT service authorisation: PUBLISH poc-settings with the token and client ID | TS 24.379 §7.2.2 | `McxClient.authorise` | S1 |
+| MCPTT service authorisation: PUBLISH poc-settings with the token and client ID, the current answer mode and the selected user profile's index | TS 24.379 §7.2.2, §7.2.3 4) | `McxClient.authorise`, `McxClient.pocSettings` | S1 |
+| A refused service authorisation retried after the Retry-After of a 500 or 503 (1 s to 10 min), else the back-off | TS 24.379 §7.2.2, RFC 3261 §20.33 | `McxClient.retryService`, `ClientRules.authorisationRetryDelayMs` | `ClientRulesTest`, `ServiceRefusalTest.retryAfterOfA503GivesTheDelay` |
 | Log-off (Settings › Log off, after a confirmation; while logged off the status beside Settings reads "logged off" in red, and Settings offers Log on): the calls end, the subscriptions end (SUBSCRIBE Expires 0; the MCVideo group key subscriptions too, and their renewal stops), each service gets a PUBLISH poc-settings with Expires 0, SIP-If-Match and no body (the MC log-off), the MCVideo CSK goes, then the SIP de-REGISTER (REGISTER Expires 0), all dialogs released before it; nothing starts again until Log on. A refused authorisation shows its Warning (486 with 164, 166 or 228: the user is on another device) and is retried with the start-up back-off | TS 24.379, TS 24.281, TS 24.282 §7.2.1A step 4 and NOTE 3, §7.3.3 steps 3a and 3b; RFC 3903 §4.5; RFC 6665 §4.1.2.3; TS 24.229 §5.1.1.6.1 | `McxClient.logOff`, `McxClient.logOn`, `McvideoService.logOff` | phone test (`log-off`, `log-on` debug commands) |
 | No service and sign-out: without service (the SIP core, a server or IdMS unreachable) the client keeps trying with a back-off of 2 s to 60 s, as a mission critical client recovers by itself; the front page shows since when, why and the next attempt, with Retry now and Log off. IdMS refusing the refresh token (account suspended, devices revoked, a system that no longer knows the device) with no password configured signs the user out: the client stops trying and shows Sign in, which opens IdMS's page once | TS 33.180 annex B.5; TS 24.379 §7.2.1A | `McxClient.start`, `retryNow`, `signIn`; `RecoveryTest` | unit test; phone test (SIP core stopped and restarted, `retry` debug command) |
 | MCData service authorisation | TS 24.282 §7.2.2 | `McxClient.authorise` | S1 |
 | Affiliation status subscription (SUBSCRIBE presence with mcptt-info and simple-filter) | TS 24.379 §9.2.1.3, TS 24.282 §8.2.3 | `McxClient.subscribe` | S1 |
 | Affiliation by PUBLISH presence (full state), confirmed by NOTIFY | TS 24.379 §9.2.1.2, TS 24.282 §8.2.2 | `McxClient.affiliate`, `body/Presence.kt` | `PresenceTest`; S1 |
+| The document unsubscribe (Expires 0) of the CMS and GMS subscriptions carries Accept application/xcap-diff+xml | TS 37.579-1 table 5.5.2.14-1, RFC 6665 §7.2 | `McxClient.endDocumentSubscriptions` | `DocumentSubscriptionClientTest` |
+
+## Service settings and affiliation
+
+The MCPTT procedures of `client/ServiceProcedures.kt` (one instance per service; MCVideo's are phase 7), each with its
+debug command ([README](../README.md#debug-control-endpoint)).
+
+| Requirement | Clause | Code | Evidence |
+|---|---|---|---|
+| Settings-only PUBLISH: the PSI, Event poc-settings, Expires 4294967295, the info body with this user's ID and the client ID (no access token), the poc-settings with the answer mode, profile index and multiplex-support; SIP-If-Match of the authorisation's publication, a 412 published anew; the outcome shown with its Warning. On the answer mode change (Settings, `answer-mode`) | TS 24.379 §7.2.3, §7.2.1A, RFC 3903 | `ServiceProcedures.settingsPublish`, `Engine.setRingFirst` | `ServiceProceduresTest.settingsPublishAndRemove`, `settingsPublishRefused`; S21 |
+| Settings removal (Expires 0): the client is logged off the service | TS 24.379 §7.2.1A NOTE 3 | `ServiceProcedures.settingsPublish(remove)`, `McxClient.settingsRemoved` | `ServiceProceduresTest`; S21 |
+| Settings subscription (Event poc-settings, Accept, Expires 4294967295 or 0 to fetch), re-subscribe and de-subscribe in the dialog; the NOTIFY's answer mode and profile index cached per client ID | TS 24.379 §7.2.4 | `ServiceProcedures.settingsSubscribe`, `settingsResubscribe` | `ServiceProceduresTest.settingsSubscription`, `ProceduresBodiesTest`; S21 |
+| Monitored groups: groups of the user profile affiliated besides the provisioned ones (at most 16), every PUBLISH naming all; shown in the Call tab's group list with their notified status | TS 24.379 §9.2.1.2 | `McxClient.monitor`, `wantedGroups`; `ui/Screens.kt` `TalkScreen` | `ServiceProceduresTest.monitorNeedsAProfileGroup`; S22 |
+| Another user's affiliation: SUBSCRIBE naming the target (the per-client filter only for the user's own), Accept application/pidf+xml, fetch; the NOTIFY read for every client | TS 24.379 §9.2.1.3 | `ServiceProcedures.affiliationSubscribe` | `ServiceProceduresTest.remoteAffiliation`; S23 (the server refuses another user's with 403, §9.2.2.2.4) |
+| Mandatory mode: the PUBLISH for the targeted client with all its groups of interest, no status or expires, a new p-id; Expires 0 and no PIDF without any group | TS 24.379 §9.2.1.2 steps 4, 5 | `ServiceProcedures.affiliateRemote` | `ServiceProceduresTest.remoteAffiliation`; S23 (targeted at alice's own client) |
+| Negotiated mode, sent: MESSAGE to the PSI with the info body naming the target and the annex F.4 affiliation command | TS 24.379 §9.2.1.4, annex F.4 | `ServiceProcedures.affiliateRemote`, `body/Presence.kt` `AffiliationCommand` | `ServiceProceduresTest`, `ProceduresBodiesTest`; S23 (answered; the OpenMCX servers do not relay it) |
+| Negotiated mode, received: 200 at once, the user prompted (Accept, Decline; `affiliation-accept [<group>...]`, `affiliation-decline`); accepted, affiliation to the groups not affiliated and de-affiliation from those affiliated, as §9.2.1.2 | TS 24.379 §9.2.1.5 | `ServiceProcedures.handle`, `answerAffiliationRequest`, `McxClient.changeAffiliation`; `ui/Screens.kt` `AffiliationRequestPrompt` | `ServiceProceduresTest.negotiatedRequestReceived`. Not in the lab: the OpenMCX servers do not send it |
+| Group dynamic data: SUBSCRIBE naming the group with the per-group filter of §9.3.2.2 (the items asked for), fetch, re-subscribe, de-subscribe; the §9.3.1.2 document (status, aliases, call ongoing, members) | TS 24.379 §9.2.1.6, §9.3.1.2, §9.3.2.2 | `ServiceProcedures.gddSubscribe`, `body/Presence.kt` `GroupDynamicData` | `ServiceProceduresTest.groupDynamicDataSubscription`, `ProceduresBodiesTest`; S24 |
 
 ## Keeping registered
 
@@ -45,16 +64,20 @@ the published specifications and not re-checked against a local copy; they are m
 
 | Requirement | Clause | Code | Evidence |
 |---|---|---|---|
-| Private call, originating: INVITE to the PSI with mcptt-info (`private`, client ID), resource-lists, Answer-Mode or Priv-Answer-Mode | TS 24.379 §11.1.1.2.1.1 | `McpttService.originate` | S2, S3 |
-| Private call, terminating: commencement mode from Priv-Answer-Mode, Answer-Mode or the local setting; 180, then 200 or 480 with warning 110 | TS 24.379 §11.1.1.2.1.2, §6.2.3 | `McpttService.incoming` | S2, S3 |
+| Private call, originating: INVITE to the PSI with mcptt-info (`private`, client ID, `<forwarding-sequence-number>` 0), resource-lists, Answer-Mode or Priv-Answer-Mode | TS 24.379 §11.1.1.2.1.1 (14B a)) | `McpttService.originate` | `McpttInfoTest.forwardingSequenceNumber`; S2, S3 |
+| Private call, terminating: commencement mode from Priv-Answer-Mode, Answer-Mode (each by its token: `Auto;require` is Auto) or the local setting; 180, then 200 or 480 with warning 110 | TS 24.379 §11.1.1.2.1.2, §6.2.3, RFC 5373 §2 | `McpttService.incoming`, `ClientRules.manualCommencement` | `ClientRulesTest`; S2, S3 |
 | Prearranged group call, originating and terminating | TS 24.379 §10.1.1.2.1 | `McpttService` | S4 |
 | Ad hoc group call; the group identity comes from `mcptt-calling-group-id` | TS 24.379 §17.2.2.1 | `McpttService` | S5 |
 | Emergency and imminent-peril group and private calls: the indications in mcptt-info, and the call state the server announces by re-INVITE | TS 24.379 §6.2.8.1, §10.1.1.2.1, §11.1.1.2.1 | `McpttService.originate`, `McpttService.setPriority` | `lab/androidlab.py --priority` |
 | Release: BYE (with Reason for ad hoc), or CANCEL before the answer | TS 24.379 §6.2.4, §17.2.3.1.1 | `McpttService.hangup` | S2–S5 |
 | Session timer; refresh by UPDATE (as UAS we are the refresher) | RFC 4028, TS 24.379 §6.2.3.1.1 step 5 | `McpttService.startRefresh` | S7 (an 80 s private call; bob's UPDATE refresh gets 200 and the call outlives the server's roughly 60 s session timer) |
-| SDP: one AMR-WB stream and `m=application … udp MCPTT` with `mc_floor_ssrc`; an offered `mc_priority` is echoed | TS 24.379 §6.2.1, §6.2.2; TS 24.380 §14 *(not checked locally)* | `mcptt/McpttSdp.kt` | `SdpTest`; S2–S5 |
+| SDP: one AMR-WB stream and `m=application … udp MCPTT` with `mc_floor_ssrc`; an offered `mc_priority` is echoed; one session ID per call and the version one higher in each subsequent offer or answer | TS 24.379 §6.2.1, §6.2.2; TS 24.380 §14 *(not checked locally)*; RFC 3264 §8 | `mcptt/McpttSdp.kt` (`Origin`) | `McpttSdpTest`; S2–S5 |
+| Implicit floor request: `mc_implicit_request` in the initial INVITE's offer only (`mcptt.implicit_floor_request`, or per call), the accepted request entering 'U: pending Request' with T101 | TS 24.379 §6.4; TS 24.380 §14.2.5, §14.5, §6.2.4.2.2 | `McpttService.originate`, `FloorParticipant.startImplicit` | `FloorParticipantTest`, `McpttSdpTest`; S20 |
+| `mc_granted` offered only next to `mc_implicit_request` in the initial offer (`mcptt.offer_granted`, default false, or per call); its grant in the 200 (OK) taken as a Floor Granted with `mc_ssrc`, the Floor Granted that may follow not a second grant; answer parameters not offered discarded | TS 24.380 §14.2.4, §14.3.4, §14.3.6, §14.4, §6.2.4.4.2 | `McpttService.originate`, `FloorParticipant.startImplicit`, `ClientRules.answerParameterKept` | `FloorParticipantTest.grantInTheAnswerIsTheOnlyGrant`, `ClientRulesTest`; S20 (offer only: the OpenMCX server grants by Floor Granted) |
 | Floor control packets (RTCP APP `MCPT`) | TS 24.380 §8 *(not checked locally)* | `mcptt/Floor.kt` | `FloorTest` (captured bytes) |
 | Floor participant: request, grant, deny, taken, idle, revoke, release, acknowledgements, T100/T101 | TS 24.380 §6.2.4 *(not checked locally)* | `mcptt/FloorParticipant.kt` | `FloorParticipantTest`; S2–S5, S4 (deny), S9 (retransmission) |
+| Floor Indicator of the Floor Request and Floor Release by call type (D emergency, E imminent peril, else A), with bit F when queueing was negotiated | TS 24.380 §6.2.4.3.5 1 b), §8.2.3.15, §14.6.2 NOTE; TS 37.579-1 tables 5.5.6.2-1, 5.5.6.5-1 | `ClientRules.floorIndicator`, `McpttService.indicatorOf` | `ClientRulesTest.floorIndicatorByCallType`, `FloorParticipantTest.floorIndicatorOfTheCall` |
+| Location field in every Floor Request: Location Type '0' (Not provided), as the client reports no location in floor control | TS 24.380 §6.2.4.3.5 1 c) i), table 8.2.3.21-3 | `FloorMessage.request` | `FloorTest` |
 | Queued floor requests: `mc_queueing` offered when the MCPTT service configuration has `<floor-control-queue>`; 'U: queued' with the position (Floor Queue Position Info and Request, T104/C104), leaving the queue, a queued grant accepted by the held PTT or by the user within T132, or given back when T132 runs out | TS 24.380 §6.2.4.9, §14.2.2; TS 24.484 §8.4.2.1 | `mcptt/FloorParticipant.kt`, `mcptt/McpttSdp.kt`, `documents/Documents.kt` (`ServiceConfig.floorQueue`) | `FloorParticipantTest`, `SdpTest`, `ServiceConfigTest`; S18 (lab made with `--floor-queue`) |
 | RTP with the SSRC from Floor Granted; AMR-WB in bandwidth-efficient or octet-aligned form, CMR 15 | RFC 3550, RFC 4867 §4.3–4.4 | `media/Rtp.kt`, `media/AmrWb.kt`, `MediaSession.talk` | `MediaTest`; S2–S11 (payloads identical end to end) |
 | AMR-WB encoding and decoding | TS 26.171, 26.201 | `app/…/media/MediaCodecAmrWb.kt` | `MediaCodecAmrWbTest` (redroid and AVD) |
@@ -87,7 +110,8 @@ the published specifications and not re-checked against a local copy; they are m
 ## Deviations and limits
 
 - **Server-driven choices** (see the wire contracts):
-  - An explicit floor request; `mc_implicit_request` is refused.
+  - An explicit floor request by default; the implicit one (`mcptt.implicit_floor_request`) is accepted by the server,
+    which grants the floor by Floor Granted and does not use `mc_granted`.
   - `mc_queueing` only when the MCPTT service configuration has a floor request queue (`<floor-control-queue>`); the
     lab enables it with `androidlab.py create --floor-queue`.
   - One AMR-WB frame per RTP packet.
@@ -123,47 +147,12 @@ the published specifications and not re-checked against a local copy; they are m
     - **Otherwise:** on Wi-Fi without EPC/5GC access, a VPN or plain IP, the header is left out, since no annex
       defines a value there.
     - **Linux:** the Linux client only has a fixed value from its configuration (`sip.access_network_info`).
-- **To fix:**
-  - **Answer-Mode / Priv-Answer-Mode with parameters on an incoming call.** The commencement check compares the whole
-    header value with `"Auto"` / `"Manual"` (`McpttService.kt` and `McvideoService.kt`, the `manual` decision on an
-    incoming INVITE). So `Priv-Answer-Mode: Auto;require` is not recognised, and a forced private call rings instead of
-    being answered automatically (TS 24.379 §11.1.1.2.1.2, TS 24.281 §6.2.3). RFC 5373 §2 makes the value the token
-    before any parameter. The fix is to compare that token only, as the Linux client's `answer_mode_value()` does.
-    Today the controlling server sends a plain `Auto` to the callee, but the Linux client now originates
-    `Auto;require` (TS 37.579-2/-6 table 6.2.5.3.3-1), and a server that passes the header on as received would hit
-    this.
-  - **"mc_granted" (floor granted in the SIP 200 (OK)).** The client never offers it, so the floor is only ever granted
-    by a Floor Granted message after the call is set up. TS 37.579-1 table 5.5.3.1.1-1 (INITIAL_SDP_OFFER) expects it,
-    so 6.1.2.7, 6.1.2.9 and the other implicit-request calls get a strict-verdict remark. TS 24.380 makes offering it
-    the client's choice (§14.2.4: "when it is acceptable"). Once it is offered, handling it is required. To do, as the
-    Linux client does when `mcptt.offer_granted` is set (default false):
-    - **Offer:** `mc_granted` only in the SDP offer of the initial INVITE that carries `mc_implicit_request` (§12.1.2.2
-      NOTE 2: it is not a floor request by itself); never in a re-INVITE or other subsequent offer (§14.5).
-    - **Answer:** `mc_granted` in the SIP 200 (OK) answer is the floor grant, handled as a Floor Granted (§6.2.4.4.2:
-      floor granted notification, 'U: has permission'), only when our offer had it; otherwise it is discarded. The
-      server may still send a Floor Granted message afterwards (NOTE to §14.2.4), which must not be treated as a
-      second grant.
-    - **MCVideo:** the same for TS 24.581 §14.2.4 / §14.5.
-  - **Accept on the document unsubscribe.** TS 37.579-1 table 5.5.2.14-1 (CONFIG, GROUPCONFIG) expects
-    `Accept: application/xcap-diff+xml` in every xcap-diff SUBSCRIBE, a re-SUBSCRIBE included. The Android client
-    sends it in the initial document SUBSCRIBE and in all group key (GKTP) SUBSCRIBEs. The SUBSCRIBE with Expires 0
-    that ends the CMS/GMS document subscriptions (`McxClient.kt`, the loop over `configSubscription` and
-    `groupDocSubscriptions`) has no Accept. Add `.add("Accept", DocumentSubscriptions.ACCEPT)` there, as the Linux
-    client now does for all its xcap-diff SUBSCRIBEs. RFC 6665 §7.2 makes Accept optional (the default for xcap-diff is
-    `application/xcap-diff+xml`, RFC 5875), so a missing Accept is a strict-verdict remark only, not a failure. The
-    MCVideo conference unsubscribe (`McvideoService.kt`, Event conference, Expires 0) also lacks Accept
-    (`ConferenceInfo.CONTENT_TYPE`).
-  - **Floor Indicator of the Floor Request and Floor Release.** `FloorParticipant.kt` sends both with the default
-    `FloorIndicator.NORMAL` (0x8000) whatever the call:
-    - **Call type (required):** TS 24.380 §6.2.4.3.5 1.b requires the Floor Request of a broadcast group call, system
-      call, emergency call or imminent peril call to carry the bit of that call type (B, C, D, E of table 8.2.3.15-2).
-      Pass the call's indicator to `FloorMessage.request` / `release` instead of the default.
-    - **Bit F, queueing (template):** when the call negotiated queueing (`mc_queueing` in the SDP offer and answer),
-      also set `FloorIndicator.QUEUEING` (0x0400). TS 37.579-1 tables 5.5.6.2-1 and 5.5.6.5-1 expect it when
-      pc_MCPTT_FloorRequestQueueing is true; TS 24.380 §8.2.3.15 allows it next to the call type, and the §14.6.2
-      NOTE has participants acknowledge queueing in the Floor Indicator. Without it a strict-verdict remark only. The
-      Linux client sets it (`client_rules::floor_queueing_bit`), as the OpenMCX server does in its own messages.
-    - Keep the G-bit (dual floor) on the Floor Release as now.
+- **Fixed in phase 0** (formerly "To fix"; see the rows above): Answer-Mode and Priv-Answer-Mode by token, Accept on
+  the document unsubscribe, the Floor Indicator by call type with bit F, `mc_granted` with the implicit floor request,
+  and the Retry-After of a refused authorisation; with them, from the TS 37.579-2 suite driver's first Android runs,
+  `<forwarding-sequence-number>` (6.2.3, 6.2.5, 6.2.7), the Location field of the Floor Request (6.1.1.2, 6.1.1.21,
+  6.2.2) and the SDP version of a subsequent answer (6.2.2). The MCVideo halves (the Answer-Mode token, the conference
+  unsubscribe's Accept, `mc_granted` of TS 24.581 §14.2.4) are phase 7's.
 - **Plan changes:**
   - The interactive login follows RFC 8252 directly (Custom Tab and loopback redirect), not through the AppAuth library.
     The core already had the OIDC logic, so the library would have added nothing.

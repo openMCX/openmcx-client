@@ -229,4 +229,69 @@ class FloorParticipantTest {
         assertEquals(null, p.queuePosition.value)
         assertEquals(listOf("queued 1", "idle", "queued 1", "denied 1"), events)
     }
+
+    private fun indicatorOf(m: FloorMessage) = m.floorIndicator
+
+    /** TS 24.380 §6.2.4.3.5 1 b): the call type in the Floor Indicator of the Floor Request and Release, and bit F. */
+    @Test
+    fun floorIndicatorOfTheCall() = runTest {
+        var indicator = FloorIndicator.EMERGENCY or FloorIndicator.QUEUEING
+        val p = FloorParticipant(backgroundScope, server, { sent += it }, listener, indicator = { indicator })
+        p.start()
+        p.request(); runCurrent()
+        assertEquals(FloorIndicator.EMERGENCY or FloorIndicator.QUEUEING, indicatorOf(sent.removeAt(0)))
+        p.receive(granted(1)); sent.clear()
+        indicator = FloorIndicator.NORMAL // the emergency state cancelled during the call
+        p.release(); runCurrent()
+        val release = sent.first { it.type == FloorType.RELEASE }
+        assertEquals(FloorIndicator.NORMAL, indicatorOf(release))
+    }
+
+    /**
+     * TS 24.380 §6.2.4.2.2 step 4: an accepted implicit floor request: 'U: pending Request' with T101 running and no
+     * Floor Request sent at once; the Floor Granted that follows grants the floor; at T101's expiry the request goes.
+     */
+    @Test
+    fun implicitRequestAwaitsTheGrant() = runTest {
+        val p = participant()
+        p.startImplicit(null); runCurrent()
+        assertEquals(FloorState.PENDING_REQUEST, p.state.value)
+        assertEquals(0, sent.size)
+        p.receive(granted(0x11223344L))
+        assertEquals(FloorState.HAS_PERMISSION, p.state.value)
+        assertEquals(listOf("granted 11223344 30"), events)
+        advanceTimeBy(5000)
+        assertEquals("no Floor Request after the grant", 0, sent.count { it.type == FloorType.REQUEST })
+    }
+
+    @Test
+    fun implicitRequestRetransmitsAtT101() = runTest {
+        val p = participant()
+        p.startImplicit(null); runCurrent()
+        advanceTimeBy(1001)
+        assertEquals(1, sent.count { it.type == FloorType.REQUEST })
+        advanceTimeBy(1000)
+        assertEquals(2, sent.count { it.type == FloorType.REQUEST })
+        advanceTimeBy(1000)
+        assertEquals(FloorState.NO_PERMISSION, p.state.value)
+        assertEquals(listOf("failed"), events)
+    }
+
+    /**
+     * TS 24.380 §14.2.4, §6.2.4.4.2: "mc_granted" in the 200 (OK): 'U: has permission' at once; the Floor Granted that
+     * follows (NOTE to §14.2.4) is acknowledged and is not a second grant.
+     */
+    @Test
+    fun grantInTheAnswerIsTheOnlyGrant() = runTest {
+        val p = participant()
+        p.startImplicit(0x0A0B0C0DL); runCurrent()
+        assertEquals(FloorState.HAS_PERMISSION, p.state.value)
+        assertEquals(listOf("granted 0a0b0c0d null"), events)
+        p.receive(granted(0x0A0B0C0DL))
+        assertEquals(FloorMessage.ack(server, FloorType.GRANTED), sent.removeAt(0))
+        assertEquals(FloorState.HAS_PERMISSION, p.state.value)
+        assertEquals(1, events.count { it.startsWith("granted") })
+        advanceTimeBy(5000)
+        assertEquals(0, sent.count { it.type == FloorType.REQUEST })
+    }
 }

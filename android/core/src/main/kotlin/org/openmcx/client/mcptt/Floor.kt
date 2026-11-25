@@ -115,9 +115,17 @@ data class FloorMessage(
 
         fun u16(value: Int) = byteArrayOf((value shr 8).toByte(), value.toByte())
 
-        /** Floor Request (§8.2.4), with the floor indicator and, when set, the priority. */
+        /**
+         * Floor Request (§8.2.4), with the floor indicator, the user's location and, when set, the priority. §6.2.4.3.5
+         * 1 c) i): this client does not report the talker's location in floor control (as the Linux client), so the
+         * Location field has Location Type '0' (Not provided, table 8.2.3.21-3) and no value.
+         */
         fun request(ssrc: Long, priority: Int? = null, indicator: Int = FloorIndicator.NORMAL) = FloorMessage(FloorType.REQUEST, ssrc,
-            fields = listOfNotNull(priority?.let { FloorField.PRIORITY to byteArrayOf(it.toByte(), 0) }, FloorField.FLOOR_INDICATOR to u16(indicator)))
+            fields = listOfNotNull(priority?.let { FloorField.PRIORITY to byteArrayOf(it.toByte(), 0) }, FloorField.FLOOR_INDICATOR to u16(indicator),
+                FloorField.LOCATION to byteArrayOf(LOCATION_NOT_PROVIDED.toByte())))
+
+        /** Table 8.2.3.21-3: Location Type '0', Not provided. */
+        const val LOCATION_NOT_PROVIDED = 0
 
         /** Floor Release (§8.2.8), optionally asking the server to acknowledge it. */
         fun release(ssrc: Long, ackRequired: Boolean = false, indicator: Int = FloorIndicator.NORMAL) =

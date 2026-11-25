@@ -87,10 +87,10 @@ class DebugControl(private val context: Context) {
         // The process ends as on a crash (SIGKILL, as kill -9) just after the reply, so that the tests can check that
         // Android restarts the sticky service without root on the phone.
         "die" -> "dying".also { Thread { Thread.sleep(300); android.os.Process.killProcess(android.os.Process.myPid()) }.start() }
-        // private <target> [auto|manual|force] [no-floor]
+        // private <target> [auto|manual|force] [no-floor] [emergency] [implicit|explicit] [granted] [<wav>]
         "private" -> call { it.privateCall(args[0], when (args.getOrNull(1) ?: "auto") {
             "manual" -> Commencement.MANUAL; "force" -> Commencement.FORCED; else -> Commencement.AUTOMATIC }, floorControl = "no-floor" !in args,
-            emergency = "emergency" in args) }
+            emergency = "emergency" in args, implicit = implicitChoice(args)) }
         // Functional aliases (TS 24.379 §9A), as the reference client: fa activate|takeover|deactivate <alias>..., fa use <alias>|none
         "fa" -> functionalAlias(args, org.openmcx.client.body.McService.MCPTT)
         // The same for MCData (TS 24.282 §22) and MCVideo (TS 24.281 §20), as the reference client's mcdata-fa and mcvideo-fa.
@@ -105,8 +105,9 @@ class DebugControl(private val context: Context) {
         "private-fa" -> call { it.privateCallToAlias(args[0], when (args.getOrNull(1) ?: "auto") {
             "manual" -> Commencement.MANUAL; "force" -> Commencement.FORCED; else -> Commencement.AUTOMATIC }, floorControl = "no-floor" !in args) }
         "mute" -> { mcptt().setMuted(args.firstOrNull() != "off"); "ok" }
+        // group [<group>] [emergency|imminent] [implicit|explicit] [granted] [<wav>]
         "group" -> call { it.groupCall(args.firstOrNull { a -> a.startsWith("sip:") } ?: Engine.client!!.config.mcptt!!.groups.first(),
-            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }) }
+            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }, implicitChoice(args)) }
         // priority emergency|imminent on|off: the state of the call in progress (§6.2.8)
         "priority" -> { mcptt().setPriority(args[0] == "emergency", args.getOrNull(1) != "off"); mcptt().active?.priority ?: "no call" }
         "adhoc" -> call { it.adhocCall(args) }
@@ -125,7 +126,58 @@ class DebugControl(private val context: Context) {
         "floor-confirm" -> if (mcptt().confirmFloor()) "ok" else throw IllegalStateException("no queued floor grant awaiting confirmation")
         "queue-status" -> if (mcptt().requestQueuePosition()) "ok" else throw IllegalStateException("no queued floor request")
         "ptt" -> ptt(args[0], args.getOrNull(1)?.toDouble() ?: 5.0)
-        "answer-mode" -> { mcptt().answerMode = args[0]; args[0] }
+        // answer-mode automatic|manual: the local answer mode, then the settings-only PUBLISH (TS 24.379 §7.2.3).
+        "answer-mode" -> {
+            require(args.firstOrNull() in setOf("automatic", "manual")) { "usage: answer-mode automatic|manual" }
+            mcptt().answerMode = args[0]
+            val published = if (Engine.client?.status?.value?.mcptt?.authorised == true) procedures().settingsPublish() else null
+            JSONObject().put("answer_mode", args[0]).put("settings_publication", published?.let(::resultJson) ?: JSONObject.NULL)
+        }
+        // Service settings (TS 24.379 §7.2.3, §7.2.4), as the reference client: settings-publish [remove],
+        // settings-subscribe [fetch], settings-resubscribe, settings-unsubscribe.
+        "settings-publish" -> {
+            require(args.isEmpty() || args == listOf("remove")) { "usage: settings-publish [remove]" }
+            resultJson(procedures().settingsPublish(remove = args.firstOrNull() == "remove"))
+        }
+        "settings-subscribe" -> {
+            require(args.isEmpty() || args == listOf("fetch")) { "usage: settings-subscribe [fetch]" }
+            resultJson(procedures().settingsSubscribe(fetch = args.firstOrNull() == "fetch"))
+        }
+        "settings-resubscribe" -> resultJson(procedures().settingsResubscribe())
+        "settings-unsubscribe" -> resultJson(procedures().settingsResubscribe(end = true))
+        // monitor <group>... | monitor none: the groups of the user profile affiliated besides the base ones (§9.2.1.2).
+        "monitor" -> {
+            require(args.isNotEmpty() && ("none" !in args || args.size == 1)) { "usage: monitor <group>... | monitor none" }
+            Engine.client!!.monitor(if (args == listOf("none")) emptyList() else args)
+            JSONObject().put("monitored_groups", JSONArray(Engine.client!!.monitoredGroups))
+                .put("affiliations", JSONObject(Engine.client!!.status.value.mcptt.affiliations))
+        }
+        // Affiliation of other users (§9.2.1.2 to §9.2.1.5): affiliation-subscribe <ID> [fetch], affiliation-unsubscribe <ID>,
+        // affiliate-remote <ID> <group> affiliate|deaffiliate mandatory|negotiated, affiliation-accept [<group>...],
+        // affiliation-decline.
+        "affiliation-subscribe" -> {
+            require(args.size in 1..2 && (args.size == 1 || args[1] == "fetch")) { "usage: affiliation-subscribe <MCPTT ID> [fetch]" }
+            resultJson(procedures().affiliationSubscribe(args[0], fetch = args.getOrNull(1) == "fetch"))
+        }
+        "affiliation-unsubscribe" -> resultJson(procedures().affiliationUnsubscribe(args.single()))
+        "affiliate-remote" -> {
+            require(args.size == 4 && args[2] in setOf("affiliate", "deaffiliate") && args[3] in setOf("mandatory", "negotiated")) {
+                "usage: affiliate-remote <MCPTT ID> <group> affiliate|deaffiliate mandatory|negotiated" }
+            resultJson(procedures().affiliateRemote(args[0], args[1], affiliate = args[2] == "affiliate", negotiated = args[3] == "negotiated"))
+        }
+        "affiliation-accept" -> { procedures().answerAffiliationRequest(true, args.toSet()); proceduresJson() }
+        "affiliation-decline" -> { procedures().answerAffiliationRequest(false); proceduresJson() }
+        // Group dynamic data (§9.2.1.6): gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated],
+        // gdd-resubscribe <group>, gdd-unsubscribe <group>.
+        "gdd-subscribe" -> {
+            val items = args.drop(1).filter { it != "fetch" }
+            require(args.isNotEmpty() && items.all { it in org.openmcx.client.body.GroupDynamicData.ITEMS }) {
+                "usage: gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]" }
+            resultJson(procedures().gddSubscribe(args[0], fetch = "fetch" in args.drop(1), items = items))
+        }
+        "gdd-resubscribe" -> resultJson(procedures().gddResubscribe(args.single()))
+        "gdd-unsubscribe" -> resultJson(procedures().gddResubscribe(args.single(), end = true))
+        "procedures" -> proceduresJson()
         "import" -> { Provisioning(context).import(java.io.File(args[0]).readText()); Engine.restart(context); "imported" }
         // What the QR code scanner gives the app, as text: the same loading path without the camera.
         // An MCX Admin activation code and the account's password (slice F2), without the camera.
@@ -339,6 +391,62 @@ class DebugControl(private val context: Context) {
 
     private fun mcptt(): McpttService = Engine.mcptt ?: throw IllegalStateException("MCPTT not provisioned")
 
+    private fun procedures(): org.openmcx.client.client.ServiceProcedures =
+        Engine.client?.procedures ?: throw IllegalStateException("MCPTT not provisioned")
+
+    /**
+     * The call's implicit floor request (TS 24.380 §14.2.5): `implicit` (with `granted`, "mc_granted" in the offer,
+     * §14.2.4), `explicit`, or the configured choice; a `.wav` argument is what its talk burst sends once granted.
+     */
+    private fun implicitChoice(args: List<String>): McpttService.Implicit? {
+        args.firstOrNull { it.endsWith(".wav") }?.let { Engine.fileAudio?.nextSource = java.io.File(it) }
+        return when {
+            "implicit" in args -> McpttService.Implicit(true, "granted" in args)
+            "explicit" in args -> McpttService.Implicit(false, false)
+            else -> null
+        }
+    }
+
+    private fun resultJson(r: org.openmcx.client.client.ProcedureResult): JSONObject = JSONObject()
+        .put("action", r.action).put("status", r.status).put("warning", r.warning ?: JSONObject.NULL)
+
+    /**
+     * The state of the service settings and affiliation procedures (keys as the reference client's status):
+     * service_settings, settings_subscribed, settings_publication, target_affiliations, remote_affiliation,
+     * affiliation_command (the pending §9.2.1.5 request), last_affiliation_answer, group_dynamic_data, monitored_groups.
+     */
+    private fun proceduresJson(): JSONObject {
+        val client = Engine.client ?: return JSONObject()
+        val p = client.procedures?.state?.value ?: return JSONObject()
+        return JSONObject()
+            .put("service_settings", JSONObject(p.serviceSettings.mapValues { (_, c) ->
+                JSONObject().put("answer_mode", c.answerMode).put("profile_index", c.profileIndex)
+                    .put("multiplex_support", c.multiplexSupport).put("own", c.own) }))
+            .put("settings_subscribed", p.settingsSubscribed)
+            .put("settings_subscription", p.settingsSubscription?.let(::resultJson) ?: JSONObject.NULL)
+            .put("settings_publication", p.settingsPublication?.let(::resultJson) ?: JSONObject.NULL)
+            .put("answer_mode", client.answerModeOf(org.openmcx.client.body.McService.MCPTT))
+            .put("target_affiliations", JSONObject(p.targetAffiliations.mapValues { (_, t) ->
+                JSONObject().put("subscribed", t.subscribed).put("status", t.status).put("notifications", t.notifications)
+                    .put("clients", JSONObject(t.clients.mapValues { JSONObject(it.value) })) }))
+            .put("remote_affiliation", p.remoteAffiliation?.let(::resultJson) ?: JSONObject.NULL)
+            .put("affiliation_command", p.affiliationRequest?.let {
+                JSONObject().put("from", it.from).put("affiliate", JSONArray(it.affiliate)).put("de-affiliate", JSONArray(it.deaffiliate)) }
+                ?: JSONObject.NULL)
+            .put("last_affiliation_answer", p.lastAffiliationAnswer ?: JSONObject.NULL)
+            .put("group_dynamic_data", JSONObject(p.groupDynamicData.mapValues { (_, g) ->
+                JSONObject().put("subscribed", g.subscribed).put("subscription_status", g.status).put("notifications", g.notifications)
+                    .put("group_status", g.data?.groupStatus).put("modified_by", g.data?.modifiedBy)
+                    .put("broadcast_alias", g.data?.broadcastAlias).put("regroup_alias", g.data?.regroupAlias)
+                    .put("call_ongoing", g.data?.callOngoing ?: JSONObject.NULL)
+                    .put("members", JSONArray(g.data?.members?.map { m ->
+                        JSONObject().put("id", m.id).put("clients", JSONArray(m.clients)).put("functional_aliases", JSONArray(m.functionalAliases)) }
+                        ?: emptyList<JSONObject>())) }))
+            .put("monitored_groups", JSONArray(client.monitoredGroups))
+            .put("monitorable_groups", JSONArray(client.monitorableGroups))
+            .put("wanted_groups", JSONArray(client.wantedGroups(org.openmcx.client.body.McService.MCPTT)))
+    }
+
     private suspend fun functionalAlias(args: List<String>, service: org.openmcx.client.body.McService): Any {
         val client = Engine.client ?: throw IllegalStateException("not started")
         val action = args.firstOrNull() ?: throw IllegalArgumentException("usage: activate|takeover|deactivate <alias>... | use <alias>|none")
@@ -524,6 +632,7 @@ class DebugControl(private val context: Context) {
         .put("queue_position", call.media?.takeIf { it.isStarted }?.floor?.queuePosition?.value)
         .put("pending_floor_confirmation", call.media?.takeIf { it.isStarted }?.floor?.offered?.value == true)
         .put("floor_events", JSONArray(call.floorEvents))
+        .put("implicit_floor_request", call.implicitFloorRequest ?: JSONObject.NULL).put("granted_offered", call.grantedOffered)
         .put("bursts", JSONArray(call.media?.bursts?.map { b ->
             JSONObject().put("direction", b.direction).put("ssrc", b.ssrc).put("frames", b.payloadHashes.size)
                 .put("hashes", JSONArray(b.payloadHashes)).put("started_at", b.startedAt)
@@ -559,6 +668,7 @@ class DebugControl(private val context: Context) {
             .put("fgs_types", (context as? android.app.Service)?.takeIf { android.os.Build.VERSION.SDK_INT >= 29 }?.foregroundServiceType ?: JSONObject.NULL)
             .put("calls", JSONArray(Engine.mcptt?.calls?.value?.map(::callJson) ?: emptyList<JSONObject>()))
             .put("functional_aliases", aliasJson())
+            .put("procedures", proceduresJson())
             .put("mcdata_functional_aliases", aliasJson(org.openmcx.client.body.McService.MCDATA))
             .put("mcvideo_functional_aliases", aliasJson(org.openmcx.client.body.McService.MCVIDEO))
             .put("history", JSONArray(Engine.mcptt?.history?.map(::callJson) ?: emptyList<JSONObject>()))

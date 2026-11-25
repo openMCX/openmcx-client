@@ -136,6 +136,15 @@ object Engine {
         mcptt?.let { it.answerMode = if (on) "manual" else (client?.config?.mcptt?.answerMode ?: "automatic") }
         mcvideo?.let { it.answerMode = if (on) "manual" else (client?.config?.mcvideo?.answerMode ?: "automatic") }
         log.add("ring first for private calls: ${if (on) "on" else "off"}")
+        // TS 24.379 §7.2.3: the changed answer mode goes to the server in a settings-only PUBLISH.
+        publishSettings()
+    }
+
+    /** TS 24.379 §7.2.3: the MCPTT service settings (the current answer mode) to the server, when authorised. */
+    fun publishSettings() {
+        val c = client ?: return
+        if (!c.status.value.mcptt.authorised) return
+        scope.launch { runCatching { c.procedures?.settingsPublish() }.onFailure { log.add("settings PUBLISH: ${it.message}") } }
     }
 
     private const val RING_FIRST = "ring_first"

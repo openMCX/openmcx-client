@@ -38,6 +38,8 @@ rows updated, and a develop APK. Sizes: S up to 2 days, M up to a week, L longer
 
 ### Phase 0: the known fixes (S)
 
+Done for MCPTT on `android-p01` (CONFORMANCE.md, TEST_REPORT.md "Parity phases 0 and 1"); the MCVideo halves are phase 7's.
+
 These are already listed under "To fix" in CONFORMANCE.md:
 - Answer-Mode and Priv-Answer-Mode compared by token (RFC 5373 section 2), for MCPTT and MCVideo.
 - `Accept: application/xcap-diff+xml` on the document unsubscribe and the MCVideo conference unsubscribe.
@@ -49,6 +51,8 @@ Also:
 - The Retry-After of a 500 or 503 on a refused service authorisation.
 
 ### Phase 1: settings and affiliation (M)
+
+Done for MCPTT on `android-p01`, S20-S24; the MCVideo settings, remote affiliation and GDD are phase 7's.
 
 - **Service settings:** the settings-only PUBLISH and the settings subscription (TS 24.379 7.2.3, 7.2.4), with the
   answer mode in the Settings screen. MCVideo too.

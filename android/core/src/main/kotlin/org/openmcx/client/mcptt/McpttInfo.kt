@@ -49,6 +49,8 @@ data class McpttInfo(
     val calledFunctionalAlias: String? = null,
     val callToFunctionalAlias: Boolean? = null,
     val requestType: String? = null,
+    /** In `<anyExt>` (annex F.1.3 af)): the number of forwardings of a private call (§11.1.1.2.1.1 14B), 14C)). */
+    val forwardingSequenceNumber: Int? = null,
     val extra: Map<String, String> = emptyMap(),
 ) {
     fun encode(): String = Xml.document("mcpttinfo", NAMESPACE) {
@@ -68,7 +70,7 @@ data class McpttInfo(
             alertReceived?.let { wrapped("alert-ind-rcvd", it.toString(), "mcpttBoolean") }
             if (participantCriteria != null || emergencyAlertArea != null || groupGeoArea != null || adhocAlert != null ||
                 adhocAlertReceived != null || functionalAlias != null || calledFunctionalAlias != null ||
-                callToFunctionalAlias != null || requestType != null) element("anyExt") {
+                callToFunctionalAlias != null || requestType != null || forwardingSequenceNumber != null) element("anyExt") {
                 leaf("call-participants-criterias", participantCriteria)
                 leaf("emergency-alert-area-ind", emergencyAlertArea?.toString())
                 leaf("group-geo-area-ind", groupGeoArea?.toString())
@@ -78,6 +80,7 @@ data class McpttInfo(
                 wrapped("called-functional-alias-URI", calledFunctionalAlias, "mcpttURI")
                 leaf("call-to-functional-alias-ind", callToFunctionalAlias?.toString())
                 leaf("request-type", requestType)
+                leaf("forwarding-sequence-number", forwardingSequenceNumber?.toString())
             }
         }
     }
@@ -124,6 +127,7 @@ data class McpttInfo(
                 calledFunctionalAlias = ext("called-functional-alias-URI"),
                 callToFunctionalAlias = flag("call-to-functional-alias-ind"),
                 requestType = ext("request-type"),
+                forwardingSequenceNumber = ext("forwarding-sequence-number")?.trim()?.toIntOrNull(),
                 extra = params.children().filter { it.localName !in known }.associate { it.localName to it.text() },
             )
         }

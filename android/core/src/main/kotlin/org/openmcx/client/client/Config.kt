@@ -115,6 +115,17 @@ data class ClientConfig(
         val gmsSubscriptionPsi: String? = null,
         /** The UE ID of the UE configuration document (TS 24.484 §8.2.1) (`ue_id`, by default the client ID). */
         val ueId: String? = null,
+        /**
+         * TS 24.379 §6.4, TS 24.380 §14.2.5: the initial INVITE of a call with floor control is an implicit floor request
+         * (`mc_implicit_request`) (`implicit_floor_request`, off by default, as the Linux client's).
+         */
+        val implicitFloorRequest: Boolean = false,
+        /**
+         * TS 24.380 §14.2.4: "mc_granted" in the offer of an initial INVITE that carries "mc_implicit_request", to accept
+         * the floor granted in the SIP 200 (OK) (`offer_granted`, off by default, as the Linux client's
+         * `mcptt.offer_granted`). The clause leaves the offer to the client ("when it is acceptable").
+         */
+        val offerGranted: Boolean = false,
     )
 
     data class Mcdata(
@@ -229,7 +240,8 @@ data class ClientConfig(
                         it.int("profile_index", 1).takeIf { index -> index in 1..255 } ?: 1, it.strings("functional_aliases"),
                         it.bool("subscribe_configuration", true), it.bool("subscribe_group_documents", true),
                         it.bool("documents_on_notify", false), it.optStr("cms_subscription_psi")?.also(::sipUri),
-                        it.optStr("gms_subscription_psi")?.also(::sipUri), it.optStr("ue_id"))
+                        it.optStr("gms_subscription_psi")?.also(::sipUri), it.optStr("ue_id"),
+                        it.flag("implicit_floor_request"), it.flag("offer_granted"))
                 },
                 mcdata = (root["mcdata"] as? JsonObject)?.let {
                     Mcdata(it.str("user_id"), it.str("psi"), it.strings("groups"), it.int("max_payload_size_sds_cplane_bytes", 1000),

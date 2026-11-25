@@ -90,4 +90,38 @@ class McpttSdpTest {
         val seen = HashSet<Long>()
         repeat(2000) { assertTrue(seen.add(McpttSdp.newFloorSsrc())) }
     }
+
+    /**
+     * TS 24.380 §14.2.5 and §14.2.4: the implicit floor request, with "mc_granted" only next to it, and the speech
+     * SSRC announced; the answer's parameters read (§14.3.4 to §14.3.6); an answer never carries them.
+     */
+    @Test fun implicitRequestAndGranted() {
+        val offer = McpttSdp.offer(local.copy(implicitRequest = true, granted = true, audioSsrc = 4242))
+        assertTrue(offer, offer.contains("a=fmtp:MCPTT mc_floor_ssrc=111;mc_implicit_request;mc_granted\r\n"))
+        assertTrue(offer.contains("a=ssrc:4242 cname:mcptt"))
+        assertFalse("mc_granted only with an implicit request", McpttSdp.offer(local.copy(granted = true)).contains("mc_granted"))
+        assertFalse(McpttSdp.offer(local).contains("mc_implicit_request"))
+        assertFalse(McpttSdp.offer(local).contains("a=ssrc"))
+        val answer = McpttSdp.remote(offer.replace("mc_floor_ssrc=111;mc_implicit_request;mc_granted",
+            "mc_floor_ssrc=222;mc_implicit_request;mc_granted;mc_ssrc=4243"))
+        assertTrue(answer.implicitRequest && answer.granted)
+        assertEquals(4243L, answer.grantedSsrc)
+        val plain = McpttSdp.remote(McpttSdp.offer(local))
+        assertFalse(plain.implicitRequest || plain.granted)
+        assertEquals(null, plain.grantedSsrc)
+        val ours = McpttSdp.answer(answer, local)
+        assertFalse(ours.contains("mc_implicit_request") || ours.contains("mc_granted") || ours.contains("mc_ssrc"))
+    }
+
+    /** RFC 3264 §8: the same session ID in the call's SDP, its version one higher in each subsequent offer or answer. */
+    @Test fun subsequentSdpIncrementsTheVersion() {
+        val origin = McpttSdp.Origin()
+        val first = McpttSdp.offer(local, origin).lines().first { it.startsWith("o=") }
+        val remote = McpttSdp.remote(McpttSdp.offer(local))
+        val second = McpttSdp.answer(remote, local, origin).lines().first { it.startsWith("o=") }
+        val (id1, v1) = first.split(' ').let { it[1] to it[2].toLong() }
+        val (id2, v2) = second.split(' ').let { it[1] to it[2].toLong() }
+        assertEquals(id1, id2)
+        assertEquals(v1 + 1, v2)
+    }
 }

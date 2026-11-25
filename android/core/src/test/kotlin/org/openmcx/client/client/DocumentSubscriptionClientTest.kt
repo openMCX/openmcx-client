@@ -132,6 +132,8 @@ class DocumentSubscriptionClientTest {
         client.logOff()
         val ends = core.requests.filter { it.method == "SUBSCRIBE" && it.headers["Event"] == "xcap-diff" && it.headers["Expires"] == "0" }
         assertEquals(setOf(subscribe.callId, group.callId), ends.map { it.callId }.toSet())
+        // TS 37.579-1 table 5.5.2.14-1: the unsubscribe carries Accept application/xcap-diff+xml too.
+        assertTrue(ends.all { it.headers["Accept"] == "application/xcap-diff+xml" })
         core.notify(subscribe, "xcap-diff", "terminated;reason=timeout", null, null)
         assertEquals(200, core.answer().status)
         client.stop()

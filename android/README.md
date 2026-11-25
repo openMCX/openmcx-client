@@ -49,7 +49,7 @@ This directory is `android/` of the openmcx-client repository; the openmcx-serve
 | `tools` | `gradle-docker.sh` (Dockerised Gradle), `build-image/` (the build image), `instrumented-test.sh` |
 | `lab/androidlab.py` | Builds a lab: the OpenMCX servers with redroid (Android 15) containers as the MC UEs, or real phones |
 | `lab/nettools`, `lab/capture` | Helper images: nftables and tc for coverage loss and impairment in a client's network namespace; packet capture |
-| `tests/` | `scenarios.py` (end-to-end S1-S16 and S18), `video.py`, `attachments.py` (phone labs) and `test_androidlab.py` (unit tests of the lab tool) |
+| `tests/` | `scenarios.py` (end-to-end S1-S24), `video.py`, `attachments.py` (phone labs) and `test_androidlab.py` (unit tests of the lab tool) |
 | `docs/` | Feature documents, wire contracts, conformance matrix and test report |
 
 ## Build
@@ -113,8 +113,16 @@ Debug builds listen on the abstract socket `@mcxclient-control` for one JSON req
 |---|---|
 | `status` | Phase, registration, authorisation and affiliation per service, calls (with floor events and payload hashes per talk burst), SDS inbox and outbox |
 | `events [N]` | The last N client events, including the SIP start lines |
-| `private <mcptt-id> [auto\|manual\|force]`, `group [<group>]`, `adhoc <id> <id>…` | Place a call |
-| `answer`, `reject`, `hangup`, `answer-mode automatic\|manual` | Call control |
+| `private <mcptt-id> [auto\|manual\|force] [no-floor] [emergency] [implicit\|explicit] [granted] [<wav>]`, `group [<group>] [emergency\|imminent] [implicit\|explicit] [granted] [<wav>]`, `adhoc <id> <id>…` | Place a call; `implicit` requests the floor in the INVITE (TS 24.380 §14.2.5), `granted` adds `mc_granted` (§14.2.4), the WAV is the burst sent once granted; without either, `mcptt.implicit_floor_request` and `mcptt.offer_granted` decide |
+| `answer`, `reject`, `hangup` | Call control |
+| `answer-mode automatic\|manual` | The local answer mode, then the settings-only PUBLISH (TS 24.379 §7.2.3) |
+| `settings-publish [remove]`, `settings-subscribe [fetch]`, `settings-resubscribe`, `settings-unsubscribe` | Service settings (§7.2.3, §7.2.4) |
+| `monitor <group>…`, `monitor none` | Groups of the user profile affiliated besides the provisioned ones (§9.2.1.2) |
+| `affiliation-subscribe <mcptt-id> [fetch]`, `affiliation-unsubscribe <mcptt-id>` | Another user's affiliation (§9.2.1.3) |
+| `affiliate-remote <mcptt-id> <group> affiliate\|deaffiliate mandatory\|negotiated` | Change another user's affiliation (§9.2.1.2, §9.2.1.4) |
+| `affiliation-accept [<group>…]`, `affiliation-decline` | Answer a received negotiated-mode request (§9.2.1.5), all or some of its groups |
+| `gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]`, `gdd-resubscribe <group>`, `gdd-unsubscribe <group>` | Group dynamic data (§9.2.1.6) |
+| `procedures` | The state of the procedures above (also in `status`, key `procedures`) |
 | `ptt <wav> [seconds]`, `floor request\|release`, `audio-next <wav>` | Talk a file (the devices have no microphone) |
 | `sds <mcdata-id> <text> [--disposition delivery\|read\|delivery-read]`, `sds-group <group> <text> …`, `display <message-id>` | Short data |
 | `refresh register\|subscription\|token`, `drop-flow` | Force a refresh or a new flow |

@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lab"))
-from androidlab import ADB, FILES, Device, meta  # noqa: E402
+from androidlab import ADB, FILES, PACKAGE, Device, meta  # noqa: E402
 
 A, B, C = "client-a", "client-b", "client-c"
 FGS_PHONE_CALL, FGS_MICROPHONE, FGS_SPECIAL_USE = 0x4, 0x80, 0x40000000  # ServiceInfo.FOREGROUND_SERVICE_TYPE_*
@@ -970,6 +970,236 @@ class Lab:
         self.hangup(A)
         self.idle_everywhere([A, B])
 
+
+    # Phases 0 and 1 of docs/PARITY_PLAN.md.
+
+    def sip_trace(self, client: str) -> str:
+        """The app's SIP trace (debug builds write every message to files/sip-trace.log)."""
+        return self.devices[client].adb("shell", "run-as", PACKAGE, "cat", "files/sip-trace.log", check=False)
+
+    def last_sent(self, client: str, start: str, containing: str = "") -> str | None:
+        """The last message [client] sent whose start line begins with [start] (and that contains [containing]), from
+        its SIP trace."""
+        blocks = [b for b in self.sip_trace(client).split("----- ") if " send\n" in b.split("\n", 1)[0] + "\n"]
+        found = [b for b in blocks if b.split("\n", 1)[1].startswith(start) and containing in b] if blocks else []
+        return found[-1] if found else None
+
+    def procedures(self, client: str) -> dict:
+        return self.cmd(client, "procedures")
+
+    def s20_implicit_floor(self) -> None:
+        # TS 24.380 §14.2.5, §6.2.4.2.2: the initial INVITE requests the floor implicitly; the server accepts it and
+        # grants the floor by Floor Granted, and the talk burst reaches the other members unchanged.
+        for granted in (False, True):
+            label = "with mc_granted" if granted else "without mc_granted"
+            args = ["group", GROUP, "implicit", SPEECH[A]] + (["granted"] if granted else [])
+            call = self.cmd(A, *args)
+            self.check(f"alice's implicit floor request call is established ({label})", call["state"] == "established", call=call)
+            self.check(f"the call's offer had mc_granted only when asked ({label})", call.get("granted_offered") == granted)
+            invite = self.last_sent(A, "INVITE ") or ""
+            fmtp = next((l for l in invite.splitlines() if l.startswith("a=fmtp:MCPTT")), "")
+            self.check(f"the INVITE's offer has mc_implicit_request ({label})", "mc_implicit_request" in fmtp, fmtp=fmtp)
+            self.check(f"mc_granted is in the offer only next to it ({label})", ("mc_granted" in fmtp) == granted, fmtp=fmtp)
+            # The OpenMCX controlling function accepts the request and does not use mc_granted (TS 24.380 §14.3.4):
+            # the floor comes by Floor Granted, once.
+            self.check(f"the server accepted the implicit request ({label})",
+                       call.get("implicit_floor_request") == "accepted", implicit=call.get("implicit_floor_request"))
+            for c in (B, C):
+                self.established(c)
+            try:
+                sent = self.wait("alice's implicit talk burst", lambda: next((b for b in (self.call(A) or {}).get("bursts", [])
+                                 if b["direction"] == "sent" and b["frames"] > 100), None), timeout=15)
+            except Failed:
+                sent = None
+            self.check(f"alice talks on the implicit grant ({label})", sent is not None, call=self.call(A))
+            grants = [e for e in (self.call(A) or {}).get("floor_events", []) if e.startswith("granted")]
+            self.check(f"one floor grant only ({label})", len(grants) == 1, events=(self.call(A) or {}).get("floor_events"))
+            if sent:
+                self.wait("alice's burst ends", lambda: (x := self.call(A)) and x.get("floor") == "NO_PERMISSION", timeout=20)
+                sent = [b for b in self.call(A)["bursts"] if b["direction"] == "sent"][-1]
+                # The burst starts with the call, while the other members' legs are still being set up: a listener may
+                # miss its first frames (at most half a second); what it gets is the rest of the burst, unchanged.
+                for l in (B, C):
+                    got = next((b for b in self.call(l)["bursts"] if b["ssrc"] == sent["ssrc"]), None)
+                    tail = got is not None and got["hashes"] == sent["hashes"][len(sent["hashes"]) - len(got["hashes"]):]
+                    self.check(f"{l} received alice's implicit burst unchanged, but for its first frames ({label})",
+                               tail and got["frames"] >= sent["frames"] - 25, sent=sent["frames"], received=got and got["frames"])
+            # TS 24.380 §6.2.4.3.5: the Floor Release of a normal call carries bit A (0x8000) in its Floor Indicator.
+            self.hangup(A)
+            self.idle_everywhere([A, B, C])
+        # The explicit request afterwards: no mc_implicit_request in the offer.
+        self.cmd(A, "group", GROUP, "explicit")
+        invite = self.last_sent(A, "INVITE ") or ""
+        self.check("an explicit call's offer has no mc_implicit_request", "mc_implicit_request" not in invite)
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+
+    def s21_service_settings(self) -> None:
+        if self.procedures(A)["settings_subscribed"]:  # left by an earlier run
+            self.cmd(A, "settings-unsubscribe", ok=False)
+        self.cmd(A, "answer-mode", "automatic")  # the provisioned mode, whatever an earlier run left
+        # TS 24.379 §7.2.4: subscribe to this user's service settings; the NOTIFY gives this client's answer mode.
+        r = self.cmd(A, "settings-subscribe")
+        self.check("alice's settings subscription is accepted", r["status"] == 200, result=r)
+        own = lambda p: next((v for v in p["service_settings"].values() if v.get("own")), None)
+        try:
+            p = self.wait("alice's own settings notified", lambda: (p := self.procedures(A)) and own(p) and p, timeout=15)
+        except Failed:
+            p = self.procedures(A)
+        self.check("the notified settings name alice's client with its answer mode", own(p) is not None
+                   and own(p).get("answer_mode") == "automatic", settings=p.get("service_settings"))
+        # §7.2.3: the answer mode changed; the settings-only PUBLISH; the subscription notifies the new one.
+        r = self.cmd(A, "answer-mode", "manual")
+        self.check("alice's settings PUBLISH with the manual answer mode is accepted",
+                   (r.get("settings_publication") or {}).get("status") == 200, result=r)
+        publish = self.last_sent(A, "PUBLISH ", "Event: poc-settings") or ""
+        self.check("the settings PUBLISH carries no access token, the client ID and SIP-If-Match",
+                   "<mcptt-access-token" not in publish and "<mcptt-client-id " in publish and "SIP-If-Match:" in publish
+                   and "<answer-mode>manual</answer-mode>" in publish, publish=publish[-1500:])
+        try:
+            p = self.wait("the manual answer mode notified", lambda: (p := self.procedures(A)) and (own(p) or {}).get("answer_mode") == "manual" and p, timeout=15)
+            ok = True
+        except Failed:
+            p, ok = self.procedures(A), False
+        self.check("the subscription notifies the new answer mode", ok, settings=p.get("service_settings"))
+        # With the manual answer mode an automatic private call to alice rings (§11.1.1.2.1.2); she declines it.
+        caller = threading.Thread(target=lambda: self.cmd(B, "private", MCPTT[A], "auto", ok=False, timeout=60))
+        caller.start()
+        try:
+            ringing = self.wait("alice rings", lambda: (c := self.call(A)) and c["state"] == "ringing" and c, timeout=15)
+        except Failed:
+            ringing = None
+        self.check("a private call to alice rings after the manual answer mode", ringing is not None, call=self.call(A))
+        self.cmd(A, "reject", ok=False)
+        caller.join()
+        self.idle_everywhere([A, B])
+        r = self.cmd(A, "answer-mode", "automatic")
+        self.check("the automatic answer mode published again", (r.get("settings_publication") or {}).get("status") == 200, result=r)
+        r = self.cmd(A, "settings-subscribe", "fetch")
+        self.check("a settings fetch (Expires 0) is accepted", r["status"] == 200, result=r)
+        r = self.cmd(A, "settings-resubscribe")
+        self.check("the settings subscription is refreshed", r["status"] == 200, result=r)
+        r = self.cmd(A, "settings-unsubscribe")
+        self.check("the settings subscription ends", r["status"] == 200 and not self.procedures(A)["settings_subscribed"], result=r)
+        # §7.2.3 with Expires 0: the settings removed, which logs alice off MCPTT (§7.2.1A NOTE 3); log-off and log-on
+        # bring her back.
+        r = self.cmd(B, "settings-publish", "remove")
+        self.check("bob's settings removal is accepted", r["status"] == 200, result=r)
+        self.check("bob is no longer authorised for MCPTT", not self.status(B)["mcptt"]["authorised"])
+        self.cmd(B, "log-off")
+        self.cmd(B, "log-on")
+        s = self.ready(B)
+        self.check("bob is authorised again after log-on", s["mcptt"]["authorised"] and s["mcptt"]["affiliations"].get(GROUP) == "affiliated")
+
+    def s22_monitor(self) -> None:
+        monitor = GROUP.replace("operations", "monitor")
+        p = self.procedures(A)
+        if monitor not in p.get("monitorable_groups", []):
+            print(f"  [SKIP] S22 needs {monitor} in the user profile (create the lab with --monitor-group)")
+            self.skipped_parts.append("S22 (no --monitor-group)")
+            return
+        # TS 24.379 §9.2.1.2: alice and bob monitor the second group; the PUBLISH names both groups.
+        for c in (A, B):
+            r = self.cmd(c, "monitor", monitor)
+            self.check(f"{c} monitors {monitor}", monitor in r["monitored_groups"])
+            s = self.wait(f"{c} affiliated to both", lambda c=c: (s := self.status(c)) and s["mcptt"]["affiliations"].get(monitor) == "affiliated"
+                          and s["mcptt"]["affiliations"].get(GROUP) == "affiliated" and s, timeout=15)
+            self.check(f"{c} is affiliated to {GROUP} and {monitor}", bool(s))
+        self.check("client-c does not monitor it", monitor not in self.status(C)["mcptt"]["affiliations"])
+        # A call on the monitored group reaches alice, not client-c.
+        call = self.cmd(B, "group", monitor)
+        self.check("bob's call on the monitored group is established", call["state"] == "established")
+        got = self.established(A)
+        self.check("alice joins the call on the monitored group", got["group"] == monitor, call=got)
+        time.sleep(1)
+        self.check("client-c, not monitoring, gets no call", self.call(C) is None)
+        self.talk_and_verify(B, [A])
+        self.hangup(B)
+        self.idle_everywhere([A, B])
+        for c in (A, B):
+            r = self.cmd(c, "monitor", "none")
+            ok = self.wait(f"{c} left {monitor}", lambda c=c: not (s := self.status(c))["mcptt"]["affiliations"].get(monitor)
+                           or s["mcptt"]["affiliations"].get(monitor) in ("deaffiliating", "deaffiliated"), timeout=15)
+            self.check(f"{c} no longer monitors {monitor}", bool(ok) and r["monitored_groups"] == [])
+            self.check(f"{c} stays affiliated to {GROUP}", self.status(c)["mcptt"]["affiliations"].get(GROUP) == "affiliated")
+
+    def s23_remote_affiliation(self) -> None:
+        # TS 24.379 §9.2.1.3: the affiliation of another user. The OpenMCX participating function authorises no user for
+        # another's affiliation status (§9.2.2.2.4: 403), so the subscription to bob is refused; this user's own is
+        # accepted, and its NOTIFY lists alice's client.
+        r = self.cmd(A, "affiliation-subscribe", MCPTT[B])
+        self.check("the subscription to bob's affiliation is refused by the server (403)", r["status"] == 403, result=r)
+        r = self.cmd(A, "affiliation-subscribe", MCPTT[A])
+        self.check("alice's subscription to her own affiliation is accepted", r["status"] == 200, result=r)
+        groups = lambda: [g for v in (self.procedures(A)["target_affiliations"].get(MCPTT[A]) or {}).get("clients", {}).values()
+                          for g, st in v.items() if st == "affiliated"]
+        self.wait("alice's own affiliation notified", lambda: GROUP in groups(), timeout=15)
+        self.check("the notification lists alice's client affiliated to the group", GROUP in groups())
+        # §9.2.1.2 in mandatory mode, targeted at alice's own client: de-affiliate, then affiliate again.
+        r = self.cmd(A, "affiliate-remote", MCPTT[A], GROUP, "deaffiliate", "mandatory")
+        self.check("the mandatory-mode de-affiliation is accepted", r["status"] == 200, result=r)
+        try:
+            self.wait("alice de-affiliated", lambda: GROUP not in groups(), timeout=15)
+            ok = True
+        except Failed:
+            ok = False
+        self.check("the server de-affiliated alice's client", ok, target=self.procedures(A)["target_affiliations"])
+        publish = self.last_sent(A, "PUBLISH ") or ""
+        self.check("the de-affiliation PUBLISH has Expires 0 and no PIDF (§9.2.1.2 step 4)",
+                   "Expires: 0" in publish and "application/pidf+xml" not in publish)
+        r = self.cmd(A, "affiliate-remote", MCPTT[A], GROUP, "affiliate", "mandatory")
+        self.check("the mandatory-mode affiliation is accepted", r["status"] == 200, result=r)
+        self.wait("alice affiliated again", lambda: GROUP in groups(), timeout=15)
+        publish = self.last_sent(A, "PUBLISH ") or ""
+        self.check("the affiliation PUBLISH names the targeted client, no status attribute, a p-id",
+                   "urn:uuid:" in publish and "<mcpttPI10:p-id>" in publish and 'status="' not in publish.split("application/pidf+xml", 1)[-1])
+        r = self.cmd(A, "affiliation-unsubscribe", MCPTT[A])
+        self.check("alice's subscription to her own affiliation ends", r["status"] == 200, result=r)
+        # The server notifies one subscription per user: the client's own takes it back with its refresh.
+        self.cmd(A, "refresh", "subscription")
+        # §9.2.1.4 negotiated mode: the MESSAGE with the affiliation command. The OpenMCX servers do not pass it on to
+        # bob (no clause 9.2.2 procedure of theirs handles it), so its final answer is what is checked.
+        r = self.cmd(A, "affiliate-remote", MCPTT[B], GROUP, "deaffiliate", "negotiated")
+        self.check("the negotiated-mode MESSAGE gets a final answer", r["status"] >= 200, result=r)
+        message = self.last_sent(A, "MESSAGE ") or ""
+        self.check("the MESSAGE carries the affiliation command naming bob",
+                   "application/vnd.3gpp.mcptt-affiliation-command+xml" in message and "<de-affiliate><group>" in message
+                   and f"<mcpttURI>{MCPTT[B]}</mcpttURI>" in message, message=message[-1200:])
+        self.check("bob got no request (the server does not relay it)", self.procedures(B)["affiliation_command"] is None)
+        s = self.status(A)
+        self.check("alice is still affiliated to the group", s["mcptt"]["affiliations"].get(GROUP) == "affiliated")
+
+    def s24_group_dynamic_data(self) -> None:
+        # TS 24.379 §9.2.1.6: the subscription with the per-group filter; the NOTIFY's dynamic data.
+        r = self.cmd(A, "gdd-subscribe", GROUP)
+        self.check("alice's group dynamic data subscription is accepted", r["status"] == 200, result=r)
+        gdd = lambda: self.procedures(A)["group_dynamic_data"].get(GROUP) or {}
+        try:
+            self.wait("dynamic data notified", lambda: gdd().get("notifications", 0) >= 1, timeout=15)
+        except Failed:
+            pass
+        g = gdd()
+        self.check("the dynamic data is notified", g.get("notifications", 0) >= 1, gdd=g)
+        members = {m["id"] for m in g.get("members", [])}
+        self.check("its affiliated members include alice and bob", {MCPTT[A], MCPTT[B]} <= members, members=sorted(members))
+        before = g.get("notifications", 0)
+        self.cmd(B, "group", GROUP)
+        self.established(A)
+        try:
+            self.wait("call ongoing notified", lambda: gdd().get("call_ongoing") is True, timeout=15)
+        except Failed:
+            pass
+        self.check("a call on the group is notified as ongoing", gdd().get("call_ongoing") is True,
+                   gdd=gdd(), notifications_before=before)
+        self.hangup(B)
+        self.idle_everywhere([A, B, C])
+        r = self.cmd(A, "gdd-resubscribe", GROUP)
+        self.check("the dynamic data subscription is refreshed", r["status"] == 200, result=r)
+        r = self.cmd(A, "gdd-unsubscribe", GROUP)
+        self.check("the dynamic data subscription ends", r["status"] == 200 and not gdd().get("subscribed"), result=r)
+        r = self.cmd(A, "gdd-subscribe", GROUP, "fetch", "call")
+        self.check("a dynamic data fetch with an item filter is accepted", r["status"] == 200, result=r)
+
     SCENARIOS = {"S1": s1_startup, "S2": s2_private_automatic, "S3": s3_private_manual, "S4": s4_group, "S5": s5_adhoc, "S6": s6_sds,
                  "S7": s7_refresh_and_recovery, "S8": s8_lifecycle, "S9": s9_impaired, "S10": s10_latency,
                  "S11": s11_product, "S12": s12_private_no_floor, "S13": s13_location,
@@ -978,7 +1208,9 @@ class Lab:
                  "S16": s16_emergency_calls,
                  "S17": s17_functional_aliases,
                  "S18": s18_floor_queue,
-                 "S19": s19_reg_event}
+                 "S19": s19_reg_event,
+                 "S20": s20_implicit_floor, "S21": s21_service_settings, "S22": s22_monitor,
+                 "S23": s23_remote_affiliation, "S24": s24_group_dynamic_data}
 
 
 def main() -> None:
