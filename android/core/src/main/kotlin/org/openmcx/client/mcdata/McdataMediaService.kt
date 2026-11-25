@@ -58,6 +58,12 @@ interface McdataMediaPeer {
     suspend fun info(dialog: Dialog, parts: List<Part>, headers: List<Pair<String, String>>): SipResponse
     fun event(text: String)
     val protection: McdataProtection? get() = null
+    /**
+     * TS 24.282 §6.6.3.2 (TS 33.180 §9.5.3): the MCData signalling bodies of an MSRP SEND sealed under the CSK, or
+     * opened (throws when refused); unchanged while signalling is not protected.
+     */
+    fun sealMsrp(parts: List<Part>): List<Part> = parts
+    fun openMsrp(parts: List<Part>): List<Part> = parts
     /** A MESSAGE for file distribution (FD NOTIFICATION, TS 24.282 §12.2.1.1); null when not available. */
     suspend fun fdMessage(parts: List<Part>): SipResponse? = null
 }
@@ -115,6 +121,8 @@ class ClientMediaPeer(private val client: McxClient) : McdataMediaPeer {
     }
     override fun event(text: String) = client.event("mcdata media: $text")
     override val protection get() = client.mcdataProtection
+    override fun sealMsrp(parts: List<Part>) = client.protection.sealMsrp(parts)
+    override fun openMsrp(parts: List<Part>) = client.protection.openMsrp(parts)
     override suspend fun fdMessage(parts: List<Part>) = ClientFdPeer(client).send(parts)
 }
 
@@ -326,8 +334,8 @@ class McdataMediaService(
         val signalling = SdsSignalling(clock(), conversationId, UUID.randomUUID(), inReplyTo, disposition = disposition)
         c.messageId = signalling.messageId
         try {
-            c.msrp!!.sendParts(listOf(Part(McdataService.SIGNALLING, signalling.encode()),
-                Part(McdataService.PAYLOAD, payload(c, DataPayload(listOf(Payload.text(text))).encode()))))
+            c.msrp!!.sendParts(peer.sealMsrp(listOf(Part(McdataService.SIGNALLING, signalling.encode()),
+                Part(McdataService.PAYLOAD, payload(c, DataPayload(listOf(Payload.text(text))).encode())))))
         } catch (e: Exception) {
             // TS 24.582 §6.1.1.2.1: the message could not be sent; the SIP session ends.
             c.dialog?.let { peer.bye(it) }
@@ -367,8 +375,8 @@ class McdataMediaService(
     suspend fun sessionSend(text: String, disposition: DispositionRequest? = null, c: MediaCommunication? = session): SentSds {
         val s = c?.takeIf { it.open } ?: throw SdsError("no SDS session is open")
         val signalling = SdsSignalling(clock(), s.conversationId, UUID.randomUUID(), disposition = disposition, sender = peer.userId)
-        s.msrp!!.sendParts(listOf(Part(McdataService.SIGNALLING, signalling.encode()),
-            Part(McdataService.PAYLOAD, payload(s, DataPayload(listOf(Payload.text(text))).encode()))))
+        s.msrp!!.sendParts(peer.sealMsrp(listOf(Part(McdataService.SIGNALLING, signalling.encode()),
+            Part(McdataService.PAYLOAD, payload(s, DataPayload(listOf(Payload.text(text))).encode())))))
         s.messages += "out: $text"
         changed(s)
         event("communication ${s.id}: session SDS ${signalling.messageId} sent")
@@ -380,7 +388,8 @@ class McdataMediaService(
     /** TS 24.582 §6.1.2.5.3: an SDS NOTIFICATION in the session, a SEND of the signalling body alone. */
     private suspend fun sendNotification(c: MediaCommunication, notification: SdsNotification): Boolean {
         if (!c.open) return false
-        c.msrp?.send(McdataService.SIGNALLING, notification.encode()) ?: return false
+        c.msrp?.send(McdataService.SIGNALLING, peer.sealMsrp(listOf(Part(McdataService.SIGNALLING, notification.encode())))[0].content)
+            ?: return false
         return true
     }
 
@@ -541,7 +550,9 @@ class McdataMediaService(
     /** TS 24.582 §6.1.1.3.2, §6.1.2.6: the MCData bodies of a received SEND, as a message of the signalling plane. */
     private suspend fun received(c: MediaCommunication, contentType: String, body: ByteArray) {
         if (contentType.substringBefore(';').trim() == FILE) return fileReceived(c, body)
-        val parts = if (contentType.startsWith("multipart/")) Multipart.parse(contentType, body) else listOf(Part(contentType, body))
+        val received = if (contentType.startsWith("multipart/")) Multipart.parse(contentType, body) else listOf(Part(contentType, body))
+        // TS 24.282 §6.6.3.2: signalling from the server under the CSK is opened first; a refused SEND is dropped.
+        val parts = try { peer.openMsrp(received) } catch (e: Exception) { event("communication ${c.id}: signalling refused: ${e.message}"); return }
         val signalling = parts.firstOrNull { it.mediaType == McdataService.SIGNALLING } ?: run { event("communication ${c.id}: SEND without signalling"); return }
         when (MessageType.of(signalling.content)) {
             MessageType.SDS_NOTIFICATION -> {

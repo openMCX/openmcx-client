@@ -121,4 +121,39 @@ def s82_message_store(lab) -> None:
     lab.check("alice disables storage again (200)", r["status"] == 200, reply=r)
 
 
-SCENARIOS = {"S80": s80_ip_connectivity, "S81": s81_enhanced_status, "S82": s82_message_store}
+def sealing(lab, client: str) -> tuple[int, int]:
+    p = lab.cmd(client, "keys")["xml_protection"]
+    return p["signalling_sealed"], p["signalling_opened"]
+
+
+def s83_protected_msrp(lab) -> None:
+    """TS 24.282 clause 6.6.3.2 with TS 33.180 clause 9.5.3 (a lab made with --protected): the MCData signalling bodies of
+    the MSRP SENDs between each phone and the MCData server are sealed under the CSK, and opened: an SDS session's
+    messages and its in-session notification, and a standalone SDS over the media plane, reach the other phone."""
+    if not lab.protected:
+        print("  [SKIP] S83 needs a protected lab (androidlab.py create --protected)"); lab.skipped.append("S83"); return
+    stamp = time.strftime("%H%M%S")
+    a0, b0 = sealing(lab, A), sealing(lab, B)
+    lab.check("both phones protect their MCData signalling", lab.cmd(A, "keys")["xml_protection"]["signalling_protection"]
+              and lab.cmd(B, "keys")["xml_protection"]["signalling_protection"])
+    s = lab.cmd(A, "sds-session", MCDATA[B], timeout=40)
+    lab.check("alice's SDS session with bob is open", s["state"] == "open", session=s)
+    lab.wait("bob's leg open", lambda: any(c["kind"] == "session" and c["state"] == "open" for c in lab.status(B)["media"]), timeout=15)
+    text = f"sealed {stamp}"
+    sent = lab.cmd(A, "sds-session", "send", "delivery", text)
+    got = lab.wait("bob receives it", lambda: next((m for m in lab.status(B)["inbox"] if m["text"] == text), None), timeout=15)
+    lab.check("bob receives alice's message from the session (opened under his CSK)", got["plane"] == "session")
+    note = lab.wait("alice's DELIVERED in the session", lambda: (m := next((m for m in lab.status(A)["outbox"]
+                    if m["message_id"] == sent["message_id"]), None)) and m["notifications"] and m, timeout=15)
+    lab.check("bob's in-session DELIVERED reaches alice (sealed by bob, opened by alice)", "DELIVERED" in note["notifications"].values(), note=note)
+    lab.cmd(A, "sds-session", "close")
+    long_text = f"{stamp} " + "sealed media " * 120
+    lab.cmd(B, "sds", MCDATA[A], long_text, timeout=60)
+    far = lab.wait("alice receives the long SDS", lambda: next((m for m in lab.status(A)["inbox"] if m["text"] == long_text), None), timeout=20)
+    lab.check("bob's standalone SDS over the media plane reaches alice", far["plane"] == "media")
+    a1, b1 = sealing(lab, A), sealing(lab, B)
+    lab.check("alice sealed her session SEND and opened bob's notice and SDS", a1[0] > a0[0] and a1[1] >= a0[1] + 2, before=a0, after=a1)
+    lab.check("bob opened alice's SEND and sealed his notice and SDS", b1[1] > b0[1] and b1[0] >= b0[0] + 2, before=b0, after=b1)
+
+
+SCENARIOS = {"S80": s80_ip_connectivity, "S81": s81_enhanced_status, "S82": s82_message_store, "S83": s83_protected_msrp}

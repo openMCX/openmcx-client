@@ -303,6 +303,34 @@ class SignallingProtection(
         return out
     }
 
+    /**
+     * TS 24.282 clause 6.6.3.2 with TS 33.180 clause 9.5.3 over the media plane: the MCData signalling bodies of an MSRP
+     * SEND to the MCData server sealed under the CSK, as those of SIP requests; unchanged while signalling is not
+     * protected. Throws when the CSK is past its Expiry time: the SEND is not made (annex E.6.10).
+     */
+    fun sealMsrp(parts: List<Part>): List<Part> {
+        val key = signallingKey() ?: return parts
+        KeyUse.requireInUse(key, now())
+        return parts.map { part ->
+            if (part.mediaType != SIGNALLING || part.content.isEmpty()) part
+            else part.copy(content = sealSignalling(part.content, key)).also { signallingSealed.incrementAndGet() }
+        }
+    }
+
+    /**
+     * TS 24.282 clause 6.6.3.2 with TS 33.180 clause 8.5.4: the MCData signalling bodies of an MSRP SEND from the MCData
+     * server opened under the CSK; clear signalling while it is protected is refused (throws, the SEND dropped).
+     */
+    fun openMsrp(parts: List<Part>): List<Part> {
+        val key = signallingKey() ?: return parts
+        return try {
+            parts.map { part ->
+                if (part.mediaType != SIGNALLING) part
+                else part.copy(content = openSignalling(part.content, key)).also { signallingOpened.incrementAndGet() }
+            }
+        } catch (e: Exception) { xmlRefused.incrementAndGet(); throw e }
+    }
+
     /** TS 24.282 clause 6.6.1: the CSK protecting signalling with the MCData server, once it holds it. */
     fun signallingKey(): KeyMessage? =
         if (config.mcdata?.protectSignalling == true && cskHeld(McService.MCDATA)) csk(McService.MCDATA) else null
