@@ -404,15 +404,16 @@ void Client::mcdata_media_answer_offer(SipResponse &response, const SipMessage &
 // TS 24.282 clause 6.2.8.1.17: release the communication over the media plane (SIP BYE request) and return the
 // communication states.
 void Client::mcdata_media_close(const std::vector<SipHeader> &bye_headers) {
-  if (!mcdata_media_dialog_.empty()) {
+  if (mcdata_media_pre_) {
+    // TS 24.282 clause 9.2.5.4.1.1: a communication within the pre-established session is left by a REFER "BYE",
+    // also while it is still being established (the REFER accepted, no re-INVITE "establish-success" yet); the
+    // session stays.
+    mcdata_media_dialog_.clear();
+    schedule([this] { mcdata_pre_leave(); });
+  } else if (!mcdata_media_dialog_.empty()) {
     const auto dialog = mcdata_media_dialog_;
     mcdata_media_dialog_.clear();
-    // TS 24.282 clause 9.2.5.4.1.1: a communication within the pre-established session is left by a REFER "BYE";
-    // the session stays.
-    if (mcdata_media_pre_)
-      schedule([this] { mcdata_pre_leave(); });
-    else
-      schedule([this, dialog, bye_headers] { sip_.bye(dialog, {}, bye_headers); });
+    schedule([this, dialog, bye_headers] { sip_.bye(dialog, {}, bye_headers); });
   }
   mcdata_media_pre_ = false;
   mcdata_media_.reset();
@@ -428,15 +429,25 @@ void Client::mcdata_media_close(const std::vector<SipHeader> &bye_headers) {
   mcdata_media_offered_ = nullptr;
   mcdata_media_key_.reset();
   mcdata_media_peer_.clear();
-  mdepc_ = 1;
+  mcdata_priority_released();
+}
 
-  // TS 24.282 clause 6.2.8.1.17: releasing the communication returns the communication states, and
-  // a request that was still pending; the in-progress state of the group itself
-  // lasts until it is cancelled, so MDEG 2 and MDIG 2 are left alone.
-  mdegc_ = 1;
-  mdigc_ = 1;
-  if (mdeg_ == 4) mdeg_ = 1;
-  if (mdig_ == 4) mdig_ = 1;
+//------------------------------------------------------------------------------
+// The priority states on the release of the communication, by the user or the server, granted or still being
+// established: TS 24.282 clauses 6.2.8.1.17 and 6.2.8.1.18 (client_rules::priority_released).
+void Client::mcdata_priority_released() {
+  auto s = client_rules::priority_released({mdeg_, mdegc_, mdea_, mdig_, mdigc_, mdepc_, mdepp_});
+  mdeg_ = s.mdeg;
+  mdegc_ = s.mdegc;
+  mdea_ = s.mdea;
+  mdig_ = s.mdig;
+  mdigc_ = s.mdigc;
+  mdepc_ = s.mdepc;
+  mdepp_ = s.mdepp;
+  if (mcdata_pre_) {
+    mcdata_pre_->priority.clear();
+    mcdata_pre_->before.reset();
+  }
 }
 
 //------------------------------------------------------------------------------

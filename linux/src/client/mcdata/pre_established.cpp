@@ -11,10 +11,19 @@
 // function's re-INVITE (clauses 9.2.5.4.1.1 and 9.2.5.4.1.2). The media plane is that of TS 24.582 clause 6.1
 // (clause 12.1): the client connects, as the active MSRP endpoint, to the session's negotiated MSRP URI.
 //
+// The emergency and imminent peril communications over the session: the REFER of an emergency one-to-one
+// communication (clause 9.2.5.2.1.1 1a): an MCData-Info body of its own, clause 6.2.8.3.2) and of an emergency or
+// imminent peril group communication (clause 9.2.5.3.1.1 3A)-3D): clauses 6.2.8.1.1, 6.2.8.1.2, 6.2.8.1.9,
+// 6.2.8.1.12); the refusal of the REFER (clauses 6.2.8.1.5, 6.2.8.3.5); the grant in the re-INVITE "establish-success"
+// (clause 9.2.5.3.1.1 0) -> 6.2.8.1.16; clause 9.2.5.2.1.1 3)); the release (clauses 6.2.8.1.17, 6.2.8.1.18); the
+// user's cancel and upgrade of an emergency one-to-one communication by a re-INVITE in the session's dialog (clauses
+// 9.2.5.2.1.3 -> 6.2.8.4.3, 9.2.5.2.1.4 -> 6.2.8.4.4, mcdata_session_priority) and the participating function's
+// (clause 9.2.5.2.1.5 -> 6.2.8.4.2, mcdata_media_reinvite).
+//
 // Not implemented: ICE connectivity checks (the offer carries the host candidate of the MSRP listener, RFC 8839; a
-// participating function that answers without ICE attributes turns ICE off, RFC 8839 section 4.2.3), the emergency
-// and imminent peril communications over the session (clauses 9.2.5.2.1.3 to 9.2.5.2.1.5), and a participating
-// function that answers "a=setup:active" (the session is then not used: communications go on demand).
+// participating function that answers without ICE attributes turns ICE off, RFC 8839 section 4.2.3), the SIP INFO of
+// clause 6.2.8.1.13 within the session, and a participating function that answers "a=setup:active" (the session is
+// then not used: communications go on demand).
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.582 V19.0.0 (Rel-19), RFC 3515, RFC 4488, RFC 4538, RFC 2392,
 // RFC 5366, RFC 4975, RFC 4145, RFC 8839, RFC 3261.
@@ -175,25 +184,42 @@ bool Client::mcdata_pre_usable() const {
 // (7) / 6), RFC 4488); Target-Dialog the session (8) / 7), RFC 4538); the SDS media feature tag in Contact (9) / 8)).
 // Require "multiple-refer": RFC 5368 section 4 for a Refer-To naming a URI list. The XML bodies are confidentiality
 // protected (TS 24.282 clause 6.5.2.3.1): the MCData-Info inside the entry, then the entry's "uri" with the list.
-void Client::mcdata_pre_refer(const std::string &target, const mcdata::Info &info, const MsrpMedia &offer) {
+//
+// A priority communication (priority "emergency" or "imminent", the states already moved by
+// mcdata_session_priority_state, clauses 6.2.8.1.1, 6.2.8.1.9, 6.2.8.3.2): the indications are in the entry's
+// MCData-Info, the one the participating function forwards (clause 9.2.5.1.1 9)a)), and in an MCData-Info body of the
+// REFER itself (clause 9.2.5.2.1.1 1a)a) for a one-to-one communication; clauses 9.2.5.3.2.1 6A)-6B) have the
+// participating function read "the" MCData-Info of the REFER for a group one); extra_parts (the location information
+// of an emergency alert, clause 6.2.8.1.1 3)b)) go into the REFER's body (not into the entry: its URI, with the
+// escaped and protected bodies, would exceed what a resource list entry carries); extra_headers (Resource-Priority,
+// clause 9.2.5.3.1.1 3B), 3D)) into the REFER.
+void Client::mcdata_pre_refer(const std::string &target, const mcdata::Info &info, const MsrpMedia &offer,
+                              const std::vector<BodyPart> &extra_parts, const std::vector<SipHeader> &extra_headers,
+                              const std::string &priority) {
   auto &pre = *mcdata_pre_;
   const auto ids = sip_.dialog_identifiers(pre.dialog);
   if (!ids || pre.uri.empty()) throw std::runtime_error("the pre-established session has no dialog identifiers");
-  auto entry_body =
-      mcdata_seal_signalling({{"application/sdp", msrp_sdp(offer, 1), random_id().substr(0, 16) + "@mcx"},
-                              {mcdata::info_mime, mcdata::info_xml(info), random_id().substr(0, 16) + "@mcx"}});
+  std::vector<BodyPart> entry_parts{{"application/sdp", msrp_sdp(offer, 1), random_id().substr(0, 16) + "@mcx"},
+                                    {mcdata::info_mime, mcdata::info_xml(info), random_id().substr(0, 16) + "@mcx"}};
+  auto entry_body = mcdata_seal_signalling(std::move(entry_parts));
   const ReferEntry entry{target, {}, std::move(entry_body)};
   const auto content_id = random_id().substr(0, 16) + "@mcx";
-  auto list = mcdata_encrypt_xml({refer_resource_list_part(entry, content_id, "mcdata-entry")}, mcdata_xml_key());
-  const std::vector<SipHeader> headers{{"Refer-To", cid_refer_to(content_id)},
-                                       {"Refer-Sub", "false"},
-                                       {"Supported", "norefersub"},
-                                       {"Require", "multiple-refer"},
-                                       {"Target-Dialog", target_dialog_value(*ids)},
-                                       {"P-Preferred-Service", mcdata::sds_icsi},
-                                       {"Contact", sds_contact(sip_.contact_target())}};
+  std::vector<BodyPart> body{refer_resource_list_part(entry, content_id, "mcdata-entry")};
+  if (!priority.empty()) body.push_back({mcdata::info_mime, mcdata::info_xml(info)});
+  for (const auto &part : extra_parts) body.push_back(part);
+  auto list = mcdata_encrypt_xml(std::move(body), mcdata_xml_key());
+  std::vector<SipHeader> headers{{"Refer-To", cid_refer_to(content_id)},
+                                 {"Refer-Sub", "false"},
+                                 {"Supported", "norefersub"},
+                                 {"Require", "multiple-refer"},
+                                 {"Target-Dialog", target_dialog_value(*ids)},
+                                 {"P-Preferred-Service", mcdata::sds_icsi},
+                                 {"Contact", sds_contact(sip_.contact_target())}};
+  for (const auto &header : extra_headers) headers.push_back(header);
   pre.communication = "requested";
   pre.last_state.clear();
+  pre.priority = priority;
+  pre.priority_group = !info.request_uri.empty();
   mcdata_media_pre_ = true;
   sip_.refer(pre.uri, list, headers, [this](const SipResponse &raw) {
     const auto response = mcdata_opened_response(raw);
@@ -212,6 +238,7 @@ void Client::mcdata_pre_refer(const std::string &target, const mcdata::Info &inf
     mcdata_media_result_["status"] = response.status_code;
     mcdata_media_result_["warning"] = std::string(get_header(response.headers, "Warning"));
     mcdata_media_result_["state"] = "rejected";
+    mcdata_pre_priority_refused(response); // TS 24.282 clauses 9.2.5.2.1.1 / 9.2.5.3.1.1 (4xx, 5xx, 6xx)
     mcdata_pre_drop_media();
     failure("communication over the pre-established session: " + std::to_string(response.status_code));
   });
@@ -283,6 +310,7 @@ void Client::mcdata_pre_drop_media() {
     mcdata_pre_->communication.clear();
     mcdata_pre_->communication_uri.clear();
   }
+  mcdata_pre_status();
 }
 
 //------------------------------------------------------------------------------
@@ -371,6 +399,9 @@ SipResponse Client::mcdata_pre_reinvite(const SipMessage &message) {
     return response;
   }
   if (state == "establish-success" && pre.communication == "requested") {
+    // TS 24.282 clause 9.2.5.3.1.1 0) (group: 6.2.8.1.16, the Resource-Priority noted, the 200 (OK) with the session's
+    // media) and clause 9.2.5.2.1.1 3) (one-to-one): the priority the REFER requested, granted.
+    if (!pre.priority.empty()) mcdata_pre_priority_granted(message, mcdata::parse_info(info_xml));
     // TS 24.282 clause 9.2.5.2.1.1 1)i) / 9.2.5.3.1.1 1)i): the user is notified of the successful establishment;
     // 5) / 4) the media plane (TS 24.582 clause 12.1).
     pre.communication = "established";
@@ -387,8 +418,11 @@ SipResponse Client::mcdata_pre_reinvite(const SipMessage &message) {
     return response;
   }
   if (state == "establish-fail" && pre.communication == "requested") {
-    // TS 24.282 clause 9.2.5.2.1.1 2)i): the user notified of the failure, the state variables restored.
+    // TS 24.282 clause 9.2.5.2.1.1 2)i): the user notified of the failure, the state variables restored (a group
+    // communication too: clause 9.2.5.3.1.1 2)i) says only "notify"; its failed establishment is the release of a
+    // communication "in the process of being established" of clause 6.2.8.1.17, which the restore covers).
     mcdata_media_result_["state"] = "rejected";
+    mcdata_pre_restore_states();
     mcdata_pre_drop_media();
     event("mcdata_pre_communication_failed", {});
     mcdata_pre_status();
@@ -415,6 +449,78 @@ SipResponse Client::mcdata_pre_reinvite(const SipMessage &message) {
   }
   event("mcdata_pre_session_modified", {{"method", "INVITE"}, {"offer", offer}});
   return response;
+}
+
+//------------------------------------------------------------------------------
+// The grant of the priority communication the REFER requested, by the participating function's re-INVITE
+// "establish-success" within the pre-established session: group, TS 24.282 clause 9.2.5.3.1.1 0)a) -> 6.2.8.1.16
+// (client_rules::pre_group_priority_granted); one-to-one, clause 9.2.5.2.1.1 3)a) (pre_private_priority_granted);
+// 0)b) the Resource-Priority of the re-INVITE noted ("may" act on it: no further action).
+void Client::mcdata_pre_priority_granted(const SipMessage &reinvite, const mcdata::Info &info) {
+  auto &pre = *mcdata_pre_;
+  if (const auto rp = get_header(reinvite.headers, "Resource-Priority"); !rp.empty())
+    mcdata_media_result_["resource_priority"] = std::string(rp);
+  client_rules::McdataPriorityStates s{mdeg_, mdegc_, mdea_, mdig_, mdigc_, mdepc_, mdepp_};
+  s = pre.priority_group ? client_rules::pre_group_priority_granted(s, info.emergency, info.imminent_peril, info.alert)
+                         : client_rules::pre_private_priority_granted(s);
+  mdeg_ = s.mdeg;
+  mdegc_ = s.mdegc;
+  mdea_ = s.mdea;
+  mdig_ = s.mdig;
+  mdigc_ = s.mdigc;
+  mdepc_ = s.mdepc;
+  mdepp_ = s.mdepp;
+  if (pre.priority_group) {
+    if (pre.priority == "imminent") mcdata_session_imminent_ = mdigc_ == 3; // 2)b): denied, at the emergency level
+    if (mdeg_ == 2) mcdata_session_emergency_ = true;
+  } else if (mdepc_ == 3) {
+    mcdata_session_emergency_ = true;
+  }
+  if (mcdata_media_result_.is_object()) {
+    mcdata_media_result_["emergency"] = mcdata_session_emergency_;
+    mcdata_media_result_["imminent"] = mcdata_session_imminent_;
+  }
+  event("mcdata_pre_priority_granted", {{"priority", pre.priority},
+                                        {"group", pre.priority_group},
+                                        {"states",
+                                         {{"mdeg", mdeg_name(mdeg_)},
+                                          {"mdegc", mdegc_name(mdegc_)},
+                                          {"mdig", mdig_name(mdig_)},
+                                          {"mdigc", mdigc_name(mdigc_)},
+                                          {"mdepc", mdepc_name(mdepc_)}}}});
+}
+
+//------------------------------------------------------------------------------
+// A SIP 4xx, 5xx or 6xx response to the REFER of a priority communication: TS 24.282 clause 9.2.5.3.1.1 1) -> 6.2.8.1.5
+// (group, MDEGC 2 or 3, MDIGC 2 or 3), clause 9.2.5.2.1.1 1) -> 6.2.8.3.5 (one-to-one, MDEPC 2: 1) MDEPC 1, 2) MDEPP 3
+// -> 1; 3) no <alert-ind> "true" is sent with a one-to-one communication).
+void Client::mcdata_pre_priority_refused(const SipResponse &response) {
+  if (!mcdata_pre_ || mcdata_pre_->priority.empty()) return;
+  if (mcdata_pre_->priority_group) {
+    mcdata_priority_response(response);
+  } else if (mdepc_ == 2 || mdepc_ == 3) {
+    mdepc_ = 1;
+    if (mdepp_ == 3) mdepp_ = 1;
+  }
+  mcdata_pre_->priority.clear();
+}
+
+//------------------------------------------------------------------------------
+// TS 24.282 clause 9.2.5.2.1.1 2)i): the state variables back to their values before the origination attempt.
+void Client::mcdata_pre_restore_states() {
+  if (!mcdata_pre_ || !mcdata_pre_->before) return;
+  const auto &b = *mcdata_pre_->before;
+  mdegc_ = b.mdegc;
+  mdeg_ = b.mdeg;
+  mdea_ = b.mdea;
+  mdigc_ = b.mdigc;
+  mdig_ = b.mdig;
+  mdepc_ = b.mdepc;
+  mdepp_ = b.mdepp;
+  mcdata_emergency_ = b.emergency;
+  mcdata_priority_group_ = b.group;
+  mcdata_pre_->before.reset();
+  mcdata_pre_->priority.clear();
 }
 
 //------------------------------------------------------------------------------

@@ -667,6 +667,51 @@ void test_pre_established_parts() {
         "ICE attributes of the MSRP listener");
 }
 
+//------------------------------------------------------------------------------
+// TS 24.282 clauses 6.2.8.1.16, 9.2.5.2.1.1 (re-INVITE 3)), 6.2.8.1.17 and 6.2.8.1.18: the priority states of a
+// communication over a pre-established session, granted and released.
+void test_pre_priority_states() {
+  using mcx::client_rules::McdataPriorityStates;
+  using mcx::client_rules::pre_group_priority_granted;
+  using mcx::client_rules::pre_private_priority_granted;
+  using mcx::client_rules::priority_released;
+  // an emergency group request with an alert: MDEGC 2, MDEG 4, MDEA 2
+  McdataPriorityStates requested{4, 2, 2, 1, 1, 1, 1};
+  auto s = pre_group_priority_granted(requested, std::nullopt, std::nullopt, std::nullopt);
+  check(s.mdeg == 2 && s.mdegc == 3 && s.mdea == 3, "6.2.8.1.16 1)a), 1)b)i): no indications grant the emergency");
+  s = pre_group_priority_granted(requested, true, std::nullopt, false);
+  check(s.mdeg == 2 && s.mdegc == 3 && s.mdea == 1, "6.2.8.1.16 1)b)ii): <alert-ind> false: MDEA 1");
+  s = pre_group_priority_granted(requested, false, std::nullopt, std::nullopt);
+  check(s.mdeg == 4 && s.mdegc == 2, "6.2.8.1.16 1)a): <emergency-ind> false grants nothing");
+  s = pre_group_priority_granted(requested, true, false, std::nullopt);
+  check(s.mdeg == 4 && s.mdegc == 2, "6.2.8.1.16 1)a): an <imminentperil-ind> present grants nothing");
+  // an imminent peril group request: MDIGC 2, MDIG 4
+  const McdataPriorityStates imminent{1, 1, 1, 4, 2, 1, 1};
+  s = pre_group_priority_granted(imminent, std::nullopt, std::nullopt, std::nullopt);
+  check(s.mdig == 2 && s.mdigc == 3 && s.mdeg == 1, "6.2.8.1.16 2)a): MDIG 2, MDIGC 3");
+  s = pre_group_priority_granted(imminent, std::nullopt, true, std::nullopt);
+  check(s.mdig == 2 && s.mdigc == 3, "6.2.8.1.16 2)a): <imminentperil-ind> true");
+  s = pre_group_priority_granted(imminent, true, false, std::nullopt);
+  check(s.mdeg == 2 && s.mdigc == 1 && s.mdig == 1, "6.2.8.1.16 2)b): at the group's emergency level");
+  // one-to-one: MDEPC 2, MDEPP 3
+  const McdataPriorityStates priv{1, 1, 1, 1, 1, 2, 3};
+  s = pre_private_priority_granted(priv);
+  check(s.mdepc == 3 && s.mdepp == 2, "9.2.5.2.1.1 3)a): MDEPP 2, MDEPC 3");
+  check(pre_private_priority_granted({}).mdepc == 1, "9.2.5.2.1.1 3)a): no request, no grant");
+  // released while still being established
+  s = priority_released(requested);
+  check(s.mdegc == 1 && s.mdeg == 1 && s.mdea == 1, "6.2.8.1.17 1): MDEGC 1, MDEG 1, MDEA 1");
+  s = priority_released(imminent);
+  check(s.mdigc == 1 && s.mdig == 1, "6.2.8.1.17 2): MDIGC 1, MDIG 1");
+  s = priority_released(priv);
+  check(s.mdepc == 1 && s.mdepp == 1, "6.2.8.1.18 1): MDEPC 1, MDEPP 1");
+  // released once granted: the group's in-progress state stays
+  s = priority_released(pre_group_priority_granted(requested, true, std::nullopt, true));
+  check(s.mdeg == 2 && s.mdegc == 1 && s.mdea == 3, "a granted emergency: MDEG 2 and the alert kept");
+  s = priority_released(pre_group_priority_granted(imminent, std::nullopt, true, std::nullopt));
+  check(s.mdig == 2 && s.mdigc == 1, "a granted imminent peril: MDIG 2 kept");
+}
+
 int main() {
   test_call_floor_ssrcs();
   test_floor_multiplexing();
@@ -692,6 +737,7 @@ int main() {
   test_mc_priorities();
   test_sds_payloads();
   test_pre_established_parts();
+  test_pre_priority_states();
   if (failures) std::fprintf(stderr, "%d check(s) failed\n", failures);
   return failures ? 1 : 0;
 }
