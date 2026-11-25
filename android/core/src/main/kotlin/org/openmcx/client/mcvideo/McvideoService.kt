@@ -26,6 +26,8 @@ import org.openmcx.client.body.McService
 import org.openmcx.client.body.Multipart
 import org.openmcx.client.body.Part
 import org.openmcx.client.body.ResourceLists
+import org.openmcx.client.body.descendants
+import org.openmcx.client.body.text
 import org.openmcx.client.client.Icsi
 import org.openmcx.client.client.McxClient
 import org.openmcx.client.client.ServiceHandler
@@ -51,12 +53,18 @@ class VideoCall internal constructor(
     /** The other party's MCVideo ID (private), or who called the group. */
     @Volatile var peer: String?,
     val transmissionControl: Boolean,
-    /** The group of a group call; null for a private call. */
-    val groupId: String? = null,
-    /** `private`, `prearranged` or `chat` (the session-type). */
+    /** The group of a group call (an ad hoc call's once the server names it); null for a private call. */
+    @Volatile var groupId: String? = null,
+    /** `private`, `prearranged`, `chat` or `adhoc` (the session-type). */
     val sessionType: String = "private",
 ) {
-    val isGroup get() = groupId != null
+    val isGroup get() = groupId != null || sessionType == McvideoService.ADHOC
+    val isAdhoc get() = sessionType == McvideoService.ADHOC
+    /** An ad hoc call (§22.2.2.1.1): the MCVideo IDs to call (step 11) or the participant criteria (step 12). */
+    internal var adhocTargets: List<String> = emptyList()
+    @Volatile var adhocCriteria: String? = null
+    /** A re-join (§22.2.5.1.1, §9.2.1.2.4.1): the session identity the INVITE goes to. */
+    internal var rejoinUri: String? = null
     /** A call with the MCVideo server itself: a push to it or a pull of a recording from it. */
     val withServer get() = sessionType == McvideoService.PUSH_TO_SERVER || sessionType == McvideoService.PULL_FROM_SERVER
     /** An ambient viewing call (§15): `remote-init` or `local-init`; null for any other call. */
@@ -150,7 +158,17 @@ class McvideoService(
     private val _recordings = MutableStateFlow<List<String>>(emptyList())
     /** URLs of this user's pushes to the server, newest last: videos to pull again. */
     val recordings: StateFlow<List<String>> = _recordings
+    /** The Call-IDs of the conference subscriptions ended with their calls, whose last NOTIFY may still come. */
+    private val endedConferences: MutableSet<String> = java.util.Collections.synchronizedSet(LinkedHashSet())
     private val _alerting = MutableStateFlow<Set<String>>(emptySet())
+    /**
+     * The group session this user last left and may re-join (TS 24.281 §22.2.5.1.1 for an ad hoc group session left
+     * by §22.2.4.1.1, or removed from it; one released for everyone, §22.2.3.1.1, has ended): (session URI, group, type).
+     */
+    @Volatile var rejoinable: Triple<String, String?, String>? = null
+        private set
+    /** The imminent peril state of groups cancelled without a call (TS 24.281 §9.2.5.2.1, annex G.7): "MVIG 1" ... */
+    val imminentStates: MutableMap<String, String> = java.util.concurrent.ConcurrentHashMap()
     /** The groups on which this user's own emergency alert is active. */
     val alerting: StateFlow<Set<String>> = _alerting
 
@@ -413,6 +431,58 @@ class McvideoService(
     suspend fun joinChat(group: String = config.chatGroups.firstOrNull() ?: throw CallError("no MCVideo chat group")): VideoCall =
         originate(VideoCall(ids.incrementAndGet(), true, null, true, group, "chat"), null)
 
+    /**
+     * An ad hoc group call (TS 24.281 §22.2.2.1.1) to [targets] (step 11) or to the users [criteria] select (step 12);
+     * with [priority] `emergency` (§6.2.8.1.19) or `imminent` (§6.2.8.1.23). The server names the ad hoc group in its 2xx.
+     */
+    suspend fun adhocCall(targets: List<String> = emptyList(), criteria: String? = null, priority: String = "normal",
+                          implicit: Boolean = false): VideoCall {
+        if (targets.isEmpty() && criteria.isNullOrBlank()) throw CallError("an ad hoc call needs MCVideo IDs or criteria")
+        return originate(VideoCall(ids.incrementAndGet(), true, null, true, null, ADHOC).also {
+            it.adhocTargets = targets; it.adhocCriteria = criteria; it.priority = priority; it.implicitAsked = implicit }, null)
+    }
+
+    /**
+     * Re-join the group session this user last left (TS 24.281 §22.2.5.1.1 for an ad hoc group session: the INVITE of
+     * §22.2.2.1.1 to the session identity, naming the ad hoc group; §9.2.1.2.4.1 for a prearranged or chat group).
+     */
+    suspend fun rejoin(): VideoCall {
+        val (uri, group, type) = rejoinable ?: throw CallError("no group session to re-join")
+        return originate(VideoCall(ids.incrementAndGet(), true, null, true, group, type).also { it.rejoinUri = uri }, null)
+    }
+
+    /**
+     * TS 24.281 §9.2.5.2.1: cancel the in-progress imminent peril state of [group] on which there is no call: a MESSAGE
+     * to the MCVideo PSI with the group, <imminentperil-ind> "false", the client ID and the alias in use (step 5); the
+     * state "MVIG 3: cancel-pending" (step 7) until a 2xx ("MVIG 1: no-imminent-peril") or a failure ("MVIG 2: in-progress").
+     * With a call on the group, the cancellation is that call's re-INVITE (§9.2.1.2.1.5).
+     */
+    suspend fun cancelImminent(group: String = config.groups.firstOrNull() ?: throw CallError("no MCVideo group")): String {
+        active?.takeIf { it.groupId == group && it.state == "established" }?.let { setPriority(emergency = false, enabled = false, call = it); return "MVIG 1: no-imminent-peril" }
+        val request = ua.newRequest("MESSAGE", config.psi, NameAddr(config.psi))
+        request.headers.add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCVIDEO)}\";require;explicit")
+            .add("Accept-Contact", "*;+g.3gpp.mcvideo;require;explicit").add("P-Preferred-Service", Icsi.MCVIDEO)
+        val info = McvideoInfo(requestUri = group, imminentPeril = false, clientId = client.config.clientId,
+            functionalAlias = client.aliasesOf(McService.MCVIDEO).value.inUse)
+        request.headers.add("Content-Type", McvideoInfo.CONTENT_TYPE)
+        imminentStates[group] = "MVIG 3: cancel-pending"
+        val response = ua.send(SipRequest(request.method, request.uri, request.headers, info.encode().toByteArray()))
+        imminentStates[group] = if (response.isSuccess) "MVIG 1: no-imminent-peril" else "MVIG 2: in-progress"
+        event("imminent peril of $group cancelled without a call: ${response.status}")
+        if (!response.isSuccess) throw CallError("${response.status} ${response.reason}${response.headers["Warning"]?.let { " ($it)" } ?: ""}", response.status)
+        return imminentStates[group]!!
+    }
+
+    /**
+     * §22.2.2.1.1: whether the MCVideo service configuration document allows ad hoc group calls: an
+     * <allow-adhoc-group-call-support> "true" in the <adhoc-group-call> of the <anyExt> of <on-network> (absent: not).
+     */
+    private suspend fun adhocSupported(): Boolean {
+        val text = runCatching { client.cmsDocument("org.3gpp.mcvideo.service-config/global/service-config.xml") }.getOrElse {
+            event("service configuration: ${it.message}"); return false }
+        return adhocSupport(text)
+    }
+
     // Video push and pull (§12.2, §13.2): private calls in which one side sends without asking.
 
     /** Push this phone's camera to [target] (§13.2.2.1): it transmits at once (implicit request); they only watch. */
@@ -461,14 +531,17 @@ class McvideoService(
         // §10.2.2.2.1 step 11, §15.2.1.1 with TS 33.180 7.4: a protected one-to-one call's media under a PCK we
         // generate for the called MCVideo ID, offered in a=key-mgmt. Calls with the server itself stay clear.
         // A call to an alias is keyed once the server names the user who holds it (the 300, then the call to them).
+        // §22.2.2.1.1: an ad hoc group call needs <allow-adhoc-group-call-support> "true" in the service configuration.
+        if (call.isAdhoc && call.rejoinUri == null && !adhocSupported()) throw CallError("ad hoc group calls are not allowed (service configuration)")
         val pck = if (protectedMedia && !call.isGroup && !call.withServer && !call.toAlias) {
             val keys = client.videoKeys ?: throw CallError("no MCVideo keys for a protected call")
             keys.makePck(target ?: throw CallError("no one to call"))
         } else null
         // Calls with the MCVideo server itself (recording, playback) stay in the clear, transmission control too.
         // A protected group or chat call's media under the group's GMK (TS 33.180 7.3).
-        val gmk = if (protectedMedia && call.isGroup) awaitGroupKey(call.groupId ?: throw CallError("no group")) else null
-        val protection = if (call.withServer) null else protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
+        // An ad hoc group's GMK is not known before the server names the group: ad hoc calls go in the clear.
+        val gmk = if (protectedMedia && call.isGroup && !call.isAdhoc) awaitGroupKey(call.groupId ?: throw CallError("no group")) else null
+        val protection = if (call.withServer || call.isAdhoc) null else protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
         _calls.value = _calls.value + call
         val (ports, bound) = bindMedia(transmissionControl,
             implicitRequest = call.sessionType == PUSH || call.sessionType == PUSH_TO_SERVER || call.ambientType == "local-init" || call.implicitAsked,
@@ -484,7 +557,9 @@ class McvideoService(
         pck?.let { call.pckId = it.first.csbId; event("call ${call.id}: PCK %08x for $target".format(it.first.csbId)) }
         call.media = media
         try {
-            val request = ua.newRequest("INVITE", config.psi, NameAddr(config.psi))
+            // §22.2.5.1.1 and §9.2.1.2.4.1: a re-join goes to the session identity; otherwise to the MCVideo PSI.
+            val requestUri = call.rejoinUri ?: config.psi
+            val request = ua.newRequest("INVITE", requestUri, NameAddr(requestUri))
             commonHeaders(request, initialInvite = true)
             request.headers.add("Session-Expires", "1800").add("Min-SE", "90")
             when (commencement) {
@@ -499,7 +574,10 @@ class McvideoService(
             call.callingAlias = presented
             if (call.toAlias) call.calledAlias = target
             val aliasCalled = call.calledAlias.takeIf { !call.toAlias }
-            val info = priorityInfo(if (call.isGroup) McvideoInfo(sessionType = call.sessionType, requestUri = call.groupId, clientId = client.config.clientId,
+            val info = priorityInfo(if (call.isAdhoc) McvideoInfo(sessionType = ADHOC, requestUri = call.groupId, clientId = client.config.clientId,
+                    // §22.2.2.1.1 steps 10 b), 12: the ad hoc group when known (a re-join), the criteria when asked.
+                    functionalAlias = presented, participantCriteria = call.adhocCriteria)
+                else if (call.isGroup) McvideoInfo(sessionType = call.sessionType, requestUri = call.groupId, clientId = client.config.clientId,
                     functionalAlias = presented)
                 else McvideoInfo(sessionType = call.sessionType, callingUserId = config.userId, clientId = client.config.clientId,
                     videoPullUrl = if (call.sessionType == PULL_FROM_SERVER) call.pushUrl else null, ambientViewingType = call.ambientType,
@@ -508,11 +586,14 @@ class McvideoService(
             val parts = mutableListOf(Part("application/sdp", McvideoSdp.offer(local).toByteArray()), Part(McvideoInfo.CONTENT_TYPE, info.encode().toByteArray()))
             // A call with the server names nobody (§13.2.2.4, §12.2.2.4).
             if (!call.isGroup && !call.withServer) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOfNotNull(target)).toByteArray())
+            // §22.2.2.1.1 step 11: the MCVideo users to call (RFC 5366).
+            if (call.isAdhoc && call.adhocTargets.isNotEmpty()) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(call.adhocTargets).toByteArray())
             val (contentType, body) = Multipart.encode(parts)
             request.headers.add("Content-Type", contentType)
             val invite = SipRequest(request.method, request.uri, request.headers, body)
             call.invite = invite
-            event("call ${call.id}: " + if (call.isGroup) "${call.sessionType} group video call on ${call.groupId}"
+            event("call ${call.id}: " + if (call.isAdhoc) "ad hoc group video call${call.rejoinUri?.let { " re-joining $it" } ?: ""} to ${call.adhocTargets.ifEmpty { listOfNotNull(call.adhocCriteria) }}"
+                else if (call.isGroup) "${call.sessionType} group video call on ${call.groupId}"
                 else if (call.ambientType != null) "${call.ambientType} ambient viewing call to $target"
                 else "private video call to $target${if (transmissionControl) "" else " without transmission control"}")
             val response = ua.send(invite, provisional = { r ->
@@ -539,6 +620,12 @@ class McvideoService(
             ua.ack(dialog, sent)
             val sdp = Multipart.parse(response.contentType, response.body).firstOrNull { it.mediaType == "application/sdp" }
                 ?: throw CallError("200 without SDP")
+            // §22.2.2.1.1, on the 2xx: the ad hoc group's identity in <mcvideo-calling-group-id>; and the priority state
+            // the server confirms (§6.2.8.1.20).
+            Multipart.parse(response.contentType, response.body).firstOrNull { it.mediaType == McvideoInfo.CONTENT_TYPE }
+                ?.let { runCatching { McvideoInfo.parse(it.text) }.getOrNull() }?.let { answered ->
+                    if (call.isAdhoc) answered.callingGroupId?.let { call.groupId = it }
+                }
             val remote = McvideoSdp.remote(sdp.text)
             if (remote.transmissionControl != transmissionControl) throw CallError("transmission control not negotiated as offered")
             if (remote.protected != local.protected) throw CallError("media protection not negotiated as offered")
@@ -581,6 +668,8 @@ class McvideoService(
             return true
         }
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "conference") {
+            // RFC 6665 §4.1.2.3: the NOTIFY that ends a subscription we ended with the call is answered too.
+            if (request.callId in endedConferences) { tx.respond(200); return true }
             val call = _calls.value.firstOrNull { it.conferenceCallId == request.callId } ?: return false
             tx.respond(200)
             conferenceNotify(call, request)
@@ -624,7 +713,7 @@ class McvideoService(
         val sdp = parts.firstOrNull { it.mediaType == "application/sdp" }?.text
         if (info == null || sdp == null) { tx.respond(400, "Bad Request"); return }
         val sessionType = info.sessionType ?: "private"
-        if (sessionType !in setOf("private", "prearranged", "chat", PUSH, PULL, AMBIENT)) { tx.respond(488); event("$sessionType video calls are not supported"); return }
+        if (sessionType !in setOf("private", "prearranged", "chat", ADHOC, PUSH, PULL, AMBIENT)) { tx.respond(488); event("$sessionType video calls are not supported"); return }
         if (active != null) { tx.respond(486); return }
         val remote = try { McvideoSdp.remote(sdp) } catch (e: SdpNegotiationError) { event("offer refused: ${e.message}"); tx.respond(488); return }
         // One-to-one calls (private, push, pull, ambient viewing) name no group, even with a request URI in the info.
@@ -643,7 +732,7 @@ class McvideoService(
         var pck: KeyMessage? = null
         var gmk: KeyMessage? = null
         if (remote.protected) {
-            if (group != null) {
+            if (group != null && sessionType != ADHOC) {
                 gmk = runCatching { awaitGroupKey(group) }.getOrNull()
                 if (gmk == null) { tx.respond(488); event("protected call on $group without its group key"); return }
             } else try {
@@ -696,7 +785,8 @@ class McvideoService(
         }
         val media = newMedia(call, ports, local)
         media.protection = try {
-            protection(pck, localInitiator = false, gmk = gmk, call = call)
+            // The MCVideo server keeps an ad hoc group call's transmission control in the clear (no group document).
+            if (sessionType == ADHOC) null else protection(pck, localInitiator = false, gmk = gmk, call = call)
         } catch (e: CallError) {
             tx.respond(480); release(call, e.message ?: "no keys"); return
         }
@@ -743,7 +833,10 @@ class McvideoService(
         val request = ua.inDialog(dialog, "SUBSCRIBE")
         request.headers.add("Contact", client.contactFor(McService.MCVIDEO)).add("Event", "conference")
             .add("Accept", ConferenceInfo.CONTENT_TYPE).add("Expires", "4294967295")
-        event("call ${call.id}: conference subscription refreshed ${runCatching { ua.send(request, dialog) }.getOrNull()?.status}")
+            .add("Content-Type", McvideoInfo.CONTENT_TYPE)
+        val refresh = SipRequest(request.method, request.uri, request.headers,
+            McvideoInfo(requestUri = call.groupId, clientId = client.config.clientId).encode().toByteArray())
+        event("call ${call.id}: conference subscription refreshed ${runCatching { ua.send(refresh, dialog) }.getOrNull()?.status}")
     }
 
     /** A conference NOTIFY (RFC 4575): update the call's participants. */
@@ -832,7 +925,14 @@ class McvideoService(
 
     // Emergency and imminent peril (§6.2.8).
 
-    private fun priorityInfo(info: McvideoInfo, priority: String) = when (priority) {
+    private fun priorityInfo(info: McvideoInfo, priority: String) = when {
+        // §6.2.8.1.19 step 2 and §6.2.8.1.23 1) a): an ad hoc group call's <adhoc-emergency-ind> or <imminentperil-ind>.
+        info.sessionType == ADHOC && priority == "emergency" -> info.copy(adhocEmergency = true)
+        info.sessionType == ADHOC && priority == "imminent" -> info.copy(imminentPeril = true)
+        else -> priorityInfoGroup(info, priority)
+    }
+
+    private fun priorityInfoGroup(info: McvideoInfo, priority: String) = when (priority) {
         // §6.2.8.1.1 step 3: an emergency call states that it is not an alert.
         "emergency" -> info.copy(emergency = true, alert = false)
         "imminent" -> info.copy(imminentPeril = true)
@@ -846,6 +946,9 @@ class McvideoService(
     /** Follow the call state in a request from the server: its emergency and imminent peril indications. */
     private fun notePriority(call: VideoCall, info: McvideoInfo) {
         val next = when {
+            // §22.2.2.2.1 steps 4 and 5: an ad hoc group call's indications.
+            info.adhocEmergency == true -> "emergency"
+            info.adhocEmergency == false && call.isAdhoc && call.priority == "emergency" -> "normal"
             info.emergency == true -> "emergency"
             info.imminentPeril == true -> "imminent"
             info.emergency == false || info.imminentPeril == false -> "normal"
@@ -863,8 +966,10 @@ class McvideoService(
      * Raise or cancel the emergency (or imminent peril) state of the call in progress by re-INVITE
      * in its dialog (§6.2.8.1.4, §6.2.8.1.9, §6.2.8.3): the server tells the other participants.
      */
-    suspend fun setPriority(emergency: Boolean, enabled: Boolean, call: VideoCall? = active) {
+    suspend fun setPriority(emergency: Boolean, enabled: Boolean, call: VideoCall? = active, cancelAlertOf: String? = null) {
         call ?: throw CallError("no video call")
+        require(cancelAlertOf == null || (emergency && !enabled)) { "only an emergency cancellation cancels another user's alert" }
+        require(cancelAlertOf != config.userId) { "the alert to cancel is another user's" }
         val dialog = call.dialog ?: throw CallError("the call is not established")
         val media = call.media ?: throw CallError("no media")
         val wanted = if (!enabled) "normal" else if (emergency) "emergency" else "imminent"
@@ -872,6 +977,9 @@ class McvideoService(
         else McvideoInfo(sessionType = "private", callingUserId = config.userId, clientId = client.config.clientId)
         info = when {
             emergency && enabled -> info.copy(emergency = true, alert = false)
+            // §6.2.8.1.14 step 3 and §6.2.8.3.8 step 3: cancelling another user's emergency alert with the emergency:
+            // <alert-ind> "false" and <originated-by> that user.
+            emergency && cancelAlertOf != null -> info.copy(emergency = false, alert = false, originatedBy = cancelAlertOf)
             emergency -> info.copy(emergency = false)
             enabled -> info.copy(imminentPeril = true)
             else -> info.copy(imminentPeril = false)
@@ -890,6 +998,7 @@ class McvideoService(
             val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""
             throw CallError("${response.status} ${response.reason}$warning", response.status)
         }
+        if (cancelAlertOf != null) { _alerts.value = _alerts.value - cancelAlertOf; call.events += "cancelled the alert of $cancelAlertOf" }
         call.priority = wanted
         call.events += "priority $wanted"
         event("call ${call.id}: $wanted")
@@ -949,7 +1058,12 @@ class McvideoService(
 
     suspend fun stopTransmit(call: VideoCall? = active) { call?.media?.takeIf { it.isStarted }?.control?.release() }
 
-    suspend fun hangup(call: VideoCall? = active) {
+    /**
+     * Leave the call (BYE); [releaseForAll] in an ad hoc group call releases it for every participant (§22.2.3.1.1,
+     * the BYE's Reason "SIP;cause=200;text=\"User requested release\""); leaving it alone (§22.2.4.1.1) lets it be
+     * re-joined (§22.2.5.1.1), as a prearranged or chat group session (§9.2.1.2.4.1).
+     */
+    suspend fun hangup(call: VideoCall? = active, releaseForAll: Boolean = false) {
         call ?: throw CallError("no video call")
         // §15.2.1.3 step 1: an ambient viewing call is released only with the release capability.
         if (!call.mayRelease && call.state == "established") throw CallError("this ambient viewing call may not be released here")
@@ -958,8 +1072,16 @@ class McvideoService(
             dialog != null -> {
                 call.media?.takeIf { it.isStarted }?.let { m -> if (m.control.state.value == TxState.HAS_PERMISSION) m.control.release() }
                 val bye = ua.inDialog(dialog, "BYE")
+                if (releaseForAll && call.isAdhoc) bye.headers.add("Reason", "SIP;cause=200;text=\"User requested release\"")
                 runCatching { withTimeoutOrNull(5_000) { ua.send(bye, dialog) } }
-                release(call, "released")
+                val session = call.sessionUri
+                rejoinable = when {
+                    session != null && call.isGroup && !(releaseForAll && call.isAdhoc) && call.sessionType != PULL_FROM_SERVER ->
+                        Triple(session, call.groupId, call.sessionType)
+                    rejoinable?.first == session -> null
+                    else -> rejoinable
+                }
+                release(call, if (releaseForAll && call.isAdhoc) "released for everyone" else "released")
             }
             call.outgoing && call.invite != null -> { ua.cancel(call.invite!!); release(call, "cancelled") }
             call.incoming != null -> call.answered.complete(false)
@@ -976,6 +1098,7 @@ class McvideoService(
         while (history.size > 20) history.removeAt(0)
         call.refresher?.cancel()
         runCatching { call.media?.stop() }
+        call.conferenceCallId?.let { endedConferences += it; while (endedConferences.size > 50) endedConferences.remove(endedConferences.first()) }
         call.conferenceCallId = null
         call.conference?.let { d ->
             // End the conference subscription (Expires 0); the server may have ended it with the session already.
@@ -985,7 +1108,12 @@ class McvideoService(
                 commonHeaders(unsubscribe)
                 // RFC 6665 §7.2 with TS 37.579-1 table 5.5.2.14-1: the Accept of the subscription on its end too.
                 unsubscribe.headers.add("Event", "conference").add("Accept", ConferenceInfo.CONTENT_TYPE).add("Expires", "0")
-                runCatching { withTimeoutOrNull(3_000) { ua.send(unsubscribe, d) } }
+                    .add("Content-Type", McvideoInfo.CONTENT_TYPE)
+                // TS 24.281 §9.2.3.2: the mcvideo-info body of the subscription (the group and the client ID) on its end too.
+                val end = SipRequest(unsubscribe.method, unsubscribe.uri, unsubscribe.headers,
+                    McvideoInfo(requestUri = call.groupId, clientId = client.config.clientId).encode().toByteArray())
+                val answer = runCatching { withTimeoutOrNull(3_000) { ua.send(end, d) } }.getOrNull()
+                event("call ${call.id}: conference subscription ended ${answer?.status}")
             }
         }
         _calls.value = _calls.value - call
@@ -1014,11 +1142,20 @@ class McvideoService(
         const val PUSH_TO_SERVER = "one-to-server video push"
         const val PULL_FROM_SERVER = "one-from-server video pull"
         const val AMBIENT = "ambient-viewing"
+        const val ADHOC = "adhoc"
         val ONE_TO_ONE = setOf("private", PUSH, PULL, AMBIENT)
         /** Annex D.3: the release capability of an ambient viewing call, in Feature-Caps. */
         const val AMBIENT_RELEASE = "g.3gpp.mcvideo.ambient-viewing-call-release"
 
         fun releaseCapability(featureCaps: List<String>) = featureCaps.any { AMBIENT_RELEASE in it }
+
+        /** §22.2.2.1.1: <on-network>/<anyExt>/<adhoc-group-call>/<allow-adhoc-group-call-support> "true" in [serviceConfig]. */
+        fun adhocSupport(serviceConfig: String): Boolean = runCatching {
+            val root = org.openmcx.client.body.Xml.parse(serviceConfig)
+            root.descendants("adhoc-group-call").any { call ->
+                call.descendants("allow-adhoc-group-call-support").any { it.text().let { v -> v == "true" || v == "1" } }
+            }
+        }.getOrDefault(false)
 
         /**
          * RFC 5373 §2: the Answer-Mode and Priv-Answer-Mode value is the token before any parameter ("Auto;require" is

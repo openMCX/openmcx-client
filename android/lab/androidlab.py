@@ -363,6 +363,27 @@ def create(args) -> None:
         policy = user.get("private_call") or {}
         if policy.get("any_target") and not policy.get("targets"):
             policy["targets"] = [i for i in callable_ids if i != user["mcptt_id"]]
+    # MCVideo transmission and reception priority (TS 24.581 clauses 14.2.3, 14.2.6): ROLE=N[:CAP] gives the role's user
+    # the MCVideo user profile <Priority> N (TS 24.484 clause 9.3.2.1 item 8 e) v)) and, on every MCVideo group, the
+    # server's cap CAP (default N) on the "mc_priority" it answers.
+    if args.mcvideo and args.priority:
+        # Emergency and imminent peril MCVideo ad hoc group calls (TS 24.281 clause 6.2.8.1.22) for client-a and client-b,
+        # as their group calls: <allow-emergency-adhoc-group-call>, <allow-imminent-peril-adhoc-group-call>.
+        for role in ("client-a", "client-b"):
+            video_id = json.loads((generated / f"{role}.json").read_text())["mcvideo"]["user_id"]
+            for user in site["users"]:
+                if user.get("mcvideo_id") == video_id:
+                    user.setdefault("mcvideo", {}).setdefault("adhoc_call", {"allow": True, "participation": True}).update(emergency=True, imminent=True)
+    for spec in getattr(args, "mcvideo_priority", None) or []:
+        role, _, value = spec.partition("=")
+        level, _, cap = value.partition(":")
+        video_id = json.loads((generated / f"{role}.json").read_text())["mcvideo"]["user_id"]
+        for user in site["users"]:
+            if user.get("mcvideo_id") == video_id:
+                user.setdefault("mcvideo", {}).setdefault("group_call", {})["priority"] = int(level)
+        for group in site["groups"]:
+            if isinstance(group.get("mcvideo"), dict):
+                group["mcvideo"].setdefault("floor_priority_caps", {})[video_id] = int(cap or level)
     (generated / "site.json").write_text(json.dumps(site, indent=2) + "\n")
     template = compose["services"]["client-a"]
     for role in ["client-a", "client-b", "client-c", "client-d"]:
@@ -505,11 +526,11 @@ def create(args) -> None:
         speech_wav(speech / f"{name}.wav", seed)
     meta_doc = {"openmcx": str(openmcx), "project": f"mcxandroid-{args.name}", "debug_sip": args.debug_sip,
                 "server_image": args.server_image, "mcvideo": args.mcvideo, "protected": args.protected, "transport_keys": args.transport_keys, "location": args.location,
-                "priority": args.priority, "floor_queue": args.floor_queue,
+                "priority": args.priority, "floor_queue": args.floor_queue, "mcvideo_priority": args.mcvideo_priority or [],
                 "reference_clients": args.reference_client or [], "client_image": args.client_image,
                 "admin": args.admin, "admin_image": args.admin_image, "keycloak": args.keycloak,
                 "mcptt_server": mcptt_server_name(compose["services"]),
-                "clients": [] if args.phones_only else [c for c in CLIENTS if c not in phones]}
+                "clients": [] if args.phones_only else [c for c in CLIENTS if c not in phones and c not in (args.reference_client or [])]}
     if phones:
         meta_doc["phones"] = phones
         meta_doc["host_ip"] = hostip
@@ -890,6 +911,8 @@ def main() -> None:
                    help="functional aliases (TS 24.379 clause 9A): duty-officer (client-a, client-b), patrol-car-12, incident-commander")
     c.add_argument("--priority", action="store_true",
                    help="emergency and imminent peril, and the MCPTT emergency alert (the group priority policy)")
+    c.add_argument("--mcvideo-priority", action="append", metavar="ROLE=N[:CAP]",
+                   help="with --mcvideo: the role's MCVideo user profile <Priority> N and the groups' cap on mc_priority")
     c.add_argument("--protected", action="store_true",
                    help="end-to-end protection (TS 33.180): the KMS, protected media and transmission control")
     c.add_argument("--xml-protection", action="store_true",

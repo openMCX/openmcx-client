@@ -90,10 +90,12 @@ class TransmissionParticipant(
     private val serverSsrc: Long,
     private val send: suspend (TransmissionMessage) -> Unit,
     private val listener: TransmissionListener,
-    private val priority: Int? = null,
+    /** The Transmission Priority field of our requests (null: left out). */
+    val priority: Int? = null,
     private val autoReceive: Boolean = true,
     private val timers: TransmissionTimers = TransmissionTimers(),
-    private val receptionPriority: Int? = null,
+    /** The Reception Priority field of our Receive Media Requests (null: left out). */
+    val receptionPriority: Int? = null,
 ) {
     private val lock = Mutex()
     private val _state = MutableStateFlow(TxState.START_STOP)

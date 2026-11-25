@@ -192,7 +192,20 @@ class DebugControl(private val context: Context) {
         "video-call" -> videoJson(mcvideo().privateCall(Engine.mcvideoId(args[0]),
             if ("manual" in args) Commencement.MANUAL else Commencement.AUTOMATIC, transmissionControl = "notc" !in args,
             emergency = "emergency" in args, implicit = "implicit" in args))
-        "video-emergency" -> { mcvideo().setPriority(emergency = true, enabled = args.firstOrNull() != "off"); mcvideo().active?.priority ?: "none" }
+        // video-emergency on|off [alert=<MCVideo ID>]: with alert=, the cancellation also cancels that user's emergency alert.
+        "video-emergency" -> { mcvideo().setPriority(emergency = true, enabled = args.firstOrNull() != "off",
+            cancelAlertOf = args.firstOrNull { it.startsWith("alert=") }?.removePrefix("alert=")); mcvideo().active?.priority ?: "none" }
+        // TS 24.281 §22.2.2.1.1: video-adhoc <MCVideo ID>... | criteria=<criteria> [emergency|imminent] [implicit]
+        "video-adhoc" -> videoJson(mcvideo().adhocCall(args.filter { it.startsWith("sip:") }.map { Engine.mcvideoId(it) },
+            args.firstOrNull { it.startsWith("criteria=") }?.removePrefix("criteria="),
+            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }, implicit = "implicit" in args))
+        // §22.2.3.1.1: release the ad hoc group call for everyone; video-hangup leaves it (§22.2.4.1.1).
+        "video-adhoc-release" -> { mcvideo().hangup(releaseForAll = true); "released" }
+        "video-rejoin" -> videoJson(mcvideo().rejoin())
+        "video-rejoinable" -> JSONObject().put("session", mcvideo().rejoinable?.first).put("group", mcvideo().rejoinable?.second)
+            .put("type", mcvideo().rejoinable?.third)
+        // §9.2.5.2.1: video-imminent-cancel [group]
+        "video-imminent-cancel" -> JSONObject().put("state", mcvideo().cancelImminent(args.firstOrNull() ?: Engine.client!!.config.mcvideo!!.groups.first()))
         "video-imminent" -> { mcvideo().setPriority(emergency = false, enabled = args.firstOrNull() != "off"); mcvideo().active?.priority ?: "none" }
         "video-chat" -> videoJson(mcvideo().joinChat(args.firstOrNull() ?: Engine.client!!.config.mcvideo!!.chatGroups.first()))
         // video-alert on|off [latitude longitude] [group]: without coordinates the phone's own location is used.
@@ -213,7 +226,13 @@ class DebugControl(private val context: Context) {
         // The emergency alert of the Call tab: alert on|off [mcptt|mcdata|video]
         "alert" -> JSONObject().put("result", Engine.emergencyAlert(args.firstOrNull() != "off", args.getOrNull(1))).put("state", alertState())
         // adhoc-alert <criteria> [mcptt|video]   or   adhoc-alert cancel
-        "adhoc-alert" -> if (args.firstOrNull() == "cancel") {
+        // TS 24.281 §12.1A.1.4: adhoc-alert modify <criteria> (MCVideo)
+        "adhoc-alert" -> if (args.firstOrNull() == "modify") {
+            val video = Engine.alertHandlers.firstOrNull { it.service == org.openmcx.client.location.LocationService.MCVIDEO }
+                ?: throw IllegalStateException("MCVideo not provisioned")
+            video.modifyAdhoc(args[1], Engine.positionOverride ?: Engine.currentLocation(context))
+            JSONObject().put("criteria", args[1]).put("state", alertState())
+        } else if (args.firstOrNull() == "cancel") {
             val done = Engine.alertHandlers.filter { it.adhoc.value != null }.map { h -> h.service.lower to runCatching { h.cancelAdhoc() }.exceptionOrNull()?.message }
             Engine.alertsChanged()
             JSONObject().put("cancelled", JSONObject(done.toMap())).put("state", alertState())
@@ -493,6 +512,8 @@ class DebugControl(private val context: Context) {
             .put("queue_position", media?.takeIf { it.isStarted }?.control?.queuePosition)
             .put("timeouts", JSONArray(media?.takeIf { it.isStarted }?.control?.timeouts ?: emptyList<String>()))
             .put("granted_by_sdp", call.grantedBySdp)
+            .put("request_priority", media?.takeIf { it.isStarted }?.control?.priority)
+            .put("request_reception_priority", media?.takeIf { it.isStarted }?.control?.receptionPriority)
             .put("negotiated_priority", call.negotiatedPriority).put("negotiated_reception_priority", call.negotiatedReceptionPriority)
             .put("events", JSONArray(call.events)).put("participants", JSONObject(call.participants))
             .put("pictures_sent", media?.stats?.picturesSent?.get()).put("pictures_received", media?.stats?.picturesReceived?.get())

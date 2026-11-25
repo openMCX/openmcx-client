@@ -318,3 +318,31 @@ class McvideoRulesTest {
         assertTrue(runCatching { McvideoProfile.parse(xml.replace(">7<", ">300<")) }.isFailure)
     }
 }
+
+/** TS 24.281 §22.2.2.1.1, §6.2.8.1.19, §6.2.8.1.23: the ad hoc group call's mcvideo-info and the service configuration. */
+class McvideoAdhocTest {
+    @Test fun adhocEmergencyIndicationRoundTrips() {
+        val info = McvideoInfo(sessionType = "adhoc", clientId = "urn:uuid:1", participantCriteria = "c1,c2", adhocEmergency = true)
+        val xml = info.encode()
+        assertTrue(xml, xml.contains("<anyExt><call-participants-criteria>c1,c2</call-participants-criteria><adhoc-emergency-ind>true</adhoc-emergency-ind>"))
+        val back = McvideoInfo.parse(xml)
+        assertEquals(true, back.adhocEmergency); assertEquals("c1,c2", back.participantCriteria); assertEquals("adhoc", back.sessionType)
+        assertNull(McvideoInfo.parse(McvideoInfo(sessionType = "adhoc").encode()).adhocEmergency)
+    }
+
+    @Test fun adhocSupportFromTheServiceConfiguration() {
+        fun doc(inner: String) = """<?xml version="1.0"?><service-configuration-info xmlns="urn:3gpp:mcvideo:mcvideoServiceConfig:1.0">
+            <service-configuration-params><on-network><anyExt>$inner</anyExt></on-network></service-configuration-params></service-configuration-info>"""
+        assertTrue(McvideoService.adhocSupport(doc("<adhoc-group-call><allow-adhoc-group-call-support>true</allow-adhoc-group-call-support></adhoc-group-call>")))
+        assertFalse(McvideoService.adhocSupport(doc("<adhoc-group-call><allow-adhoc-group-call-support>false</allow-adhoc-group-call-support></adhoc-group-call>")))
+        assertFalse(McvideoService.adhocSupport(doc(""))) // absent: not supported
+    }
+
+    @Test fun cancellationOfAnotherUsersAlertAndImminentCancel() {
+        val cancel = McvideoInfo.parse(McvideoInfo(requestUri = "sip:g@mcx.test", emergency = false, alert = false,
+            originatedBy = "sip:bob.mcvideo@mcx.test").encode())
+        assertEquals(false, cancel.alert); assertEquals("sip:bob.mcvideo@mcx.test", cancel.originatedBy)
+        val imminent = McvideoInfo(requestUri = "sip:g@mcx.test", imminentPeril = false, clientId = "urn:uuid:1").encode()
+        assertTrue(imminent.contains("<imminentperil-ind type=\"Normal\"><mcvideoBoolean>false</mcvideoBoolean></imminentperil-ind>"))
+    }
+}
