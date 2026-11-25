@@ -554,6 +554,9 @@ void Client::mcdata_command(const std::string &cmd) {
   if (verb == "mcdata-affiliate" || verb == "mcdata-deaffiliate") {
     std::vector<std::string> groups;
     for (std::string group; words >> group;) groups.push_back(group);
+    // TS 24.282 clause 8.2.2: a de-affiliation a fulfilled rule holds is suppressed (mcdata/location_rules.cpp).
+    if (verb == "mcdata-deaffiliate")
+      mcdata_check_manual_deaffiliation(groups.empty() ? std::vector<std::string>{mcdata_group()} : groups);
     if (groups.empty()) return mcdata_affiliate(verb == "mcdata-affiliate");
     if (verb == "mcdata-affiliate")
       mcdata_change_affiliation(groups, {});
@@ -1017,6 +1020,7 @@ void Client::mcdata_fa_command(std::istringstream &words) {
   }
   if ((action != "activate" && action != "takeover" && action != "deactivate") || aliases.empty())
     throw std::runtime_error("usage: mcdata-fa activate|takeover|deactivate <alias>... | subscribe | unsubscribe");
+  if (action == "deactivate") mcdata_check_manual_alias_deactivation(aliases); // TS 24.282 clause 22.2.1.2
   return mcdata_functional_alias(action, aliases);
 }
 

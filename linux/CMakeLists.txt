@@ -54,6 +54,7 @@ add_executable(mcx-client
     src/client/mcvideo/call.cpp
     src/client/mcvideo/functional_alias.cpp
     src/client/mcptt/location_rules.cpp
+    src/client/mcdata/location_rules.cpp
     src/client/mcvideo/group_selection.cpp
     src/client/mcvideo/live_video.cpp
     src/client/mcvideo/location.cpp

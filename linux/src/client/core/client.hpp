@@ -2722,6 +2722,25 @@ private:
   std::vector<std::pair<std::string, std::vector<std::string>>> mcdata_pending_alias_changes_;
   std::set<std::string> mcdata_takeover_possible_, mcdata_takeover_wanted_;
 
+  // MCData location rules (mcdata/location_rules.cpp): TS 24.282 clause 22.2.1.4 (functional aliases) and clause
+  // 8.2.6.2 (the MCData user profile's affiliation rules). Where the client was in each rule's areas at the last
+  // position (none before the first), the last position, the groups a rule affiliated, the aliases a location criterion
+  // activated and those the profile locks against a manual deactivation.
+  McpttProfileRules mcdata_location_rules_;
+  std::map<std::string, bool> mcdata_rule_area_inside_;
+  std::optional<location::Point> mcdata_last_position_;
+  std::set<std::string> mcdata_rule_affiliated_groups_, mcdata_aliases_by_location_, mcdata_alias_locks_;
+  void take_mcdata_profile_rules(const std::string &profile);
+  bool mcdata_rule_area_crossed(const std::string &key, const std::vector<location::Area> &areas, bool entry,
+                                double lat, double lon);
+  void mcdata_location_rules(const location::Point &position);
+  bool mcdata_rule_aliases_met(const McpttAffiliationRule &rule) const;
+  void mcdata_rules_aliases_changed(const std::set<std::string> &before);
+  void mcdata_apply_affiliation_rules(const std::map<std::string, std::pair<bool, bool>> &fulfilled,
+                                      const char *trigger);
+  void mcdata_check_manual_deaffiliation(const std::vector<std::string> &groups) const;
+  void mcdata_check_manual_alias_deactivation(const std::vector<std::string> &aliases) const;
+
   void mcdata_functional_alias(const std::string &action, const std::vector<std::string> &aliases);
 
   void mcdata_publish_functional_alias(const std::string &action, const std::vector<std::string> &aliases);
