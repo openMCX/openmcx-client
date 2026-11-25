@@ -41,6 +41,9 @@ data class McdataInfo(
     val callToFunctionalAlias: Boolean? = null,
     val functionalAlias: String? = null,
     val calledFunctionalAlias: String? = null,
+    /** In `<anyExt>` (TS 24.282 Annex D.1): an emergency (§6.2.8.1.1, §6.2.8.3.2) or imminent peril (§6.2.8.1.9) communication. */
+    val emergency: Boolean? = null,
+    val imminentPeril: Boolean? = null,
 ) {
     fun encode(): String = Xml.document("mcdatainfo", NAMESPACE) {
         element("mcdata-Params") {
@@ -54,9 +57,11 @@ data class McdataInfo(
             uri("originated-by", originatedBy)
             if (clientId != null) element("mcdata-client-id") { attr("type", "Normal"); leaf("mcdataString", clientId) }
             uri("mcdata-controller-psi", controllerPsi)
-            if (alertReceived != null || associatedGroupId != null || userRequestedPriority != null || usedPriority != null ||
+            if (emergency != null || imminentPeril != null || alertReceived != null || associatedGroupId != null || userRequestedPriority != null || usedPriority != null ||
                 emergencyAlertArea != null || groupGeoArea != null || callToFunctionalAlias != null || functionalAlias != null ||
                 calledFunctionalAlias != null) element("anyExt") {
+                leaf("emergency-ind", emergency?.toString())
+                leaf("imminentperil-ind", imminentPeril?.toString())
                 leaf("alert-ind-rcvd", alertReceived?.toString())
                 leaf("associated-group-id", associatedGroupId)
                 leaf("user-requested-priority", userRequestedPriority?.toString())
@@ -104,6 +109,8 @@ data class McdataInfo(
                 callToFunctionalAlias = flag("call-to-functional-alias-ind"),
                 functionalAlias = ext("functional-alias-URI"),
                 calledFunctionalAlias = ext("called-functional-alias-URI"),
+                emergency = flag("emergency-ind"),
+                imminentPeril = flag("imminentperil-ind"),
             )
         }
     }
