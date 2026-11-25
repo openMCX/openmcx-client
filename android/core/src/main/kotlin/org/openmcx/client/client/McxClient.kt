@@ -1248,8 +1248,8 @@ class McxClient(
         // once that one logs off or its authorisation ends. A refused request may still have spent its CSK upload (the
         // server opens it first): the retry uploads a new CSK.
         if (!response.isSuccess && cskUploads[service] != null) csks.remove(service)
-        if (!response.isSuccess) throw IllegalStateException("${service.name} service authorisation: ${response.status} ${response.reason}" +
-            (response.headers["Warning"]?.let { " ($it)" } ?: ""))
+        if (!response.isSuccess) throw AuthorisationRefused("${service.name} service authorisation: ${response.status} ${response.reason}" +
+            (response.headers["Warning"]?.let { " ($it)" } ?: ""), response.status, response.headers["Retry-After"])
         response.headers["SIP-ETag"]?.let { authEtags[service] = it }
         cskUploads.remove(service) // the server has the CSK
         updateService(service) { it.copy(authorised = true, refused = null) }
@@ -1490,23 +1490,34 @@ class McxClient(
      * and a retry on the same registration after the start-up's growing delay ([ClientConfig.recovery], no value of the
      * specifications: TS 33.180 C-2 and C-3 "may be repeated ... as necessary", without a timer), at once on Retry now.
      */
-    private fun refuseService(service: McService, groups: List<String>, lifeline: CompletableDeferred<Throwable?>, reason: String) {
+    private fun refuseService(service: McService, groups: List<String>, lifeline: CompletableDeferred<Throwable?>, reason: String,
+                              firstDelayMs: Long = config.recovery.firstRetryMs) {
         val message = "${service.name} not authorised: $reason"
         event(message)
         updateService(service) { it.copy(authorised = false, refused = message) }
         _status.update { it.copy(lastError = message) }
         if (serviceRetries[service]?.isActive == true) return
-        serviceRetries[service] = scope.launch { retryService(service, groups, lifeline) }
+        serviceRetries[service] = scope.launch { retryService(service, groups, lifeline, firstDelayMs) }
     }
 
-    private suspend fun retryService(service: McService, groups: List<String>, lifeline: CompletableDeferred<Throwable?>) {
+    /**
+     * The delay before the next authorisation attempt after [e]: the Retry-After of a 500 or 503 (RFC 3261 §20.33,
+     * [ClientRules.authorisationRetryDelayMs]), else [backoffMs].
+     */
+    private fun retryDelay(e: Throwable, backoffMs: Long): Long =
+        (e as? AuthorisationRefused)?.let { ClientRules.authorisationRetryDelayMs(it.status, it.retryAfter, backoffMs) } ?: backoffMs
+
+    private suspend fun retryService(service: McService, groups: List<String>, lifeline: CompletableDeferred<Throwable?>,
+                                     firstDelayMs: Long) {
         var backoff = config.recovery.firstRetryMs
+        var wait = firstDelayMs
         while (true) {
             val now = serviceRetryNow
-            updateService(service) { it.copy(nextRetryAt = clock() + backoff / 1000) }
-            withTimeoutOrNull(backoff) { select<Unit> { now.onAwait {}; lifeline.onAwait {} } }
+            updateService(service) { it.copy(nextRetryAt = clock() + wait / 1000) }
+            withTimeoutOrNull(wait) { select<Unit> { now.onAwait {}; lifeline.onAwait {} } }
             if (lifeline.isCompleted || loggedOff || signedOut) return
             backoff = if (now.isCompleted) config.recovery.firstRetryMs else (backoff * 2).coerceAtMost(config.recovery.lastRetryMs)
+            wait = backoff
             updateService(service) { it.copy(nextRetryAt = null) }
             try {
                 if (authorise(service)) bringUpAuthorised(service, groups)
@@ -1517,6 +1528,8 @@ class McxClient(
             } catch (e: Exception) {
                 if (lifeline.isCompleted || loggedOff || signedOut) return
                 val message = "${service.name} not authorised: ${e.message ?: e}"
+                wait = retryDelay(e, backoff)
+                if (wait != backoff) event("${service.name}: Retry-After ${wait / 1000} s")
                 event(message)
                 updateService(service) { it.copy(authorised = false, refused = message) }
                 _status.update { it.copy(lastError = message) }
@@ -1549,7 +1562,7 @@ class McxClient(
             throw e
         } catch (e: Exception) {
             if (loggedOff || signedOut || lifeline.isCompleted) throw e
-            refuseService(service, groups, lifeline, e.message ?: e.toString())
+            refuseService(service, groups, lifeline, e.message ?: e.toString(), retryDelay(e, config.recovery.firstRetryMs))
             return
         }
         if (!authorised) return
@@ -1833,6 +1846,9 @@ class McxClient(
     private fun nextBackoff(backoff: Long): Long =
         if (reconnectNow.isCompleted) config.recovery.firstRetryMs else (backoff * 2).coerceAtMost(config.recovery.lastRetryMs)
 }
+
+/** A refused service authorisation PUBLISH (TS 24.379 §7.2.2): its status and the Retry-After it carried. */
+class AuthorisationRefused(message: String, val status: Int, val retryAfter: String?) : IllegalStateException(message)
 
 /** A bounded log of client events and SIP messages, for the status view and the debug endpoint. */
 class EventLog(private val capacity: Int = 500) {

@@ -25,7 +25,9 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 internal class FakeSipCore(
                             /** A status other than 200 for a request (e.g. one service's authorisation PUBLISH), or null. */
-                            val statusFor: (SipRequest) -> Int? = { null }) : Connection {
+                            val statusFor: (SipRequest) -> Int? = { null },
+                            /** Header fields added to the answer of a request (e.g. Retry-After with a refusal). */
+                            val headersFor: (SipRequest) -> List<Pair<String, String>> = { emptyList() }) : Connection {
     val requests = CopyOnWriteArrayList<SipRequest>()
     val answers = LinkedBlockingQueue<SipResponse>()
     private val toClient = LinkedBlockingQueue<ByteArray>()
@@ -76,6 +78,7 @@ internal class FakeSipCore(
             "PUBLISH" -> headers.add("SIP-ETag", "e${requests.size}").add("Expires", request.headers["Expires"] ?: "0")
             "SUBSCRIBE" -> headers.add("Expires", if (event == "reg") "3761" else request.headers["Expires"]!!)
         }
+        headersFor(request).forEach { (name, value) -> headers.add(name, value) }
         statusFor(request)?.let { toClient.put(SipResponse(it, "Refused", headers).encode()); return }
         toClient.put(SipResponse(200, "OK", headers).encode())
         if (request.method == "SUBSCRIBE" && event == "presence" && request.headers["Expires"] == "0")

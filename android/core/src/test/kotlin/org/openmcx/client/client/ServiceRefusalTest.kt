@@ -63,9 +63,10 @@ class ServiceRefusalTest {
         request.method == "PUBLISH" && request.headers["Event"] == "poc-settings" && request.uri == "sip:$service@mcx.test"
 
     private fun start(security: Boolean, http: HttpClient, cores: MutableList<FakeSipCore>,
+                      headersFor: (SipRequest) -> List<Pair<String, String>> = { emptyList() },
                       statusFor: (SipRequest) -> Int? = { null }): McxClient {
         val client = McxClient(CoroutineScope(SupervisorJob() + Dispatchers.Default), config(security), http,
-            connector = { _, _ -> FakeSipCore(statusFor = statusFor).also { cores += it } })
+            connector = { _, _ -> FakeSipCore(statusFor = statusFor, headersFor = headersFor).also { cores += it } })
         client.tokens = tokens()
         client.serviceProtection = mapOf("mcptt" to (false to false), "mcvideo" to (false to false))
         client.start()
@@ -145,6 +146,30 @@ class ServiceRefusalTest {
         val old = cores[0].requests.count { authorisation(it, "mcvideo") }
         Thread.sleep(1_500)
         assertEquals(old, cores[0].requests.count { authorisation(it, "mcvideo") })
+        client.stop()
+    }
+
+    /**
+     * TS 24.379 §7.2.2 with RFC 3261 §20.33: a 503 with Retry-After 2 to the MCPTT authorisation is tried again after
+     * 2 s, not after the 300 ms of the back-off; then authorised.
+     */
+    @Test
+    fun retryAfterOfA503GivesTheDelay() = runBlocking {
+        val cores = CopyOnWriteArrayList<FakeSipCore>()
+        val refused = AtomicInteger()
+        val first = java.util.concurrent.atomic.AtomicLong()
+        val client = start(false, Http(), cores, headersFor = { request ->
+            if (authorisation(request, "mcptt") && refused.get() == 0) listOf("Retry-After" to "2") else emptyList()
+        }) { request ->
+            if (authorisation(request, "mcptt") && refused.get() == 0) { refused.incrementAndGet(); first.set(System.currentTimeMillis()); 503 } else null
+        }
+        waitFor("MCPTT refused") { client.status.value.mcptt.refused != null }
+        val retryAt = client.status.value.mcptt.nextRetryAt
+        assertTrue("next attempt in about 2 s: $retryAt", retryAt != null && retryAt - System.currentTimeMillis() / 1000 in 1..3)
+        waitFor("MCPTT authorised", 10) { client.status.value.mcptt.authorised }
+        val second = cores[0].requests.filter { authorisation(it, "mcptt") }
+        assertEquals(2, second.size)
+        assertTrue(System.currentTimeMillis() - first.get() >= 1_900)
         client.stop()
     }
 }
