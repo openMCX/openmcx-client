@@ -405,6 +405,8 @@ class Client {
   std::deque<std::function<void()>> pending_;
   std::string token_, dialog_, subscription_, auth_etag_, affiliation_etag_, wav_path_, session_uri_,
       conference_subscription_;
+  // The group of the conference event subscription (its <mcptt-request-uri>, repeated when it is ended).
+  std::string conference_group_;
   std::optional<std::uint32_t> conference_version_;
   // RFC 4575: the participants of the conference notifications (MCPTT ID -> endpoint status), a partial notification
   // applied on top of them.

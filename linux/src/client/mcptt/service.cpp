@@ -512,6 +512,7 @@ void Client::subscribe_conference(bool force) {
   McpttInfo info;
   info.request_uri = active_group();
   info.client_id = client_id();
+  conference_group_ = info.request_uri;
   conference_version_.reset();
   conference_members_.clear();
   const auto generation = ++conference_generation_;
@@ -537,18 +538,29 @@ void Client::subscribe_conference(bool force) {
 //------------------------------------------------------------------------------
 // TS 24.379 clause 10.1.3.2 with RFC 6665 section 4.1.2.3: "conference-unsubscribe" ends the conference event
 // subscription by an in-dialog SUBSCRIBE with Expires 0; the final NOTIFY is still answered (retired_conferences_).
+// The termination is "according to IETF RFC 6665", which needs only Expires 0 in the dialog; the SUBSCRIBE also
+// repeats the Accept-Contact and the mcptt-info body of the subscription (items 4) and 8)), as TS 37.579-2 table
+// 6.1.3.1.3.3-14 has it. A final response other than 2xx leaves the server's subscription in place: reported.
 void Client::unsubscribe_conference() {
   if (conference_subscription_.empty()) throw std::runtime_error("no conference event subscription");
   const auto dialog = conference_subscription_;
-  sip_.request_in_dialog(dialog, "SUBSCRIBE", {}, {},
-                         {{"Event", "conference"},
-                          {"Expires", "0"},
-                          {"Accept", "application/conference-info+xml"},
-                          {"P-Preferred-Service", "urn:urn-7:3gpp-service.ims.icsi.mcptt"}},
-                         [this](const SipResponse &response) {
-                           if (response.status_code >= 200)
-                             event("conference_unsubscribed", {{"status", response.status_code}});
-                         });
+  McpttInfo info;
+  info.request_uri = conference_group_.empty() ? active_group() : conference_group_;
+  info.client_id = client_id();
+  sip_.request_in_dialog(
+      dialog, "SUBSCRIBE", "application/vnd.3gpp.mcptt-info+xml", mcptt_info_xml(info),
+      {{"Event", "conference"},
+       {"Expires", "0"},
+       {"Accept", "application/conference-info+xml"},
+       {"P-Preferred-Service", "urn:urn-7:3gpp-service.ims.icsi.mcptt"},
+       {"Accept-Contact", "*;+g.3gpp.mcptt;require;explicit"},
+       {"Accept-Contact", "*;+g.3gpp.icsi-ref=\"urn%3Aurn-7%3A3gpp-service.ims.icsi.mcptt\";require;explicit"}},
+      [this](const SipResponse &response) {
+        if (response.status_code < 200) return;
+        status_["conference_unsubscribe_status"] = response.status_code;
+        event("conference_unsubscribed", {{"status", response.status_code}});
+        if (response.status_code >= 300) failure("conference unsubscribe: " + std::to_string(response.status_code));
+      });
   if (retired_conferences_.size() >= 32) retired_conferences_.erase(retired_conferences_.begin());
   retired_conferences_[dialog] = session_uri_;
   conference_subscription_.clear();
