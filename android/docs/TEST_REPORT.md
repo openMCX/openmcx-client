@@ -317,3 +317,47 @@ Found in the lab, and allowed for in the scenarios: the OpenMCX server passes ne
 `<call-forwarding-ind>` on to the target, and gives the invitee of a forwarded call Answer-Mode Auto although the caller
 asked for Manual (so the forwarded call may connect at once). Not exercised in the lab: the announced transfer
 (not implemented), `<ric-app-level-priority>` (unit test only), a protected ambient listening call.
+
+## Parity phase 5: pre-established sessions (2026-11-26)
+
+[PARITY_PLAN.md](PARITY_PLAN.md) phase 5 (branch `android-p5`, with `android-parity` and phase 3 merged). One lab,
+`p5-a`: `lab/androidlab.py create --name p5-a --server-image openmcx-all:mcdpre-800c657 --priority
+--mcdata-pre-established --pre-established --reference-client client-d --client-image openmcx-client:mcdemerg-ce06d65`
+(host ports 27061, 27443-27445), three redroid 15 clients and the Linux client as client-d, TLS. The new options pass
+the fixture's `--mcdata-pre-established` (`mcdata.resource_sharing` "rx") and `--pre-established`
+(`mcptt.resource_sharing` "rx").
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 563 passed, 0 failed. New: `PreEstablishedTest` (14, MCData), `McpttPreSessionTest` (12, MCPTT) |
+| App unit tests (`:app:testDebugUnitTest`) | 15 passed |
+| `:app:assembleDebug` | Built |
+| One run of S1, S6, S60-S67 and S70-S80 | 193 of 196. The three failures were S76's: the group was left in emergency by an earlier S80 run that failed before the 491 retry (below), so alice's call reached bob as an emergency call by INVITE with Replaces. After cancelling it, S76 and S80 again: 23 of 23 |
+| MCPTT regression S2-S5, S16 | 64 of 64 |
+
+| # | Scenario | Checks | Result |
+|---|---|---|---|
+| S70 | MCData session and SDS over it (TS 24.282 §18.3.2.1, §9.2.5.2.1.1, §9.2.5.3.1.1) | 8 | The server answers passive. Alice's one-to-one and group standalone SDS go by REFER, each with its own MSRP connection to the session's listener; she leaves by REFER BYE and the session is free again |
+| S71 | Communications offered over the session (§9.2.5.2.1.2, §9.2.5.4.1.2), a group session by REFER | 11 | Alice's on-demand SDS session reaches bob by `establish-request`; messages both ways; her close gives bob `terminate-request`. Bob's group session over his session reaches alice and client-c |
+| S72 | Emergency and imminent peril over the session (§9.2.5.3.1.1 3A)-3D), §6.2.8.1.16) | 8 | An emergency group session with an alert (the server records the alert and Resource-Priority), its cancel by re-INVITE in the session, imminent peril, an emergency one-to-one session |
+| S73 | Release (§18.3.3.1.1) | 5 | The BYE ends it; the next SDS goes on demand; a new session has a new dialog |
+| S74 | Flow loss | 3 | After `drop-flow` the session is kept by a re-INVITE with the new Contact (`resumed` 1), and an SDS goes over it |
+| S75 | MCPTT session and group calls over it (TS 24.379 §8.2.1, §10.1.1.2.2.1) | 19 | REFER, Connect and Acknowledge; speech both ways on the session's ports; left by REFER BYE; a second call on the same session |
+| S76 | A call offered by Connect (TS 24.380 §9.2.2.3.2) | 13 | Bob's leg of alice's on-demand group call comes by Connect; speech both ways; its end by Disconnect |
+| S77 | Private calls (§11.1.1.2.2.1, §11.1.1.2.2.2) | 15 | Alice's automatic private call over her session; her manual one reaches bob, who holds a session, by re-INVITE: he rings, answers, and the Connect follows |
+| S78 | Modification and release (§8.3.1.1, §8.4.1.1) | 5 | Implicit floor request on by re-INVITE, off by UPDATE; the BYE; the next call on demand |
+| S79 | Flow loss | 6 | The MCPTT session is kept on the new registration and carries a call |
+| S80 | INVITE with Replaces (§6.3.2.2.5.3 step 1), an emergency call over the session | 10 | Alice's emergency call reaches bob on demand with Replaces naming his session: he ends it and makes it again after the call. Alice's own emergency group call goes over her session |
+
+Faults found and fixed here:
+- **A cancelled ringing call answered 480** (`McpttCallTypesTest.firstToAnswerCancelledBeforeTheAnswer`, flaky): the
+  user agent woke the INVITE's handler before it sent the 487. The 487 now goes first, and a server transaction claims
+  its one final response atomically.
+- **491 on the cancel of an emergency over the MCPTT session**: the server's priority re-INVITE of TS 24.379
+  §6.3.2.1.8.5 crossed the client's. `setPriority` now sends it again after 2.1 to 4 s (RFC 3261 §14.1).
+
+Server notes (openmcx-server `mcdpre-800c657`, not changed): the MCData participating function listens for the session
+and the client connects for each communication, which suits an outbound-only phone; no change is needed. The MCPTT
+function runs ICE as the controlled agent and records it as failed for a phone that answers no STUN, then uses the SDP
+addresses, so calls work; with NAT (a real phone) they would need the phone's address from latching, as on demand.
+

@@ -304,6 +304,16 @@ class Lab:
             except Exception:
                 pass
             try:
+                # A pre-established session left by a scenario would carry the next scenarios' SDS.
+                pre = (self.cmd(c, "mcdata-pre-session", ok=False).get("result") or {})
+                if pre.get("state") in ("established", "suspended", "establishing"):
+                    self.cmd(c, "mcdata-pre-release", ok=False)
+                mpre = (self.cmd(c, "pre-session", ok=False).get("result") or {})
+                if mpre.get("state") in ("established", "suspended", "establishing", "replaced"):
+                    self.cmd(c, "pre-session-release", ok=False)
+            except Exception:
+                pass
+            try:
                 if self.cmd(c, "video-status", ok=False).get("result", {}).get("active"):
                     self.cmd(c, "video-hangup", ok=False)
             except Exception:
@@ -2477,6 +2487,302 @@ class Lab:
                       if x.get("name") == f"ref-{stamp}.bin" and x.get("state") not in (None, "offered")), None), timeout=30)
         self.check("client-d (Linux) receives alice's group file whole", f.get("state") == "received" and f.get("hash_verified") is True, file=f)
 
+    # Parity phase 5: MCData pre-established sessions (TS 24.282 §18.3, §9.2.5; TS 24.582 §12). The lab needs
+    # --mcdata-pre-established (mcdata.resource_sharing "rx"); S72 also --priority.
+
+    def pre(self, client: str) -> dict:
+        return self.cmd(client, "mcdata-pre-session") or {}
+
+    def pre_establish(self, client: str) -> dict:
+        p = self.pre(client)
+        if p.get("state") != "established":
+            p = self.cmd(client, "mcdata-pre-establish")
+        self.check(f"{client}'s MCData pre-established session is established, the server passive",
+                   p["state"] == "established" and p["setup"] == "passive" and "mcdata-pre-session" in (p.get("uri") or ""), pre=p)
+        return p
+
+    def pre_free(self, client: str, what: str, terminated: int) -> dict:
+        return self.wait(what, lambda: (p := self.pre(client)) and p.get("usable") and p["terminated"] >= terminated and p, timeout=20)
+
+    def s70_pre_session_sds(self) -> None:
+        stamp = time.strftime("%H%M%S")
+        p = self.pre_establish(A)
+        # TS 24.282 §9.2.5.2.1.1: a standalone SDS over the media plane goes by REFER over the session.
+        text = f"Over the pre-established session {stamp}"
+        sent = self.cmd(A, "sds-media", MCDATA[B], text)
+        self.check("alice's standalone SDS is delivered over the session", sent["communication"]["state"] == "delivered"
+                   and sent["communication"]["pre_established"] and sent["plane"] == "pre-established", sent=sent)
+        got = self.inbox_message(B, text)
+        self.check("bob receives it over the media plane", got["plane"] == "media" and got["sender"] == MCDATA[A], got=got)
+        events = self.cmd(A, "events", "120")
+        self.check("alice sent a REFER, not an INVITE of its own", any("REFER over the pre-established session" in e for e in events))
+        # §9.2.5.4.1.1: alice leaves by REFER "BYE"; the re-INVITE "terminated" (or "terminate-request") frees the session.
+        q = self.pre_free(A, "alice's session free again", p["terminated"] + 1)
+        self.check("alice's session is free again, the communication counted", q["established"] >= p["established"] + 1
+                   and q["last_state"] in ("terminated", "terminate-request"), pre=q)
+        # TS 24.582 §12.1: the next communication connects anew to the same MSRP listener; a group one.
+        gtext = f"Group over the session {stamp}"
+        sent = self.cmd(A, "sds-media", f"group={GROUP}", gtext)
+        self.check("alice's group SDS goes over the session too", sent["communication"]["pre_established"] and sent["communication"]["state"] == "delivered", sent=sent)
+        for c in (B, C):
+            got = self.inbox_message(c, gtext)
+            self.check(f"{c} receives the group SDS on {GROUP}", got["group"] == GROUP and got["sender"] == MCDATA[A], got=got)
+        self.pre_free(A, "alice's session free after the group SDS", q["terminated"] + 1)
+        self.cmd(A, "mcdata-pre-release")
+
+    def s71_pre_session_offered(self) -> None:
+        stamp = time.strftime("%H%M%S")
+        # TS 24.282 §9.2.5.2.1.2: bob holds a session; alice's SDS session to him is offered over it (re-INVITE
+        # "establish-request"); bob answers active and connects (TS 24.582 §12.1).
+        p = self.pre_establish(B)
+        opened = self.cmd(A, "sds-session", MCDATA[B])
+        self.check("alice's SDS session (on demand) is open", opened["state"] == "open" and not opened["pre_established"], session=opened)
+        leg = self.last_media(B, "session", False, "bob's session over his pre-established session", lambda c: c["state"] == "open")
+        self.check("bob's leg arrived over his pre-established session", leg["pre_established"], leg=leg)
+        self.check("bob's session records the offered communication", self.pre(B)["communication"] == "established", pre=self.pre(B))
+        text = f"To bob's pre-established session {stamp}"
+        self.cmd(A, "sds-session", "send", text)
+        got = self.inbox_message(B, text)
+        self.check("bob receives alice's message in the session", got["plane"] == "session", got=got)
+        reply = f"Bob replies over it {stamp}"
+        self.cmd(B, "sds-session", "send", reply)
+        got = self.inbox_message(A, reply)
+        self.check("alice receives bob's reply", got["sender"] == MCDATA[B], got=got)
+        # §9.2.5.4.1.2: alice ends it; the server's re-INVITE "terminate-request" releases bob's leg, the session stays.
+        self.cmd(A, "sds-session", "close")
+        self.last_media(B, "session", False, "bob's leg released", lambda c: c["state"] == "released")
+        q = self.pre_free(B, "bob's session free again", p["terminated"] + 1)
+        self.check("bob's pre-established session stays, terminate-request", q["state"] == "established" and q["last_state"] == "terminate-request", pre=q)
+        # §9.2.5.3.1.1 within bob's session, his own group SDS session; alice and client-c join on demand.
+        opened = self.cmd(B, "sds-session", f"group={GROUP}")
+        self.check("bob's group session goes over his pre-established session", opened["pre_established"] and opened["state"] == "open", session=opened)
+        for c in (A, C):
+            self.last_media(c, "session", False, f"{c} joins bob's group session", lambda x: x["state"] == "open" and x["group"] == GROUP)
+        gtext = f"Bob's group session over the pre-established one {stamp}"
+        self.cmd(B, "sds-session", "send", gtext)
+        for c in (A, C):
+            self.check(f"{c} receives bob's message", self.inbox_message(c, gtext)["sender"] == MCDATA[B])
+        self.cmd(B, "sds-session", "close")
+        r = self.pre_free(B, "bob's session free after his group session", q["terminated"] + 1)
+        self.check("bob left by REFER BYE, the server's re-INVITE terminated", r["last_state"] in ("terminated", "terminate-request"), pre=r)
+        self.cmd(B, "mcdata-pre-release")
+
+    def s72_pre_session_priority(self) -> None:
+        # TS 24.282 §9.2.5.3.1.1 3A)-3D) with §6.2.8.1.1: an emergency group session with an alert over alice's session;
+        # the location of the alert in the REFER's body (§6.2.8.1.1 3)b)); then its cancel by re-INVITE in the
+        # session's dialog (§6.2.8.1.3). Needs --priority.
+        self.cmd(A, "location-position", "48.85", "2.35", ok=False)
+        p = self.pre_establish(A)
+        opened = self.cmd(A, "sds-session", f"group={GROUP}", "emergency", "alert")
+        self.check("alice's emergency group session goes over her session", opened["pre_established"] and opened["emergency"], session=opened)
+        for c in (B, C):
+            leg = self.last_media(c, "session", False, f"{c} joins the emergency session", lambda x: x["state"] == "open")
+            self.check(f"{c} learns the group's emergency", leg["emergency"], leg=leg)
+        cancelled = self.cmd(A, "sds-session-priority", "emergency", "off")
+        self.check("alice cancels the emergency within the session", not cancelled["emergency"], session=cancelled)
+        for c in (B, C):
+            self.last_media(c, "session", False, f"{c} learns the cancel", lambda x: x["state"] == "open" and not x["emergency"])
+        self.cmd(A, "sds-session", "close")
+        q = self.pre_free(A, "alice's session free after the emergency session", p["terminated"] + 1)
+        # §9.2.5.3.1.1 with §6.2.8.1.9: imminent peril over the session.
+        opened = self.cmd(A, "sds-session", f"group={GROUP}", "imminent")
+        self.check("alice's imminent peril session goes over her session", opened["pre_established"] and (opened["imminent_peril"] or opened["emergency"]), session=opened)
+        self.cmd(A, "sds-session", "close")
+        self.pre_free(A, "alice's session free after imminent peril", q["terminated"] + 1)
+        # §9.2.5.2.1.1 1a): an emergency one-to-one session over it.
+        opened = self.cmd(A, "sds-session", MCDATA[B], "emergency")
+        self.check("alice's emergency one-to-one session goes over her session", opened["pre_established"] and opened["emergency"], session=opened)
+        leg = self.last_media(B, "session", False, "bob's emergency session", lambda x: x["state"] == "open")
+        self.check("bob's session is an emergency one", leg["emergency"], leg=leg)
+        self.cmd(A, "sds-session", "close")
+        self.cmd(A, "mcdata-pre-release")
+
+    def s73_pre_session_release(self) -> None:
+        stamp = time.strftime("%H%M%S")
+        # TS 24.282 §18.3.3.1.1: the user's release (BYE); then SDS go on demand again.
+        self.pre_establish(A)
+        r = self.cmd(A, "mcdata-pre-release")
+        self.check("alice's release ends the session", r["state"] == "released" and r["release_reason"] == "released by the user", pre=r)
+        text = f"On demand again {stamp}"
+        sent = self.cmd(A, "sds-media", MCDATA[B], text)
+        self.check("the next SDS goes on demand (its own INVITE)", not sent["communication"]["pre_established"] and sent["plane"] == "media", sent=sent)
+        self.inbox_message(B, text)
+        # §18.3.2.1 again, then §18.3.3.1.2: the session released while a communication is offered over it ends both.
+        self.pre_establish(A)
+        p = self.pre(A)
+        self.check("a second session has a new dialog", p["call_id"] != r["call_id"], pre=p)
+        self.cmd(A, "mcdata-pre-release")
+
+    def s74_pre_session_flow_loss(self) -> None:
+        stamp = time.strftime("%H%M%S")
+        # The session survives the loss of the flow: once MCData is authorised on the new registration, the dialog is
+        # refreshed with the new Contact (RFC 3261 §12.2) or a new session is made (TS 24.282 §18.3.2.1).
+        p = self.pre_establish(A)
+        self.cmd(A, "drop-flow")
+        q = self.wait("alice's session back after the new registration",
+                      lambda: (x := self.pre(A)) and x["state"] == "established" and (x["resumed"] + x["reestablished"]) > (p["resumed"] + p["reestablished"]) and x,
+                      timeout=90)
+        self.check("alice's session is kept or made anew after the new registration", True, pre=q)
+        text = f"After the flow loss {stamp}"
+        sent = self.cmd(A, "sds-media", MCDATA[B], text)
+        self.check("an SDS goes over the session after the flow loss", sent["communication"]["pre_established"] and sent["communication"]["state"] == "delivered", sent=sent)
+        self.inbox_message(B, text)
+        self.cmd(A, "mcdata-pre-release")
+
+    # Parity phase 5: MCPTT pre-established sessions (TS 24.379 §8, TS 24.380 §9). The lab needs --pre-established.
+
+    def mcptt_pre(self, client: str) -> dict:
+        return self.cmd(client, "pre-session") or {}
+
+    def mcptt_pre_establish(self, client: str, *args: str) -> dict:
+        p = self.mcptt_pre(client)
+        if p.get("state") != "established":
+            p = self.cmd(client, "pre-establish", *args)
+        self.check(f"{client}'s MCPTT pre-established session is established, not in use",
+                   p["state"] == "established" and p["control"] == "not-in-use" and "mcptt-pre-session" in (p.get("uri") or ""), pre=p)
+        return p
+
+    def mcptt_pre_free(self, client: str, what: str) -> dict:
+        return self.wait(what, lambda: (p := self.mcptt_pre(client)) and p.get("usable") and p, timeout=20)
+
+    def s75_pre_group_call(self) -> None:
+        # TS 24.379 §10.1.1.2.2.1: alice's group call over her pre-established session: REFER, then the Connect
+        # (TS 24.380 §9.2.2.4.2); speech and floor control on the session's ports.
+        p = self.mcptt_pre_establish(A)
+        call = self.cmd(A, "group", GROUP)
+        self.check("alice's group call is established over her session", call["state"] == "established" and call["pre_established"], call=call)
+        self.check("the call has its own MCPTT session identity", bool(call.get("session_uri")) and call["session_uri"] != p["uri"], call=call)
+        self.check("alice's session is in use", self.mcptt_pre(A)["control"] == "in-use", pre=self.mcptt_pre(A))
+        for c in (B, C):
+            got = self.established(c)
+            self.check(f"{c} joined the group call", got["group"] == GROUP, call=got)
+        self.talk_and_verify(A, [B, C])
+        self.talk_and_verify(B, [A, C])
+        # TS 24.379 §6.2.4.2: alice leaves by REFER "BYE"; the session stays.
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+        q = self.mcptt_pre_free(A, "alice's session free again")
+        self.check("alice's session stays after the call, the same ports", q["audio_port"] == p["audio_port"] and q["call_id"] == p["call_id"], pre=q)
+        call = self.cmd(A, "group", GROUP)
+        self.check("a second call goes over the same session", call["pre_established"] and call["state"] == "established", call=call)
+        self.established(B)
+        self.talk_and_verify(A, [B])
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+        self.cmd(A, "pre-session-release")
+
+    def s76_pre_connect(self) -> None:
+        # TS 24.379 §10.1.1.2.2.2 by Connect (automatic commencement, TS 24.380 §9.2.2.3.2): bob holds a session; alice's
+        # on-demand group call reaches him over it; the call's end is a Disconnect (§9.2.2.4.5).
+        self.mcptt_pre_establish(B)
+        call = self.cmd(A, "group", GROUP)
+        self.check("alice's group call (on demand) is established", call["state"] == "established" and not call["pre_established"], call=call)
+        got = self.established(B)
+        self.check("bob's leg arrived by Connect over his session", got["pre_established"] and got["group"] == GROUP, call=got)
+        self.check("bob's session is in use", self.mcptt_pre(B)["control"] == "in-use")
+        self.established(C)
+        self.talk_and_verify(A, [B, C])
+        self.talk_and_verify(B, [A, C])
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+        q = self.mcptt_pre_free(B, "bob's session free after the Disconnect")
+        self.check("bob's session was told by Disconnect", "Disconnect" in (q.get("last_control") or ""), pre=q)
+        self.cmd(B, "pre-session-release")
+
+    def s77_pre_private(self) -> None:
+        # TS 24.379 §11.1.1.2.2.1: alice's private call over her session (Answer-Mode Auto in the entry).
+        self.mcptt_pre_establish(A)
+        call = self.cmd(A, "private", MCPTT[B])
+        self.check("alice's private call goes over her session", call["pre_established"] and call["state"] == "established", call=call)
+        self.established(B)
+        self.talk_and_verify(A, [B])
+        self.hangup(A)
+        self.idle_everywhere([A, B])
+        self.mcptt_pre_free(A, "alice's session free after the private call")
+        # §11.1.1.2.2.2: bob holds a session and answers by hand: the call is offered by re-INVITE in it.
+        self.mcptt_pre_establish(B)
+        self.cmd(B, "answer-mode", "manual")
+        try:
+            result: dict = {}
+            # Alice's manual call goes over her own session too (Answer-Mode Manual in the REFER's entry).
+            t = threading.Thread(target=lambda: result.update(r=self.cmd(A, "private", MCPTT[B], "manual", ok=False, timeout=40)))
+            t.start()
+            ringing = self.wait("bob rings over his session", lambda: (c := self.call(B)) and c["state"] == "ringing" and c)
+            self.check("bob's ringing call is over his session", ringing["pre_established"], call=ringing)
+            time.sleep(1)
+            self.cmd(B, "answer")
+            t.join(30)
+            r = result.get("r", {})
+            self.check("alice's call is answered", r.get("ok") and r["result"]["state"] == "established" and r["result"]["pre_established"], error=r.get("error"))
+            got = self.established(B)
+            self.check("bob's answered call is over his session", got["pre_established"] and got.get("session_uri"), call=got)
+            self.talk_and_verify(A, [B])
+            self.talk_and_verify(B, [A])
+            self.hangup(A)
+            self.idle_everywhere([A, B])
+            self.mcptt_pre_free(B, "bob's session free after the private call")
+        finally:
+            self.cmd(B, "answer-mode", "automatic", ok=False)
+        self.cmd(A, "pre-session-release")
+        self.cmd(B, "pre-session-release")
+
+    def s78_pre_modify_release(self) -> None:
+        # TS 24.379 §8.3.1.1: the user's modification (implicit floor request, by re-INVITE and by UPDATE); §8.4.1.1 the release.
+        self.mcptt_pre_establish(A)
+        m = self.cmd(A, "pre-session-modify", "implicit")
+        self.check("alice's session now asks for implicit floor control", m["implicit"] and m["modified"] >= 1, pre=m)
+        m = self.cmd(A, "pre-session-modify", "explicit", "update")
+        self.check("and no longer, by UPDATE", not m["implicit"] and m["modified"] >= 2, pre=m)
+        r = self.cmd(A, "pre-session-release")
+        self.check("alice's release ends the session", r["state"] == "released" and r["release_reason"] == "released by the user", pre=r)
+        call = self.cmd(A, "group", GROUP)
+        self.check("the next call goes on demand", not call["pre_established"] and call["state"] == "established", call=call)
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+
+    def s79_pre_flow_loss(self) -> None:
+        # The session survives the loss of the flow: refreshed with the new Contact once MCPTT is authorised again.
+        p = self.mcptt_pre_establish(A)
+        self.cmd(A, "drop-flow")
+        q = self.wait("alice's MCPTT session back after the new registration",
+                      lambda: (x := self.mcptt_pre(A)) and x["state"] == "established" and
+                      (x["resumed"] + x["reestablished"]) > (p["resumed"] + p["reestablished"]) and x, timeout=90)
+        self.check("alice's MCPTT session is kept or made anew", True, pre=q)
+        call = self.cmd(A, "group", GROUP)
+        self.check("a call goes over the session after the flow loss", call["pre_established"] and call["state"] == "established", call=call)
+        self.established(B)
+        self.talk_and_verify(A, [B])
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+        self.cmd(A, "pre-session-release")
+
+    def s80_pre_replaces(self) -> None:
+        # TS 24.379 §6.3.2.2.5.3 step 1: an emergency call reaches a member holding a session by an on-demand INVITE with
+        # Replaces naming it (RFC 3891); the member ends the session once the call is accepted, and makes it again after.
+        # Then §10.1.2.2.2.1 / §6.2.8.1.16: alice's own emergency group call over her session. Needs --priority.
+        p = self.mcptt_pre_establish(B)
+        self.cmd(A, "group", GROUP, "emergency", timeout=30)
+        got = self.established(B)
+        self.check("bob's emergency call came on demand, not over his session", not got["pre_established"], call=got)
+        q = self.wait("bob's session replaced", lambda: (x := self.mcptt_pre(B)) and x["state"] == "replaced" and x)
+        self.check("bob's session was replaced by the call (RFC 3891)", "replaced" in (q.get("release_reason") or ""), pre=q)
+        self.talk_and_verify(A, [B])
+        self.cmd(A, "priority", "emergency", "off")
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+        r = self.wait("bob's session made again after the call", lambda: (x := self.mcptt_pre(B)) and x["state"] == "established" and x, timeout=30)
+        self.check("bob's session is made again after the call, a new dialog", r["call_id"] != p["call_id"] and r["reestablished"] >= 1, pre=r)
+        self.cmd(B, "pre-session-release")
+        self.mcptt_pre_establish(A)
+        call = self.cmd(A, "group", GROUP, "emergency", timeout=30)
+        self.check("alice's emergency group call goes over her session", call["pre_established"] and call["priority"] == "emergency", call=call)
+        self.wait("bob's phone shows the emergency", lambda: (self.call(B) or {}).get("priority") == "emergency")
+        self.check("bob's phone shows alice's emergency", True)
+        self.cmd(A, "priority", "emergency", "off")
+        self.hangup(A)
+        self.idle_everywhere([A, B, C])
+        self.cmd(A, "pre-session-release")
+
     SCENARIOS = {"S1": s1_startup, "S2": s2_private_automatic, "S3": s3_private_manual, "S4": s4_group, "S5": s5_adhoc, "S6": s6_sds,
                  "S7": s7_refresh_and_recovery, "S8": s8_lifecycle, "S9": s9_impaired, "S10": s10_latency,
                  "S11": s11_product, "S12": s12_private_no_floor, "S13": s13_location,
@@ -2497,7 +2803,11 @@ class Lab:
                  "S60": s60_long_sds, "S61": s61_media_group_sds, "S62": s62_one_to_one_session, "S63": s63_group_session,
                  "S64": s64_media_fd, "S65": s65_media_priority, "S66": s66_media_release, "S67": s67_media_reference_client,
                  "S32": s32_ambient_remote, "S33": s33_ambient_local, "S34": s34_call_back, "S35": s35_remote_private,
-                 "S36": s36_remote_group, "S37": s37_transfer, "S38": s38_forward_manual, "S39": s39_forward_by_server}
+                 "S36": s36_remote_group, "S37": s37_transfer, "S38": s38_forward_manual, "S39": s39_forward_by_server,
+                 "S70": s70_pre_session_sds, "S71": s71_pre_session_offered, "S72": s72_pre_session_priority,
+                 "S73": s73_pre_session_release, "S74": s74_pre_session_flow_loss,
+                 "S75": s75_pre_group_call, "S76": s76_pre_connect, "S77": s77_pre_private, "S78": s78_pre_modify_release,
+                 "S79": s79_pre_flow_loss, "S80": s80_pre_replaces}
 
 
 def main() -> None:

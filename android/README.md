@@ -12,6 +12,7 @@ interoperability-certified implementation.
 | MCPTT prearranged group call | TS 24.379 §10.1.1.2.1 |
 | MCPTT ad hoc group call | TS 24.379 §17.2 |
 | MCData short data service | TS 24.282 §9.2.2, one-to-one and group, with delivery and read notifications (§9.2.1.3, §12.2); over the media plane (MSRP, the phone as the active endpoint): long messages, SDS sessions, files, their emergency and imminent peril and their release (§9.2.3, §9.2.4, §10.2.5, §13.2; [CONFORMANCE.md](docs/CONFORMANCE.md#mcdata-media-plane-phase-4)) |
+| Pre-established sessions | MCPTT (TS 24.379 §8: calls by REFER, received by Connect, re-INVITE or INVITE with Replaces) and MCData (TS 24.282 §18.3, §9.2.5: SDS and SDS sessions by REFER, emergency included); host candidates only, the phone still never listens ([CONFORMANCE.md](docs/CONFORMANCE.md#pre-established-sessions-phase-5)) |
 | MCData file distribution, MCVideo, emergency alerts, location | [ATTACHMENTS.md](docs/ATTACHMENTS.md), [VIDEO.md](docs/VIDEO.md), [ALERTS.md](docs/ALERTS.md), [LOCATION.md](docs/LOCATION.md) |
 | Start-up | OIDC with PKCE (TS 24.482), CMS user profile and GMS group documents, REGISTER, service authorisation by PUBLISH poc-settings, affiliation |
 | Floor control | TS 24.380 floor participant; AMR-WB speech (RFC 4867) through the platform codec |
@@ -144,6 +145,8 @@ Debug builds listen on the abstract socket `@mcxclient-control` for one JSON req
 | `ptt <wav> [seconds]`, `floor request\|release`, `audio-next <wav>` | Talk a file (the devices have no microphone) |
 | `sds <mcdata-id> <text> [--disposition delivery\|read\|delivery-read]`, `sds-group <group> <text> …`, `display <message-id>` | Short data (over the media plane on its own above the signalling-plane limit) |
 | `sds-media <target> <text…>`, `sds-session <target> [emergency\|imminent] [alert]`, `sds-session send [delivery\|read\|both] <text…>`, `sds-session close [all]`, `sds-session-priority emergency\|imminent on\|off`, `fd-media <target> <path> [name=…] [type=…] [mandatory] [completed] [emergency\|imminent]`, `fd-media-answer accept\|decline\|defer [id]`, `fd-media-policy ask\|accept\|decline`, `mcdata-media`, `mcdata-release extend\|now [reason]\|intent [query] [reason]\|accept\|reject` | The MCData media plane (TS 24.282 §9.2.3, §9.2.4, §10.2.5, §6.2.8, §13.2); a target is an MCData ID or `group=<group>` |
+| `pre-establish [implicit]`, `pre-session-modify [implicit\|explicit] [update]`, `pre-session-release`, `pre-session` | The MCPTT pre-established session (TS 24.379 §8.2.1, §8.3.1.1, §8.4.1.1); while it is up, calls go over it; also in `status`, key `pre_session` |
+| `mcdata-pre-establish`, `mcdata-pre-release`, `mcdata-pre-session` | The MCData pre-established session (TS 24.282 §18.3.2.1, §18.3.3.1.1); while it is up, `sds-media` and `sds-session` go over it; also in `status`, key `mcdata_pre_session` |
 | `fd-terminate <id>`, `fd-release <id>`, `fd-extend <id>`, `fd-release-intent <id> [reason]`, `fd-extension-response accept\|reject <id>` | Release and extension of an FD over HTTP (§6.2.2.4, §13.2.4.5, §13.2.5.3, §13.2.6.3) |
 | `refresh register\|subscription\|video-subscription\|token`, `drop-flow` | Force a refresh or a new flow |
 | `history [N]`, `telecom`, `resolve <host>`, `sip-probe` | Diagnostics |

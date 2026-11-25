@@ -2,7 +2,7 @@
 
 For each requirement this lists the clause, the code that implements it, and the evidence that it works. The evidence
 is a JVM unit test (`core/src/test`), an instrumented test (`app/src/androidTest`) or a check in the Android-only lab
-scenarios (`tests/scenarios.py`, S1–S45). Paths are relative to `android/`. Clause numbers are from ETSI TS 124 379 and TS 124 282 V19.7.0. Clauses of TS 24.380, 24.482 and 24.484 are cited from
+scenarios (`tests/scenarios.py`, S1–S80). Paths are relative to `android/`. Clause numbers are from ETSI TS 124 379 and TS 124 282 V19.7.0. Clauses of TS 24.380, 24.482 and 24.484 are cited from
 the published specifications and not re-checked against a local copy; they are marked *(not checked locally)*.
 
 ## Start-up
@@ -181,7 +181,39 @@ MSRP (RFC 4975) in `core/…/msrp/`; the procedures in `core/…/mcdata/McdataMe
 | Communication release: received intent to release (the remaining data query answered), extension request and response; sent extension request, the authorised user's release, intent to release, extension response | TS 24.282 §13.2.4 to §13.2.6, §15.1.10.1 | `Release.kt`; `mcdata-release` | `McdataMediaServiceTest`; S66 |
 | FD over HTTP: release and extension (FD HTTP TERMINATION) | TS 24.282 §6.2.2.4, §13.2.4.5, §13.2.5.3, §13.2.6.3, §15.1.13.1 | `FdService.terminate`; `fd-terminate`, `fd-release`, `fd-extend`, `fd-release-intent`, `fd-extension-response` | `FdServiceTest`; S64 |
 | PCK in `a=key-mgmt` (one-to-one) and GMK (group) for media-plane payloads and files | TS 33.180 §8.3, §8.4, §8.5.4 | `McdataMediaService.protect` | Not in a lab (the protected lab is phase 7b's) |
-| **Not implemented:** MCData signalling protection of MSRP bodies (TS 24.282 §6.6.3.2); ad hoc group SDS and FD over the media plane; SDS to a functional alias over the media plane; the MDEG, MDEPC and related state machines of §6.2.8 (only the session's emergency and imminent peril flags are kept); the emergency alert with a session (`alert`, sent but not tracked); pre-established sessions (phase 5); IP connectivity, enhanced status, the message store and notification channels | | | |
+| **Not implemented:** MCData signalling protection of MSRP bodies (TS 24.282 §6.6.3.2); ad hoc group SDS and FD over the media plane; SDS to a functional alias over the media plane; the MDEG, MDEPC and related state machines of §6.2.8 (only the session's emergency and imminent peril flags are kept); the emergency alert with a session (`alert`, sent with the phone's last position, not tracked); IP connectivity, enhanced status, the message store and notification channels | | | |
+
+## Pre-established sessions (phase 5)
+
+MCData in `core/…/mcdata/PreEstablished.kt` (`McdataPreSession`), MCPTT in `core/…/mcptt/McpttPreSession.kt` and
+`PreEstablishedControl.kt`.
+
+**Outbound only, checked against the server.** The Linux client keeps an MSRP listener open for its MCData session
+(`keep_listening`) only in case the participating function answers `active`. The OpenMCX participating function never
+does: `pre_session_invite` (openmcx-server `src/mcdata/pre_established.cpp`) answers `a=setup:passive`, refuses an offer
+that would listen with 488, and keeps *its own* listener (`keep_listening`) for the session's lifetime; the client
+connects to it anew for each communication (TS 24.582 §12.1, TS 37.579-1 table 5.3C.12.3-1 step 8). So the phone keeps
+no listener and no idle connection: its offer is `actpass` with one host candidate, TCP active on port 9 (RFC 6544
+§4.5), and it connects as for an on-demand communication. A server answering `active` would leave the session unused
+(communications on demand). No server change is needed. MCPTT media are UDP from the session's own ports, as every
+Android call; the server sends to the SDP addresses.
+
+| Requirement | Clause | Code | Evidence |
+|---|---|---|---|
+| MCData session: INVITE with `<pre-established-session-ind>`, SDS tags, Session-Expires without refresher, `actpass` offer with the host candidate; the session URI of the 2xx's Contact; release by BYE either way | TS 24.282 §18.3.2.1, §18.3.3.1.1, §18.3.3.1.2, §18.3.1.1 | `McdataPreSession.establish`, `release`, `handle` | `PreEstablishedTest`; S70, S73 |
+| Standalone SDS and SDS sessions, one-to-one and group, by REFER: cid Refer-To, the entry's hname `body` (SDP and MCData-Info protected as the request's own), Target-Dialog, Refer-Sub false, norefersub, multiple-refer; `establish-success`/`establish-fail`; left by REFER `BYE`, `terminated` | §9.2.5.2.1.1, §9.2.5.3.1.1, §9.2.5.4.1.1, §6.5.2.3.1 | `originate`, `leave`; `McdataMediaService.establishOverSession` | `PreEstablishedTest`; S70, S71 |
+| A communication offered over the session (`establish-request`, 486 when busy), its release (`terminate-request`) | §9.2.5.2.1.2, §9.2.5.3.1.2, §9.2.5.4.1.2 | `handle`, `McdataMediaService.offeredOverSession` | `PreEstablishedTest`; S71 |
+| Emergency and imminent peril over the session: the REFER's own MCData-Info, Resource-Priority for a group, the grant of §6.2.8.1.16 in `establish-success`, cancel by re-INVITE in the session's dialog with its media; the alert's location in the REFER's body (as Linux d44fc8b) and in the on-demand INVITE | §9.2.5.2.1.1 1a), §9.2.5.3.1.1 3A)-3D), §6.2.8.1.16, §9.2.5.2.1.3, §6.2.8.1.1 3)b) | `McdataMediaService.openSession`, `granted`, `setPriority` | `PreEstablishedTest`; S72 |
+| The server's BYE ends the session and a communication over it; the next SDS goes on demand. Each communication keeps its own group, peer and key, so Linux ce06d65's fault (a stale group after the server's BYE) cannot arise | §18.3.3.1.2 | `McdataPreSession.ended`; `MediaCommunication` | `PreEstablishedTest.theServersByeEndsTheSessionAndCommunicationsGoOnDemand` |
+| MCPTT session: INVITE to `<psi>;mcptt-pre-established` with an SDP offer only (Accept application/sdp), host candidates for speech RTP, RTCP and floor; the session's sockets bound for its lifetime | TS 24.379 §8.2.1; TS 37.579-1 table 5.3.3.4-1; RFC 8839 | `McpttPreSession.establish`, `withIce` | `McpttPreSessionTest`; S75 |
+| Modification by the user (re-INVITE or UPDATE, implicit floor request) and by the function (the offered `mc_priority` returned); release by BYE either way | §8.3.1.1, §8.3.1.2, §8.4.1.1, §8.4.1.2; TS 24.380 §14.3.3 | `modify`, `handle`, `release` | `McpttPreSessionTest`; S78 |
+| Calls by REFER: group, chat, broadcast, private, first-to-answer (one entry per invitee), ambient listening; the entry's Accept-Contact or Answer-Mode/Priv-Answer-Mode, MCPTT-Info under the CSK; the Connect (Acknowledge), a Disconnect in its place; left by REFER `BYE` | §10.1.1.2.2.1, §10.1.2.2.2.1, §11.1.1.2.2.1, §11.1.6.2.2.1, §6.2.4.2; TS 24.380 §9.2.2.3.5, §9.2.2.4.2, §9.2.2.4.6 | `originate`, `leave`; `McpttService.originate` | `McpttPreSessionTest`; S75, S77, S79, S80 (chat, broadcast, first-to-answer and ambient: unit tests of the entry only, the lab has no such rights) |
+| Calls received by Connect (automatic, Busy, Not Accepted for protected ones), by re-INVITE (manual: 180 for a private call, the session's media; `mc_no_floor_ctrl` answered as Linux 9eaa3ac), by an on-demand INVITE with Replaces naming the session (the session ended once the call is accepted, made again after) | TS 24.380 §9.2.2.3.2, §9.2.2.4.5, §14.2.6, §14.3.7; TS 24.379 §10.1.1.2.2.2, §6.3.2.2.5.3 step 1; RFC 3891 | `control`, `offeredByConnect`, `offeredByReinvite`, `replacedBy` | `McpttPreSessionTest`; S76, S77, S80 |
+| Answers within the session during a call: the offered `mc_priority` returned, the call's priority followed | TS 24.380 §14.3.3; TS 24.379 §6.2.8.1.16 | `handle` | S80 (emergency over the session) |
+| The MCPC messages Connect, Disconnect, Acknowledge and the client's state machine; one reader of the control channel, floor control handed to the call | TS 24.380 §8.3, §9.2.2, §4.1.2.1 | `PreEstablishedControl.kt`; `MediaSession.externalFloor`, `keepPorts` | `McpttPreSessionTest.mcpcMessagesRoundTrip`, `theClientsStateMachine` |
+| Lifecycle: the refresh timed on the wall clock (a refresh Doze held back goes at the next wake-up); on a lost flow the dialog is kept and, at the next authorisation of the service, refreshed with the new Contact, or released and made anew | RFC 4028 §10; RFC 3261 §12.2.1.1 | `timer`, `flowLost`, `resume`; `ServiceState.authorisations` | `PreEstablishedTest.afterAFlowLossTheSessionIsRefreshedOrMadeAnew`; S74, S79 |
+| A priority re-INVITE crossing the server's (491) is sent again after 2.1 to 4 s | RFC 3261 §14.1 | `McpttService.setPriority` | S80 |
+| **Not implemented:** ICE connectivity checks (the phone answers no STUN; the OpenMCX server records ICE as failed and uses the default addresses); protected calls over the MCPTT session (a PCK in the Connect or the first-to-answer key re-INVITE: such calls are refused 'Not Accepted' or go on demand); the SIP INFO of §6.2.8.1.13; the MDEG/MDEPC state machines; FD over the MCData session (TS 24.282 has none); MCVideo pre-established sessions (out of scope) | | | |
 
 ## MCVideo (phase 7)
 
@@ -276,7 +308,6 @@ MSRP (RFC 4975) in `core/…/msrp/`; the procedures in `core/…/mcdata/McdataMe
   gives the invitee of a forwarded call Answer-Mode Auto although the caller sent Priv-Answer-Mode Manual; its user
   profile names the manual forwarding right `<allow-call-forward-manual-input>` rather than `<allow-call-fwd-manual-any>`.
 - **Not implemented:**
-  - pre-established sessions
   - group-broadcast and user-broadcast groups as their own call kind (a broadcast call on them is made as on any
     group); originating protected first-to-answer calls (§11.1.1.2.1.1, the 200 step 2 PCK)
   - MCData data streaming, IP connectivity, enhanced status, the message store (the media plane: phase 4 above)

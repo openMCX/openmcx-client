@@ -1036,14 +1036,22 @@ class McpttService(
         }
         val parts = mutableListOf(Part("application/sdp", McpttSdp.offer(media.local, call.origin).toByteArray()), Part(McpttInfo.CONTENT_TYPE, info.encode().toByteArray()))
         if (call.type == CallType.PRIVATE) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOfNotNull(call.peer)).toByteArray())
-        val request = ua.inDialog(dialog, "INVITE")
-        commonHeaders(request)
-        resource?.let { request.headers.add("Resource-Priority", it) }
         val (contentType, body) = Multipart.encode(parts)
-        request.headers.add("Content-Type", contentType)
-        val reinvite = SipRequest(request.method, request.uri, request.headers, body)
-        val response = ua.send(reinvite, dialog)
-        if (response.isSuccess) ua.ack(dialog, ua.lastSent[reinvite.callId] ?: reinvite)
+        var response: org.openmcx.client.sip.SipResponse
+        var attempt = 0
+        while (true) {
+            val request = ua.inDialog(dialog, "INVITE")
+            commonHeaders(request)
+            resource?.let { request.headers.add("Resource-Priority", it) }
+            request.headers.add("Content-Type", contentType)
+            val reinvite = SipRequest(request.method, request.uri, request.headers, body)
+            response = ua.send(reinvite, dialog)
+            if (response.isSuccess) ua.ack(dialog, ua.lastSent[reinvite.callId] ?: reinvite)
+            // RFC 3261 §14.1: 491 (Request Pending), the server's own re-INVITE crossing this one (over a pre-established
+            // session, its priority re-INVITE of TS 24.379 §6.3.2.1.8.5): again after 2.1 to 4 s.
+            if (response.status != 491 || attempt++ >= 2) break
+            kotlinx.coroutines.delay(2100L + java.util.concurrent.ThreadLocalRandom.current().nextLong(1900L))
+        }
         if (!response.isSuccess) {
             val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""
             throw CallError("${response.status} ${response.reason}$warning", response.status)
@@ -1162,7 +1170,7 @@ class McpttService(
         while (history.size > 20) history.removeAt(0)
         event("call ${call.id}: $reason")
         listener?.changed(call)
-        if (call.preEstablished) preSession.free(call)
+        if (call.preEstablished) preSession.free(call) else preSession.afterCall()
     }
 
     override suspend fun flowLost() {

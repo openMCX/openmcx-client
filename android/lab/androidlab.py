@@ -391,6 +391,13 @@ def create(args) -> None:
         # Private call services (TS 24.379 §10.1.5, §11.1.5 to §11.1.9) and ambient listening (§11.1.6): the
         # fixture's rights, adapted to three Android clients below (private_services).
         command.append("--private-services")
+    if args.pre_established:
+        # MCPTT pre-established sessions (TS 24.379 clause 8): the MCPTT server allows them, resource sharing left to
+        # the PCC deployment (mcptt.resource_sharing "rx", clause 8.1A).
+        command.append("--pre-established")
+    if args.mcdata_pre_established:
+        # MCData pre-established sessions (TS 24.282 clause 18.3): mcdata.resource_sharing "rx" (clause 18.2).
+        command.append("--mcdata-pre-established")
     if args.priority:
         # Emergency, imminent peril and emergency alerts (TS 24.379 §6.2.8, §12.1): client-a and client-b may raise
         # them, client-a may cancel an alert (its own or another user's). With the private call policy: emergency
@@ -645,6 +652,7 @@ def create(args) -> None:
                 "server_image": args.server_image, "mcvideo": args.mcvideo, "protected": args.protected, "transport_keys": args.transport_keys, "location": args.location, "location_rules": args.location_rules,
                 "priority": args.priority, "floor_queue": args.floor_queue, "mcvideo_priority": args.mcvideo_priority or [],
                 "chat": args.chat, "broadcast": args.broadcast, "regroup": args.regroup, "private_services": args.private_services,
+                "pre_established": args.pre_established, "mcdata_pre_established": args.mcdata_pre_established,
                 "reference_clients": args.reference_client or [], "client_image": args.client_image,
                 "admin": args.admin, "admin_image": args.admin_image, "keycloak": args.keycloak,
                 "mcptt_server": mcptt_server_name(compose["services"]), "fixture_args": args.fixture_arg or [],
@@ -1039,6 +1047,10 @@ def main() -> None:
     c.add_argument("--private-services", action="store_true",
                    help="call-back, remotely initiated calls, transfer, forwarding and ambient listening rights "
                         "(TS 24.379 clauses 10.1.5, 11.1.5 to 11.1.9; see private_services)")
+    c.add_argument("--pre-established", action="store_true",
+                   help="the MCPTT server allows pre-established sessions (TS 24.379 clause 8; mcptt.resource_sharing rx)")
+    c.add_argument("--mcdata-pre-established", action="store_true",
+                   help="the MCData server allows pre-established sessions (TS 24.282 clause 18.3; mcdata.resource_sharing rx)")
     c.add_argument("--broadcast", action="store_true", help="broadcast group calls by client-a and client-b (TS 24.379 clause 6.2.8.2)")
     c.add_argument("--regroup", action="store_true",
                    help="regroups and temporary groups (TS 24.379 clause 16, TS 24.481 clause 6.3.14): constituent groups "

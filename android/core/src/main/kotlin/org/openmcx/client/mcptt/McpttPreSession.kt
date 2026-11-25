@@ -612,6 +612,11 @@ class McpttPreSession internal constructor(private val svc: McpttService) {
     }
 
 
+    /** An on-demand call ended: a session it replaced (RFC 3891) is made again once no call is left. */
+    internal fun afterCall() {
+        if (phase == "replaced" && wanted && svc.active == null) svc.scope.launch { runCatching { reestablish() } }
+    }
+
     /** After a replaced session's call: the session made again (TS 24.379 §8.2.1). */
     internal suspend fun reestablish() = mutex.withLock {
         if (!wanted || phase in setOf("establishing", "established")) return@withLock

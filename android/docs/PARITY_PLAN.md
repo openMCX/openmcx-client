@@ -23,7 +23,7 @@ keys and notifications, and a `DebugControl` command for every procedure so the 
 | Groups | regroups, temporary groups | both (phase 2) | none |
 | Emergency, imminent peril, alerts | all three services, ad hoc group alerts | MCPTT and MCVideo calls, alerts of the three services | MCData emergency and imminent-peril communications |
 | Functional aliases | all, location based activation | all but location based activation, per-alias status, FD to an alias | location based, FD to an alias |
-| Pre-established sessions | MCPTT (TS 24.379 8, ICE), MCData (TS 24.282 18.3, emergency included) | none | both |
+| Pre-established sessions | MCPTT (TS 24.379 8, ICE), MCData (TS 24.282 18.3, emergency included) | both (phase 5: host candidates only, no protected calls over the MCPTT session) | ICE checks |
 | MCData SDS | signalling plane and media plane (MSRP), SDS sessions, ad hoc | signalling plane, one-to-one and group | MSRP, SDS sessions, ad hoc |
 | MCData FD | HTTP and media plane, deferral, extension, release | HTTP | FD over MSRP, release, extension |
 | MCData other | IP connectivity, enhanced status, communication release, message store, notification channels | none | all |
