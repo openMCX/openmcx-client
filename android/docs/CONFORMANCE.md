@@ -73,6 +73,27 @@ the published specifications and not re-checked against a local copy; they are m
 | Disposition: DELIVERED, READ, DELIVERED AND READ with TDU1; Sender IE always present | TS 24.282 §9.2.1.3, §12.2.1.1 | `McdataService.notify`, `display` | S6 |
 | Receiving notifications, several per MESSAGE (aggregated) | TS 24.282 §12.2.1.2 | `McdataService.handle` | S6 (the group case) |
 
+## MCVideo (phase 7)
+
+| Requirement | Clause | Code | Evidence |
+|---|---|---|---|
+| Answer-Mode and Priv-Answer-Mode compared by token | RFC 5373 §2, TS 24.281 §6.2.3 | `McvideoService.answerModeToken` | `McvideoRulesTest` |
+| `mc_granted` offered with an implicit request in the initial INVITE only (`mcvideo.offer_granted`, default false); the 200 (OK)'s grant is the transmission grant | TS 24.581 §14.2.4, §14.5, §12.1.2.2 NOTE 3, §14.4 | `McvideoSdp`, `TransmissionParticipant.grantedInAnswer` | `TransmissionTimersTest.grantInTheAnswer`, `TransmissionPriorityTest` |
+| Transmission end request and response, never Transmission Release; the server's end request answered | TS 24.581 §6.2.4.5.3, §6.2.4.5.7, §6.2.4.6.4, §9.2.7 | `TransmissionParticipant` | `TransmissionTimersTest`; V1 |
+| T100 to T104, C100 to C104 (`mcvideo.transmission_timers`), with the implicit request's T100 | TS 24.581 §6.2.4.2.2 step 4, §6.2.4.4.3-4, §6.2.4.6.2-3, §6.2.4.9.7-8, §6.2.5.4.3-4, §6.2.5.6.2-3, §11.1.1, §11.2.1 | `TransmissionParticipant`, `TransmissionTimers` | `TransmissionTimersTest` (virtual time); V1 |
+| Queueing: Queue Position Info, Queue Position Request, Cancel Request Notify (`mcvideo.queueing`) | TS 24.581 §6.2.4.4.5, §6.2.4.9 | `TransmissionParticipant` | `TransmissionTimersTest`; not in a lab |
+| Reception end request and the server's reception end | TS 24.581 §6.2.5.5.3, §6.2.5.5.5, §6.2.5.6.4 | `TransmissionParticipant.endReception` | `TransmissionTimersTest`; V1 |
+| Transmission and reception priority from the MCVideo user profile's `<Priority>`: offered, negotiated, requested | TS 24.581 §14.2.3, §14.2.6, §14.3.3, §14.4, §6.2.4.3.2 step 2a, §6.2.5.3.3 step 1a; TS 24.484 §9.3.2.1 item 8 e) v) | `TransmissionPriority`, `McvideoProfile` | `TransmissionPriorityTest`, `McvideoRulesTest`; V1 (7 offered, 4 negotiated and requested) |
+| XML confidentiality and integrity of MCVideo signalling; 403 with warning 139 or 140 | TS 24.281 §4.8, §6.6; TS 33.180 §9.3 | `client/SignallingProtection.kt` | `SignallingProtectionTest` (MCVideo tests); V1 on a protected lab |
+| Ad hoc group calls: listed users or criteria, the support check, the ad hoc group from the 2xx; emergency and imminent peril ad hoc calls | TS 24.281 §22.2.2.1.1, §22.2.2.2.1, §6.2.8.1.19, §6.2.8.1.23 | `McvideoService.adhocCall` | `McvideoAdhocTest`; V2 |
+| Leaving and re-joining an ad hoc (or group) session; release for everyone with Reason | TS 24.281 §22.2.3.1.1, §22.2.4.1.1, §22.2.5.1.1, §9.2.1.2.4.1 | `McvideoService.hangup`, `rejoin` | V2 |
+| Cancelling another user's emergency alert with the emergency; a group's imminent peril without a call | TS 24.281 §6.2.8.1.14 step 3, §6.2.8.3.8 step 3, §9.2.5.2.1 | `McvideoService.setPriority`, `cancelImminent` | `McvideoAdhocTest`; V3 |
+| Ad hoc group emergency alert criteria modification | TS 24.281 §12.1A.1.4 | `EmergencyAlerts.modifyAdhoc` | debug command only (no lab check) |
+| Settings-only PUBLISH | TS 24.281 §7.2.3, §7.2.1A; RFC 3903 §5 | `McvideoService.publishSettings` | V4 |
+| Group dynamic data subscription | TS 24.281 §8.2.1.6, §8.3.1.2, §8.3.2.2 | `McvideoService.subscribeGdd`, `GroupDynamicData` | `GroupDynamicDataTest`; V4 |
+| Target KMS of a private call from `<PrivateCallKMSURI>`; KMS redirect (488 with a KRR) | TS 24.281 §6.2.8.3.9, §10.2.2.2.1 step 8 d); TS 33.180 §5.2.8.2.5, annex D.4 | `McvideoService.originate`, `KmsRedirect`, `KeyClient.makePck` | `KmsRedirectTest`; V5 |
+| **Not implemented:** remote affiliation per group and de-affiliation from one group (§8.2.1.2-8.2.1.5, in `McxClient`, phase 1); other KMSs' certificates (KMS CertCache); ad hoc participant modification; protected ad hoc calls | | | |
+
 ## Android integration
 
 | Requirement | Code | Evidence |
@@ -131,7 +152,7 @@ the published specifications and not re-checked against a local copy; they are m
     before any parameter. The fix is to compare that token only, as the Linux client's `answer_mode_value()` does.
     Today the controlling server sends a plain `Auto` to the callee, but the Linux client now originates
     `Auto;require` (TS 37.579-2/-6 table 6.2.5.3.3-1), and a server that passes the header on as received would hit
-    this.
+    this. **MCVideo: done** (`McvideoService.answerModeToken`, phase 7).
   - **"mc_granted" (floor granted in the SIP 200 (OK)).** The client never offers it, so the floor is only ever granted
     by a Floor Granted message after the call is set up. TS 37.579-1 table 5.5.3.1.1-1 (INITIAL_SDP_OFFER) expects it,
     so 6.1.2.7, 6.1.2.9 and the other implicit-request calls get a strict-verdict remark. TS 24.380 makes offering it
@@ -143,7 +164,8 @@ the published specifications and not re-checked against a local copy; they are m
       floor granted notification, 'U: has permission'), only when our offer had it; otherwise it is discarded. The
       server may still send a Floor Granted message afterwards (NOTE to §14.2.4), which must not be treated as a
       second grant.
-    - **MCVideo:** the same for TS 24.581 §14.2.4 / §14.5.
+    - **MCVideo:** the same for TS 24.581 §14.2.4 / §14.5. **Done** (phase 7): `mcvideo.offer_granted`, default
+      false; `McvideoSdp`, `TransmissionParticipant.grantedInAnswer`.
   - **Accept on the document unsubscribe.** TS 37.579-1 table 5.5.2.14-1 (CONFIG, GROUPCONFIG) expects
     `Accept: application/xcap-diff+xml` in every xcap-diff SUBSCRIBE, a re-SUBSCRIBE included. The Android client
     sends it in the initial document SUBSCRIBE and in all group key (GKTP) SUBSCRIBEs. The SUBSCRIBE with Expires 0
@@ -151,8 +173,9 @@ the published specifications and not re-checked against a local copy; they are m
     `groupDocSubscriptions`) has no Accept. Add `.add("Accept", DocumentSubscriptions.ACCEPT)` there, as the Linux
     client now does for all its xcap-diff SUBSCRIBEs. RFC 6665 §7.2 makes Accept optional (the default for xcap-diff is
     `application/xcap-diff+xml`, RFC 5875), so a missing Accept is a strict-verdict remark only, not a failure. The
-    MCVideo conference unsubscribe (`McvideoService.kt`, Event conference, Expires 0) also lacks Accept
-    (`ConferenceInfo.CONTENT_TYPE`).
+    MCVideo conference unsubscribe (`McvideoService.kt`, Event conference, Expires 0) also lacked Accept
+    (`ConferenceInfo.CONTENT_TYPE`): **MCVideo done** (phase 7), with the mcvideo-info body of TS 24.281 §9.2.3.2,
+    which the server requires.
   - **Floor Indicator of the Floor Request and Floor Release.** `FloorParticipant.kt` sends both with the default
     `FloorIndicator.NORMAL` (0x8000) whatever the call:
     - **Call type (required):** TS 24.380 §6.2.4.3.5 1.b requires the Floor Request of a broadcast group call, system

@@ -10,6 +10,8 @@ of `androidlab.py` is the exception). Test scripts: `tests/`; lab: `lab/androidl
 | Instrumented tests (`tools/instrumented-test.sh`) | AVD: Android 16 (API 36), google_apis, x86_64 | 11 passed (codec 2, UI 6, telecom 2, browser login 1) |
 | Instrumented tests, without telecom and browser login | redroid 15 | 8 passed. Redroid's Telecom has no telephony service, so its self-managed calls stall at random |
 | Lab scenarios S1-S11 (`tests/scenarios.py a1`) | Three redroid 15 clients on the OpenMCX lab, TLS | 144 of 144 checks passed, repeatedly, against several server builds |
+| JVM unit tests, phase 7 (MCVideo) | Docker, JDK 17 | 424 passed, 0 failed (2026-11-25, branch `android-p7`) |
+| MCVideo signalling scenarios V1-V5 (`tests/scenarios.py LAB V1 V2 V3 V4 V5`), phase 7 | Two redroid 15 clients and the Linux reference client, server `openmcx-all:mcdpre-800c657`; protected lab with XML confidentiality and integrity | 35 of 35, with S2, S3, S12 and S16 in the same run (79 of 79). See [VIDEO.md](VIDEO.md#signalling-on-redroid-phase-7) |
 
 In S9, 91-97% of the payloads arrived at each listener, all unchanged, with 52-57 reordered. In S10 the access time was
 4-10 ms and mouth-to-ear 47-72 ms. Some S10 mouth-to-ear samples are large negative numbers: a listener reported no
