@@ -55,4 +55,30 @@ def s80_ip_connectivity(lab) -> None:
                   not r.get("ok") and "403" in r.get("error", ""), reply=r)
 
 
-SCENARIOS = {"S80": s80_ip_connectivity}
+def s81_enhanced_status(lab) -> None:
+    """TS 24.282 clause 14.2.1: the group's operational values from its document; alice sends "On scene" (id 1) as a
+    group SDS of type ENHANCED STATUS, bob and client-c render it; an id the group does not know is discarded; a group
+    without <mcdata-allow-enhanced-status> refuses the request before anything is sent."""
+    values = lab.cmd(A, "sds-status-values", GROUP)
+    lab.check("the group document allows enhanced status and has its operational values",
+              values["allowed"] and {"1": "On scene", "2": "En route"}.items() <= {v["id"]: v["value"] for v in values["values"]}.items(),
+              values=values)
+    before = {c: len(lab.cmd(c, "sds-status-received")["received"]) for c in (B, C) if c in lab.devices}
+    sent = lab.cmd(A, "sds-status", "delivery", GROUP, "1")
+    lab.check("alice's enhanced status is accepted by the server", sent["status"] in (200, 202), sent=sent)
+    for c in before:
+        got = lab.wait(f"{c} renders it", lambda c=c: (r := lab.cmd(c, "sds-status-received")["received"][before[c]:]) and r[-1], timeout=15)
+        lab.check(f"{c} renders alice's 'On scene' (clause 14.2.1.2 step 3)", got["value"] == "On scene" and got["from"] == MCDATA[A]
+                  and got["group"] == GROUP, got=got)
+    discarded = lab.cmd(B, "sds-status-received")["discarded"]
+    inbox = len(lab.status(B)["inbox"])
+    forced = lab.cmd(A, "sds-status", GROUP, "9", "force")
+    lab.wait("bob discards id 9", lambda: lab.cmd(B, "sds-status-received")["discarded"] > discarded, timeout=15)
+    lab.check("bob discards a value the group does not have, and does not deliver it",
+              len(lab.status(B)["inbox"]) == inbox and all(m["message_id"] != forced["message_id"] for m in lab.status(B)["inbox"]))
+    r = lab.cmd(A, "sds-status", "sip:operations-noemergency@mcx.test", "1", ok=False)
+    lab.check("a group without <mcdata-allow-enhanced-status> refuses it locally (clause 14.2.1.1)", not r.get("ok")
+              and "not allowed" in r.get("error", ""), reply=r)
+
+
+SCENARIOS = {"S80": s80_ip_connectivity, "S81": s81_enhanced_status}
