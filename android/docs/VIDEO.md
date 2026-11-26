@@ -362,17 +362,18 @@ On an unprotected lab (`p7-u1`, the same without `--protected`), V1 to V4 pass t
 S16 (MCPTT) then stopped at its imminent peril group call there, and did the same with the APK from before phase 7.
 On the protected lab MCData was not authorised (403, warning 140, "XML content encrypted under another XPK"), with
 the APK from before phase 7 as well. Both are server faults, found after phase 7 (CONFORMANCE.md, "Deviations and
-limits"): the MCPTT server lets a new group call join the session it is still releasing, and the MCData server
-decrypts a new service authorisation under the CSK of the old binding, which an app restart (here the reinstall)
-leaves behind.
+limits"): the MCPTT server let a new group call join the session it was still releasing, and the MCData server
+decrypted a new service authorisation under the CSK of the old binding, which an app restart (here the reinstall)
+leaves behind. Both are fixed on openmcx-server branch `android-server-faults`.
 
 ### Affiliation and the re-runs (after phase 7)
 
 Branch `android-p7b`, server image `openmcx-all:mcdpre-800c657`, three redroid 15 clients (no reference client; V2
 takes the redroid client-c as its third participant). V6 checks MCVideo affiliation: de-affiliation from the group and
 affiliation again, the PUBLISH of each, this user's own affiliation subscription, and the negotiated-mode MESSAGE with
-the MCVideo affiliation command (the OpenMCX servers do not relay it, so bob's acceptance per group is checked by
-`McvideoProceduresTest` only).
+the MCVideo affiliation command (the OpenMCX servers of `mcdpre-800c657` did not relay it, so bob's acceptance per group
+was checked by `McvideoProceduresTest` only; on openmcx-server branch `android-server-faults`, with
+`--fixture-arg=--remote-affiliation`, it reaches bob, who accepts it for the group: TEST_REPORT.md, "Server fixes").
 
 | Lab | Scenarios | Result |
 |---|---|---|

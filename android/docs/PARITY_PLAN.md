@@ -31,18 +31,20 @@ State on `android-final` (2026-11-26), all phases merged; the "Status" section b
 | MCData other | IP connectivity, enhanced status, communication release, message store, notification channels | all (phases 4, 4b) | IP connectivity to the phone's own IP stack (no `VpnService`), IPv6 in the tunnel; message store upload, retrieve, folder copy/move, notification restart; data streaming |
 | Location | the three services, location rules, group geographic areas, SEAL (TS 24.545) | the same (phase 6) | MCData group configuration rules (as Linux), MCVideo affiliation rules, hysteresis |
 | MCVideo | see FEATURES.md | calls, push and pull, ambient viewing, remote transmission, protected video, XML signalling protection, T100-T104, priority, rejoin, ad hoc emergency, settings and remote affiliation, GDD, KMS redirect (phase 7) | other KMSs' certificates (CertCache), ad hoc participant modification, protected ad hoc calls |
-| End-to-end protection | GMK, PCK, XML signalling for the three services | the same: media, XML signalling for the three services, protected MCData payloads, files and MSRP bodies | protected MCPTT ad hoc floor control (the server keeps it clear) |
+| End-to-end protection | GMK, PCK, XML signalling for the three services | the same: media, XML signalling for the three services, protected MCData payloads, files and MSRP bodies | none (protected MCPTT ad hoc floor control works with the server fix on `android-server-faults`) |
 
 ## Status (2026-11-26)
 
 All phases are merged on `android-final` (from `android-parity` with `android-p4b`). The full regression on redroid
-passed every scenario but S15 (phone mode, not run) and the known server faults below; see TEST_REPORT.md, "Final
-regression". JVM unit tests 581 and app unit tests 15, all passing, `:core:test` twice.
+passed every scenario but S15 (phone mode, not run) and the server faults below; see TEST_REPORT.md, "Final
+regression". Those faults are fixed on openmcx-server branch `android-server-faults` (not yet on the server's main),
+and branch `android-srvfix` updates the scenarios to expect the fixed behaviour (TEST_REPORT.md, "Server fixes").
+JVM unit tests 583 and app unit tests 15, all passing.
 
 | Phase | State | What remains (CONFORMANCE.md) |
 |---|---|---|
 | 0: known fixes | done | the MCVideo halves were done in phase 7 |
-| 1: settings and affiliation | done | a received negotiated-mode affiliation request is unit-tested only (the servers do not pass it on) |
+| 1: settings and affiliation | done | none (the received negotiated-mode request is checked in S23 and V6 with `--fixture-arg=--remote-affiliation`) |
 | 2: MCPTT call types and floor | partial | group-broadcast and user-broadcast groups as their own call kind; originating protected first-to-answer calls |
 | 3: MCPTT call services | partial | the announced transfer (§11.1.8.2.3); the step 1A check of manual forwarding (`<forwarding-other-list>`); a remotely initiated group call only when affiliated and idle |
 | 4: MCData media plane | partial | the MDEG, MDEPC and related state machines of TS 24.282 §6.2.8 (only the emergency and imminent peril flags kept); the emergency alert with a session not tracked; ad hoc group emergency and imminent peril communications (refused locally, as the server does) |
@@ -52,30 +54,28 @@ regression". JVM unit tests 581 and app unit tests 15, all passing, `:core:test`
 | 7: MCVideo remainder and protection | partial | other KMSs' certificates (KMS CertCache); ad hoc participant modification; protected ad hoc calls |
 
 Also open outside the phases: P-Access-Network-Info (planned), `authorise_by_register`, MCData data streaming, the
-per-alias user status subscription and FD over HTTP to an alias, and the in-progress imminent peril notification
-MESSAGE (answered 488).
+per-alias user status subscription and FD over HTTP to an alias.
 
-Server faults found on the Android labs (openmcx-server `mcdpre-800c657`, not changed; CONFORMANCE.md "Deviations and
-limits", TEST_REPORT.md):
-- MCData on a protected lab after an app restart (reinstall, crash, `die`): every request refused 403 warning 140, the
-  new service authorisation opened under the old binding's CSK. The protected labs are brought down and up after a new
-  APK.
-- MCPTT ad hoc calls on a protected lab: the server keeps ad hoc floor control in the clear, the client protects it;
-  no floor is granted (S5 4/6 on `fin-p`).
-- A group call made while the last one is being released joins it, and its caller gets a BYE (S16 waits for every
-  member to be out of the call).
-- A one-to-one media-plane MCData communication to a functional alias is taken as a user (403 warning 229), not
-  answered 300.
-- Notifications of a standalone SDS sent over the media plane are refused 403 warning 216; a declined media-plane
-  FD ends the originator's INVITE with 487 without the warning; an SDS above the group's limit ends the originator's
-  leg before the SEND is answered.
-- `<call-transfer-ind>` and `<call-forwarding-ind>` are not passed on to the target, and a forwarded call's invitee
-  gets Answer-Mode Auto although the caller asked Manual.
-- After a "rejected" network deregistration and a new registration, the SIP core's first reg event NOTIFY is the old
-  binding's, terminated "rejected", and ends the new subscription (the client now ignores it by its `callid`; found
-  in this regression).
-- The MCPTT pre-established session: the server records ICE as failed for a phone that answers no STUN and uses the
-  SDP addresses (works on the lab; a NATed phone would need latching).
+Server faults found on the Android labs in `mcdpre-800c657` (CONFORMANCE.md "Deviations and limits", TEST_REPORT.md),
+all **fixed on openmcx-server branch `android-server-faults`**, not yet on the server's main:
+- MCData on a protected lab after an app restart: every request refused 403 warning 140 (fixed: the new service
+  authorisation is opened with the CSK it uploads).
+- MCPTT ad hoc calls on a protected lab: the server kept ad hoc floor control in the clear (fixed: S5 passes there).
+- A group call made while the last one was being released joined it, and its caller got a BYE (fixed: a new session;
+  S16 re-calls the group at once and checks it).
+- A one-to-one media-plane MCData communication to a functional alias was taken as a user, 403 warning 229 (fixed:
+  300 and delivery, S84; the target is still not told the alias called on this path).
+- Notifications of a standalone SDS over the media plane refused 403 warning 216; a declined media-plane FD ended with
+  487; an SDS above the group's limit ended the leg unanswered (fixed: 202, the 480 and warning, MSRP 403).
+- `<call-transfer-ind>` and `<call-forwarding-ind>` not passed on, and a forwarded call's invitee given Answer-Mode
+  Auto (fixed: both passed on, Answer-Mode Manual; S37-S39). A client race found with it is fixed too: a forwarding
+  request before the 480 sent Priv-Answer-Mode Auto.
+- Another user's affiliation status refused 403, one subscription per user, the negotiated-mode request not relayed
+  (fixed with the `--remote-affiliation` rights: S23, V6).
+- After a "rejected" network deregistration, the SIP core's first reg event NOTIFY was the old binding's (fixed in
+  SIP core `openmcx-kamailio:6.1.4-13`; the client's `callid` check stays).
+- Still open: the MCPTT pre-established session: the server records ICE as failed for a phone that answers no STUN and
+  uses the SDP addresses (works on the lab; a NATed phone would need latching).
 
 ## Phases
 

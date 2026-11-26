@@ -38,10 +38,10 @@ MCVideo's (`McxClient.videoProcedures`, see the MCVideo table), each with its de
 | Settings removal (Expires 0): the client is logged off the service | TS 24.379 §7.2.1A NOTE 3 | `ServiceProcedures.settingsPublish(remove)`, `McxClient.settingsRemoved` | `ServiceProceduresTest`; S21 |
 | Settings subscription (Event poc-settings, Accept, Expires 4294967295 or 0 to fetch), re-subscribe and de-subscribe in the dialog; the NOTIFY's answer mode and profile index cached per client ID | TS 24.379 §7.2.4 | `ServiceProcedures.settingsSubscribe`, `settingsResubscribe` | `ServiceProceduresTest.settingsSubscription`, `ProceduresBodiesTest`; S21 |
 | Monitored groups: groups of the user profile affiliated besides the provisioned ones (at most 16), every PUBLISH naming all; shown in the Call tab's group list with their notified status | TS 24.379 §9.2.1.2 | `McxClient.monitor`, `wantedGroups`; `ui/Screens.kt` `TalkScreen` | `ServiceProceduresTest.monitorNeedsAProfileGroup`; S22 |
-| Another user's affiliation: SUBSCRIBE naming the target (the per-client filter only for the user's own), Accept application/pidf+xml, fetch; the NOTIFY read for every client | TS 24.379 §9.2.1.3 | `ServiceProcedures.affiliationSubscribe` | `ServiceProceduresTest.remoteAffiliation`; S23 (the server refuses another user's with 403, §9.2.2.2.4) |
+| Another user's affiliation: SUBSCRIBE naming the target (the per-client filter only for the user's own), Accept application/pidf+xml, fetch; the NOTIFY read for every client | TS 24.379 §9.2.1.3 | `ServiceProcedures.affiliationSubscribe` | `ServiceProceduresTest.remoteAffiliation`; S23 (granted with `--fixture-arg=--remote-affiliation`, else 403, §9.2.2.2.4) |
 | Mandatory mode: the PUBLISH for the targeted client with all its groups of interest, no status or expires, a new p-id; Expires 0 and no PIDF without any group | TS 24.379 §9.2.1.2 steps 4, 5 | `ServiceProcedures.affiliateRemote` | `ServiceProceduresTest.remoteAffiliation`; S23 (targeted at alice's own client) |
-| Negotiated mode, sent: MESSAGE to the PSI with the info body naming the target and the annex F.4 affiliation command | TS 24.379 §9.2.1.4, annex F.4 | `ServiceProcedures.affiliateRemote`, `body/Presence.kt` `AffiliationCommand` | `ServiceProceduresTest`, `ProceduresBodiesTest`; S23 (answered; the OpenMCX servers do not relay it) |
-| Negotiated mode, received: 200 at once, the user prompted (Accept, Decline; `affiliation-accept [<group>...]`, `affiliation-decline`); accepted, affiliation to the groups not affiliated and de-affiliation from those affiliated, as §9.2.1.2 | TS 24.379 §9.2.1.5 | `ServiceProcedures.handle`, `answerAffiliationRequest`, `McxClient.changeAffiliation`; `ui/Screens.kt` `AffiliationRequestPrompt` | `ServiceProceduresTest.negotiatedRequestReceived`. Not in the lab: the OpenMCX servers do not send it |
+| Negotiated mode, sent: MESSAGE to the PSI with the info body naming the target and the annex F.4 affiliation command | TS 24.379 §9.2.1.4, annex F.4 | `ServiceProcedures.affiliateRemote`, `body/Presence.kt` `AffiliationCommand` | `ServiceProceduresTest`, `ProceduresBodiesTest`; S23 (relayed to bob with `--remote-affiliation`, §9.2.2.2.8) |
+| Negotiated mode, received: 200 at once, the user prompted (Accept, Decline; `affiliation-accept [<group>...]`, `affiliation-decline`); accepted, affiliation to the groups not affiliated and de-affiliation from those affiliated, as §9.2.1.2 | TS 24.379 §9.2.1.5 | `ServiceProcedures.handle`, `answerAffiliationRequest`, `McxClient.changeAffiliation`; `ui/Screens.kt` `AffiliationRequestPrompt` | `ServiceProceduresTest.negotiatedRequestReceived`, `negotiatedRequestNamesTheRequester` (the requester from `<mcptt-calling-user-id>`, not the PSI in From); S23 with `--remote-affiliation` |
 | Group dynamic data: SUBSCRIBE naming the group with the per-group filter of §9.3.2.2 (the items asked for), fetch, re-subscribe, de-subscribe; the §9.3.1.2 document (status, aliases, call ongoing, members) | TS 24.379 §9.2.1.6, §9.3.1.2, §9.3.2.2 | `ServiceProcedures.gddSubscribe`, `body/Presence.kt` `GroupDynamicData` | `ServiceProceduresTest.groupDynamicDataSubscription`, `ProceduresBodiesTest`; S24 |
 
 ## Location rules, group geographic areas, SEAL location
@@ -255,7 +255,7 @@ Code in `core/…/mcdata/IpConnectivity.kt`, `EnhancedStatus.kt`, `MessageStore.
 | Settings-only PUBLISH | TS 24.281 §7.2.3, §7.2.1A; RFC 3903 §5 | `McvideoService.publishSettings` | V4 |
 | Group dynamic data subscription | TS 24.281 §8.2.1.6, §8.3.1.2, §8.3.2.2 | `McvideoService.subscribeGdd`, `GroupDynamicData` | `GroupDynamicDataTest`; V4 |
 | Target KMS of a private call from `<PrivateCallKMSURI>`; KMS redirect (488 with a KRR) | TS 24.281 §6.2.8.3.9, §10.2.2.2.1 step 8 d); TS 33.180 §5.2.8.2.5, annex D.4 | `McvideoService.originate`, `KmsRedirect`, `KeyClient.makePck` | `KmsRedirectTest`; V5 |
-| Negotiated-mode affiliation request received: 200 at once, the user's confirmation sought (a dialog, or `video-affiliation-accept [<group>...]` / `video-affiliation-decline`); accepted for the groups named only, each applied as in §8.2.1.2 | TS 24.281 §8.2.1.5 | `McxClient.videoProcedures` (`ServiceProcedures` for MCVideo), `McxClient.changeAffiliation`; `ui/UiModel.kt` | `McvideoProceduresTest.negotiatedRequestAcceptedPerGroup`, `deaffiliationFromOneGroup`; V6 (the OpenMCX servers do not relay the request, so only its MESSAGE is checked there) |
+| Negotiated-mode affiliation request received: 200 at once, the user's confirmation sought (a dialog, or `video-affiliation-accept [<group>...]` / `video-affiliation-decline`); accepted for the groups named only, each applied as in §8.2.1.2 | TS 24.281 §8.2.1.5 | `McxClient.videoProcedures` (`ServiceProcedures` for MCVideo), `McxClient.changeAffiliation`; `ui/UiModel.kt` | `McvideoProceduresTest.negotiatedRequestAcceptedPerGroup`, `deaffiliationFromOneGroup`; V6 (relayed with `--remote-affiliation`; bob accepts it for the group) |
 | De-affiliation from one group (`video-deaffiliate <group>`) and affiliation to one (`video-affiliate <group>`): the PUBLISH lists the groups still wanted, Expires 0 when none is left; the change confirmed by the next NOTIFY; kept across a new registration | TS 24.281 §8.2.1.2 steps 4 and 5, §8.2.1.3 | `McxClient.changeAffiliation`, `affiliate`, `wantedGroups` | `McvideoProceduresTest.deaffiliationFromOneGroup`; V6 |
 | Another user's MCVideo affiliation (subscription), and the change for them in mandatory or negotiated mode, sent with the mcvideo-info, the MCVideo PSI and `application/vnd.3gpp.mcvideo-affiliation-command+xml` | TS 24.281 §8.2.1.2, §8.2.1.3, §8.2.1.4 | `ServiceProcedures.affiliationSubscribe`, `affiliateRemote` | `McvideoProceduresTest.requestsForAnotherUser`; V6 |
 | **Not implemented:** other KMSs' certificates (KMS CertCache); ad hoc participant modification; protected ad hoc calls | | | |
@@ -273,39 +273,33 @@ Code in `core/…/mcdata/IpConnectivity.kt`, `EnhancedStatus.kt`, `MessageStore.
 
 ## Deviations and limits
 
-- **Faults found on the Android labs** (the server ones not changed here; openmcx-server `mcdpre-800c657`):
-  - **A one-to-one media-plane communication to a functional alias is not resolved:** the MCData server takes the
-    resource list's entry of a media-plane INVITE as a user (`media_invite_private_target`): no 300 for an alias as on the
-    signalling plane and for IP connectivity, so `fa=<alias>` is refused (alice: 403 warning 229, the alias not in her
-    one-to-one list; another user would get 404). An alias among ad hoc participants is resolved (S84).
-  - **MCData on a protected lab after an app restart:** the MCData server opens every request of a user it holds a
-    binding for with the CSK of that binding (`src/mcdata/sip_dispatch.cpp`, `DataServer::incoming` ->
-    `open_signalling`) before the service authorisation sees the request. A new service authorisation uploads a new CSK
-    and encrypts its mcdata-info under it (TS 33.180 §9.2.1.3, TS 24.282 §7.2.2 steps 3 and 4), so it is refused 403
-    with warning 140 ("XML content encrypted under another XPK") until the old binding ends; `authorise_csk`, which would
-    take the uploaded CSK, is never reached. Any restart of the app without a log-off (a reinstall, a crash, `die`)
-    shows it; MCPTT and MCVideo authorise with their new CSK.
-  - **A stale reg event document after "rejected":** when a user logs on again after a network-initiated "rejected"
-    deregistration (a new REGISTER with a new Call-ID, the same contact address), the SIP core's first NOTIFY on the new
-    reg event subscription is still the old binding's, terminated with event "rejected", and the subscription ends
-    (Subscription-State terminated). The client now ignores a contact of another registration (its `callid`); the
-    server's document and the ended subscription are a SIP core fault (seen in S19 on `fin-base`).
-  - **A group call made while the last one is being released joins it:** when the initiator leaves, the MCPTT server
-    BYEs the others (`end_when_initiator_leaves`) but keeps the session in `sessions_` until each BYE is answered
-    (`McServer::release_departed_leg`). A new group call INVITE in that time is a "call_joined" of that session
-    (warning 123), which then ends with its last participant's answer, and the caller gets a BYE. TS 24.379
-    §10.1.1.4.2 has the controlling function create a prearranged group session when none is ongoing, and a session in
-    release is no longer one. S16 met it on MCVideo labs, where client-c answers its BYE later; S16 now waits for every
-    member to be out of the call.
-  - **The in-progress imminent peril notification is answered 488:** the joining INVITE above made the server send
-    bob a MESSAGE with the group's imminent peril state (TS 24.379 §6.3.3.1.11); the Android MCPTT client handles
-    such MESSAGEs only for emergency alerts and answers this one 488 (client gap, TS 24.379 §12.1.1.3, not fixed here).
-  - **MCPTT ad hoc calls on a protected lab:** the MCPTT server keeps an ad hoc call's floor control in the clear
-    (`src/server/adhoc.cpp`, `adhoc_call_policy`: `protect_floor` false), while the client, provisioned with protected
-    floor control, protects it under the CSK as TS 33.180 §9.4.2 has it for floor control between client and server.
-    Each side drops the other's packets: the client's "packet failed authentication", the server's `floor_rejected`
-    "RTCP length mismatch" for every Floor Ack, then `floor_ack_timeout`; no floor is granted (S5 4/6 there, 12/12
-    unprotected). A server fault; the MCVideo client already keeps ad hoc transmission control clear to match it.
+- **Server faults found on the Android labs, fixed on openmcx-server branch `android-server-faults`** (not yet on
+  the server's main; images `openmcx-all:srvfix-a-a3db6b4` MCData, `srvfix-b-be65d35` MCPTT, `srvfix-c-c29be0a`
+  affiliation with SIP core `openmcx-kamailio:6.1.4-13`; TEST_REPORT.md, "Server fixes"). Faults of `mcdpre-800c657`:
+  - **A one-to-one media-plane communication to a functional alias** was taken as a user (403 warning 229); the
+    server now answers 300 naming the user who activated it (TS 24.282 §9.2.3.4.4 step 6a1), and the client invites
+    that user (S84). Still open: the target's INVITE does not carry the `<called-functional-alias-URI>` alice sent.
+  - **MCData on a protected lab after an app restart** was refused 403 warning 140 (the new service authorisation
+    opened under the old binding's CSK); the server now opens it with the CSK it uploads (TS 33.180 §9.2.1.3).
+  - **Notifications of a standalone SDS over the media plane** were refused 403 warning 216; they are now correlated
+    and answered 202 (TS 24.282 §12.2.3), and reach the sender (S60, S61). A declined media-plane FD is answered with
+    the recipient's 480 and warning, not 487 (S64); an SDS above the group's limit gets MSRP 403.
+  - **A stale reg event document after "rejected":** the SIP core's first NOTIFY on a new reg event subscription is
+    now the current registration's. The client still ignores a contact whose `callid` is another registration's
+    (harmless, kept; S19).
+  - **A group call made while the last one is being released** joined it and its caller got a BYE; the server now
+    creates a new session (TS 24.379 §10.1.1.4.2 steps 9 and 14) and invites the remaining members once they are out of
+    the old one. S16 checks a quick re-call: a new session, no BYE.
+  - **Affiliation of another user:** one status subscription per user (a second replaced the first) and every
+    subscription to another user refused 403; now one per dialog, granted with `<allow-request-affiliated-groups>` or
+    `<allow-request-to-affiliate-other-users>` (§9.2.2.2.4; the fixture's `--remote-affiliation`). The negotiated-mode
+    request (§9.2.1.4) was not relayed; it now reaches the target with the requester in `<mcptt-calling-user-id>`
+    (§9.2.2.2.8), which the client shows as the sender (S23, V6).
+  - **MCPTT ad hoc calls on a protected lab:** floor control is now protected under each user's CSK when the server's
+    `security.protect_floor` is set (TS 33.180 §9.4.2); S5 passes on the protected lab.
+  - **Private call services:** `<call-transfer-ind>` and `<call-forwarding-ind>` are passed on to the target
+    (TS 24.379 §6.3.3.1.2 step 11), and a forwarded call's Priv-Answer-Mode Manual becomes Answer-Mode Manual towards it
+    (§11.1.1.3.1.1 step 18): the target rings (S37-S39).
 - **Server-driven choices** (see the wire contracts):
   - An explicit floor request by default; the implicit one (`mcptt.implicit_floor_request`) is accepted by the server,
     which grants the floor by Floor Granted and does not use `mc_granted`.
@@ -333,10 +327,10 @@ Code in `core/…/mcdata/IpConnectivity.kt`, `EnhancedStatus.kt`, `MessageStore.
   Replaces) is not implemented, only the unannounced one; the step 1A check of manual forwarding (`<forwarding-other-list>`)
   is not made; a remotely initiated group call goes to the group only when this client is affiliated to it and idle;
   the server-side forwarding settings (immediate, no answer, not reachable) are the user profile's, set by the
-  administrator: the app's Settings only choose the target its Forward action offers first. The OpenMCX server (image
-  `openmcx-all:mcdpre-800c657`) passes neither `<call-transfer-ind>` nor `<call-forwarding-ind>` on to the target, and
-  gives the invitee of a forwarded call Answer-Mode Auto although the caller sent Priv-Answer-Mode Manual; its user
+  administrator: the app's Settings only choose the target its Forward action offers first. The OpenMCX server's user
   profile names the manual forwarding right `<allow-call-forward-manual-input>` rather than `<allow-call-fwd-manual-any>`.
+  A forwarding request that arrives before the 480 of the call it forwards (ms apart) takes that call's answer mode and
+  sequence number once it has ended (`PrivateServicesTest.forwardingRequestBeforeThe480`).
 - **Not implemented:**
   - group-broadcast and user-broadcast groups as their own call kind (a broadcast call on them is made as on any
     group); originating protected first-to-answer calls (§11.1.1.2.1.1, the 200 step 2 PCK)

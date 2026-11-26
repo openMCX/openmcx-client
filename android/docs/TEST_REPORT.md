@@ -24,8 +24,9 @@ client's reporting or in the check, not a server fault.
 from before phase 7 too. Cause, from the MCPTT server's events: alice's emergency call ends with her BYE; the server
 BYEs bob and client-c but keeps the session until both answer; alice's imminent peril INVITE, 40 ms later, arrives
 before client-c's answer and is a "call_joined" of that session, which ends with client-c's answer, so the server
-BYEs alice and bob is never invited. A server fault (CONFORMANCE.md, "Deviations and limits"); S16 now waits for every
-member of the group, client-c included, to be out of the call before the next one (18/18).
+BYEs alice and bob is never invited. A server fault, fixed on openmcx-server branch `android-server-faults` (a new
+session; see "Server fixes" below). S16 waited for every member of the group to be out of the call before the next
+one; it now re-calls the group as soon as alice is out, and checks the new session and that alice gets no BYE.
 
 ## Environment
 
@@ -267,7 +268,7 @@ server image `openmcx-all:mcdpre-800c657`, three redroid 15 clients and the Linu
 
 | # | Scenario | Checks | Result |
 |---|---|---|---|
-| S60 | Long one-to-one SDS (3000 octets, above the 1000 octet signalling limit; TS 24.282 §9.2.1.1, §9.2.3) | 7 | Bob's SDS goes over MSRP in two chunks, with the BYE cause 200. Alice gets it whole, marked as media plane. The server releases her leg. She sends DELIVERED by MESSAGE (the server answers 403 216, see below) |
+| S60 | Long one-to-one SDS (3000 octets, above the 1000 octet signalling limit; TS 24.282 §9.2.1.1, §9.2.3) | 7 | Bob's SDS goes over MSRP in two chunks, with the BYE cause 200. Alice gets it whole, marked as media plane. The server releases her leg. She sends DELIVERED by MESSAGE (the server answered 403 216, see below; 202 since the server fix, and bob gets it) |
 | S61 | Group standalone SDS over the media plane | 6 | Bob and client-c receive it on `operations`, and both send DELIVERED. One above the group's 400 byte limit is discarded by the server (TS 24.582 §6.3.1.3) |
 | S62 | One-to-one SDS session (§9.2.4) | 7 | Alice and bob each send in the session. Bob's DELIVERED goes in the session (TS 24.582 §6.1.2.5.1) and reaches alice. Alice's BYE ends bob's leg |
 | S63 | Group SDS session | 8 | Bob and client-c join. Alice's and bob's messages reach the other two, bob named by the Sender IE. The originator leaving ends the session for everyone |
@@ -276,7 +277,7 @@ server image `openmcx-all:mcdpre-800c657`, three redroid 15 clients and the Linu
 | S66 | Communication release (§13.2.4 to §13.2.6) | 8 | Bob's intent to release reaches alice with his reason, and alice's remaining data (0) reaches bob. Alice's extension request goes to bob, who grants it. Client-c's release is refused 403. Bob's release ends every leg |
 | S67 | The Linux reference client as a recipient | 3 | client-d receives alice's media-plane group SDS, her group session message and a group file whose hash checks |
 
-Server gaps found (openmcx-server, not changed here):
+Server gaps found (openmcx-server, not changed here; all three fixed on branch `android-server-faults`, see "Server fixes"):
 - **Notifications of a standalone SDS sent over the media plane.** The server refuses them with 403 warning 216
   ("unable to correlate"). It records the relayed message only on the signalling plane (`dispatched_`, `sds.cpp`), so
   TS 24.282 §12.2.3 step 5 finds nothing. Notifications sent inside an SDS session are relayed (S62).
@@ -313,9 +314,10 @@ never-registered "offline" is forwarded to bob at once.
 | S38 | Manual forwarding (§11.1.9.2.1) | 9 | bob forwards alice's ringing call to client-c (manual-input) and declines it with 480 and warning 175; alice's app calls client-c with `<call-forwarding-ind>`, sequence number 1 and Priv-Answer-Mode Manual; speech; bob gets the success |
 | S39 | Forwarding by the server (§6.3.2.5, §11.1.1.3.2) | 9 | alice's call to client-c is not answered in 4 s and ends with 480 and warning 175, and her app calls bob; her call to the unregistered "offline" is forwarded at once (Priv-Answer-Mode Auto, sequence number 1) |
 
-Found in the lab, and allowed for in the scenarios: the OpenMCX server passes neither `<call-transfer-ind>` nor
+Found in the lab, and allowed for in the scenarios then: the OpenMCX server passes neither `<call-transfer-ind>` nor
 `<call-forwarding-ind>` on to the target, and gives the invitee of a forwarded call Answer-Mode Auto although the caller
-asked for Manual (so the forwarded call may connect at once). Not exercised in the lab: the announced transfer
+asked for Manual (so the forwarded call may connect at once). Fixed on server branch `android-server-faults`; S37-S39
+now check both at the target and that it rings ("Server fixes"). Not exercised in the lab: the announced transfer
 (not implemented), `<ric-app-level-priority>` (unit test only), a protected ambient listening call.
 
 ## Phase 4b: IP connectivity, enhanced status, message store, ad hoc
@@ -349,10 +351,10 @@ private and group communications and client-c none. client-c (and client-d) may 
 Found:
 - **Client fault, fixed here:** on a protected lab, the receiver of an ad hoc file tried to open it as a protected
   series ("DPPK-ID is neither a PCK-ID nor a GMK-ID"); ad hoc files are in the clear.
-- **Server, not changed:** a one-to-one media-plane communication to a functional alias is refused. The server treats
+- **Server, not changed then (fixed on branch `android-server-faults`: 300, S84):** a one-to-one media-plane communication to a functional alias is refused. The server treats
   the alias as a user (403 warning 229 for alice, whose one-to-one list does not hold it). On the signalling plane and
   for IP connectivity it answers 300.
-- **Server, still there:** an app restart on a protected lab makes MCData refuse every request with 403 warning 140
+- **Server, then still there (fixed on branch `android-server-faults`):** an app restart on a protected lab makes MCData refuse every request with 403 warning 140
   (CONFORMANCE.md, "Deviations and limits"). The protected lab was brought down and up again after each new APK.
 
 ## Parity phase 5: pre-established sessions (2026-11-26)
@@ -427,7 +429,7 @@ most two labs up at a time, all brought down at the end. On the protected lab th
 | `fin-q` | `--floor-queue` | S1, S18 | 24 of 24 |
 | `fin-loc` | `--location --functional-alias --location-rules --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1, V1-V4, V6, S13, S14, S17, S40-S45 | 131 of 131 |
 | `fin-ps` | `--private-services --priority` | S1, S32-S39 | 91 of 91 |
-| `fin-p` | `--protected --xml-protection --integrity-protection --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1-S6, S12, S16, V1-V6, S60-S66, S80, S81, S83, S84 | 239 of 241 (S5 4/6: the server's clear ad hoc floor control, a known server fault) |
+| `fin-p` | `--protected --xml-protection --integrity-protection --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1-S6, S12, S16, V1-V6, S60-S66, S80, S81, S83, S84 | 239 of 241 (S5 4/6: the server's clear ad hoc floor control, a server fault since fixed, "Server fixes") |
 
 Per scenario: S1 15 (each lab), S2 10, S3 7, S4 17, S5 12 (4/6 protected), S6 15, S7 35, S8 16, S9 7, S10 2, S11 8,
 S12 9, S13 18, S14 17, S16 18, S17 11, S18 9, S19 13, S20 19, S21 13, S22 15, S23 13, S24 7, S25 23, S26 16, S27 10,
@@ -445,7 +447,8 @@ Fixed in this run:
 - **Client, S19:** after alice's "rejected" deregistration and log-on, the SIP core's first NOTIFY on her new reg
   event subscription named her old binding as terminated, "rejected"; the client took it as its own and stayed off,
   and S20-S28 failed behind it (158 of 169 in the first `fin-base` run). The client now ignores a contact whose
-  `callid` is not its registration's (`RegEventRulesTest`). Server fault noted in CONFORMANCE.md.
+  `callid` is not its registration's (`RegEventRulesTest`). Server fault noted in CONFORMANCE.md; the SIP core now
+  sends the current binding first (`openmcx-kamailio:6.1.4-13`), and the client's check stays (harmless).
 - **Lab, S19:** the SIP core's `reginfo.shorten` takes the private user identity as well; the scenario passes it.
 - **Client, S64 on a protected lab:** media-plane files are reported with the clear file's size and hash (the
   selector's describe the protected series); S64 checks both lab kinds.
