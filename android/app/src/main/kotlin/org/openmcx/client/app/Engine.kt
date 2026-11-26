@@ -372,7 +372,7 @@ object Engine {
                 // TS 24.281 §11.2.1.5 and §6.2.8.1.27: MCVideo's group alert is the McvideoService's, and so is the
                 // user profile that authorises an ad hoc alert.
                 h.serviceGroupAlert = object : org.openmcx.client.alert.EmergencyAlerts.ServiceGroupAlert {
-                    override fun alerting(): Set<String> = mcvideo?.alerting?.value.orEmpty()
+                    override fun alerting(): Set<String> = mcvideo?.emergencyState?.value.orEmpty()
                     override suspend fun raise(group: String, location: org.openmcx.client.mcvideo.EmergencyLocation) {
                         (mcvideo ?: throw IllegalStateException("MCVideo not started")).sendAlert(group, true, location)
                         alertsChanged()

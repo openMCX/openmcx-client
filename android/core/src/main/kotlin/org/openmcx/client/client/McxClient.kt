@@ -15,7 +15,9 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
@@ -428,6 +430,8 @@ class McxClient(
         @Volatile var wanted: Set<String>? = null
         /** Aliases the user asked to take over that the server has not offered yet (§9A.2.1.2 step 6 d, NOTE 4). */
         val takeOverWanted: MutableSet<String> = ConcurrentHashMap.newKeySet()
+        /** One status subscription at a time: the one after the service authorisation, or a change asked for first. */
+        val subscribing = kotlinx.coroutines.sync.Mutex()
     }
     private val aliasChannels: Map<McService, AliasChannel> = buildMap {
         config.mcptt?.let { put(McService.MCPTT, AliasChannel(McService.MCPTT, it.functionalAliases.ifEmpty { knownAliases })) }
@@ -1730,7 +1734,10 @@ class McxClient(
      * status: the info body names the user with `functional-alias-status-determination`, Expires 4294967295 for the
      * state and its changes.
      */
-    private suspend fun subscribeAliases(channel: AliasChannel) {
+    private suspend fun subscribeAliases(channel: AliasChannel) = channel.subscribing.withLock {
+        // A status change asked for while the subscription after the service authorisation is being made (6.2.14)
+        // uses that subscription, not a second one whose NOTIFYs would race the first's.
+        if (channel.dialog != null) return@withLock
         val service = channel.service
         val request = serviceRequest(service, "SUBSCRIBE", "presence", listOf(aliasInfo(service, ownId(service), "functional-alias-status-determination")))
         request.headers.add("Contact", contactFor(service)).add("Accept", FunctionalAliasPidf.CONTENT_TYPE).add("Expires", "4294967295")
@@ -1782,8 +1789,23 @@ class McxClient(
     /** The alias presented on this user's outgoing requests of [service] (§11.1.1.2.1.1 step 14c), or none. */
     fun useAlias(alias: String?, service: McService = McService.MCPTT) {
         val channel = aliasChannels[service] ?: throw IllegalStateException("${service.name} not provisioned")
-        if (alias != null && alias !in channel.state.value.active) throw IllegalStateException("$alias is not active for this user")
-        channel.state.update { it.copy(inUse = alias) }
+        // An alias whose activation is awaited (its PUBLISH answered, the NOTIFY not yet in) is kept for use once active.
+        val activating = alias != null && channel.wanted?.contains(alias) == true
+        var refused = false
+        channel.state.update { s -> FunctionalAliasRules.use(s, alias, activating) ?: s.also { refused = true } }
+        if (refused) throw IllegalStateException("$alias is not active for this user")
+    }
+
+    /**
+     * The functional alias to present on a request of [service] now: the one in use while active. When the alias the
+     * user chose is still being activated ([FunctionalAliasState.pendingUse]), wait up to [timeoutMs] for the NOTIFY
+     * that activates it (§9A.2.1.3), so that the request carries it (TS 24.282 §10.2.4.2.1 1)b)ii), §9.2.4.2.3 8)b)iv)).
+     */
+    suspend fun awaitAlias(service: McService, timeoutMs: Long = 5_000): String? {
+        val state = aliasesOf(service)
+        if (state.value.pendingUse != null)
+            kotlinx.coroutines.withTimeoutOrNull(timeoutMs) { state.first { it.pendingUse == null } }
+        return state.value.let { a -> a.inUse?.takeIf { it in a.active } }
     }
 
     /**
@@ -1825,7 +1847,8 @@ class McxClient(
         val body = Multipart.parse(request.contentType, request.body).firstOrNull { it.mediaType == FunctionalAliasPidf.CONTENT_TYPE }?.text ?: return
         val status = runCatching { FunctionalAliasPidf.parseStatus(body, service) }.getOrNull() ?: return
         // Computed once (its take-overs leave the wanted set), then set: NOTIFYs of one subscription arrive in order.
-        val result = FunctionalAliasRules.notified(channel.state.value, status, channel.publish, channel.takeOverWanted)
+        val result = FunctionalAliasRules.notified(channel.state.value, status, channel.publish, channel.takeOverWanted,
+            awaiting = channel.wanted.orEmpty())
         channel.state.value = result.state
         if (status.publishId != null && status.publishId == channel.publish?.publishId) channel.wanted = null
         event("${service.name} functional alias status: active ${result.state.active}, take-over possible ${result.state.takeOverPossible}")

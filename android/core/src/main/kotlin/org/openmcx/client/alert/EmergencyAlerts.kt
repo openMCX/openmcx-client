@@ -78,6 +78,15 @@ class EmergencyAlerts(
     private val _alerting = MutableStateFlow<Set<String>>(emptySet())
     /** The groups on which this user's own alert is active. */
     val alerting: StateFlow<Set<String>> = _alerting
+    /**
+     * The groups on which this client set the user's emergency state by its own alert (§12.1.1.1, TS 24.282 §16.2.1.1),
+     * until it or an authorised user cancels it. An own alert the server only reports ([alerting]: one this client did
+     * not raise, e.g. kept by the server across a restart of the app) is shown and may be cancelled, but it does not
+     * set the emergency state that §12.1.1.6 1)a)ii) (TS 24.282 §16.2.1.5) tests.
+     */
+    private val emergencyState: MutableSet<String> = java.util.concurrent.ConcurrentHashMap.newKeySet()
+    /** Whether this client set the user's emergency state with an alert on any group (see [emergencyState]). */
+    fun inEmergencyState(): Boolean = emergencyState.isNotEmpty()
     private val _adhoc = MutableStateFlow<OwnAdhocAlert?>(null)
     val adhoc: StateFlow<OwnAdhocAlert?> = _adhoc
     val notices: MutableList<AreaNotice> = CopyOnWriteArrayList()
@@ -100,6 +109,7 @@ class EmergencyAlerts(
      * user's alert is up on, and the raising of one, for the alert an emergency alert area notice raises (§11.2.1.5).
      */
     interface ServiceGroupAlert {
+        /** The groups on which the service's own alert set the user's emergency state (not one only reported). */
         fun alerting(): Set<String>
         suspend fun raise(group: String, location: EmergencyLocation)
     }
@@ -191,8 +201,10 @@ class EmergencyAlerts(
         val response = message(Fields(requestUri = group, clientId = client.config.clientId, alert = on,
             originatedBy = originatedBy?.takeIf { it != userId }), if (on) location else null)
         if (!response.isSuccess) throw failure("alert on $group ${if (on) "raise" else "cancel"}", response)
-        if (originatedBy == null || originatedBy == userId) _alerting.value = if (on) _alerting.value + group else _alerting.value - group
-        else _alerts.value = _alerts.value - key(originatedBy, group)
+        if (originatedBy == null || originatedBy == userId) {
+            _alerting.value = if (on) _alerting.value + group else _alerting.value - group
+            if (on) emergencyState += group else emergencyState -= group
+        } else _alerts.value = _alerts.value - key(originatedBy, group)
         event("alert on $group ${if (on) "raised at ${location?.latitude}, ${location?.longitude}" else "cancelled"}" +
             (originatedBy?.let { " (of $it)" } ?: "") + ": ${response.status}")
     }
@@ -289,6 +301,8 @@ class EmergencyAlerts(
         if (info.alertReceived == true || originator == null || originator == userId) {
             // The receipt of our own alert or its cancellation, or an authorised user cancelled it.
             if (group != null) _alerting.value = if (on) _alerting.value + group else _alerting.value - group
+            // A cancellation ends the emergency state; an alert only reported does not set it (see [emergencyState]).
+            if (group != null && !on) emergencyState -= group
             val by = info.callingUser?.takeIf { it != userId && info.alertReceived != true }
             event("own alert on $group ${if (on) "active" else "cancelled"}${by?.let { " by $it" } ?: ""}")
             if (!on && by != null && group != null) listener?.ownCancelled(service, group, by)
@@ -338,9 +352,10 @@ class EmergencyAlerts(
         var notice = AreaNotice(service, alertArea, entered, info.associatedGroup)
         val own = serviceGroupAlert
         val raising = groupAlerts || own != null
-        if (alertArea && entered && raising && (if (groupAlerts) _alerting.value else own!!.alerting()).isEmpty()) {
+        if (alertArea && entered && raising && (if (groupAlerts) emergencyState else own!!.alerting()).isEmpty()) {
             // §12.1.1.6 (TS 24.282 §16.2.1.5, TS 24.281 §11.2.1.5 1) a) ii)): entering an emergency alert area raises an
-            // alert, unless one is active (the user is in the emergency state).
+            // alert, unless the user is in the emergency state: one this client's own alert set. An own alert the server
+            // reports after a restart of the app (still active there) is not that state: the alert is raised again.
             val target = defaultGroup()
             val where = position()
             notice = notice.copy(alerted = target)

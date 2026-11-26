@@ -924,3 +924,44 @@ Server image `openmcx-all:session-faults-67b0493` (server main cc52507), APK sha
 | Lab `ipc-a` (`create --debug-sip --priority --functional-alias`): S1, S6, S80 | 38 of 38 |
 | Suite `results/android-ipc-mcdata` (lab `drv-ipc`, `android-lab-up.py up`) | 5.1 **Inconclusive** (was Fail): step 17 passes all seven REGISTER Contact checks, IPCONN tag and ICSI included; only the HTTPS steps 3-16 are unchecked (no TLS key log). Strict Fail from the P-Access-Network-Info remarks only. 6.7.1 Pass (46 pass, 4 remarks). 6.7.2 Inconclusive as before: the real-server SS has no mapping for `ipconn_invite`/`ipconn_ping`/`ipconn_release` (falls to the operator, not performed). D.1.1, D.1.2 Inconclusive as before (`set_service_authorisation`: no REGISTER mode in the app) |
 
+
+## Remaining conformance faults (branch `android-q4`, 2026-11-26)
+
+Branch `android-q4` from client main 46599a0, against the faults left by the suite runs `android-sfx-final-{mcptt,
+mcdata,mcvideo}` (suite worktree `suite-android-fixes`, suite main 165a471). Server image
+`openmcx-all:pre-emerg-cancel-7e1ce68` (server main with the priority re-INVITE in a pre-established session).
+
+| Test case | Cause | Fix | Clause |
+|---|---|---|---|
+| MCVideo 6.3.4 (and MCPTT, MCData likewise) | Not the alert hook or the group: on registration the server repeats the user's own MCVideo and MCPTT alerts on `operations` (`<alert-ind>` true, calling user alice; frames 308, 482 of the sfx-final capture). They are left over from MCPTT 6.6.4, which cancels only the MCPTT alert raised on the area entry. The app took that report as its emergency state, so the entry notice (frame 600) raised the MCData alert only (606) and MCVideo's waited for the user (801) | The emergency state that keeps the notice from raising the alert is the one this client's own alert set (`EmergencyAlerts.inEmergencyState`, `McvideoService.emergencyState`); an own alert the server only reports is still shown and can be cancelled | TS 24.281 §11.2.1.5 1)a)ii), TS 24.379 §12.1.1.6 1)a)ii), TS 24.282 §16.2.1.5 |
+| MCData 6.2.14 (intermittent) | In p7, `mcdata-fa use` came 40 ms after `activate`, before the NOTIFY that activates the alias: it was refused, so the FD went without `<functional-alias-URI>`. A status change asked for during the subscription after the service authorisation could also make a second subscription, whose NOTIFYs race the first | An alias chosen while its activation is awaited is kept (`FunctionalAliasState.pendingUse`) and used once active; the FD request over HTTP waits for it, up to 5 s (`McxClient.awaitAlias`); one status subscription at a time | TS 24.282 §22.2.1.2, §22.2.1.3, §10.2.4.2.1 1)b)ii) |
+| MCData D.5.8 | Not a client fault. The SS stimuli `refuse_alert` and `peer_emergency` are not available in the openmcx SS adapter, so the SIP INFO that would set MDEG 2 and MDIG 1 (§6.2.8.1.13 3)) never comes (step 6 Inconclusive). The group stays in MDIG 2 after the granted imminent peril session, so the next plain session correctly carries the imminent peril value mcpttp.10 (§9.2.4.2.3 8)f)). The configuration's values are right: mcpttp.15 emergency (step 2), mcpttp.10 imminent (step 6) | none; suite: judge step 8 only when step 5's `peer_emergency` was produced | TS 24.282 §6.2.8.1.13, §9.2.4.2.3 8)e), 8)f) |
+| MCData D.5.12 | Not a client fault. `priority_reinvite`, `pre_hold`, `peer_emergency` and `priority_refuse` exist only in the SS emulator (`mcss`), not in the openmcx adapter, so the group's emergency of step 2 is never ended (MDEG 2): steps 16, 24 (an imminent peril request on a group in emergency is granted at the emergency level, §6.2.8.1.16 2)b)) and 34 carry mcpttp.15 correctly. At step 47 the emergency session is not refused, so it keeps the pre-established session; step 49's plain session goes on demand (an INVITE with mcpttp.15), and the REFER step 50 judges is step 53's one-to-one emergency REFER to user B | none; suite: gate the `next_refer` checks on the stimuli of steps 7, 11, 25, 29, 43, 47 | TS 24.282 §9.2.5.3.1.1 3B), 3D), §6.2.8.1.16, §6.2.8.1.17 |
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`:core:test`) | 647 passed, 0 failed (new: `PrivateServicesTest.alertAreaRaisesDespiteAnOwnAlertOnlyReported`, `FunctionalAliasTest.anAliasChosenWhileBeingActivatedIsUsedOnceActive`; `McvideoPriorityAuthorisationTest.alertAreaNoticeAndAdhocAlert` now starts with a reported own alert) |
+| App unit tests (`:app:testDebugUnitTest`) | 15 passed |
+| `:app:assembleDebug` | Built |
+| `tests/test_androidlab.py` | 8 passed |
+
+| Lab | Options | Scenarios | Checks |
+|---|---|---|---|
+| `q4-loc` | `--location --functional-alias --location-rules --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1, V1-V4, V6, S13, S14, S17, S40-S45 | 132 of 132 (S14 17: the area raises alice's alert on MCPTT, MCData and MCVideo) |
+| `q4-pm` | `--priority --functional-alias --mcdata-pre-established --pre-established --reference-client client-d --client-image openmcx-client:mcdemerg-ce06d65 --fixture-arg=--msgstore` | S1, S6, S60-S67, S80-S82, S84, S70-S79, S85 | 238 of 238 (S84 15) |
+
+Suite (`--dut android --ss openmcx`, lab `q4-s` from `tools/android-lab-up.py --mcvideo`, runs
+`results/android-q4-{mcptt,mcdata,mcvideo}` in that order, so that 6.6.4 leaves the MCData and MCVideo alerts up as in
+sfx-final):
+
+| Test case | sfx-final | now | Remaining cause |
+|---|---|---|---|
+| MCVideo 6.3.4 | Fail | Pass | also `android-q4-mcvideo-stale`: an MCVideo alert raised, then the app restarted by the test; the server repeats the own alert (frame 329) and the entry still raises the alert on all three services (579, 588, 600) |
+| MCVideo 6.3.3, MCPTT 6.6.3, 6.6.4, MCData 6.4.3, 6.4.4 | Pass | Pass | |
+| MCData 6.2.14 | Inconclusive | Inconclusive | step 2's `<functional-alias-URI>` passes; steps 4-8 need `fd_notify`, which the real servers do not play |
+| MCData 6.2.1-6.2.13, 6.2.15 | | Inconclusive | FD notifications and HTTP (TLS, no key log) not observable on the bench; no client check fails |
+| MCData 6.2.16, 6.2.17 | | Pass | |
+| MCData D.5.1, D.5.3, D.5.4, D.5.13 | | Pass | |
+| MCData D.5.5, D.5.6, D.5.9-D.5.11 | | Inconclusive | |
+| MCData D.5.8, D.5.12 | Fail | Fail | bench (above) |
+| MCData D.5.2, D.5.7, D.5.14 | | Fail | bench, as in q2: `priority_reinvite` (D.5.2 step 7), `priority_refuse` (D.5.7 step 1) and `fd_media` (D.5.14 step 1) were not produced, and the "next session" checks are judged without them |

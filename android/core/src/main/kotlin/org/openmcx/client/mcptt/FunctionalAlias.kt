@@ -81,6 +81,11 @@ data class FunctionalAliasState(
     val standing: Set<String> = emptySet(),
     val takeOverPossible: Set<String> = emptySet(),
     val inUse: String? = null,
+    /**
+     * The alias the user chose to present while its activation is still awaited (asked for, or listed `activating`):
+     * it becomes [inUse] once a NOTIFY lists it active (§9A.2.1.3), and is dropped when the activation is refused.
+     */
+    val pendingUse: String? = null,
     val subscribed: Boolean = false,
     val lastAction: String? = null,
     val lastStatus: Int? = null,
@@ -132,9 +137,10 @@ object FunctionalAliasRules {
      * offered for take-over. When its <p-id-fa> is that
      * of [last], each alias of that change gets its outcome: activated, take-over-possible, deactivated, or refused
      * (omitted from the notification); an alias the user wanted to take over and is now offered is taken over.
-     * [wanted] loses the aliases of the answered change.
+     * [wanted] loses the aliases of the answered change. [awaiting]: the aliases a change not yet answered lists.
      */
-    fun notified(state: FunctionalAliasState, status: FunctionalAliasPidf.Status, last: Change?, wanted: MutableSet<String>): Notified {
+    fun notified(state: FunctionalAliasState, status: FunctionalAliasPidf.Status, last: Change?, wanted: MutableSet<String>,
+                 awaiting: Set<String> = emptySet()): Notified {
         val active = status.entries.filter { it.status == "activated" || it.status == "deactivating" }.map { it.alias }.toSet()
         val standing = status.entries.filter { it.status == "activated" || it.status == "activating" }.map { it.alias }.toSet()
         val possible = status.entries.filter { it.status == "take-over-possible" }.map { it.alias }.toSet()
@@ -148,7 +154,25 @@ object FunctionalAliasRules {
             }
         }
         val takeOver = if (answered) last!!.aliases.filter { wanted.remove(it) && it in possible } else emptyList()
+        // The alias chosen for use stays chosen while it is being activated: listed `activating`, or in a change whose
+        // NOTIFY is still awaited ([awaiting]); it is presented once active, and dropped when refused or given up.
+        val chosen = state.inUse ?: state.pendingUse
+        val awaited = chosen != null && (chosen in standing || (!answered && chosen in awaiting))
+        val inUse = chosen?.takeIf { it in active }
         return Notified(state.copy(active = active, standing = standing, takeOverPossible = possible, available = (state.available + active + possible).distinct(),
-            inUse = state.inUse?.takeIf { it in active }, lastOutcomes = outcomes), takeOver)
+            inUse = inUse, pendingUse = chosen.takeIf { inUse == null && awaited }, lastOutcomes = outcomes), takeOver)
+    }
+
+    /**
+     * The user's choice of the alias to present on outgoing requests ([alias], null for none). An active alias is in
+     * use at once. One whose activation is awaited ([activating]: asked for and not answered yet, or listed `activating`)
+     * is kept as [FunctionalAliasState.pendingUse] until the NOTIFY lists it active, so that a request made meanwhile
+     * waits for it (McxClient.awaitAlias) rather than going without it. Any other alias is refused (null).
+     */
+    fun use(state: FunctionalAliasState, alias: String?, activating: Boolean): FunctionalAliasState? = when {
+        alias == null -> state.copy(inUse = null, pendingUse = null)
+        alias in state.active -> state.copy(inUse = alias, pendingUse = null)
+        activating || alias in state.standing -> state.copy(inUse = null, pendingUse = alias)
+        else -> null
     }
 }

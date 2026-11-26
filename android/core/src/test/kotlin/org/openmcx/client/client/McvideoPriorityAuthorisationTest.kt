@@ -206,7 +206,7 @@ class McvideoPriorityAuthorisationTest {
         alerts.defaultGroup = { a }
         alerts.position = { EmergencyLocation(48.05, 2.05) }
         alerts.serviceGroupAlert = object : EmergencyAlerts.ServiceGroupAlert {
-            override fun alerting() = lab.video.alerting.value
+            override fun alerting() = lab.video.emergencyState.value
             override suspend fun raise(group: String, location: EmergencyLocation) { raised += group; lab.video.sendAlert(group, true, location) }
         }
         alerts.authoriseAdhoc = { cancel -> lab.video.authoriseAdhocAlert(cancel) }
@@ -214,6 +214,13 @@ class McvideoPriorityAuthorisationTest {
         val notice = "<?xml version=\"1.0\"?><mcvideoinfo xmlns=\"urn:3gpp:ns:mcvideoInfo:1.0\"><mcvideo-Params>" +
             "<mcvideo-request-uri type=\"Normal\"><mcvideoURI>$alice</mcvideoURI></mcvideo-request-uri>" +
             "<anyExt><emergency-alert-area-ind>true</emergency-alert-area-ind></anyExt></mcvideo-Params></mcvideoinfo>"
+        // The server reports an own alert this client did not raise (kept across a restart of the app): shown, but not
+        // the MCVideo emergency state, so the notice still raises the alert (TS 37.579-6 6.3.4).
+        lab.client.handlers.add(1, lab.video)
+        lab.core.message(McvideoInfo.CONTENT_TYPE, McvideoInfo(callingUserId = alice, callingGroupId = a, alert = true).encode(), from = "sip:mcvideo@mcx.test")
+        assertEquals(200, lab.core.answer().status)
+        waitFor("reported") { lab.video.alerting.value == setOf(a) }
+        assertTrue(lab.video.emergencyState.value.isEmpty())
         lab.core.message(McvideoInfo.CONTENT_TYPE, notice, from = "sip:mcvideo@mcx.test")
         assertEquals(200, lab.core.answer().status)
         waitFor("the alert") { lab.sent("MESSAGE").isNotEmpty() }

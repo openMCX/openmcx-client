@@ -55,6 +55,8 @@ interface FdPeer {
     val protection: McdataProtection? get() = null
     /** TS 24.282 §10.2.4.2.1 1)b)ii): the functional alias in use, while it is active for the user; null otherwise. */
     fun aliasInUse(): String? = null
+    /** [aliasInUse], once the activation of the alias the user chose to use is in (McxClient.awaitAlias). */
+    suspend fun awaitAlias(): String? = aliasInUse()
     /** TS 24.282 §10.2.1.1 1) -> §11.1 (McdataTransmission.fd): throws when the file of [size] octets is not allowed. */
     suspend fun transmission(target: String, group: Boolean, size: Long) {}
 }
@@ -82,6 +84,7 @@ class ClientFdPeer(private val client: McxClient) : FdPeer {
     override fun event(text: String) = client.event("fd: $text")
     override val protection get() = client.mcdataProtection
     override fun aliasInUse() = client.aliasesOf(org.openmcx.client.body.McService.MCDATA).value.let { a -> a.inUse?.takeIf { it in a.active } }
+    override suspend fun awaitAlias() = client.awaitAlias(org.openmcx.client.body.McService.MCDATA)
     override suspend fun transmission(target: String, group: Boolean, size: Long) = McdataTransmission.fd(client, target, group, size)
 }
 
@@ -261,7 +264,8 @@ class FdService(
             val signalling = FdSignalling(clock(), UUID.fromString(record.conversationId), UUID.fromString(record.id), url,
                 described.encode(), completionRequested = true)
             // TS 24.282 §10.2.4.2.1 1)b)ii) (§22): the functional alias in use, while active; the client ID (as Linux).
-            val alias = peer.aliasInUse()
+            // An alias chosen while its activation is awaited is waited for (TS 37.579-7 6.2.14 step 2).
+            val alias = peer.awaitAlias()
             val requestInfo = if (group) McdataInfo(requestType = "group-fd", requestUri = target, clientId = peer.clientId, functionalAlias = alias)
             else McdataInfo(requestType = "one-to-one-fd", clientId = peer.clientId, functionalAlias = alias)
             val parts = mutableListOf(Part(McdataInfo.CONTENT_TYPE, requestInfo.encode().toByteArray()))

@@ -184,6 +184,13 @@ class McvideoService(
     val imminentStates: MutableMap<String, String> = java.util.concurrent.ConcurrentHashMap()
     /** The groups on which this user's own emergency alert is active. */
     val alerting: StateFlow<Set<String>> = _alerting
+    /**
+     * The groups on which this client set the MCVideo emergency state by its own alert (§11.2.1.1), until cancelled. An
+     * own alert the server only reports (in [alerting]: one kept by the server across a restart of the app) does not
+     * set it, so entering an emergency alert area raises the alert again (§11.2.1.5 1)a)ii)).
+     */
+    private val _emergencyState = MutableStateFlow<Set<String>>(emptySet())
+    val emergencyState: StateFlow<Set<String>> = _emergencyState
 
     /** The MCVideo user profile (TS 24.484 §9.3), read once the service is authorised. */
     @Volatile var profile: McvideoProfile? = null
@@ -1156,8 +1163,10 @@ class McvideoService(
             val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""
             throw CallError("${response.status} ${response.reason}$warning", response.status)
         }
-        if (originatedBy == null) _alerting.value = if (on) _alerting.value + group else _alerting.value - group
-        else _alerts.value = _alerts.value - originatedBy
+        if (originatedBy == null) {
+            _alerting.value = if (on) _alerting.value + group else _alerting.value - group
+            _emergencyState.value = if (on) _emergencyState.value + group else _emergencyState.value - group
+        } else _alerts.value = _alerts.value - originatedBy
         event("emergency alert on $group ${if (on) "raised at ${location?.latitude}, ${location?.longitude}" else "cancelled"}: ${response.status}")
     }
 
@@ -1175,6 +1184,8 @@ class McvideoService(
             // About our own alert: it is active, or someone authorised has cancelled it.
             val group = info.callingGroupId ?: info.requestUri
             if (group != null) _alerting.value = if (on) _alerting.value + group else _alerting.value - group
+            // A cancellation ends the emergency state; an alert only reported does not set it.
+            if (group != null && !on) _emergencyState.value = _emergencyState.value - group
             event("own emergency alert on $group ${if (on) "active" else "cancelled by ${info.callingUserId}"}")
             return true
         }
