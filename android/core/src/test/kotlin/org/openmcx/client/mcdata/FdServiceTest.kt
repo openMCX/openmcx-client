@@ -41,6 +41,7 @@ class FdServiceTest {
     /** The MCData server side of the client: records requests, answers with [answer]. */
     private inner class FakePeer(override val userId: String = "sip:alice@mcx.test") : FdPeer {
         override val clientId = "urn:uuid:00000000-0000-0000-0000-00000000000a"
+        override var psi: String? = "sip:mcdata@mcx.test"
         val sent = mutableListOf<List<Part>>()
         var answer: (List<Part>) -> SipResponse = { SipResponse(202, "Accepted") }
         var token = "t1"
@@ -421,6 +422,28 @@ class FdServiceTest {
         fd.receive(request(listOf(Part(McdataService.SIGNALLING, FdHttpTermination(UUID.fromString(sent.conversationId),
             UUID.fromString(sent.id), TerminationType.RESPONSE, releaseSucceeded = true).encode()))))
         assertEquals("terminated", fd.record(sent.id)!!.release)
+    }
+
+    @Test fun extensionRequestWithoutAStoredControllerPsiNamesTheMcdataPsi() = runTest {
+        // TS 24.282 §13.2.4.5.2.2 3)a): <mcdata-controller-psi> is mandatory; no intent stored one, so the MCData PSI.
+        val peer = FakePeer(); val files = FakeFiles()
+        val fd = service(backgroundScope, peer, files)
+        val (file, metadata) = staged()
+        val sent = fd.send("sip:bob@mcx.test", false, file, metadata)
+        fd.terminate(sent.id, "extend")
+        val info = McdataInfo.parse(peer.sent.last().single { it.mediaType == McdataInfo.CONTENT_TYPE }.text)
+        assertEquals("sip:mcdata@mcx.test", info.controllerPsi)
+        assertEquals("one-to-one-fd", info.requestType)
+        assertEquals(TerminationType.EXTENSION_REQUEST, FdHttpTermination.decode(signalling(peer.sent.last())).type)
+        // An intent without <mcdata-controller-psi> leaves the fallback; other terminations carry no controller PSI.
+        fd.receive(request(listOf(Part(McdataInfo.CONTENT_TYPE, McdataInfo(requestUri = "sip:alice@mcx.test").encode().toByteArray()),
+            Part(McdataService.SIGNALLING, FdHttpTermination(UUID.fromString(sent.conversationId), UUID.fromString(sent.id),
+                TerminationType.INTENT_TO_RELEASE).encode()))))
+        fd.terminate(sent.id, "extend")
+        assertEquals("sip:mcdata@mcx.test",
+            McdataInfo.parse(peer.sent.last().single { it.mediaType == McdataInfo.CONTENT_TYPE }.text).controllerPsi)
+        fd.terminate(sent.id, "cancel")
+        assertEquals(null, McdataInfo.parse(peer.sent.last().single { it.mediaType == McdataInfo.CONTENT_TYPE }.text).controllerPsi)
     }
 
     @Test fun intentToReleaseThenExtensionRequestWithTheControllerPsi() = runTest {
