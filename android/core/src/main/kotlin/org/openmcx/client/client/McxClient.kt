@@ -41,6 +41,7 @@ import org.openmcx.client.security.KeyClient
 import org.openmcx.client.security.KeyMessage
 import org.openmcx.client.idms.LoopbackRedirect
 import org.openmcx.client.idms.Tokens
+import org.openmcx.client.mcdata.IpConn
 import org.openmcx.client.mcdata.McdataInfo
 import org.openmcx.client.mcptt.FunctionalAliasPidf
 import org.openmcx.client.mcptt.FunctionalAliasRules
@@ -67,6 +68,7 @@ object Icsi {
     const val MCDATA = "urn:urn-7:3gpp-service.ims.icsi.mcdata"
     const val MCDATA_SDS = "urn:urn-7:3gpp-service.ims.icsi.mcdata.sds"
     const val MCDATA_FD = "urn:urn-7:3gpp-service.ims.icsi.mcdata.fd"
+    const val MCDATA_IPCONN = IpConn.ICSI
     const val MCVIDEO = "urn:urn-7:3gpp-service.ims.icsi.mcvideo"
 
     /** An ICSI as a feature tag value: percent-encoded with upper-case hex, as the servers match it. */
@@ -75,6 +77,26 @@ object Icsi {
     val mcpttContactTags = ";+g.3gpp.mcptt;+g.3gpp.icsi-ref=\"${encoded(MCPTT)}\""
     val mcvideoContactTags = ";+g.3gpp.mcvideo;+g.3gpp.icsi-ref=\"${encoded(MCVIDEO)}\""
     val mcdataContactTags = ";+g.3gpp.mcdata.sds;+g.3gpp.mcdata.fd;+g.3gpp.icsi-ref=\"${encoded(MCDATA)},${encoded(MCDATA_SDS)},${encoded(MCDATA_FD)}\""
+}
+
+/**
+ * The REGISTER Contact's header field parameters after the URI, but the RFC 3840 media feature tags: +sip.instance,
+ * reg-id, then the tag of each MC service and sub-service [config] enables and one g.3gpp.icsi-ref with their ICSIs.
+ * TS 24.379 §7.2.1: the MCPTT tag and ICSI. TS 24.282 §7.2.1 with MCData: 1) the MCData ICSI; 2) SDS and 3) FD, which
+ * every configured MCData client serves; 4) IPCONN when `mcdata.ipconn.address` is set (§20.2.0a step 1; without an
+ * address the client refuses every IP connectivity session, §20.2.2). TS 24.281 §7.2.1: the MCVideo tag and ICSI.
+ */
+fun registerContactParams(config: ClientConfig): String {
+    val tags = mutableListOf("+g.3gpp.mcptt")
+    val icsis = mutableListOf(Icsi.MCPTT)
+    config.mcdata?.let { mcdata ->
+        tags += listOf("+g.3gpp.mcdata.sds", "+g.3gpp.mcdata.fd")
+        icsis += listOf(Icsi.MCDATA, Icsi.MCDATA_SDS, Icsi.MCDATA_FD)
+        if (!mcdata.ipconnAddress.isNullOrEmpty()) { tags += IpConn.FEATURE; icsis += Icsi.MCDATA_IPCONN }
+    }
+    if (config.mcvideo != null) { tags += "+g.3gpp.mcvideo"; icsis += Icsi.MCVIDEO }
+    return ";+sip.instance=\"<${config.clientId}>\";reg-id=1;" + tags.joinToString(";") +
+        ";+g.3gpp.icsi-ref=\"" + icsis.joinToString(",") { Icsi.encoded(it) } + "\""
 }
 
 /**
@@ -927,14 +949,14 @@ class McxClient(
     /** The expiry a REGISTER asks for: TS 24.229 §5.1.1.2.1's 600 000 s with IMS AKA, else the configured one. */
     private fun registerExpires(): Int = if (imsAka != null) IMS_AKA_REGISTER_EXPIRES else config.sip.registerExpires
 
-    /** The Contact's header field parameters: +sip.instance, reg-id and the MC feature tags. */
-    private fun contactParams(): String =
-        ";+sip.instance=\"<${config.clientId}>\";reg-id=1;+g.3gpp.mcptt;+g.3gpp.mcdata.sds;" +
-            (if (config.mcdata != null) "+g.3gpp.mcdata.fd;" else "") +
-            (if (config.mcvideo != null) "+g.3gpp.mcvideo;" else "") +
-            "+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCPTT)},${Icsi.encoded(Icsi.MCDATA)},${Icsi.encoded(Icsi.MCDATA_SDS)}" +
-            (if (config.mcdata != null) ",${Icsi.encoded(Icsi.MCDATA_FD)}" else "") +
-            (if (config.mcvideo != null) ",${Icsi.encoded(Icsi.MCVIDEO)}" else "") + "\""
+    /**
+     * The Contact's header field parameters: +sip.instance, reg-id and the MC feature tags (TS 24.379 §7.2.1, TS 24.281
+     * §7.2.1). TS 24.282 §7.2.1: an MCData client registers the MCData ICSI (1)) and, for each MCData service it
+     * supports, its tag and ICSI: SDS (2)) and FD (3)) whenever MCData is configured, IPCONN (4)) when the client has an
+     * IP connectivity address (`mcdata.ipconn.address`, §20.2.0a step 1; without one [IpconService] refuses every
+     * session). Without MCData none of them (NOTE 1). The same tags as the Linux client.
+     */
+    private fun contactParams(): String = registerContactParams(config)
 
     private suspend fun register(expires: Int): Int {
         setPhase("registering")
