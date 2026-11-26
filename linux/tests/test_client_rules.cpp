@@ -470,6 +470,29 @@ void test_call_key_group() {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.281 clauses 22.2.2.1.1 (2xx step 3), 22.2.2.1.2 step 8 and 22.1 with TS 33.180 clause 5.7: the preconfigured
+// group keying a protected MCVideo ad hoc group call, and the groups subscribed to for it from the start.
+void test_adhoc_security() {
+  using mcx::client_rules::adhoc_key_group;
+  using mcx::client_rules::mcvideo_adhoc_security_groups;
+  check(adhoc_key_group("sip:adhoc-security@x", "") == "sip:adhoc-security@x", "the received preconfigured group");
+  check(adhoc_key_group(" sip:adhoc-security@x\n", "") == "sip:adhoc-security@x", "surrounding white space dropped");
+  check(adhoc_key_group("sip:new@x", "sip:old@x") == "sip:new@x", "a newly received group replaces the kept one");
+  check(adhoc_key_group("", "sip:old@x") == "sip:old@x", "a re-INVITE without the element keeps the call's group");
+  check(adhoc_key_group("", "").empty(), "no <preconfigured-group-id>: not keyable (488, or the call ends)");
+  check(adhoc_key_group("adhoc-security", "").empty(), "a <preconfigured-group-id> that is no SIP URI: not keyable");
+  check(adhoc_key_group("sips:s@x", "") == "sips:s@x", "a SIPS URI");
+  using Groups = std::optional<std::vector<std::string>>;
+  check(mcvideo_adhoc_security_groups(Groups{{"sip:v@x"}}, Groups{{"sip:p@x"}}) == std::vector<std::string>{"sip:v@x"},
+        "mcvideo.adhoc_security_groups first");
+  check(mcvideo_adhoc_security_groups(Groups{std::vector<std::string>{}}, Groups{{"sip:p@x"}}).empty(),
+        "an empty mcvideo.adhoc_security_groups subscribes to none");
+  check(mcvideo_adhoc_security_groups(std::nullopt, Groups{{"sip:p@x"}}) == std::vector<std::string>{"sip:p@x"},
+        "without it, mcptt.adhoc_security_groups");
+  check(mcvideo_adhoc_security_groups(std::nullopt, std::nullopt).empty(), "neither configured: none");
+}
+
+//------------------------------------------------------------------------------
 // TS 33.180 annex E.6.10: an MCData PCK context ends at the earlier of the local lifetime and the PCK's own Expiry
 // time (0: none); with an Expiry time 1 s ahead it is usable now and gone at that time (expire_data_keys drops a
 // context once its end is reached).
@@ -716,6 +739,7 @@ int main() {
   test_call_floor_ssrcs();
   test_floor_multiplexing();
   test_call_key_group();
+  test_adhoc_security();
   test_data_pck_end();
   test_notifiers();
   test_has_warning();

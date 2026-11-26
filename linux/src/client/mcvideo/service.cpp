@@ -130,8 +130,7 @@ SipResponse Client::mcvideo_key_notify(const SipMessage &message) {
     response.status_code = 481; // RFC 6665 section 4.1.3
     return response;
   }
-  const auto in_use = mcvideo_key_group_of(mcvideo_call_ && !mcvideo_call_->group.empty() ? mcvideo_call_->group
-                                                                                          : mcvideo_group());
+  const auto in_use = mcvideo_call_key_group();
   if (get_header(message.headers, "Subscription-State").starts_with("terminated")) {
     mcvideo_group_keys_.erase(key_group);
     mcvideo_wanted_key_groups_.erase(key_group); // asked again only when called again
@@ -178,6 +177,58 @@ std::string Client::mcvideo_key_group_of(const std::string &group) const {
 }
 
 //------------------------------------------------------------------------------
+// TS 33.180 clause 5.7: the group whose GMK keys the call in progress: for an end-to-end protected ad hoc group call
+// the preconfigured group of its <preconfigured-group-id> (TS 24.281 clauses 22.2.2.1.1 2xx step 3 and 22.2.2.1.2
+// step 8), otherwise that of the call's group (mcvideo_key_group_of); without a call, the selected group's.
+std::string Client::mcvideo_call_key_group() const {
+  if (mcvideo_call_ && mcvideo_call_->type == "adhoc" && !mcvideo_call_->security_group.empty())
+    return mcvideo_call_->security_group;
+  return mcvideo_key_group_of(mcvideo_call_ && !mcvideo_call_->group.empty() ? mcvideo_call_->group : mcvideo_group());
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 22.1 (as TS 24.379 clause 17.1: "the security related information is used from this preconfigured
+// group") and TS 33.180 clause 5.7: the preconfigured groups whose GMK an end-to-end protected MCVideo ad hoc group call
+// may be keyed with, subscribed to from the start so that the first invitation finds the key:
+// mcvideo.adhoc_security_groups, or, when that is absent, mcptt.adhoc_security_groups (one preconfigured group, with
+// its MCPTT and MCVideo configurations, serving both services, as the lab's).
+std::vector<std::string> Client::mcvideo_configured_adhoc_security_groups() const {
+  const auto configured = [this](const char *service) -> std::optional<std::vector<std::string>> {
+    const auto section = cfg_.value(service, Json::object());
+    if (!section.is_object() || !section.contains("adhoc_security_groups")) return std::nullopt;
+    return section.at("adhoc_security_groups").get<std::vector<std::string>>();
+  };
+  return client_rules::mcvideo_adhoc_security_groups(configured("mcvideo"), configured("mcptt"));
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 22.2.2.1.1 (on the 2xx, step 3) and clause 22.2.2.1.2 step 8: "if the <preconfigured-group-id>
+// element received [...], shall use the security related information from the group configuration associated with the
+// received preconfigured group identity": the ad hoc call's video is keyed with that group's GMK (TS 33.180 clause
+// 5.7). [received]: the <preconfigured-group-id> of the 2xx or INVITE (empty in a re-INVITE without it: the call keeps
+// its group, client_rules::adhoc_key_group). False without the group or its GMK; the group's GMK is then subscribed to
+// for later calls.
+bool Client::mcvideo_use_adhoc_security(const std::string &received) {
+  const auto preconfigured =
+      client_rules::adhoc_key_group(received, mcvideo_call_ ? mcvideo_call_->security_group : std::string{});
+  if (mcvideo_call_) mcvideo_call_->security_group = preconfigured;
+  if (preconfigured.empty()) {
+    event("mcvideo_adhoc_security_unavailable", {{"reason", "no preconfigured-group-id"}, {"received", received}});
+    return false;
+  }
+  if (mcvideo_adhoc_security_groups_.insert(preconfigured).second)
+    schedule([this] { mcvideo_update_key_subscriptions(); });
+  if (!mcvideo_use_group_key(preconfigured) || !mcvideo_protection_.group_ready()) {
+    event("mcvideo_group_key_missing",
+          {{"group_id", mcvideo_call_ ? mcvideo_call_->group : std::string{}}, {"key_group", preconfigured}});
+    return false;
+  }
+  event("mcvideo_adhoc_security",
+        {{"group_id", mcvideo_call_ ? mcvideo_call_->group : std::string{}}, {"key_group", preconfigured}});
+  return true;
+}
+
+//------------------------------------------------------------------------------
 // TS 24.281 clause 4.7.1: select the GMK of [group] for the media; false when it is not held (it is then subscribed
 // to, so that a later call finds it).
 bool Client::mcvideo_use_group_key(const std::string &group) {
@@ -208,6 +259,9 @@ void Client::mcvideo_update_key_subscriptions() {
   for (const auto &group : mcvideo_groups_) wanted.insert(mcvideo_key_group_of(group));
   for (const auto &group : mcvideo_extra_groups_) wanted.insert(mcvideo_key_group_of(group));
   for (const auto &[tgi, regroup] : mcvideo_regroups_.items()) wanted.insert(mcvideo_key_group_of(tgi));
+  // TS 24.281 clause 22.1 with TS 33.180 clause 5.7: the preconfigured groups providing the security of ad hoc calls.
+  for (const auto &group : mcvideo_configured_adhoc_security_groups()) wanted.insert(group);
+  wanted.insert(mcvideo_adhoc_security_groups_.begin(), mcvideo_adhoc_security_groups_.end());
   wanted.erase(mcvideo_key_group_);
   wanted.erase(std::string{});
   for (auto it = mcvideo_extra_key_subscriptions_.begin(); it != mcvideo_extra_key_subscriptions_.end();) {

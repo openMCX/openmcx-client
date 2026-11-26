@@ -38,6 +38,11 @@ has it: the lab scenarios run each server feature through this client.
 
 - Group calls: prearranged, chat and broadcast, with floor control, floor priority, queueing and pre-emption; ad hoc
   group calls with participants or criteria, and their modification
+- End-to-end protected ad hoc group calls (TS 24.379 clauses 17.2.2.1.1 step 10 c) iii) and 17.2.2.1.2 step 7, TS 33.180
+  clause 5.7): with protected media the offer carries `<end-to-end-security>` "true"; the speech is keyed with the GMK
+  of the preconfigured group the controlling function names in `<preconfigured-group-id>` (the 2xx, or the
+  invitation), whose GMK is subscribed to from the start when listed in `mcptt.adhoc_security_groups`; without the
+  element or the GMK the call ends (originator) or is refused (invitee)
 - Private calls: automatic, manual and forced commencement, with and without floor control; first-to-answer
 - Ambient listening (locally and remotely initiated); remotely initiated private and group calls
 - Emergency and imminent-peril calls (group and private), emergency alerts and their cancellation by an authorised
@@ -85,6 +90,13 @@ has it: the lab scenarios run each server feature through this client.
   group and private calls; private calls with and without transmission control
 - Ad hoc group calls, also emergency and imminent peril (`mcvideo-adhoc emergency|imminent`), with participant list or
   criteria modification (`mcvideo-adhoc-modify`)
+- End-to-end protected ad hoc group calls (TS 24.281 clauses 22.2.2.1.1 step 10 d) iii) and 2xx step 3, 22.2.2.1.2
+  step 8; TS 33.180 clause 5.7): with protected media the offer (a re-join's too) is RTP/SAVP with
+  `<end-to-end-security>` "true"; the video is keyed with the GMK of the preconfigured group named in
+  `<preconfigured-group-id>` of the 2xx (originator; without it or its GMK the call ends with a BYE) or of the INVITE
+  (invitee; else 488). The GMKs of `mcvideo.adhoc_security_groups` (absent: `mcptt.adhoc_security_groups`) and of
+  every group a `<preconfigured-group-id>` named are subscribed to from the start; status `mcvideo_call_protected`,
+  `mcvideo_security_group`, `mcvideo_adhoc_security_groups`
 - Emergency and imminent-peril calls with pre-emptive transmission, emergency alerts, ad hoc group emergency alerts
   with participant criteria modification (`mcvideo-adhoc-alert modify`); cancelling another user's emergency and
   emergency alert (`mcvideo-emergency off alert=<MCVideo ID>`); cancelling a group's imminent peril state without a
