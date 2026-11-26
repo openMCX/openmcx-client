@@ -387,8 +387,11 @@ void Client::mcdata_cancel_file(const std::string &id, mcdata::TerminationType t
   request.file_url = record.value("file_url", std::string{});
   mcdata::Info info;
   info.client_id = client_id();
-  // TS 24.282 clause 13.2.4.5.2.2 3)a): the stored PSI of the controlling function
-  if (type == mcdata::TerminationType::ExtensionRequest) info.controller_psi = record.value("controller_psi", std::string{});
+  // TS 24.282 clause 13.2.4.5.2.2 3)a): the stored PSI of the controlling function, else the MCData PSI the MESSAGE
+  // goes to (clause 13.2.4.5.2.2 4)); none in the other termination types
+  info.controller_psi =
+      client_rules::extension_controller_psi(type == mcdata::TerminationType::ExtensionRequest,
+                                             record.value("controller_psi", std::string{}), mcdata_service());
   if (own) {
     info.request_type = record.value("request_type", std::string{});
     if (info.request_type == "group-fd") info.request_uri = record.value("target", std::string{});

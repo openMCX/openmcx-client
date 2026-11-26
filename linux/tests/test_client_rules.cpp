@@ -735,6 +735,20 @@ void test_pre_priority_states() {
   check(s.mdig == 2 && s.mdigc == 1, "a granted imminent peril: MDIG 2 kept");
 }
 
+//------------------------------------------------------------------------------
+// TS 24.282 clause 13.2.4.5.2.2 3)a) and 4): the <mcdata-controller-psi> of an FD HTTP TERMINATION message.
+void test_extension_controller_psi() {
+  using mcx::client_rules::extension_controller_psi;
+  const std::string psi = "sip:mcdata-server@example.org";
+  const std::string controller = "sip:mcdata-controller@example.org";
+  check(extension_controller_psi(true, controller, psi) == controller,
+        "13.2.4.5.2.2 3)a): the PSI stored from the intent to release wins");
+  check(extension_controller_psi(true, "", psi) == psi,
+        "13.2.4.5.2.2 3)a), 4): none stored, the MCData PSI the MESSAGE goes to");
+  check(extension_controller_psi(false, controller, psi).empty(), "a release or cancel carries no controller PSI");
+  check(extension_controller_psi(false, "", psi).empty(), "a release without a stored PSI carries none either");
+}
+
 int main() {
   test_call_floor_ssrcs();
   test_floor_multiplexing();
@@ -762,6 +776,7 @@ int main() {
   test_sds_payloads();
   test_pre_established_parts();
   test_pre_priority_states();
+  test_extension_controller_psi();
   if (failures) std::fprintf(stderr, "%d check(s) failed\n", failures);
   return failures ? 1 : 0;
 }
