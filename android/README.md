@@ -91,6 +91,8 @@ tests/scenarios.py a1               # S1-S11; results in lab/run/a1/android-scen
 lab/androidlab.py down a1                   # logs the phones off first, then removes the lab and lab/run/a1 (--keep keeps it)
 ```
 
+The whole set of scenarios, each unit on a fresh lab with a summary: `tools/regress.py` ([docs/REGRESSION.md](docs/REGRESSION.md)).
+
 In the lab, `client-a` is alice, `client-b` is bob and `client-c` is client-c. All three are members of
 `sip:operations@mcx.test`. Each redroid container is on the lab network under the reference client's hostname, with its
 own address. That matters because the MCPTT server checks the SDP address against the resolved host and does not handle

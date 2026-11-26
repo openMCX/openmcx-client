@@ -2,7 +2,8 @@
 
 Results recorded for the Android client in the full edition, before it was imported here; they have not all been
 re-run in this repository. Every end-to-end test runs between Android clients only (the optional reference client
-of `androidlab.py` is the exception). Test scripts: `tests/`; lab: `lab/androidlab.py` ([README](../README.md)).
+of `androidlab.py` is the exception). Test scripts: `tests/`; lab: `lab/androidlab.py` ([README](../README.md)). The
+regression runner `tools/regress.py` ([REGRESSION.md](REGRESSION.md)) runs the lab table of the regressions below.
 
 | Suite | Where | Result |
 |---|---|---|
