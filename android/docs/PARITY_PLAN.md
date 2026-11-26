@@ -23,7 +23,7 @@ State on `android-final` (2026-11-26), all phases merged; the "Status" section b
 | Floor control | priority, queueing, pre-emption, `mc_granted`, Floor Indicator by call type and bit F | the same (phases 0, 2) | none |
 | MCPTT call services | ambient listening, remotely initiated calls, call-back, transfer, forwarding | all five (phase 3) | the announced transfer (11.1.8.2.3), the step 1A check of manual forwarding |
 | Groups | regroups, temporary groups | both (phase 2) | none |
-| Emergency, imminent peril, alerts | all three services, ad hoc group alerts | the same; MCData emergency and imminent peril communications over the media plane and the pre-established session (phases 4, 5) | the MDEG/MDEPC state machines of TS 24.282 6.2.8; ad hoc group MCData emergency; the in-progress imminent peril notification MESSAGE (answered 488) |
+| Emergency, imminent peril, alerts | all three services, ad hoc group alerts | the same; MCData emergency and imminent peril communications over the media plane and the pre-established session (phases 4, 5) | ad hoc group MCData emergency; the MCData in-progress emergency cancel by MESSAGE outside a communication (6.2.7.5) (the MDEG/MDEGC/MDEA/MDIG/MDIGC/MDEPC/MDEPP state machines of TS 24.282 6.2.8: done, branch `android-q2-mcdata`) |
 | Functional aliases | all, location based activation | all, location based activation (phase 6), media-plane communications to an alias (phase 4b) | the per-alias user status subscription, FD over HTTP to an alias |
 | Pre-established sessions | MCPTT (TS 24.379 8, ICE), MCData (TS 24.282 18.3, emergency included) | both (phase 5: host candidates only) | ICE checks; protected calls over the MCPTT session |
 | MCData SDS | signalling plane and media plane (MSRP), SDS sessions, ad hoc | the same (phases 4, 4b), MSRP bodies protected | none |
@@ -49,11 +49,17 @@ regression on the server fixes"). JVM unit tests 583 and app unit tests 15, all 
 | 1: settings and affiliation | done | none (the received negotiated-mode request is checked in S23 and V6 with `--fixture-arg=--remote-affiliation`) |
 | 2: MCPTT call types and floor | partial | group-broadcast and user-broadcast groups as their own call kind; originating protected first-to-answer calls |
 | 3: MCPTT call services | partial | the announced transfer (§11.1.8.2.3); the step 1A check of manual forwarding (`<forwarding-other-list>`); a remotely initiated group call only when affiliated and idle |
-| 4: MCData media plane | partial | the MDEG, MDEPC and related state machines of TS 24.282 §6.2.8 (only the emergency and imminent peril flags kept); the emergency alert with a session not tracked; ad hoc group emergency and imminent peril communications (refused locally, as the server does) |
+| 4: MCData media plane | partial | the emergency alert with a session sent without a location when the phone has no position; ad hoc group emergency and imminent peril communications (refused locally, as the server does) |
 | 4b: IP connectivity, enhanced status, message store | partial | IP connectivity to the phone's own IP stack (no `VpnService`/TUN), the implicit target by IP information, IPv6 in the tunnel; message store upload, retrieve, folder copy/move and notification restart; FD by reference to a stored object |
-| 5: pre-established sessions | partial | ICE connectivity checks (host candidates only); protected calls over the MCPTT session; the SIP INFO of §6.2.8.1.13; FD over the MCData session (TS 24.282 has none) |
+| 5: pre-established sessions | partial | ICE connectivity checks (host candidates only); protected calls over the MCPTT session; FD over the MCData session (TS 24.282 has none) |
 | 6: location rules | done, with limits | MCData group configuration rules (§8.2.6.3, as the Linux client), MCVideo affiliation rules and the MCVideo group geographic area notice, hysteresis |
 | 7: MCVideo remainder and protection | partial | other KMSs' certificates (KMS CertCache); ad hoc participant modification |
+
+Done on branch `android-q2-mcdata` (the MCData suite failures of `android-mcdata-real-p7`): the service configuration's
+`<tx-and-rx-control>` limits (the signalling-plane limit among them), the group transmission control of TS 24.282 §11.1
+from the group document read for each request, `<associated-group-id>` to a temporary group, the §6.2.8 priority state
+machines on demand and over the pre-established session with the SIP INFO of §6.2.8.1.13, the functional alias in an FD
+over HTTP, one MIME body sent as it is (§6.4).
 
 Also open outside the phases: P-Access-Network-Info (planned), `authorise_by_register`, MCData data streaming, the
 per-alias user status subscription and FD over HTTP to an alias.

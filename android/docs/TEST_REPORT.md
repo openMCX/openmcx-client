@@ -611,3 +611,58 @@ the speech of alice and of client-c arrives unchanged (the frame hashes); V2: th
 under the same group's GMK on alice and bob, bob's leave and protected re-join, emergency and imminent peril ad hoc calls.
 The Linux reference client was not a participant: it subscribes to `mcptt.adhoc_security_groups` but has no MCVideo
 counterpart (an invitation to a protected MCVideo ad hoc call is refused 488 until its first try subscribes to the GMK).
+
+## MCData suite failures (branch `android-q2-mcdata`, 2026-11-26)
+
+The MCData failures of the suite run `android-mcdata-real-p7` (suite worktree `suite-android`, real servers), fixed on
+client main 5d431a0. Server image `openmcx-all:adhoc-e2e-6c4ddd3` (server main f4a6c3c).
+
+What changed (CONFORMANCE.md "MCData", "MCData media plane", "Pre-established sessions"):
+- The `<tx-and-rx-control>` of the MCData service configuration (TS 24.484 §10.4.2.1 2)): the signalling-plane limit
+  `<max-payload-size-sds-cplane-bytes>` (the provisioning's value only until the document is read; it had been the
+  provisioning's alone, so the suite's value 0 never sent an SDS over the media plane or by REFER), and
+  `<max-data-size-sds-bytes>` / `<max-data-size-fd-bytes>` for one-to-one SDS and FD (TS 24.282 §11.1 3), 4)).
+- Group transmission control from the group document read from the GMS for each request (TS 24.282 §11.1 2), 5), 6),
+  §9.2.2.2.1 3)a), §9.2.3.2.3, §9.2.4.2.3 8)a1), §10.2.4.2.1, §10.2.5.2.3 9)a1)): the user's
+  `<mcdata-allow-transmit-data-in-this-group>`, AllowedSDS, AllowedFD, the group's size limits and
+  `<preconfigured-group-use-only>` (no media-plane SDS, session or FD; a REFER over the pre-established session too).
+- `<associated-group-id>` in a group SDS to a temporary group (§9.2.2.2.1 3)b)iii)).
+- The priority state machines of TS 24.282 §6.2.8 (MDEG, MDEGC, MDEA, MDIG, MDIGC, MDEPC, MDEPP, `McdataPriority`, as
+  Linux priority.cpp): the Resource-Priority of a plain group communication on a group in an in-progress state, the
+  imminent peril value (it was looked up as "imminent_peril", which the service configuration does not have), the
+  normal one on a group cancel, `<alert-ind>` "false" in an emergency request, the states on refusal, grant (also by
+  the pre-established session's re-INVITE), release, the SIP INFO of §6.2.8.1.13 and the in-progress notification; the
+  200 (OK) to the server's group priority re-INVITE with `+g.3gpp.mcdata` and the MCData ICSI (§6.2.7.4 7)-8)).
+- The functional alias in use and the client ID in an FD request over HTTP (§10.2.4.2.1 1)b)ii)).
+- One MIME body sent as it is, not in a one-part multipart (§6.4): the media storage discovery request, an alert cancel.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`:core:test`) | 616 passed, 0 failed (593 before: 23 new in `McdataPriorityTest`, `McdataRulesTest`, `McdataMediaServiceTest`, `FdServiceTest`) |
+| App unit tests (`:app:testDebugUnitTest`) | 15 passed |
+| `:app:assembleDebug` | Built |
+| `tests/test_androidlab.py` | passed |
+
+| Lab | Options | Scenarios | Checks |
+|---|---|---|---|
+| `q2pm` | `--priority --functional-alias --mcdata-pre-established --pre-established --reference-client client-d --client-image openmcx-client:mcdemerg-ce06d65 --fixture-arg=--msgstore` | S1, S6, S60-S67, S80-S82, S84, S70-S79, S85 | 238 of 238 (S6's policy check now accepts the client's own refusal: client-c has no transmit right on `operations`, refused before the MESSAGE, §11.1 2)) |
+| `q2p` | `--protected --xml-protection --integrity-protection --priority` | S1, S6, S60-S66, S80, S81, S83, S84 | 129 of 129 |
+
+Suite (`--dut android --ss openmcx`, lab `drv-q2` from `tools/android-lab-up.py`, run `results/android-q2-r1`, D.3.4
+and D.4.5 again in `android-q2-r2`): the 25 failing test cases and the 12 that passed in p7.
+
+| Test case | p7 | now | Remaining cause |
+|---|---|---|---|
+| 6.1.5, 6.1.7, 6.1.13, 6.1.17, 6.1.22 | Fail | Pass | |
+| 6.1.23 | Fail | Pass | |
+| D.3.5, D.5.3, D.5.4, D.5.13 | Fail | Pass | |
+| D.3.4, D.4.5 | Fail | Pass (r2) | in r1 the SS's group document edits were not made (`update_document group_mcdata` returned false: a bench transient), the group checks so untested; both pass in r2 |
+| D.12.3 | Fail | Inconclusive | step 4 passes (the SDS's BYE Reason; p7 judged the FD's BYE as the SDS went on the signalling plane); `msrp_answer_active` and the FD notification are SS stimuli the real servers do not play |
+| D.13.5 | Fail | Inconclusive | every body check passes; step 6 needs a peer session the bench did not make |
+| 6.2.14 | Fail | Fail | step 2 (the alias) passes; step 5 needs `fd_notify`, not available in the openmcx SS adapter |
+| 6.4.3, 6.4.4 | Fail | Fail | the area notices (`send_message group_geo_area` / `emergency_alert_area`) are not available in the openmcx SS adapter: never sent, so the judge takes the postamble's PUBLISH (6.4.3) and the user's alert (6.4.4); the client's handling is `EmergencyAlerts.area` (unit tested, S43) |
+| D.5.1, D.5.8 | Fail | Fail | the alert's location body: the driver sets no position before `sds-session ... alert` (redroid has no fix); D.5.8 also needs `refuse_alert`, `peer_emergency`, `priority_reinvite` |
+| D.5.2, D.5.7, D.5.14, D.6.3 | Fail | Fail | SS stimuli not available on the real servers (`priority_reinvite`, `priority_refuse`, `fd_media`, `peer_cancel`, `fd_release_intent`); D.5.7's "wrong dialog" follows from the missing refusal: the first session stays, the server ends the second |
+| D.5.6 | Fail | Fail | the server answers the emergency and imminent peril FD INVITEs 403 (no Warning), so MDEG stays 1 and the plain FD has no emergency priority |
+| D.5.12 | Fail | Fail | the client's rows pass (steps 2, 6, 20, 30, 38, 42, 54-62, 70, 72); the rest need `priority_reinvite`, `pre_hold`, `peer_emergency`, `priority_refuse`, which the openmcx SS adapter does not play, and the states then follow what was granted |
+| the 12 p7 passes | Pass | Pass | |
