@@ -28,6 +28,7 @@ import org.openmcx.client.media.AudioSource
 import org.openmcx.client.media.SpeechCodecFactory
 import org.openmcx.client.media.SpeechDecoder
 import org.openmcx.client.media.SpeechEncoder
+import org.openmcx.client.mcptt.CallError
 import org.openmcx.client.mcptt.CallType
 import org.openmcx.client.mcptt.LocalMedia
 import org.openmcx.client.mcptt.McpttInfo
@@ -104,9 +105,10 @@ class PrivateServicesTest {
 
     private fun start(floorPriority: String = "", status: (SipRequest) -> Int? = { null },
                       headers: (SipRequest) -> List<Pair<String, String>> = { emptyList() },
-                      answer: (SipRequest) -> Pair<String, ByteArray>? = { null }, hold: (SipRequest) -> Boolean = { false }): Lab {
+                      answer: (SipRequest) -> Pair<String, ByteArray>? = { null }, hold: (SipRequest) -> Boolean = { false },
+                      http: HttpClient = noHttp): Lab {
         val cores = CopyOnWriteArrayList<FakeSipCore>()
-        val client = McxClient(CoroutineScope(SupervisorJob() + Dispatchers.Default), config(floorPriority), noHttp,
+        val client = McxClient(CoroutineScope(SupervisorJob() + Dispatchers.Default), config(floorPriority), http,
             connector = { _, _ -> FakeSipCore(statusFor = status, holdFor = hold, bodyFor = answer, headersFor = { r -> headers(r) +
                 // The MCPTT session identity in the 200 (OK)'s Contact (§17.2.5.1.1).
                 (if (r.method == "INVITE" && r.to.tag == null) listOf("Contact" to "<sip:mcptt@127.0.0.1:5061;transport=tls;isfocus>") else emptyList()) }).also { cores += it } })
@@ -203,10 +205,36 @@ class PrivateServicesTest {
         assertEquals("sendonly", offer.direction)
         assertTrue(offer.implicitRequest)
         assertEquals("listened-to", call.ambientRole)
-        assertFalse("shown: the listened-to user asked for it", call.hidden)
+        // §11.1.6.2.1.1 (200 (OK)) 3): no indication of the establishment, even of a call the user asked for; it stays
+        // the user's call (§11.1.6.2.1.3).
+        assertTrue("not shown", call.hidden)
+        assertFalse(call.concealed)
+        assertEquals(call, lab.service.active)
         // §11.1.6.2.1.3 step 1: no Feature-Caps in the 200 (OK): this client may not release the call.
         assertFalse(call.mayRelease)
         assertEquals("not released", true, runCatching { lab.service.hangup(call) }.isFailure)
+        lab.client.stop()
+    }
+
+    /**
+     * §11.1.6.2.1.1 with local-init and the release capability (annex D.3): the call is hidden from the user that
+     * initiated it (200 (OK) step 3)) and from the listeners of the app (no ringing, no incoming call); the user may
+     * still release it (§11.1.6.2.1.3 step 1), and the release is not shown either (step 2)).
+     */
+    @Test
+    fun ambientListeningLocalInitHiddenAndReleasable() = runBlocking {
+        val lab = start(headers = { r -> if (r.method == "INVITE") listOf("Feature-Caps" to "*;+${PrivateServiceRules.AMBIENT_RELEASE}") else emptyList() },
+            answer = { r -> ok(r, McpttInfo(sessionType = "ambient-listening", requestUri = bob, ambientListeningType = "local-init")) })
+        val call = lab.service.ambientCall(bob, local = true)
+        assertEquals("established", call.state)
+        assertTrue(call.hidden)
+        assertFalse(call.concealed)
+        assertTrue(call.mayRelease)
+        assertEquals("the user's call", call, lab.service.active)
+        lab.service.hangup()
+        assertTrue(lab.core.requests.any { it.method == "BYE" })
+        assertEquals("released", call.state)
+        assertTrue("still hidden once released", call.hidden)
         lab.client.stop()
     }
 
@@ -228,6 +256,7 @@ class PrivateServicesTest {
         waitFor("established") { lab.service.calls.value.firstOrNull()?.state == "established" }
         val call = lab.service.calls.value.single()
         assertTrue(call.hidden)
+        assertTrue(call.concealed)
         assertNull("not the user's call", lab.service.active)
         assertTrue("no indication", told.isEmpty())
         assertTrue(call.media!!.floor.grantExpected)
@@ -436,6 +465,9 @@ class PrivateServicesTest {
         assertEquals("manual-input", sent.service["forwarding-reason"])
         assertEquals(alice, sent.service["forwarded-by-mcptt-id"])
         assertEquals(carol, sent.service["forwarding-target-orig-id"])
+        // 2) d) i) B): a target that is an MCPTT ID: <call-to-functional-alias-ind> "false", not left out.
+        assertEquals(false, sent.callToFunctionalAlias)
+        assertTrue(String(messages(lab).last().body), "<call-to-functional-alias-ind>false</call-to-functional-alias-ind>" in String(messages(lab).last().body))
         assertEquals(listOf(bob), ResourceLists.parse(part(messages(lab).last(), ResourceLists.CONTENT_TYPE)!!))
         val declined = lab.core.answer()
         assertEquals(480, declined.status)
@@ -550,5 +582,103 @@ class PrivateServicesTest {
         assertEquals(Commencement.AUTOMATIC, PrivateServiceRules.commencement(null))
         assertTrue(PrivateServiceRules.forwarded(480, "399 mcx \"175 call is forwarded\""))
         assertFalse(PrivateServiceRules.forwarded(480, "399 mcx \"110 user declined\""))
+    }
+
+    /** A GMS answering one group document: [group] with <preconfigured-group-use-only> [useOnly]; counts the GETs. */
+    private class GroupGms(val group: String, val useOnly: Boolean) : HttpClient {
+        val gets = java.util.concurrent.atomic.AtomicInteger()
+        override suspend fun request(method: String, url: String, headers: Map<String, String>, body: ByteArray?): HttpResponse {
+            if (method != "GET" || "byGroupID" !in url) return HttpResponse(404, emptyMap(), ByteArray(0))
+            gets.incrementAndGet()
+            val doc = """<?xml version="1.0"?><group xmlns="urn:oma:xml:poc:list-service"><list-service uri="$group">""" +
+                """<list><entry uri="sip:alice.mcptt@mcx.test"/></list><preconfigured-group-use-only>$useOnly</preconfigured-group-use-only>""" +
+                """<supported-services><service enabler="urn:urn-7:3gpp-service.ims.icsi.mcptt"/></supported-services></list-service></group>"""
+            return HttpResponse(200, mapOf("Content-Type" to listOf("application/vnd.oma.poc.groups+xml")), doc.toByteArray())
+        }
+    }
+
+    /**
+     * TS 24.379 §10.1.1.2.1.1 (first paragraph) 1), 2): a call on a group whose document says
+     * <preconfigured-group-use-only> "true" is refused here and nothing is sent, also for a group the client was not
+     * provisioned with (affiliated later, TS 37.579-2 6.1.1.22): its document is read when the call is asked for.
+     */
+    @Test
+    fun preconfiguredUseOnlyGroupReadOnDemandAndNotCalled() = runBlocking {
+        val preconf = "sip:operations-preconf@mcx.test"
+        val gms = GroupGms(preconf, useOnly = true)
+        val lab = start(http = gms)
+        assertTrue(preconf !in lab.client.groupDocuments)
+        val refused = runCatching { lab.service.groupCall(preconf) }.exceptionOrNull()
+        assertTrue("$refused", refused is CallError && "not allowed" in refused.message!!)
+        assertEquals(1, gms.gets.get())
+        assertEquals(true, lab.client.groupDocuments[preconf]?.preconfiguredUseOnly)
+        assertTrue("no INVITE", lab.core.requests.none { it.method == "INVITE" })
+        // Asked again: the document is known, not read again, and still nothing is sent.
+        assertTrue(runCatching { lab.service.groupCall(preconf) }.isFailure)
+        assertEquals(1, gms.gets.get())
+        assertTrue(lab.core.requests.none { it.method == "INVITE" })
+        lab.client.stop()
+    }
+
+    /** The same document read on demand without <preconfigured-group-use-only> "true": the call goes out. */
+    @Test
+    fun groupDocumentReadOnDemandAllowsTheCall() = runBlocking {
+        val gms = GroupGms(group, useOnly = false)
+        val lab = start(http = gms, answer = { r -> ok(r, McpttInfo(sessionType = "prearranged", callingGroupId = group)) })
+        val call = lab.service.groupCall(group)
+        assertEquals(1, gms.gets.get())
+        assertTrue(lab.core.requests.any { it.method == "INVITE" })
+        lab.service.hangup(call)
+        lab.client.stop()
+    }
+
+    private val adhocProfile = { activate: Boolean, cancel: Boolean ->
+        org.openmcx.client.documents.UserProfile.parse("<mcptt-user-profile xmlns=\"urn:3gpp:mcptt:user-profile:1.0\" " +
+            "xmlns:cp=\"urn:ietf:params:xml:ns:common-policy\" XUI-URI=\"$alice\" user-profile-index=\"1\"><Common index=\"1\"/>" +
+            "<cp:ruleset><cp:rule id=\"r\"><cp:actions><allow-activate-adhoc-group-emergency-alert>$activate" +
+            "</allow-activate-adhoc-group-emergency-alert><allow-cancel-adhoc-group-emergency-alert>$cancel" +
+            "</allow-cancel-adhoc-group-emergency-alert></cp:actions></cp:rule></cp:ruleset></mcptt-user-profile>")
+    }
+
+    /**
+     * TS 24.379 §12.1A.1.1 with §6.2.8.1.19: an unauthorised ad hoc group emergency alert is not sent (2) "shall skip");
+     * an authorised one carries <adhoc-alert-ind> "true", the criteria and the location as a <Report> (5) -> §6.2.9.1
+     * 2) a)); without a position it is not sent. §12.1A.1.2: the cancellation is one mcptt-info body, sent as itself
+     * (§6.5), and an unauthorised cancellation is not sent.
+     */
+    @Test
+    fun adhocAlertAuthorisationLocationAndCancellation() = runBlocking {
+        val adhocGroup = "sip:adhoc-alert-1@mcx.test"
+        val lab = start(answer = { r -> if (r.method == "MESSAGE" && "adhoc-alert-ind>true" in String(r.body))
+            McpttInfo.CONTENT_TYPE to McpttInfo(callingGroupId = adhocGroup).encode().toByteArray() else null })
+        val alerts = EmergencyAlerts(lab.client, LocationService.MCPTT, psi, alice)
+        lab.client.handlers += alerts
+        val here = org.openmcx.client.mcvideo.EmergencyLocation(48.0, 2.0)
+        lab.client.profile = adhocProfile(false, false)
+        assertTrue(runCatching { alerts.sendAdhoc("organization=mcx.test", here) }.exceptionOrNull()!!.message!!.contains("not allowed"))
+        assertTrue("nothing sent", messages(lab).isEmpty())
+        lab.client.profile = adhocProfile(true, true)
+        assertTrue(runCatching { alerts.sendAdhoc("organization=mcx.test", null) }.exceptionOrNull()!!.message!!.contains("location"))
+        assertTrue("nothing sent", messages(lab).isEmpty())
+        alerts.sendAdhoc("organization=mcx.test", here)
+        val alert = messages(lab).single()
+        assertTrue(alert.contentType!!.startsWith("multipart/mixed"))
+        assertEquals(true, info(alert).adhocAlert)
+        assertEquals("organization=mcx.test", info(alert).participantCriteria)
+        assertTrue(part(alert, "application/vnd.3gpp.mcptt-location-info+xml")!!.contains("Report"))
+        assertEquals(adhocGroup, alerts.adhoc.value?.group)
+        // An unauthorised cancellation stays here; then the authorised one goes, one body and not multipart.
+        lab.client.profile = adhocProfile(true, false)
+        assertTrue(runCatching { alerts.cancelAdhoc() }.isFailure)
+        assertEquals(1, messages(lab).size)
+        lab.client.profile = adhocProfile(true, true)
+        alerts.cancelAdhoc()
+        val cancel = messages(lab).last()
+        assertEquals(McpttInfo.CONTENT_TYPE, cancel.contentType)
+        val cancelled = McpttInfo.parse(String(cancel.body))
+        assertEquals(false, cancelled.adhocAlert)
+        assertEquals(adhocGroup, cancelled.requestUri)
+        assertNull(alerts.adhoc.value)
+        lab.client.stop()
     }
 }

@@ -34,6 +34,14 @@ object Multipart {
         return "multipart/mixed; boundary=$boundary" to out.toByteArray()
     }
 
+    /**
+     * A SIP message body of [parts] (TS 24.379 §6.5, TS 24.282 §6.4, TS 24.281 §6.6): one body goes as itself, with its
+     * own MIME type as the Content-Type (§6.5 "one MIME body" 1)); several as multipart/mixed with a boundary delimiter
+     * before each (RFC 2046 §5.1.1), [encode]. A lone part with headers of its own (Content-ID) stays multipart.
+     */
+    fun body(parts: List<Part>, boundary: String = newBoundary()): Pair<String, ByteArray> =
+        parts.singleOrNull()?.takeIf { it.headers.isEmpty() }?.let { it.contentType to it.content } ?: encode(parts, boundary)
+
     /** The parts of a body with [contentType]; a non-multipart body is one part. */
     fun parse(contentType: String?, body: ByteArray): List<Part> {
         if (contentType == null) return if (body.isEmpty()) emptyList() else listOf(Part("application/octet-stream", body))

@@ -199,6 +199,7 @@ object Tags {
     fun callBackCancel(target: String) = "call-back-cancel-$target"
     fun ambient(target: String) = "ambient-$target"
     fun ambientLocal(target: String) = "ambient-local-$target"
+    fun ambientStop(target: String) = "ambient-stop-$target"
     fun remoteGroup(target: String) = "remote-group-$target"
     fun transferTo(target: String) = "transfer-to-$target"
     fun forwardTo(target: String) = "forward-to-$target"
@@ -1249,6 +1250,9 @@ private fun CallOptions(target: String, enabled: Boolean, actions: UiActions, gr
                 onClick = { open = false; actions.ambientListen(target, local = false) })
             DropdownMenuItem(text = { Text("Let them listen to me (ambient)") }, modifier = Modifier.testTag(Tags.ambientLocal(target)),
                 onClick = { open = false; actions.ambientListen(target, local = true) })
+            // §11.1.6.2.1.3: the listened-to user ends the call it started; the call itself is never shown (§11.1.6.2.0).
+            DropdownMenuItem(text = { Text("Stop letting them listen") }, modifier = Modifier.testTag(Tags.ambientStop(target)),
+                onClick = { open = false; actions.ambientStop(target) })
             // §10.1.5.2.1: have their phone call the selected group.
             group?.let { g ->
                 DropdownMenuItem(text = { Text("Have them call ${g.short()}") }, modifier = Modifier.testTag(Tags.remoteGroup(target)),
