@@ -234,10 +234,12 @@ class McvideoService(
 
     /**
      * Authorise a priority request by the MCVideo user profile ([McvideoAuthorisation]); an unauthorised one is
-     * refused here and never sent. Before the profile is read nothing is checked (the server still decides).
+     * refused here and never sent. A request made before the profile is read (one right after the service
+     * authorisation) reads it first; without a profile the request is unauthorised ("In all other cases").
      */
     private suspend fun authorise(check: suspend McvideoAuthorisation.(McvideoProfile) -> Unit) {
-        val known = profile ?: run { event("user profile not read: the request is not checked against it"); return }
+        val known = profile ?: readProfile() ?: throw McvideoAuthorisation.NotAuthorised("mcvideo-user-profile", "the request",
+            "no MCVideo user profile").also { lastRefusal = it.message; event(it.message ?: "not authorised") }
         try { McvideoAuthorisation.check(known) } catch (e: McvideoAuthorisation.NotAuthorised) {
             lastRefusal = e.message
             event(e.message ?: "not authorised")

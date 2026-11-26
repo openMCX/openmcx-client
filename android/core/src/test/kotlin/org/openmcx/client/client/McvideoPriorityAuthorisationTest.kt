@@ -63,6 +63,7 @@ class McvideoPriorityAuthorisationTest {
 
     private class Documents(var profile: String, var group: String) : HttpClient {
         override suspend fun request(method: String, url: String, headers: Map<String, String>, body: ByteArray?) = when {
+            url.endsWith("mcvideo-user-profile-1.xml") && profile.isEmpty() -> HttpResponse(404, emptyMap(), ByteArray(0))
             url.endsWith("mcvideo-user-profile-1.xml") -> HttpResponse(200, emptyMap(), profile.toByteArray())
             "byGroupID" in url -> HttpResponse(200, emptyMap(), group.toByteArray())
             else -> HttpResponse(404, emptyMap(), ByteArray(0))
@@ -100,6 +101,12 @@ class McvideoPriorityAuthorisationTest {
     private class Lab(val client: McxClient, val core: FakeSipCore, val video: McvideoService)
 
     private fun start(profile: String, group: String = McvideoAuthorisationTest.groupDocument(a, listOf(alice), listOf(alice))): Lab {
+        val lab = startWithout(profile, group)
+        waitFor("profile") { lab.video.profile != null }
+        return lab
+    }
+
+    private fun startWithout(profile: String, group: String = McvideoAuthorisationTest.groupDocument(a, listOf(alice), listOf(alice))): Lab {
         val cores = CopyOnWriteArrayList<FakeSipCore>()
         val log = EventLog()
         val client = McxClient(CoroutineScope(SupervisorJob() + Dispatchers.Default), config(), Documents(profile, group), log = log,
@@ -111,7 +118,6 @@ class McvideoPriorityAuthorisationTest {
         try { waitFor("ready") { client.status.value.phase == "ready" && client.status.value.mcvideo.authorised } }
         catch (e: AssertionError) { throw AssertionError("not ready: ${client.status.value} ${log.last(20)}") }
         val video = McvideoService(client, devices, codecs, silence)
-        waitFor("profile") { video.profile != null }
         return Lab(client, cores[0], video)
     }
 
@@ -140,6 +146,20 @@ class McvideoPriorityAuthorisationTest {
         // Suite S.5.13: no ad hoc rights in the profile.
         lab.refused("allow-emergency-adhoc-group-call") { lab.video.adhocCall(listOf("sip:bob.mcvideo@mcx.test"), priority = "emergency") }
         lab.refused("allow-imminent-peril-adhoc-group-call") { lab.video.adhocCall(listOf("sip:bob.mcvideo@mcx.test"), priority = "imminent") }
+        lab.client.stop()
+    }
+
+    /** "In all other cases" unauthorised: without a readable MCVideo user profile the request is refused, not sent. */
+    @Test fun noProfileNoPriorityRequest() {
+        val lab = startWithout("")
+        lab.refused("mcvideo-user-profile") { lab.video.groupCall(a, priority = "emergency") }
+        lab.client.stop()
+    }
+
+    /** Suite S.5.13: a request right after the start, before the profile was read, reads it and is refused by it. */
+    @Test fun requestBeforeTheProfileIsReadReadsIt() {
+        val lab = startWithout(McvideoAuthorisationTest.profile(alice, emptyMap()))
+        lab.refused("allow-emergency-adhoc-group-call") { lab.video.adhocCall(listOf("sip:bob.mcvideo@mcx.test"), priority = "emergency") }
         lab.client.stop()
     }
 
