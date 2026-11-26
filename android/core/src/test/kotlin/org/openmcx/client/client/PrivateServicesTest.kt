@@ -561,6 +561,38 @@ class PrivateServicesTest {
         lab.client.stop()
     }
 
+    /**
+     * TS 24.379 §12.1.1.6 1)a)ii): the emergency state that keeps an emergency alert area notice from raising the alert is
+     * the one this client's alert set. The server's report of an own alert this client did not raise (kept by the server
+     * across a restart of the app) is shown, but the notice still raises the alert; once raised, a second notice does not.
+     */
+    @Test
+    fun alertAreaRaisesDespiteAnOwnAlertOnlyReported() {
+        val lab = start()
+        val alerts = EmergencyAlerts(lab.client, LocationService.MCPTT, psi, alice)
+        alerts.defaultGroup = { group }
+        alerts.position = { org.openmcx.client.mcvideo.EmergencyLocation(48.05, 2.05) }
+        lab.client.handlers.add(0, alerts)
+        lab.core.message(McpttInfo.CONTENT_TYPE, McpttInfo(callingGroupId = group, callingUserId = alice, alert = true).encode(), from = psi)
+        assertEquals(200, lab.core.answer().status)
+        waitFor("reported") { alerts.alerting.value == setOf(group) }
+        assertFalse(alerts.inEmergencyState())
+        val notice = "<?xml version=\"1.0\"?><mcpttinfo xmlns=\"urn:3gpp:ns:mcpttInfo:1.0\"><mcptt-Params>" +
+            "<mcptt-request-uri type=\"Normal\"><mcpttURI>$alice</mcpttURI></mcptt-request-uri>" +
+            "<anyExt><emergency-alert-area-ind>true</emergency-alert-area-ind></anyExt></mcptt-Params></mcpttinfo>"
+        lab.core.message(McpttInfo.CONTENT_TYPE, notice, from = psi)
+        assertEquals(200, lab.core.answer().status)
+        waitFor("the alert") { messages(lab).isNotEmpty() }
+        assertEquals(true, info(messages(lab).single()).alert)
+        waitFor("emergency state") { alerts.inEmergencyState() }
+        lab.core.message(McpttInfo.CONTENT_TYPE, notice, from = psi)
+        assertEquals(200, lab.core.answer().status)
+        Thread.sleep(300)
+        assertEquals(1, messages(lab).size)
+        assertEquals(listOf(group, null), alerts.notices.filter { it.alertArea && it.entered }.map { it.alerted })
+        lab.client.stop()
+    }
+
     /** Annex F.1.2: the service elements written in schema order and read back; the time of request has no zone. */
     @Test
     fun serviceElementsRoundTrip() {

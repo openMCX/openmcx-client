@@ -148,6 +148,44 @@ class FunctionalAliasTest {
         assertEquals(setOf(dispatcher), wanted)
     }
 
+    /**
+     * The alias chosen for use while its activation is awaited (TS 37.579-7 6.2.14: "use" right after "activate"): kept
+     * as pending, presented once a NOTIFY lists it active; a NOTIFY of the subscription that does not answer the change
+     * keeps it pending; the answer that refuses it drops it. An alias neither active nor being activated is refused.
+     */
+    @Test
+    fun anAliasChosenWhileBeingActivatedIsUsedOnceActive() {
+        val medic = "sip:medic.alias@mcx.test"
+        val idle = FunctionalAliasState(available = listOf(dispatcher, medic))
+        assertNull(FunctionalAliasRules.use(idle, dispatcher, activating = false))
+        val chosen = FunctionalAliasRules.use(idle, dispatcher, activating = true)!!
+        assertEquals(dispatcher, chosen.pendingUse)
+        assertNull(chosen.inUse)
+        val change = FunctionalAliasRules.Change("activate", listOf(dispatcher), "p1")
+        // The subscription's first NOTIFY (no <p-id-fa> of this change) lists nothing yet: still awaited.
+        val first = FunctionalAliasRules.notified(chosen, status(null), change, mutableSetOf(), awaiting = setOf(dispatcher)).state
+        assertEquals(dispatcher, first.pendingUse)
+        assertNull(first.inUse)
+        // `activating`: still awaited, also without the change.
+        val activating = FunctionalAliasRules.notified(first, status(null, dispatcher to "activating"), change, mutableSetOf()).state
+        assertEquals(dispatcher, activating.pendingUse)
+        // The answer: active, and now in use.
+        val active = FunctionalAliasRules.notified(activating, status("p1", dispatcher to "activated"), change, mutableSetOf(), awaiting = setOf(dispatcher)).state
+        assertEquals(dispatcher, active.inUse)
+        assertNull(active.pendingUse)
+        // An alias already active is in use at once.
+        assertEquals(medic, FunctionalAliasRules.use(active.copy(active = setOf(dispatcher, medic)), medic, activating = false)!!.inUse)
+        // An answer refusing it drops the choice.
+        val refused = FunctionalAliasRules.notified(chosen, status("p1"), change, mutableSetOf(), awaiting = setOf(dispatcher)).state
+        assertNull(refused.pendingUse)
+        assertNull(refused.inUse)
+        assertEquals(mapOf(dispatcher to "refused"), refused.lastOutcomes)
+        // Choosing none clears both.
+        val none = FunctionalAliasRules.use(chosen, null, false)!!
+        assertNull(none.pendingUse)
+        assertNull(none.inUse)
+    }
+
     @Test
     fun aDeactivationOutcome() {
         val result = FunctionalAliasRules.notified(FunctionalAliasState(active = setOf(dispatcher)), status("p3"),
