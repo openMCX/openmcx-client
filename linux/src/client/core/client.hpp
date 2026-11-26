@@ -3095,6 +3095,17 @@ private:
   // Calls over the session (TS 24.379 clauses 10.1.1.2.2, 10.1.2.2.2, 6.2.4.2; TS 24.380 clause 9.2.2).
   [[nodiscard]] bool pre_session_usable() const;
   [[nodiscard]] bool call_over_pre_session() const { return dialog_.starts_with("pre-call-"); }
+  // TS 24.379 clauses 10.1.1.2.1.3 to 10.1.1.2.1.5, 10.1.2.2.1.3 to 10.1.2.2.1.5, 11.1.1.2.1.4 and 11.1.1.2.1.5 ("This
+  // clause covers both on-demand session and pre-established sessions"): the dialog of a re-INVITE the client sends
+  // during a call: the call's own, or for a call over the pre-established session, which has no dialog of its own
+  // (its "pre-call-..." identifier), the session's, sent to its remote target, the URI identifying the session (the
+  // Contact of its 200 (OK), clause 8.2.2 step 9 a). Throws when the session is gone.
+  [[nodiscard]] std::string call_reinvite_dialog() const;
+  // The SDP offer of that re-INVITE: offer_media() in the call's own dialog (clause 6.2.1); in the session's "based
+  // upon the parameters already negotiated for the pre-established session" (clause 10.1.1.2.1.3 step 6, clause
+  // 10.1.1.2.1.4 step 7; NOTE 2: the same speech and floor control media-level sections), with the call's implicit
+  // floor request (clause 6.4) and the session's ICE attributes.
+  [[nodiscard]] MediaDescription call_reinvite_offer() const;
   std::string pre_session_refer_call(const std::vector<std::string> &targets, std::vector<BodyPart> parts,
                                      std::vector<SipHeader> entry_headers, const std::vector<SipHeader> &headers,
                                      bool with_sdp);

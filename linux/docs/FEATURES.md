@@ -52,7 +52,12 @@ has it: the lab scenarios run each server feature through this client.
 - Pre-established sessions (TS 24.379 clause 8, TS 24.380 clause 9): `pre-establish`, `pre-session-modify`,
   `pre-session-release`, with ICE; group, broadcast, chat (emergency, imminent peril, functional alias), private,
   first-to-answer and ambient listening calls over the session by REFER, received by Connect, re-INVITE or INVITE with
-  Replaces
+  Replaces. In a call over the session, the user's emergency or imminent peril upgrade or cancel (group and private
+  calls, TS 24.379 clauses 10.1.1.2.1.3 to 10.1.1.2.1.5, 10.1.2.2.1.3 to 10.1.2.2.1.5, 11.1.1.2.1.4, 11.1.1.2.1.5),
+  the ad hoc call's modification, the private call's hold and resume for an announced transfer and
+  `refresh-reinvite` go as a re-INVITE in the session's dialog (to the URI identifying the session) with the session's
+  negotiated SDP; the participating function's priority re-INVITE in that dialog (clause 6.3.3.1.6) is answered with
+  the session's media and sets the group's or, in a private call, the MEPP priority state
 - Location reporting and requests, emergency alert areas and group geographic areas, SEAL location reporting
   (TS 24.545)
 - End-to-end protection: media and floor control (GMK, PCK), XML signalling confidentiality and integrity

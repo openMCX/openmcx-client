@@ -241,7 +241,7 @@ void Client::run_command(const std::string &cmd) {
     if (dialog_.empty()) {
       failure("refresh-reinvite: no call");
     } else {
-      auto offer = offer_media();
+      auto offer = call_reinvite_offer();
       std::istringstream words(cmd.substr(std::string_view("refresh-reinvite").size()));
       for (std::string word; words >> word;) {
         if (word == "hold") {
@@ -269,7 +269,7 @@ void Client::run_command(const std::string &cmd) {
       const auto sequence = ++refresh_sequence_;
       status_["last_refresh_offer"] = {
           {"sequence", sequence}, {"floor_ssrc", offer.floor_ssrc}, {"direction", offer.direction}};
-      sip_.reinvite(dialog_, offer, {}, [this, sequence](const SipResponse &response) {
+      sip_.reinvite(call_reinvite_dialog(), offer, {}, [this, sequence](const SipResponse &response) {
         if (response.status_code < 200) return;
         status_["last_refresh"] = {{"sequence", sequence}, {"status", response.status_code}};
         event("session_refresh_answered", {{"status", response.status_code}, {"sequence", sequence}});

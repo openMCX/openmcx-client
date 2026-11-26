@@ -346,8 +346,9 @@ void Client::change_private_priority(bool enable, bool with_alert, const std::st
   }
   priority_pending_ = true;
   try {
+    // TS 24.379 clause 11.1.1.2.1.5 step 3 and its NOTE: in the call's dialog or the pre-established session's.
     sip_.reinvite(
-        dialog_, offer_media(), parts,
+        call_reinvite_dialog(), call_reinvite_offer(), parts,
         [this, enable, previous_mpea, implicit](const SipResponse &response) {
           if (response.status_code < 200) return;
           if (implicit) schedule([this, code = response.status_code] { upgrade_implicit_answered(code); });
@@ -488,7 +489,9 @@ void Client::change_priority(bool emergency, bool enabled, const std::string &ot
       })
                            : std::function<void(const SipResponse &)>(completed);
       try {
-        sip_.reinvite(dialog_, offer_media(), info_parts(info), done, headers);
+        // TS 24.379 clauses 10.1.1.2.1.3 steps 5, 6 and 10.1.1.2.1.4 steps 6, 7: in the call's dialog or the
+        // pre-established session's.
+        sip_.reinvite(call_reinvite_dialog(), call_reinvite_offer(), info_parts(info), done, headers);
       } catch (...) {
         if (implicit) upgrade_implicit_answered(500);
         local_.implicit_request = false;
