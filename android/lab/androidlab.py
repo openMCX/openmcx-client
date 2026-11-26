@@ -46,7 +46,8 @@ ROOT = Path(__file__).resolve().parents[1]  # android/
 RUNS = ROOT / "lab" / "run"
 CLIENTS = ["client-a", "client-b", "client-c"]
 REDROID = "redroid/redroid:15.0.0_64only-latest"
-APK = ROOT / "app/build/outputs/apk/debug/app-debug.apk"
+# The debug APK that install and up put on the clients; MCX_ANDROID_APK names another (tools/regress.py --apk).
+APK = Path(os.environ.get("MCX_ANDROID_APK") or ROOT / "app/build/outputs/apk/debug/app-debug.apk")
 PACKAGE = "org.openmcx.client"
 FILES = f"/data/user/0/{PACKAGE}/files"
 CONTROL = "mcxclient-control"  # the debug build's control socket (@mcxclient-control)
