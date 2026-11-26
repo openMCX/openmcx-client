@@ -32,9 +32,11 @@ The Call tab has one **Emergency alert** section, after the calls and before the
 
   An ongoing notification per person goes with the banner.
 - **Emergency alert areas.** When the server says the phone entered an emergency alert area, the phone raises an
-  alert on MCPTT and MCData itself, on the selected group, unless the user's alert is already up, and says so in a
-  notification. No user request is needed (§12.1.1.6 1)a)ii)). Leaving the area is notified too; the alert stays up
-  until the user, or an authorised user, cancels it (§12.1.1.6 NOTE).
+  alert on MCPTT, MCData and MCVideo itself, on the selected group, unless the user's alert is already up, and says
+  so in a notification. No user request is needed (§12.1.1.6 1)a)ii), TS 24.281 §11.2.1.5 1)a)ii)). "Already up" is
+  the emergency state the phone's own alert set: an own alert the server only reports (one it kept across a restart
+  of the app) is shown and can be cancelled, but the notice still raises the alert. Leaving the area is notified too;
+  the alert stays up until the user, or an authorised user, cancels it (§12.1.1.6 NOTE).
 - **Group geographic areas.** A notice of entering a group's geographic area affiliates the phone to the group it names
   (`<associated-group-id>`), one of leaving it de-affiliates it from that group, on MCPTT and MCData (§12.1.1.4,
   TS 24.282 §16.2.1.4); the user's other groups are kept. The notice is shown as before (LOCATION.md, "Location rules").
