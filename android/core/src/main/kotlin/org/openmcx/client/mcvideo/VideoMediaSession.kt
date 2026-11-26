@@ -133,7 +133,8 @@ class VideoMediaSession(
      */
     fun start(remote: RemoteVideoMedia, ownVideoPayloadType: Int, priority: Int? = null, receptionPriority: Int? = null,
               timers: TransmissionTimers = TransmissionTimers(), grantedInAnswer: Boolean = false) {
-        val implicit = local.implicitRequest && remote.transmissionControl
+        // §6.2.4.2.2: 'U: pending request to transmit' only for this client's own implicit request (TS 24.281 §6.4).
+        val implicit = local.ownImplicitRequest && remote.transmissionControl
         this.remote = remote
         videoPt = ownVideoPayloadType
         control = TransmissionParticipant(scope, remote.controlSsrc ?: 0, ::sendControl, this, priority,
@@ -353,6 +354,7 @@ class VideoMediaSession(
     override fun revoked(cause: Int?) { events?.revoked(cause) }
     override fun requestFailed() { events?.requestFailed() }
     override fun reception(receiving: Boolean, rejectCause: Int?) { events?.reception(receiving, rejectCause) }
+    override fun receptionOverridden() { events?.receptionOverridden() }
     override fun remoteResult(start: Boolean, done: Boolean?) { events?.remoteResult(start, done) }
     override fun queued(position: Int?) { events?.queued(position) }
     override fun timeout(what: String) { events?.timeout(what) }

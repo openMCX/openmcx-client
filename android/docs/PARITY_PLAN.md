@@ -59,7 +59,7 @@ P.3.9, P.4.5, P.5.1's location) are bench or suite faults, listed there with the
 | 4b: IP connectivity, enhanced status, message store | partial | IP connectivity to the phone's own IP stack (no `VpnService`/TUN), the implicit target by IP information, IPv6 in the tunnel; message store upload, retrieve, folder copy/move and notification restart; FD by reference to a stored object |
 | 5: pre-established sessions | partial | ICE connectivity checks (host candidates only); protected calls over the MCPTT session; FD over the MCData session (TS 24.282 has none) |
 | 6: location rules | done, with limits | MCData group configuration rules (§8.2.6.3, as the Linux client), MCVideo affiliation rules and the MCVideo group geographic area notice, hysteresis |
-| 7: MCVideo remainder and protection | partial | other KMSs' certificates (KMS CertCache); ad hoc participant modification |
+| 7: MCVideo remainder and protection | partial | other KMSs' certificates (KMS CertCache); ad hoc participant modification. The p7 suite failures are fixed on `android-q3-mcvideo` (TEST_REPORT.md, "MCVideo suite fixes") |
 
 Done on branch `android-q2-mcdata` (the MCData suite failures of `android-mcdata-real-p7`): the service configuration's
 `<tx-and-rx-control>` limits (the signalling-plane limit among them), the group transmission control of TS 24.282 §11.1

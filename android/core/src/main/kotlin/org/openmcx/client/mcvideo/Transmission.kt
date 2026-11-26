@@ -143,6 +143,18 @@ data class TransmissionMessage(
         fun receiveMedia(ssrc: Long, receptionPriority: Int? = null) = TransmissionMessage(TxType.RECEIVE_MEDIA_REQUEST, ssrc,
             fields = listOfNotNull(receptionPriority?.let { TxField.RECEPTION_PRIORITY to byteArrayOf(it.toByte(), 0) }))
 
+        /**
+         * Media reception end request or response (§9.2.26, §9.2.27) naming the stream received: the User ID of the
+         * Transmitting User, its Audio SSRC and its Video SSRC (§6.2.5.5.3 step 1b), each left out when unknown.
+         */
+        fun receptionEnd(type: TxType, ssrc: Long, user: String?, audioSsrc: Long?, videoSsrc: Long?): TransmissionMessage {
+            require(type == TxType.RECEPTION_END_REQUEST || type == TxType.RECEPTION_END_RESPONSE) { "not a media reception end message" }
+            return TransmissionMessage(type, ssrc, fields = listOfNotNull(
+                user?.takeIf { it.isNotEmpty() }?.let { TxField.TRANSMITTING_USER_ID to it.toByteArray() },
+                audioSsrc?.let { TxField.AUDIO_SSRC to ssrcValue(it) },
+                videoSsrc?.let { TxField.VIDEO_SSRC to ssrcValue(it) }))
+        }
+
         /** Transmission control ack (§9.2.29) for [type], from the participant (source 0). */
         fun ack(ssrc: Long, type: TxType) = TransmissionMessage(TxType.ACK, ssrc,
             fields = listOf(TxField.SOURCE to u16(0), TxField.MESSAGE_TYPE to byteArrayOf(type.subtype.toByte(), 0)))

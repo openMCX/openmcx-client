@@ -95,6 +95,22 @@ class EmergencyAlerts(
      */
     var onGroupState: ((String, String?, Boolean?, Boolean?) -> Unit)? = null
 
+    /**
+     * The group alert of a service that does it itself (MCVideo's McvideoService, TS 24.281 §11.2.1.1): the groups its
+     * user's alert is up on, and the raising of one, for the alert an emergency alert area notice raises (§11.2.1.5).
+     */
+    interface ServiceGroupAlert {
+        fun alerting(): Set<String>
+        suspend fun raise(group: String, location: EmergencyLocation)
+    }
+    var serviceGroupAlert: ServiceGroupAlert? = null
+
+    /** The client's own authorisation of an ad hoc group emergency alert ([cancel]: its cancellation); throws when refused. */
+    var authoriseAdhoc: (suspend (cancel: Boolean) -> Unit)? = null
+
+    /** TS 24.281 §12.1A.1.1 5) and §12.1A.1.4 5) with §6.2.9.1: an MCVideo ad hoc alert always carries the location. */
+    private val adhocNeedsLocation = service == LocationService.MCVIDEO
+
     private fun event(text: String) {
         events += text
         while (events.size > 50) events.removeAt(0)
@@ -137,7 +153,8 @@ class EmergencyAlerts(
         }
         LocationService.MCVIDEO -> McvideoInfo.parse(text).let {
             Fields(it.requestUri, it.callingUserId, it.callingGroupId, it.clientId, adhocAlert = it.adhocAlert,
-                adhocAlertReceived = it.adhocAlertReceived, criteria = it.participantCriteria)
+                adhocAlertReceived = it.adhocAlertReceived, criteria = it.participantCriteria,
+                alertArea = it.emergencyAlertArea, groupArea = it.groupGeoArea, associatedGroup = it.associatedGroupId)
         }
     }
 
@@ -201,6 +218,9 @@ class EmergencyAlerts(
         if (!adhocAuthorised(cancel = false)) throw AlertError("ad hoc group emergency alerts are not allowed for this user")
         if (service == LocationService.MCPTT && location == null) throw AlertError("an ad hoc emergency alert needs this phone's location")
         if (_adhoc.value != null) throw AlertError("an ad hoc alert is already active")
+        if (adhocNeedsLocation && location == null) throw AlertError("an ad hoc emergency alert needs this phone's location")
+        // TS 24.281 §6.2.8.1.27: only an authorised request is sent.
+        authoriseAdhoc?.invoke(false)
         val response = message(Fields(clientId = client.config.clientId, adhocAlert = true, criteria = criteria), location)
         if (!response.isSuccess) throw failure("ad hoc alert to $criteria", response)
         val group = Multipart.parse(response.contentType, response.body).firstOrNull { it.mediaType == infoType }
@@ -217,6 +237,7 @@ class EmergencyAlerts(
     suspend fun modifyAdhoc(criteria: String, location: EmergencyLocation?) {
         check(service == LocationService.MCVIDEO) { "participant criteria modification is the MCVideo procedure here" }
         val own = _adhoc.value ?: throw AlertError("no ad hoc alert to modify")
+        if (adhocNeedsLocation && location == null) throw AlertError("an ad hoc emergency alert needs this phone's location")
         val response = message(Fields(requestUri = own.group, clientId = client.config.clientId, adhocAlert = true, criteria = criteria,
             reqType = "ad-hoc-emergency-alert-participant-criteria-modification"), location)
         if (!response.isSuccess) throw failure("ad hoc alert ${own.group} modification", response)
@@ -229,6 +250,7 @@ class EmergencyAlerts(
         val own = _adhoc.value ?: throw AlertError("no ad hoc alert to cancel")
         // §12.1A.1.2 1), 2): an unauthorised cancellation (§6.2.8.1.19) is not sent.
         if (!adhocAuthorised(cancel = true)) throw AlertError("cancelling ad hoc group emergency alerts is not allowed for this user")
+        authoriseAdhoc?.invoke(true)
         val response = message(Fields(requestUri = own.group, clientId = client.config.clientId, adhocAlert = false), null)
         if (!response.isSuccess) throw failure("ad hoc alert ${own.group} cancel", response)
         _adhoc.value = null
@@ -314,16 +336,21 @@ class EmergencyAlerts(
         val alertArea = info.alertArea != null
         val entered = (info.alertArea ?: info.groupArea)!!
         var notice = AreaNotice(service, alertArea, entered, info.associatedGroup)
-        if (alertArea && entered && groupAlerts && _alerting.value.isEmpty()) {
-            // §12.1.1.6 (TS 24.282 §16.2.1.5): entering an emergency alert area raises an alert, unless one is active.
+        val own = serviceGroupAlert
+        val raising = groupAlerts || own != null
+        if (alertArea && entered && raising && (if (groupAlerts) _alerting.value else own!!.alerting()).isEmpty()) {
+            // §12.1.1.6 (TS 24.282 §16.2.1.5, TS 24.281 §11.2.1.5 1) a) ii)): entering an emergency alert area raises an
+            // alert, unless one is active (the user is in the emergency state).
             val target = defaultGroup()
             val where = position()
             notice = notice.copy(alerted = target)
             if (target != null && where != null) client.scope.launch {
-                runCatching { send(target, true, where) }.onFailure { event("area alert on $target: ${it.message}") }
+                runCatching { if (groupAlerts) send(target, true, where) else own!!.raise(target, where) }
+                    .onFailure { event("area alert on $target: ${it.message}") }
             } else notice = notice.copy(alerted = null).also { event("area alert: no ${if (target == null) "group" else "position"}") }
         }
-        if (!alertArea && groupAlerts) {
+        // TS 24.281 §11.2.1.4 for MCVideo, as the other services.
+        if (!alertArea && (groupAlerts || service == LocationService.MCVIDEO)) {
             // TS 24.379 §12.1.1.4 step 2 (TS 24.282 §16.2.1.4 step 2): affiliate to (entered) or de-affiliate from (left)
             // the group the participating function indicates in <associated-group-id>, by the affiliation status change
             // procedure (§9.2.1.2, TS 24.282 §8.2.2): that group only, the user's other groups kept.

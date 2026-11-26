@@ -213,6 +213,58 @@ class McvideoSdpTest {
         assertFalse(McvideoSdp.offer(local).contains("mc_implicit_request"))
     }
 
+    /** RFC 3264 §8 (RFC 4566 §5.2): one o= session ID for the call, the version one higher in each later offer or answer. */
+    @Test fun originKeepsTheSessionAndIncrementsTheVersion() {
+        fun origin(sdp: String) = sdp.lineSequence().first { it.startsWith("o=") }.split(' ')
+        val call = org.openmcx.client.mcptt.McpttSdp.Origin()
+        val first = origin(McvideoSdp.offer(local, call))
+        val reinvite = origin(McvideoSdp.offer(local, call))
+        val remote = McvideoSdp.remote(McvideoSdp.offer(local))
+        val answer = origin(McvideoSdp.answer(remote, local, call))
+        assertEquals(first[1], reinvite[1]); assertEquals(first[1], answer[1])
+        assertEquals(listOf("1", "2", "3"), listOf(first[2], reinvite[2], answer[2]))
+        // A terminating call: the 200 (OK)'s answer, then the answers to the server's re-INVITEs.
+        val terminating = org.openmcx.client.mcptt.McpttSdp.Origin()
+        val answers = (1..3).map { origin(McvideoSdp.answer(remote, local, terminating)) }
+        assertEquals(1, answers.map { it[1] }.toSet().size)
+        assertEquals(listOf("1", "2", "3"), answers.map { it[2] })
+    }
+
+    /** TS 24.581 §14.3.1: an answer has no fmtp parameter the offer lacked: "mc_implicit_request" only when offered. */
+    @Test fun answerCarriesTheImplicitRequestOnlyWhenOffered() {
+        val pulled = local.copy(implicitRequest = true)
+        val notOffered = McvideoSdp.remote(McvideoSdp.offer(local))
+        assertFalse(McvideoSdp.answer(notOffered, pulled).contains("mc_implicit_request"))
+        val offered = McvideoSdp.remote(McvideoSdp.offer(local.copy(implicitRequest = true)))
+        assertTrue(McvideoSdp.answer(offered, pulled).contains("a=fmtp:MCVideo mc_transmission_ssrc=111;mc_implicit_request\r\n"))
+        assertFalse(McvideoSdp.answer(offered, local).contains("mc_implicit_request"))
+    }
+
+    /**
+     * TS 24.281 §15.2.1.1 step 13 with §6.4: a remotely initiated ambient viewing offer requests the grant for the
+     * viewed-to user: "mc_implicit_request", but no "mc_granted" and no own pending request.
+     */
+    @Test fun remoteInitAmbientOfferRequestsTheGrantForThePeer() {
+        val viewing = local.copy(implicitRequest = true, implicitForPeer = true, granted = true, direction = "recvonly")
+        val offer = McvideoSdp.offer(viewing)
+        assertTrue(offer.contains("a=fmtp:MCVideo mc_transmission_ssrc=111;mc_implicit_request\r\n"))
+        assertFalse(offer.contains("mc_granted"))
+        assertFalse(viewing.ownImplicitRequest)
+        val localInit = local.copy(implicitRequest = true, granted = true)
+        assertTrue(localInit.ownImplicitRequest)
+        assertTrue(McvideoSdp.offer(localInit).contains(";mc_implicit_request;mc_granted\r\n"))
+    }
+
+    /** RFC 3264 §6.1: the called user of a video push only receives: a sendrecv offer is answered recvonly. */
+    @Test fun pushIsAnsweredReceiveOnly() {
+        assertEquals("recvonly", McvideoSdp.answerDirection("sendrecv", receiveOnly = true))
+        assertEquals("recvonly", McvideoSdp.answerDirection("sendonly", receiveOnly = true))
+        assertEquals("inactive", McvideoSdp.answerDirection("recvonly", receiveOnly = true))
+        val answer = McvideoSdp.answer(McvideoSdp.remote(McvideoSdp.offer(local)), local.copy(direction = McvideoSdp.answerDirection("sendrecv", true)))
+        assertEquals("recvonly", McvideoSdp.remote(answer).direction)
+        assertFalse(answer.contains("a=sendrecv"))
+    }
+
     @Test fun pullAndPushUrls() {
         val xml = McvideoInfo(sessionType = "one-from-server video pull", videoPullUrl = "https://mcvideo-server/recordings/1").encode()
         assertTrue(xml.contains("<video-pull-url type=\"Normal\"><mcvideoURI>https://mcvideo-server/recordings/1</mcvideoURI>"))

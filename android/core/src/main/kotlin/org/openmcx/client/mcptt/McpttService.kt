@@ -43,7 +43,7 @@ import java.net.InetAddress
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicInteger
 
-class CallError(message: String, val status: Int? = null) : Exception(message)
+open class CallError(message: String, val status: Int? = null) : Exception(message)
 
 /**
  * The call types of TS 24.379: private (§11.1; a first-to-answer call is a private call once an invitee answered,

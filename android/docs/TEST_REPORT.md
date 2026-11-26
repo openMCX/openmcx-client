@@ -738,3 +738,68 @@ Suite (Android DUT, `--ss openmcx`, lab `drv-q1` from `tools/android-lab-up.py`,
 | P.10.4, 6.6.4 | Fail | Fail (bench) | b |
 | The 20 that passed in p7 (5.5, 5.7, 6.1.1.3, 6.1.1.5, 6.1.1.11, 6.1.1.13, 6.1.1.15, 6.1.1.21, 6.1.5.1, 6.2.3-6.2.8, 6.2.12, 6.2.18, P.1.3, P.9.1, P.10.3) | Pass | Pass (6.2.4, 6.2.7, 6.2.8, 6.2.12 on run d, before any pre-establishment) | b, d |
 | 6.1.1.4, 6.1.1.9, 6.1.1.12, 6.1.1.14 (the server's answer-mode fix) | Fail | Pass | b |
+
+## MCVideo suite fixes (2026-11-26)
+
+Branch `android-q3-mcvideo` (from main 5d431a0): the MCVideo failures of the suite run
+`suite-android/results/android-mcvideo-real-p7` (CONFORMANCE.md, MCVideo; VIDEO.md, "Suite fixes"). Server image
+`openmcx-all:adhoc-e2e-6c4ddd3` (server main f4a6c3c), three redroid 15 clients per lab, TLS; one lab at a time, each
+brought down after its run.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 612 passed, 0 failed (593 before). New: `McvideoAuthorisationTest` (5), `McvideoPriorityAuthorisationTest` (6); `TransmissionTimersTest` +3 (reception end fields, override), `McvideoSdpTest` +4 (origin, implicit request in answers, remote-init ambient offer, push direction), `AlertInfoTest` +1 (MCVideo area notices) |
+| App unit tests (`:app:testDebugUnitTest`) | 15 passed |
+| `:app:assembleDebug` | Built |
+| `tests/test_androidlab.py` | 8 passed |
+
+| Lab | Options | Scenarios | Checks |
+|---|---|---|---|
+| `q3-u` | `--mcvideo --priority --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1, V1-V4, V6 (V5 needs protection) | 57 of 57 |
+| `q3-p` | `--protected --xml-protection --integrity-protection --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1, V1-V6 | 65 of 65 |
+
+On `q3-u` a push, a pull and a remote-init ambient viewing call were also made by hand: the push callee answers
+`recvonly` and the server relays alice's grant; the pulled bob is granted at once; in the ambient call bob (viewed-to)
+is granted and alice receives without a pending request of her own.
+
+**Suite** (`suite-android`, lab `drv-q3` from `tools/android-lab-up.py up --mcvideo`, PIXIT
+`bench/openmcx-lab-android-mcvideo.toml`, `--dut android --ss openmcx`): the 17 failed test cases of p7 (5.8 is TBI)
+and the 28 that passed there. Run `results/android-q3-mcvideo-b` (APK e214691c…, commit 38ebc06); run
+`android-q3-mcvideo-a` was the commit before (the profile read on demand missing, see S.5.13).
+
+| Test case | p7 | q3-b | Note |
+|---|---|---|---|
+| 6.1.1.1, 6.2.1, S.8.2 | Fail | Inconclusive, Inconclusive, Pass | the re-INVITE offer's `o=` now passes; Inconclusive for SS stimuli (Transmission Granted) the real server does not send on cue |
+| 6.1.1.2 | Fail | Inconclusive | the answers' `o=` and the reception end request's fields pass; SS stimuli not in the trace |
+| 6.1.1.11 | Fail | Pass | |
+| 6.1.1.13, S.9.6 | Fail | Inconclusive | the reception end request's fields pass; the override notification and the unanswered request (S.9.6) are SS stimuli the bench cannot make |
+| 6.4.2 | Fail | Pass | |
+| 6.7.1 | Fail | Inconclusive | the offer's `mc_implicit_request` passes; step 8's Media Transmission Notification is not in the trace |
+| S.1.1, S.1.3 | Fail | Inconclusive, Pass | the answer is `recvonly`; S.1.1 step 3 is an SS stimulus |
+| S.8.1, S.12.2 | Fail | Pass | |
+| 6.3.4 | Fail | Fail | suite: no area notice is sent (below) |
+| S.5.13 | Fail | Fail | suite: the lab's profile grants the rights (below) |
+| S.5.5, S.5.16 | Fail | Fail | suite: no location and criteria the server does not take (below) |
+| the 28 passed in p7 | Pass | 26 Pass, S.17.4 and S.18.1 Inconclusive | S.17.4 and S.18.1: the server's 403 "Resource-Priority not authorized by call state" (below) |
+
+Not client faults:
+- **6.3.4:** step 1's `ss.send_message(kind='emergency_alert_area')` is "not available in the openmcx adapter", so no
+  notice reaches the phone and the only alert is the user's (as MCPTT's 6.6.4, ALERTS.md). The client now raises the
+  MCVideo alert on the notice (`McvideoPriorityAuthorisationTest.alertAreaNoticeAndAdhocAlert`). The adapter has to
+  move the DUT into the lab's emergency alert area instead.
+- **S.5.13:** the test expects a profile without `<allow-emergency-adhoc-group-call>` and
+  `<allow-imminent-peril-adhoc-group-call>` "as provisioned", but the bench's `site()` rights grant both (alice's
+  `mcvideo.adhoc_call.emergency`/`imminent` true), so the requests are authorised and sent. A preamble that sets them
+  false (as S.8.1 does with `update_document`) is needed. With the rights false the client refuses them
+  (`McvideoPriorityAuthorisationTest.unauthorisedRightsSendNothing`, `requestBeforeTheProfileIsReadReadsIt`).
+- **S.5.5, S.5.16:** the driver's `adhoc_alert` sets no position (the group alert's `_video_alert` sends
+  `location-position <PIXIT initial>` first); redroid has no fix, so the client now refuses the alert without a
+  location (TS 24.281 §12.1A.1.1 5)) instead of sending it without the location body. With a position the server
+  still refuses the bench's criterion `organization=mcx.test` (403, warning 187 "can't determine the adhoc group
+  participants": it takes `affiliated:<group>` and `member:<group>`), so no alert is raised and there is nothing to
+  cancel. By hand on `drv-q3`, `location-position 45 10` then `adhoc-alert affiliated:sip:operations@mcx.test video`
+  sent the alert with the location (the server's `adhoc_alert_started`, three recipients) and `adhoc-alert cancel`
+  cancelled it.
+- **S.17.4 (and S.18.1 in run a):** the INVITE right after the app restart was refused 403 "Resource-Priority not
+  authorized by call state" while the bench was restoring a service configuration that another test had changed (the
+  MCVideo server read `mcpttq.*` values and then the `mcpttp.*` ones again); the same calls passed in the other run.

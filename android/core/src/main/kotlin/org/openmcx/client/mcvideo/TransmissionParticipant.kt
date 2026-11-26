@@ -57,6 +57,8 @@ interface TransmissionListener {
     fun requestFailed() {}
     /** The server accepted (or refused, with [rejectCause]) our reception of the current transmission. */
     fun reception(receiving: Boolean, rejectCause: Int?) {}
+    /** Another stream overrides the one we receive (TS 24.581 §6.2.5.5.4 step 1); its reception is being ended. */
+    fun receptionOverridden() {}
     /** The answer to our remote transmission (cancel) request: done or not. */
     fun remoteResult(start: Boolean, done: Boolean?) {}
     /** Our request is queued (TS 24.581 §6.2.4.4.5, §6.2.4.9.2) at [position] (null: not given). */
@@ -221,13 +223,20 @@ class TransmissionParticipant(
      */
     suspend fun endReception(): Boolean = lock.withLock {
         if (_reception.value != RxState.HAS_PERMISSION && _reception.value != RxState.PENDING_REQUEST) return@withLock false
+        sendReceptionEnd()
+        true
+    }
+
+    /** §6.2.5.5.3 steps 1, 4, 5 (and §6.2.5.5.4 steps 3-5): Media reception end request, T104 and C104, 'U: pending reception release'. */
+    private suspend fun sendReceptionEnd() {
         _reception.value = RxState.PENDING_RELEASE
         receiving = false
-        runReception(TransmissionMessage(TxType.RECEPTION_END_REQUEST, serverSsrc), timers.t104Ms, timers.c104) {
+        // Step 1b: the User ID, Audio SSRC and Video SSRC of the transmitting user (from §6.2.5.3.2 step 3).
+        runReception(TransmissionMessage.receptionEnd(TxType.RECEPTION_END_REQUEST, serverSsrc, transmitter, transmitterAudioSsrc,
+            transmitterVideoSsrc), timers.t104Ms, timers.c104) {
             // §6.2.5.6.3: T104 expired N times: 'terminated'.
             if (_reception.value == RxState.PENDING_RELEASE) { _reception.value = RxState.TERMINATED; timeout("receive media release timeout") }
         }
-        true
     }
 
     /** §6.2.5.3.3: accept the notified transmission: Receive Media Request, T103 started with C103 at 1. */
@@ -371,9 +380,17 @@ class TransmissionParticipant(
                 _reception.value = RxState.TERMINATED
                 listener.reception(false, null)
             }
+            // §6.2.5.5.4: our reception is overridden: the user told (step 1), then a Media reception end request for the
+            // stream received (step 3) with T104 and C104 (step 4), 'U: pending reception release' (step 5).
+            TxType.RECEPTION_OVERRIDE_NOTIFICATION -> if (_reception.value == RxState.HAS_PERMISSION) {
+                listener.receptionOverridden()
+                sendReceptionEnd()
+            }
             // §6.2.5.5.5: the server ends our reception: Media reception end response, 'terminated'.
             TxType.RECEPTION_END_REQUEST -> {
-                send(TransmissionMessage(TxType.RECEPTION_END_RESPONSE, serverSsrc))
+                // The response names the stream ended (§9.2.27), as the request names it, else the one being received.
+                send(TransmissionMessage.receptionEnd(TxType.RECEPTION_END_RESPONSE, serverSsrc, message.transmittingUser ?: transmitter,
+                    message.audioSsrc ?: transmitterAudioSsrc, message.videoSsrc ?: transmitterVideoSsrc))
                 receptionTimer?.cancel()
                 receiving = false
                 _reception.value = RxState.TERMINATED
