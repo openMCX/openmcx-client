@@ -456,3 +456,66 @@ Fixed in this run:
   its 200.
 - **Scenario ids:** phases 4b and 5 both added an S80; phase 5's (INVITE with Replaces) is now S85.
 
+
+## Server fixes (2026-11-26)
+
+The server faults found on the Android labs (CONFORMANCE.md, "Deviations and limits") are fixed on openmcx-server
+branch `android-server-faults` (not yet on the server's main): srvfix-a (MCData, a3db6b4), srvfix-b (MCPTT, be65d35),
+srvfix-c (affiliation and the SIP core's reg event, c29be0a with `openmcx-kamailio:6.1.4-13`), merged at 0c5e503.
+Branch `android-srvfix` (from `android-parity` 6a29006) updates the client and the scenarios to expect the fixed
+behaviour. Each change was checked first on the image with its fix, then everything on the combined image
+`openmcx-all:srvfix-0c5e503` (fixture from the server's 0c5e503 checkout), three redroid 15 clients per lab, TLS.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 583 passed, 0 failed. New: `PrivateServicesTest.forwardingRequestBeforeThe480` (fails before the fix: Priv-Answer-Mode null), `ServiceProceduresTest.negotiatedRequestNamesTheRequester` |
+| App unit tests (`:app:testDebugUnitTest`) | 15 passed |
+| `:app:assembleDebug` | Built |
+| `tests/test_androidlab.py` | 6 passed (new: `down` removes `lab/run/NAME`) |
+
+Client and lab changes:
+- **Client, forwarding race:** when the server's forwarding MESSAGE arrived before the 480 of the call it forwards
+  (ms apart), `placeFollowUp` looked for that call in the history before it had ended, found nothing and sent
+  Priv-Answer-Mode Auto instead of the forwarded call's Manual. It now takes the call once it has ended.
+- **Client, negotiated-mode affiliation request received:** the requester is the service information's
+  `<mcptt-calling-user-id>` (`<mcvideo-calling-user-id>`), not the From header (the server's PSI).
+- **Lab:** `androidlab.py down` left `lab/run/NAME` behind (with root-owned server artifacts), so the name could not
+  be created again, although the README said `down` removes the lab. It now removes the directory (the root-owned
+  files through a container of the lab's server image); `down --keep` keeps it, with the scenario results.
+
+Scenario changes: S60 and S61 accept the server's 202 for a media-plane SDS's notification and check that the
+sender gets it; S64 checks the declined and deferred file's 480 with warning 110 or 231; S84's one-to-one media-plane
+SDS to `patrol-car-12.fa` is redirected (300) to client-c and delivered; S16 re-calls the group as soon as alice is
+out of the last call and checks a new session and no BYE (the MCPTT server's `group_call_replaced`, awaiting
+client-c, showed the case was met); S37 checks `<call-transfer-ind>` in client-c's INVITE; S38 and S39 check
+`<call-forwarding-ind>` at the target and that it rings for a Manual forwarded call (auto-answer was tolerated
+before); S23 and V6 (with `--fixture-arg=--remote-affiliation`) check bob's affiliation subscribed to and notified,
+and the negotiated-mode request reaching bob from alice, who is named in `<mcptt-calling-user-id>`; the refresh that
+took back the one subscription per user is gone.
+
+On the image with each fix: `srvfix-a-a3db6b4` S1, S6, S60, S61, S84 60/60 (S84 after a check fix, 15/15);
+`srvfix-b-be65d35` `--private-services --priority` S1, S37, S38 three times, S39 73/73, and the protected lab
+S1-S6, S16 96/96 (S5 12/12); `srvfix-c-c29be0a` `--mcvideo --monitor-group --fixture-arg=--remote-affiliation` S1,
+S19, S23, V6 59/59.
+
+On the combined image `openmcx-all:srvfix-0c5e503`:
+
+| Lab | Options | Scenarios | Checks |
+|---|---|---|---|
+| `sfx-fa` | `--functional-alias --priority` | S1, S6, S60, S61, S64, S84 | 75 of 75 (S1 15, S6 15, S60 8, S61 7, S64 15, S84 15) |
+| `sfx-fps` | `--private-services --priority` | S1, S37, S38 three times, S39 | 73 of 73 (S37 12, S38 11 each run, S39 13) |
+| `sfx-fp` | `--protected --xml-protection --integrity-protection --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1-S6, S16, S60, S61, S64, S84 | 141 of 141 (S5 12 of 12, S16 20) |
+| `sfx-fp` | the same, after `androidlab.py install` (an app restart without log-off) | S1, S6, S60 | 38 of 38: MCData authorised under the new CSK (it was 403 warning 140) |
+| `sfx-fc` | `--mcvideo --priority --monitor-group --fixture-arg=--remote-affiliation` | S1, S16, S19, S23, V6 | 68 of 73 (S19 11/13, S23 8/11: see below); V6 14 of 14, S16 20 of 20 |
+| `sfx-fc` | the same, after bob logged off and on | S1, S19, S23, twice | 45 of 45 each time (S19 13, S23 17) |
+
+Still open (server, not changed here):
+- **A third-party deregistration after the new registration (S19, once in four runs):** bob, deregistered by the
+  network with "deactivated", registered again 15 ms later on a new flow. The SIP core's first NOTIFY on his new reg
+  event subscription was still the old binding's (terminated, "deactivated", the old `callid`), ending the
+  subscription (the client ignored the contact by its `callid`), and the MCPTT server's `service_binding_removed`
+  (reason deregistration) for the old binding came after bob's new service authorisation and removed it: his MCPTT
+  calls then got 480 and alice's subscription to his affiliation 404 until he logged on again.
+- **The alias called, one-to-one over the media plane (S84):** after the 300, client-c's INVITE does not carry the
+  `<called-functional-alias-URI>` alice's INVITE has, so client-c is not told the alias called (it is printed, not
+  checked).
