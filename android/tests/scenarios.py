@@ -2000,9 +2000,12 @@ class Lab:
         seen = (self.video(B) or {}).get("pictures_received") or 0
         r = self.cmd(A, "video-transmit", "2", timeout=30)
         self.check("alice transmits in the ad hoc call (transmission control under the CSK on a protected lab)", r.get("granted") is True, result=r)
-        if protected:
+        # A camera that sends pictures (a phone; redroid has none, its transmissions carry no picture): bob decodes them
+        # under the preconfigured group's GMK.
+        if protected and (r.get("pictures") or 0) > 0:
             self.wait("bob decodes alice's protected ad hoc video",
                       lambda: ((self.video(B) or {}).get("pictures_received") or 0) > seen, timeout=10)
+            self.check("bob decodes alice's protected ad hoc video", True)
         self.cmd(B, "video-hangup")
         rejoin = self.cmd(B, "video-rejoinable")
         self.check("bob leaves; the ad hoc session can be re-joined", rejoin["type"] == "adhoc" and rejoin["group"] == group, rejoin=rejoin)
