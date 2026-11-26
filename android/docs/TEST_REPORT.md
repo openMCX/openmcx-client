@@ -803,3 +803,101 @@ Not client faults:
 - **S.17.4 (and S.18.1 in run a):** the INVITE right after the app restart was refused 403 "Resource-Priority not
   authorized by call state" while the bench was restoring a service configuration that another test had changed (the
   MCVideo server read `mcpttq.*` values and then the `mcpttp.*` ones again); the same calls passed in the other run.
+
+## Regression on merged main (2026-11-26)
+
+Client main deca57d (the merges of `android-q2-mcdata`, `android-q1-mcptt` and `android-q3-mcvideo`), branch
+`android-main-verify`. Server image `openmcx-all:answer-mode-e7a4a79` (server main 19a5250), fixture from that
+checkout; three redroid 15 clients per lab, TLS, the Linux reference client `openmcx-client:mcdemerg-ce06d65` as
+client-d on `mv-pm`. Each lab was created with `lab/androidlab.py create --openmcx <server checkout> --server-image
+openmcx-all:answer-mode-e7a4a79` and its own host ports in 24000-24109; up to three labs at a time, all brought down at
+the end. Debug APK sha256 23bf1789… (built from deca57d; the commit below changes a scenario only).
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`:core:test`) | 641 passed (before the verification) |
+| App unit tests (`:app:testDebugUnitTest`) | 15 passed |
+| `:app:assembleDebug` | Built |
+| `tests/test_androidlab.py` | passed (again after the S14 change) |
+
+| Lab | Options | Scenarios | Checks |
+|---|---|---|---|
+| `mv-base` | `--monitor-group` | S1-S12 | 153 of 153 |
+| `mv-base` | the same | S19-S24, S28; then S19, S23 twice | 98 of 98; 25 of 25 each time |
+| `mv-pm2` | `--priority --functional-alias --mcdata-pre-established --pre-established --reference-client client-d --client-image openmcx-client:mcdemerg-ce06d65 --fixture-arg=--msgstore` | S1, S6, S60-S67, S80-S82, S84, S70-S79, S85 | 238 of 238 |
+| `mv-f` | `--priority --chat --broadcast` | S1, S16, S25-S27, S29 | 91 of 91 |
+| `mv-g` | `--regroup --floor-queue` | S30, S31; S1, S18 | 41 of 41; 12 of 16, as before (the regroup fixture affiliates nobody to `operations`) |
+| `mv-q` | `--floor-queue` | S1, S18 | 24 of 24 |
+| `mv-loc2` | `--location --functional-alias --location-rules --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1, V1-V4, V6, S13, S14, S17, S40-S45 | 132 of 132 (with the S14 change below; 129 of 131 before it on `mv-loc`) |
+| `mv-ps` | `--private-services --priority` | S1, S32-S39; then S38 twice | 98 of 98; 11 of 11 each time |
+| `mv-p` | `--protected --xml-protection --integrity-protection --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1-S6, S12, S16, V1-V6, S60-S66, S80, S81, S83, S84 | 257 of 257 |
+| `mv-p` | the same, after `androidlab.py install` | S1, S6, S60 | 38 of 38 |
+| `mv-c` | `--mcvideo --priority --monitor-group --fixture-arg=--remote-affiliation` | S1, S16, S19, S23, V6; then S19, S23 three times | 79 of 79; 30 of 30 each time |
+
+Found by the merge, fixed here:
+- **S14 (the merge of q1 and q3):** `android-q3-mcvideo` makes the client raise its MCVideo alert on an emergency alert
+  area notice too (TS 24.281 §11.2.1.5, as TS 24.379 §12.1.1.6), so on the location lab (`--mcvideo`) the area raises
+  the alert on MCPTT, MCData and MCVideo and bob receives it on three services. S14 still expected two (q1 ran S14
+  before q3; q3 did not run S14). The scenario now expects every service; 132 of 132 on `mv-loc2`.
+
+Not counted in the table (the first labs and re-runs on the same lab):
+- `mv-pm` (the first pm lab): 227 of 229, client-c's control endpoint did not answer when S1 began (three labs were
+  starting); the runner now waits for each client's `phase: ready`. Its re-run on the same lab, and S66, S76 after a
+  full run on `mv-pm2`: 3 checks fail on a re-run only. **S76** (server, not merge-caused): S85 ends alice's emergency
+  group call over her pre-established session with the cancelling re-INVITE in that session (TS 24.379 §10.1.1.2.1.4
+  allows either session); the MCPTT server answers it as a pre-established session re-INVITE
+  (`pre_established_session_answered`, no `priority_changed` to normal), so the group's in-progress emergency stays,
+  the next plain call of alice is an emergency call, and bob's leg comes by INVITE with Replaces instead of Connect.
+  The same with the `android-q2-mcdata` APK (before the merges): S1, S76 28 of 28, S85 10 of 10, then S76 11 of 13.
+  **S66** ("alice's session is extended", MCData): the server grants the extension (`mcdata_release_extension
+  accepted`); passes on a fresh lab, fails on a re-run only (probably the first run's session records in alice's
+  status). Both pass on a fresh lab, as in every earlier regression.
+- `mv-loc` re-run on the same lab after the S14 change: 97 of 104 (alice not affiliated to the MCVideo group after
+  the first run's V6); on the fresh `mv-loc2`, 132 of 132.
+
+### Suite against Android
+
+Suite worktree `suite-android` (79902b0), `--dut android --ss openmcx`, a fresh lab per service from
+`tools/android-lab-up.py up` with `--androidlab` this worktree's `androidlab.py` (the APK above) and
+`--server-image openmcx-all:answer-mode-e7a4a79`: `drv-mvp`, `drv-mvd`, `drv-mvv` (`--mcvideo`). Runs
+`results/android-main-mcptt`, `android-main-mcdata`, `android-main-mcvideo`; MCPTT ran 6.1.1.5, 6.1.2.14 and 6.2.18
+last. Re-runs on fresh labs: `android-main-mcptt-fresh` (`drv-mvp2`), `android-main-mcdata-fresh` (`drv-mvd2`,
+D.3.4), `android-main-mcvideo-rerun` (S.18.1).
+
+| Service | p7 Pass / Fail / Inconclusive (+ unsupported) | Now | With the fresh re-runs |
+|---|---|---|---|
+| MCPTT (141) | 20 / 20 / 57 + 41, N/A 3 | 24 / 7 / 66 + 42, N/A 2 | 29 / 7 / 61 + 42, N/A 2 |
+| MCData (137) | 12 / 30 / 50 + 43, N/A 2 | 23 / 19 / 50 + 43, N/A 2 | the same (D.3.4 fails again) |
+| MCVideo (149) | 28 / 17 / 59 + 33, N/A 11, TBI 1 | 33 / 4 / 67 + 33, N/A 11, TBI 1 | 34 / 4 / 66 + 33 |
+
+MCPTT: the q1 fixes hold (6.1.1.4, 6.1.1.9, 6.1.1.12, 6.1.1.14, 6.1.1.19, 6.1.1.22, 6.1.2.13, 6.1.2.14 Pass; 6.2.16,
+P.4.6, P.8.12, P.10.4 Inconclusive). 6.1.5.1, 6.2.4, 6.2.8, 6.2.12 were Inconclusive in the full run (the incoming
+INVITE never reached the app: 6.1.1.6, 6.1.1.7 and 6.1.1.18 also pre-establish sessions they do not release, so
+running the three of the q1 note last is not enough) and Pass on the fresh `drv-mvp2`, with 6.2.7 and P.10.2 (Pass).
+6.1.1.17 is now "not supported" (a broadcast call with an implicit floor request) instead of N/A.
+
+Every Fail:
+
+| Service | Test case | Class | Evidence |
+|---|---|---|---|
+| MCPTT | 6.6.4 | bench | the suite lab has no `--location`; `send_message kind=emergency_alert_area` is not mapped on the real-server SS (as q1) |
+| MCPTT | P.1.4 | bench | the suite lab has no XML protection: the affiliation PUBLISH bodies are `type="Normal"` (as p7) |
+| MCPTT | P.1.9 | suite | step 4 judges the cached answer modes of a step-3 SS NOTIFY that was never sent ("the SS stimulus is not in the trace"); should be Inconclusive (as p7) |
+| MCPTT | P.3.2, P.3.9, P.4.5 | suite | `no_floor_after` / `media_stopped` take the next call's Floor Acks (another floor port and Call-ID) as the left call's (q1) |
+| MCPTT | P.5.1 | driver | `adhoc_alert` sets no position and uses the criterion `organization=mcx.test`, which the server refuses (q1: Pass with both changed) |
+| MCData | 5.1 | client, not merge-caused | REGISTER #42's Contact has no `+g.3gpp.mcdata.ipconn` nor the `...icsi.mcdata.ipconn` ICSI while the client supports IPCONN (TS 24.282 §7.2.1 4); PICS `pc_mcdata_ipconn`). `IpConnectivity.FEATURE`/`ICSI` (phase 4b, 7d08078) are never used in the REGISTER; p7 had the row `na` |
+| MCData | 6.2.1, 6.2.3 | suite | the media storage discovery MESSAGE has one body and goes as `application/vnd.3gpp.mcdata-info+xml` (TS 24.282 §6.4 one MIME body: q2's change); `msf_discovery` (`_lib_fd.py`) calls `message_headers` without `single=`, so it requires multipart/mixed. 6.2.1 steps 21, 30 also judge the user notification of FD notifications the SS never sent (as p7) |
+| MCData | 6.2.11; D.1.6, D.1.7, D.1.8 | bench | no protection on the suite lab: the file / DATA PAYLOAD goes in clear (as p7) |
+| MCData | 6.2.14 | suite | step 5 needs `fd_notify`, not in the openmcx SS adapter (q2) |
+| MCData | 6.4.3, 6.4.4 | suite | the area notices are not available in the openmcx SS adapter (q2) |
+| MCData | D.3.4 | suite | the SS's `update_document group_mcdata` edits the GMS's stored copy of the group document, and a fresh lab's GMS has none (`/data/groups` empty), so no edit is made (no "stored group document" in `ss-commands.log`) and steps 6-12 judge the client against the unchanged document; same on the fresh `drv-mvd2`. q2-r2 passed on a lab where an earlier test had stored the document |
+| MCData | D.5.1, D.5.8 | driver | no position before the alert (redroid has no fix); D.5.8 also SS stimuli (q2) |
+| MCData | D.5.2, D.5.7, D.5.12, D.5.14, D.6.3 | suite/bench | SS stimuli the real servers do not play (`priority_reinvite`, `priority_refuse`, `pre_hold`, `peer_emergency`, `fd_media`, `peer_cancel`, `fd_release_intent`) (q2) |
+| MCData | D.5.6 | server | the server answers the emergency and imminent peril FD INVITEs 403 (q2) |
+| MCVideo | 6.3.4 | suite | no area notice is sent (`emergency_alert_area` not in the openmcx adapter) (q3) |
+| MCVideo | S.5.13 | suite | the bench's rights grant the ad hoc emergency / imminent peril calls the test expects refused (q3) |
+| MCVideo | S.5.5, S.5.16 | driver | `adhoc_alert` without a position and with `organization=mcx.test` (q3) |
+
+Every Fail row of MCData but 5.1, 6.2.1 step 14 and 6.2.3 is the same as in q2's runs (or p7's); no Fail is caused by
+the merge. MCVideo S.18.1 was Inconclusive in the full run (the transmission request answered after the driver's
+2.5 s, so step 3 counted as not performed) and Pass on the re-run.

@@ -718,14 +718,15 @@ class Lab:
         self.cmd(A, "adhoc-alert", "cancel")
         self.wait("the ad hoc alert leaves bob's phone", lambda: self.alert_from(B, "alice") is None)
         self.check("the ad hoc alert is withdrawn", True)
-        # alice walks into the emergency alert area: the server says so, and her phone raises an alert (MCPTT and MCData).
+        # alice walks into the emergency alert area: the server says so, and her phone raises an alert in every service
+        # (MCPTT, MCData and, since the MCVideo suite fixes, MCVideo: TS 24.281 §11.2.1.5 as TS 24.379 §12.1.1.6).
         try:
             self.cmd(A, "location-position", "48.05", "2.05")
             notice = self.wait("alice's area notice", lambda: next((n for n in self.alerts(A)["notices"] if n["alert_area"] and n["entered"]), None), timeout=30)
             self.check("alice is told she entered the emergency alert area", notice is not None, notice=notice)
-            own = self.wait("alice's area alert is up", lambda: (x := self.alerts(A)["own"]) and "mcptt" in x and "mcdata" in x and x, timeout=15)
-            self.check("the area raised alice's alert on MCPTT and MCData", sorted(own) == ["mcdata", "mcptt"], own=own)
-            got = self.wait("bob receives alice's area alert", lambda: (x := self.alert_from(B, "alice")) and len(x["services"]) == 2 and x)
+            own = self.wait("alice's area alert is up", lambda: (x := self.alerts(A)["own"]) and all(s in x for s in every) and x, timeout=15)
+            self.check("the area raised alice's alert on MCPTT, MCData and MCVideo", sorted(own) == every, own=own)
+            got = self.wait("bob receives alice's area alert", lambda: (x := self.alert_from(B, "alice")) and len(x["services"]) == len(every) and x)
             self.check("bob sees it with alice's position in the area", abs(got["lat"] - 48.05) < 0.001 and abs(got["lon"] - 2.05) < 0.001)
             self.cmd(A, "alert", "off")
             self.wait("alice's area alert leaves bob's phone", lambda: self.alert_from(B, "alice") is None)
