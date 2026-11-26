@@ -15,7 +15,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import org.openmcx.client.app.attachments.AttachmentFiles
@@ -88,6 +90,9 @@ object Engine {
     /** File distribution (attachments in Messages). */
     @Volatile var fd: FdService? = null
         private set
+    /** MCData over the media plane (MSRP): long SDS, SDS sessions, files (TS 24.282 §9.2.3, §9.2.4, §10.2.5). */
+    @Volatile var mcdataMedia: org.openmcx.client.mcdata.McdataMediaService? = null
+        private set
     /** Test audio in debug builds: WAV files in place of the microphone, received speech to files. */
     @Volatile var fileAudio: FileAudio? = null
         private set
@@ -136,9 +141,26 @@ object Engine {
         mcptt?.let { it.answerMode = if (on) "manual" else (client?.config?.mcptt?.answerMode ?: "automatic") }
         mcvideo?.let { it.answerMode = if (on) "manual" else (client?.config?.mcvideo?.answerMode ?: "automatic") }
         log.add("ring first for private calls: ${if (on) "on" else "off"}")
+        // TS 24.379 §7.2.3: the changed answer mode goes to the server in a settings-only PUBLISH.
+        publishSettings()
+    }
+
+    /** TS 24.379 §7.2.3: the MCPTT service settings (the current answer mode) to the server, when authorised. */
+    fun publishSettings() {
+        val c = client ?: return
+        if (!c.status.value.mcptt.authorised) return
+        scope.launch { runCatching { c.procedures?.settingsPublish() }.onFailure { log.add("settings PUBLISH: ${it.message}") } }
+    }
+
+    /** The forwarding target the Forward action offers first (TS 24.379 §11.1.9.2.1), kept across restarts. */
+    val forwardTarget = MutableStateFlow<String?>(null)
+    fun setForwardTarget(target: String?) {
+        forwardTarget.value = target
+        prefs?.edit()?.putString(FORWARD_TARGET, target)?.apply()
     }
 
     private const val RING_FIRST = "ring_first"
+    private const val FORWARD_TARGET = "forward_target"
     private const val KNOWN_ALIASES = "known_aliases:"
     private val _inCall = MutableStateFlow(false)
     /** True while a call is up: the service then declares the phoneCall and microphone types. */
@@ -192,10 +214,17 @@ object Engine {
             val service = McpttService(c, MediaCodecAmrWb, audio)
             prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
             if (prefs?.getBoolean(RING_FIRST, false) == true) service.answerMode = "manual"
+            forwardTarget.value = prefs?.getString(FORWARD_TARGET, null)
             val bridge = TelecomBridge(context, scope, service).also { telecom = it }
+            // TS 24.379 §11.1.5.2.2, §11.1.7.2.2 1): the requests the user is told of, and the outcomes of the user's own.
+            service.services.listener = { record -> notify.callService(record) }
             service.listener = object : CallListener {
                 override fun incoming(call: Call) { bridge.track(call); notify.incomingCall(call) }
                 override fun changed(call: Call) {
+                    // The listened-to user of a remotely initiated ambient listening call is told nothing (TS 24.379
+                    // §11.1.6.2.1.2): no Telecom call, notification, location trigger or history entry. The foreground
+                    // service keeps the microphone (inCall).
+                    if (call.hidden) { _inCall.value = service.calls.value.any { it.state != "released" }; return }
                     if (call.outgoing) bridge.track(call)
                     if (call.state != "ringing") notify.cancelIncoming(call)
                     notify.callChanged(call)
@@ -212,6 +241,12 @@ object Engine {
             }
             mcptt = service
             c.handlers += service
+            // TS 24.379 §8: the pre-established session the user asked for is made again on each new MCPTT authorisation.
+            scope.launch {
+                c.status.map { it.mcptt.authorisations }.distinctUntilChanged().collect { n ->
+                    if (n > 0) runCatching { service.preSession.resume() }
+                }
+            }
         }
         config.mcdata?.let {
             val service = McdataService(c)
@@ -228,6 +263,34 @@ object Engine {
             }
             mcdata = service
             c.handlers += service
+            // The media plane: the phone connects to the server's MSRP stream (it never listens), TLS with the flow's keys.
+            val media = org.openmcx.client.mcdata.McdataMediaService(scope, org.openmcx.client.mcdata.ClientMediaPeer(c), service,
+                org.openmcx.client.msrp.SocketMsrpConnector(ssl, endpoints))
+            media.fileDirectory = File(AttachmentFiles.fdDirectory(context), "media")
+            // TS 24.282 §10.2.5.2.4 7)a): a file that is not a mandatory download waits for the user (Messages, or fd-media-answer).
+            media.fileDecision = { "ask" }
+            media.listener = object : org.openmcx.client.mcdata.MediaListener {
+                override fun changed(communication: org.openmcx.client.mcdata.MediaCommunication) {
+                    if (communication.kind == "fd" && !communication.outgoing && communication.state == "offered")
+                        log.add("file ${communication.fileName} offered by ${communication.peer} over the media plane")
+                    if (communication.kind == "fd" && communication.state in setOf("received", "delivered"))
+                        store.put(HistoryEntry("file", "media-${communication.startedAt}-${communication.id}", if (communication.outgoing) "out" else "in",
+                            communication.peer ?: communication.group, communication.group, "${communication.fileName} (media plane)", System.currentTimeMillis()))
+                }
+            }
+            service.media = media
+            mcdataMedia = media
+            // TS 24.282 §6.2.8.1.1 3)b): an emergency alert with an SDS session carries where the phone is.
+            media.alertLocation = { lastPosition() }
+            // TS 24.282 §18.3: the pre-established session the user asked for is made again once MCData is authorised
+            // on a new registration (kept by a target refresh when the participating function still has it).
+            scope.launch {
+                c.status.map { it.mcdata.authorisations }.distinctUntilChanged().collect { n ->
+                    if (n > 0) runCatching { media.preSession.resume() }
+                }
+            }
+            // Ahead of MCPTT, which would take any INVITE it does not recognise.
+            c.handlers.add(0, media)
             val files = FdService(scope, ClientFdPeer(c), it.fd, SocketFileHttpClient(ssl, endpoints, it.fd.transferTimeoutMs, config.httpProxy),
                 AttachmentFiles.fdDirectory(context), AttachmentStore(context))
             files.onOffer = { record ->
@@ -236,6 +299,8 @@ object Engine {
             }
             fd = files
             c.handlers += files
+            // IP connectivity, enhanced status, the message store (TS 24.282 §20, §14, §21).
+            McdataExtras.start(c, scope, SocketHttpClient(ssl, endpoints, proxy = config.httpProxy))
         }
         config.mcvideo?.let {
             val devices = AndroidVideo(context.applicationContext).also { v -> video = v }
@@ -271,7 +336,7 @@ object Engine {
         }
         services.forEach { c.handlers.add(0, it); it.start() }
         locations = services
-        deviceLocation = org.openmcx.client.app.location.DeviceLocation(context.applicationContext, scope) { locations }.also { it.start() }
+        deviceLocation = org.openmcx.client.app.location.DeviceLocation(context.applicationContext, scope, { locations }) { p -> c.locationRules.position(p) }.also { it.start() }
         // Emergency alerts, ahead of the services too.
         val alertListener = object : org.openmcx.client.alert.AlertListener {
             override fun alert(alert: org.openmcx.client.alert.EmergencyAlert, active: Boolean) = alertsChanged()
@@ -343,6 +408,7 @@ object Engine {
         client?.stop()
         deviceLocation?.stop(); deviceLocation = null; locations = emptyList()
         alertHandlers = emptyList(); alerts = null; notifications?.emergencyAlerts(emptyList())
+        McdataExtras.stop()
         client = null; mcptt = null; mcdata = null; fd = null; mcvideo = null; video = null; telecom = null; fileAudio = null
         _inVideoCall.value = false
         history?.close(); history = null
@@ -424,6 +490,16 @@ object Engine {
         }
     }
 
+    /** The pre-established sessions in one line for the Messages screen; null when none was asked for. */
+    fun preSessionLine(): String? {
+        val mcdataPre = mcdataMedia?.preSession?.status?.value?.takeIf { it.state != "released" || mcdataMedia?.preSession?.wanted == true }
+        val mcpttPre = mcptt?.preSession?.status?.value?.takeIf { it.state != "released" || mcptt?.preSession?.wanted == true }
+        val parts = listOfNotNull(mcpttPre?.let { "MCPTT pre-established session: ${it.state}" + (if (it.control == "in-use") " (in use)" else "") },
+            mcdataPre?.let { "MCData pre-established session: ${it.state}" +
+            (it.communication?.let { c -> " ($c)" } ?: "") })
+        return parts.joinToString(" · ").ifEmpty { null }
+    }
+
     /** The last position known without waiting: the debug override, else the phone's last fix. */
     fun lastPosition(): org.openmcx.client.mcvideo.EmergencyLocation? = positionOverride
         ?: deviceLocation?.lastFix?.let { org.openmcx.client.mcvideo.EmergencyLocation(it.latitude, it.longitude) }
@@ -498,7 +574,7 @@ object Engine {
 
     /** Empties the event log and the SIP trace (the Logs tab's Clear logs). */
     /** Clear the Message tab: short data and files (not the History tab). */
-    fun clearMessages() { mcdata?.clear(); fd?.clear() }
+    fun clearMessages() { mcdata?.clear(); fd?.clear(); mcdataMedia?.clear() }
 
     /** Clear the History tab. */
     fun clearHistory() { history?.clear() }

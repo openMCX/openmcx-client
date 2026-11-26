@@ -40,4 +40,13 @@ class McpttInfoTest {
         assertEquals(true, McpttInfo.parse(peril).imminentPeril)
         assertEquals(false, McpttInfo.parse(emergency).alert)
     }
+
+    /** TS 24.379 §11.1.1.2.1.1 14B) a), annex F.1.3 af): <forwarding-sequence-number> in <anyExt>, read back. */
+    @Test
+    fun forwardingSequenceNumber() {
+        val xml = McpttInfo(sessionType = "private", forwardingSequenceNumber = 0).encode()
+        org.junit.Assert.assertTrue(xml, xml.contains("<anyExt><forwarding-sequence-number>0</forwarding-sequence-number></anyExt>"))
+        org.junit.Assert.assertEquals(0, McpttInfo.parse(xml).forwardingSequenceNumber)
+        org.junit.Assert.assertFalse(McpttInfo(sessionType = "prearranged").encode().contains("forwarding"))
+    }
 }

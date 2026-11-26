@@ -13,6 +13,8 @@ import org.w3c.dom.Element
 import org.openmcx.client.security.KeyClient
 import kotlinx.serialization.json.*
 import org.openmcx.client.mcdata.GroupFdPolicy
+import org.openmcx.client.location.GroupAreas
+import org.openmcx.client.location.ProfileRules
 
 class DocumentError(message: String) : Exception(message)
 
@@ -33,6 +35,15 @@ data class UserProfile(
      * <entry> of <FunctionalAliasList> in the <anyExt> of <OnNetwork>.
      */
     val functionalAliases: List<String> = emptyList(),
+    /** §8.3.2.1 item 8 e) v): the <Priority> of <MCPTT-group-call> in <Common>, the user's group call priority. */
+    val groupCallPriority: Int? = null,
+    /**
+     * TS 24.484 §8.3.2.1 item 10 with TS 24.379 §9A.2.1.4, §9.2.1.7.2 and §9.2.1.2: the location criteria of the
+     * functional aliases, the affiliation rules of the <MCPTTGroupInfo> entries and the manual de-affiliation locks
+     * (none when the profile cannot be read for them: [locationRulesError]).
+     */
+    val locationRules: ProfileRules = ProfileRules(),
+    val locationRulesError: String? = null,
 ) {
     fun allows(action: String) = action in actions
 
@@ -63,7 +74,12 @@ data class UserProfile(
                     .flatMap { it.kids("PrivateCallURI") }.mapNotNull { it.uriEntry() },
                 functionalAliases = root.kids("OnNetwork").flatMap { it.kids("anyExt") }.flatMap { it.kids("FunctionalAliasList") }
                     .flatMap { it.kids("entry") }.mapNotNull { it.uriEntry() },
-            )
+                groupCallPriority = common.flatMap { it.kids("MCPTT-group-call") }.firstNotNullOfOrNull { it.kid("Priority") }
+                    ?.text()?.trim()?.toIntOrNull(),
+            ).let { profile ->
+                runCatching { ProfileRules.parse(text) }
+                    .fold({ profile.copy(locationRules = it) }, { profile.copy(locationRulesError = it.message) })
+            }
         }
 
         /**
@@ -87,9 +103,20 @@ data class UserProfile(
     }
 }
 
-/** A group document (TS 24.481 §7.2), the parts this client uses. */
+/**
+ * A group document (TS 24.481 §7.2), the parts this client uses. Phase 2: [type] "chat" for a chat group
+ * (<on-network-invite-members> "false", §7.2.4.2, or the OpenMCX configuration extension's type, which also has
+ * "group-broadcast" and "user-broadcast"), else "prearranged"; [preconfiguredUseOnly]; the members' <user-priority>
+ * (§7.2.2); [temporaryConstituents] of a temporary group's <on-network-temporary> and the temporary groups
+ * [regroupedInto] of a constituent's <on-network-regrouped> (§7.2.4.2, §6.3.14).
+ */
 data class GroupDocument(val uri: String, val members: List<String>, val services: Set<String>, val protectMedia: Boolean,
-                         val fd: GroupFdPolicy? = null) {
+                         val fd: GroupFdPolicy? = null,
+                         /** TS 24.481 §7.2.4.2, §7.2.8: the group's permitted and mandatory geographic areas (TS 24.379 §9.2.1.7.3). */
+                         val areas: GroupAreas = GroupAreas(), val type: String = "prearranged", val preconfiguredUseOnly: Boolean = false,
+                         val userPriorities: Map<String, Int> = emptyMap(), val temporaryConstituents: List<String> = emptyList(),
+                         val regroupedInto: List<String> = emptyList()) {
+    val chat get() = type == "chat"
     val mcptt get() = services.any { it.endsWith("icsi.mcptt") }
     val mcdata get() = services.any { it.endsWith("icsi.mcdata") }
 
@@ -97,9 +124,13 @@ data class GroupDocument(val uri: String, val members: List<String>, val service
         fun parse(text: String): GroupDocument {
             val root = Xml.parse(text)
             val service = root.descendants("list-service").firstOrNull() ?: throw DocumentError("no list-service")
-            val extension = service.descendants("configuration")
+            val configuration = service.descendants("configuration")
                 .firstOrNull { it.namespaceURI == "urn:openmcx:ns:groupConfiguration:1.0" }
-                ?.let { Json.parseToJsonElement(it.text()).jsonObject["mcdata"] as? JsonObject }
+                ?.let { runCatching { Json.parseToJsonElement(it.text()).jsonObject }.getOrNull() }
+            val extension = configuration?.get("mcdata") as? JsonObject
+            val invite = service.descendants("on-network-invite-members").firstOrNull()?.text()
+            val type = (configuration?.get("type") as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotEmpty() }
+                ?: if (invite == "false") "chat" else "prearranged"
             val fd = extension?.let {
                 GroupFdPolicy(it["allow_fd"]?.jsonPrimitive?.booleanOrNull ?: false,
                     it["fd_supported"]?.jsonPrimitive?.booleanOrNull ?: false,
@@ -111,6 +142,16 @@ data class GroupDocument(val uri: String, val members: List<String>, val service
                 services = service.descendants("service").map { it.getAttribute("enabler") }.toSet(),
                 protectMedia = service.descendants("protect-media").firstOrNull()?.text() == "true",
                 fd = fd,
+                type = type,
+                preconfiguredUseOnly = service.descendants("preconfigured-group-use-only").firstOrNull()?.text() == "true",
+                userPriorities = service.descendants("entry").mapNotNull { e ->
+                    e.descendants("user-priority").firstOrNull()?.text()?.toIntOrNull()?.let { e.getAttribute("uri") to it }
+                }.toMap(),
+                temporaryConstituents = service.descendants("on-network-temporary")
+                    .flatMap { it.descendants("constituent-MCPTT-group-ID") }.map { it.text() },
+                regroupedInto = service.descendants("on-network-regrouped").map { it.getAttribute("temporary-MCPTT-group-ID") }
+                    .filter { it.isNotEmpty() },
+                areas = runCatching { GroupAreas.parse(text) }.getOrDefault(GroupAreas()),
             )
         }
     }
@@ -198,6 +239,15 @@ class DocumentClient(private val http: HttpClient, private val cms: String, priv
     suspend fun userProfile(mcpttId: String, index: Int, token: String): UserProfile =
         UserProfile.parse(fetch("$cms/org.3gpp.mcptt.user-profile/users/${enc(mcpttId)}/mcptt-user-profile-$index.xml", token))
 
+    /** A CMS document by its path under the XCAP root (the MCVideo user profile, TS 24.484 §9.3.1A). */
+    suspend fun cmsDocument(path: String, token: String): String = fetch("$cms/$path", token)
+    /**
+     * TS 24.484 §10.3.1A and §9.3.1A: the user's MCData or MCVideo user profile document ([service] `mcdata` or
+     * `mcvideo`), <service>-user-profile-<index>.xml, as text.
+     */
+    suspend fun serviceProfile(service: String, userId: String, index: Int, token: String): String =
+        fetch("$cms/org.3gpp.$service.user-profile/users/${enc(userId)}/$service-user-profile-$index.xml", token)
+
     /** TS 24.484 §8.4.2.8 (§9.4.2.8, §10.4.2.8): the service configuration document of `mcptt`, `mcvideo` or `mcdata`. */
     suspend fun serviceConfiguration(service: String, token: String): String =
         fetch("$cms/org.3gpp.$service.service-config/global/service-config.xml", token)
@@ -209,6 +259,18 @@ class DocumentClient(private val http: HttpClient, private val cms: String, priv
     suspend fun ueConfiguration(mcpttId: String, ueId: String, token: String): String =
         fetch("$cms/org.3gpp.mcptt.ue-config/users/${enc(mcpttId)}/${enc(ueId)}", token)
 
-    suspend fun group(groupId: String, token: String): GroupDocument =
-        GroupDocument.parse(fetch("$gms/org.openmobilealliance.groups/global/byGroupID/${enc(groupId)}", token))
+    suspend fun group(groupId: String, token: String): GroupDocument = GroupDocument.parse(groupText(groupId, token))
+
+    /** The group document of [groupId] as text (TS 24.481 §6.3.3; read for the MCData enhanced status, TS 24.282 §14.2.1). */
+    suspend fun groupText(groupId: String, token: String): String =
+        fetch("$gms/org.openmobilealliance.groups/global/byGroupID/${enc(groupId)}", token)
+
+    /**
+     * A group management request of TS 24.481 §6.3 (temporary group formation §6.3.14.2, tear down §6.3.15.2) to the
+     * user's own tree of the GMS, `org.openmobilealliance.groups/users/<XUI>/<document>`, with the access token.
+     */
+    suspend fun gmsUserRequest(method: String, user: String, document: String, token: String, contentType: String? = null,
+                               body: ByteArray? = null) = http.request(method,
+        "$gms/org.openmobilealliance.groups/users/${enc(user)}/${enc(document)}",
+        mapOf("Authorization" to "Bearer $token") + (contentType?.let { mapOf("Content-Type" to it) } ?: emptyMap()), body)
 }

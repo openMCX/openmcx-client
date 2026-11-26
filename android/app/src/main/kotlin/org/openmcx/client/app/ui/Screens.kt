@@ -126,6 +126,11 @@ object Tags {
     const val MESSAGE_TEXT = "message-text"
     const val MESSAGE_TARGET = "message-target"
     const val SEND = "send"
+    const val SESSION_START = "session-start"
+    const val SESSION_END = "session-end"
+    const val SESSION = "session"
+    const val PRE_SESSION = "pre-session"
+    fun fileOffer(id: Int, decision: String) = "file-offer-$id-$decision"
     const val IMPORT = "import"
     const val SCAN_QR = "scan-qr"
     const val SPEAKER = "speaker"
@@ -189,6 +194,19 @@ object Tags {
     fun alertCancelOf(person: String) = "alert-cancel-of-$person"
     fun groupOptions(group: String) = "group-options-$group"
     fun callEmergency(target: String) = "call-emergency-$target"
+    fun callBack(target: String) = "call-back-$target"
+    fun callBackFulfil(from: String) = "call-back-fulfil-$from"
+    fun callBackCancel(target: String) = "call-back-cancel-$target"
+    fun ambient(target: String) = "ambient-$target"
+    fun ambientLocal(target: String) = "ambient-local-$target"
+    fun remoteGroup(target: String) = "remote-group-$target"
+    fun transferTo(target: String) = "transfer-to-$target"
+    fun forwardTo(target: String) = "forward-to-$target"
+    const val TRANSFER = "transfer"
+    const val FORWARD = "forward"
+    const val REMOTE_CALL = "remote-call"
+    const val SERVICE_NOTE = "service-note"
+    const val FORWARD_TARGET = "forward-target"
     fun callImminent(group: String) = "call-imminent-$group"
     const val CALL_PRIORITY = "call-priority"
     const val CALL_EMERGENCY = "call-emergency"
@@ -213,6 +231,16 @@ object Tags {
     fun adhocChoice(criteria: String) = "adhoc-choice-$criteria"
     const val ALERT_RESULT = "alert-result"
     fun callGroup(group: String) = "call-group-$group"
+    fun callBroadcast(group: String) = "call-broadcast-$group"
+    const val FIRST_TO_ANSWER = "first-to-answer"
+    const val ADHOC_CRITERIA = "adhoc-criteria"
+    fun adhocCriteria(criteria: String) = "adhoc-criteria-$criteria"
+    fun monitor(group: String) = "monitor-$group"
+    fun groupStatus(group: String) = "group-status-$group"
+    const val SETTINGS_NOTE = "settings-note"
+    const val AFFILIATION_REQUEST = "affiliation-request"
+    const val AFFILIATION_ACCEPT = "affiliation-accept"
+    const val AFFILIATION_DECLINE = "affiliation-decline"
     fun callPrivate(target: String) = "call-private-$target"
 }
 
@@ -271,7 +299,8 @@ fun McxApp(state: UiState, actions: UiActions, initialTab: Int = 0) {
                     TextButton(onClick = actions::logOff) { Text("Log off") }
                 }
             }
-            state.incoming?.let { IncomingCall(it, actions) }
+            state.incoming?.let { IncomingCall(it, actions, state.privateTargets, state.forwardTarget) }
+            state.affiliationRequest?.let { AffiliationRequestPrompt(it, actions) }
             if (!state.provisioned) Row(Modifier.fillMaxWidth().padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Button(onClick = actions::scanProvisioning, modifier = Modifier.weight(1f),
                     colors = ButtonDefaults.buttonColors(containerColor = LightGrey, contentColor = Mcx.Ink)) { Text("Scan QR code") }
@@ -365,6 +394,33 @@ private fun SettingsScreen(state: UiState, actions: UiActions, close: () -> Unit
                         style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
                 }
                 Switch(checked = state.ringFirst, onCheckedChange = actions::setRingFirst, modifier = Modifier.testTag(Tags.RING_FIRST))
+            }
+            // TS 24.379 §7.2.3: the answer mode goes to the server in the service settings; §7.2.4: those it notified.
+            state.settingsNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Mcx.Muted, modifier = Modifier.testTag(Tags.SETTINGS_NOTE)) }
+            state.notifiedAnswerModes.forEach { (who, mode) ->
+                Text("$who answers $mode", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+            }
+            // TS 24.379 §11.1.9.2.1: the user forwards a ringing private call; this target is offered first.
+            if (state.privateTargets.isNotEmpty()) {
+                var open by remember { mutableStateOf(false) }
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Call forwarding")
+                        Text("Ringing private calls can be forwarded with Forward to…; this person is offered first.",
+                            style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                    }
+                    Box {
+                        TextButton(onClick = { open = true }, modifier = Modifier.testTag(Tags.FORWARD_TARGET)) {
+                            Text(state.forwardTarget?.short() ?: "No one")
+                        }
+                        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                            DropdownMenuItem(text = { Text("No one") }, onClick = { open = false; actions.setForwardTarget(null) })
+                            state.privateTargets.forEach { t ->
+                                DropdownMenuItem(text = { Text(t.short()) }, onClick = { open = false; actions.setForwardTarget(t) })
+                            }
+                        }
+                    }
+                }
             }
             Section("Provisioning")
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End), modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
@@ -527,7 +583,7 @@ private fun Logo() {
 }
 
 @Composable
-private fun IncomingCall(call: CallItem, actions: UiActions) {
+private fun IncomingCall(call: CallItem, actions: UiActions, targets: List<String> = emptyList(), forwardTarget: String? = null) {
     Column(Modifier.fillMaxWidth().padding(12.dp).background(Mcx.Card, RoundedCornerShape(16.dp)).border(1.dp, Mcx.Line, RoundedCornerShape(16.dp))
         .padding(16.dp)) {
         Text("Incoming ${call.type.sessionType} call", style = MaterialTheme.typography.titleMedium, color = Mcx.Muted)
@@ -543,14 +599,71 @@ private fun IncomingCall(call: CallItem, actions: UiActions) {
                 Text("Decline", color = Mcx.Ink, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
             }
         }
+        // TS 24.379 §11.1.9.2.1: a ringing private call may be forwarded to another user instead of answered; the
+        // target chosen in Settings first.
+        val choices = (listOfNotNull(forwardTarget) + targets).distinct().filter { it.short() != call.title }
+        if (call.type == CallType.PRIVATE && !call.firstToAnswer && choices.isNotEmpty()) {
+            var open by remember { mutableStateOf(false) }
+            Box(Modifier.padding(top = 8.dp)) {
+                TextButton(onClick = { open = true }, modifier = Modifier.testTag(Tags.FORWARD)) { Text("Forward to…", color = Mcx.Ink) }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    choices.forEach { t ->
+                        DropdownMenuItem(text = { Text(t.short()) }, modifier = Modifier.testTag(Tags.forwardTo(t)),
+                            onClick = { open = false; actions.forward(t) })
+                    }
+                }
+            }
+        }
     }
 }
+
+/** The status line of a group: the affiliation the server notified, and whether it is monitored or may be. */
+private fun groupStatusText(g: GroupItem): String {
+    val affiliation = when (g.status) {
+        null -> "not affiliated"
+        "affiliated" -> "affiliated"
+        else -> g.status
+    }
+    val constituents = g.constituents.takeIf { it.isNotEmpty() }?.joinToString(prefix = " of ") { it.short() }.orEmpty()
+    return (if (g.chat && !g.regrouped) "chat, " else "") + when (g.kind) {
+        // TS 24.379 §16.2.1.3, TS 24.481 §6.3.14: the regroup or temporary group, and the groups it combines.
+        "regroup" -> "regroup" + (if (g.chat) " (chat)" else "") + constituents
+        "temporary" -> "temporary group" + (if (g.chat) " (chat)" else "") + constituents
+        "monitored" -> "monitored, $affiliation"
+        "available" -> if (g.status == null) "not monitored" else "not monitored, $affiliation"
+        else -> affiliation
+    } + (g.rule?.let { " ($it)" } ?: "")
+}
+
+/**
+ * TS 24.379 §9.2.1.5 step 2: an authorised user asks this phone to affiliate to or de-affiliate from groups (negotiated
+ * mode); the user accepts or declines.
+ */
+@Composable
+private fun AffiliationRequestPrompt(request: AffiliationRequestItem, actions: UiActions) = AlertDialog(
+    onDismissRequest = {},
+    modifier = Modifier.testTag(Tags.AFFILIATION_REQUEST),
+    title = { Text("Group change requested") },
+    text = {
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text("${request.from} asks this phone to change its groups.")
+            if (request.affiliate.isNotEmpty()) Text("Join: ${request.affiliate.joinToString { it.short() }}", fontWeight = FontWeight.Medium)
+            if (request.deaffiliate.isNotEmpty()) Text("Leave: ${request.deaffiliate.joinToString { it.short() }}", fontWeight = FontWeight.Medium)
+        }
+    },
+    confirmButton = {
+        TextButton(onClick = { actions.answerAffiliationRequest(true) }, modifier = Modifier.testTag(Tags.AFFILIATION_ACCEPT)) { Text("Accept") }
+    },
+    dismissButton = {
+        TextButton(onClick = { actions.answerAffiliationRequest(false) }, modifier = Modifier.testTag(Tags.AFFILIATION_DECLINE)) { Text("Decline") }
+    },
+)
 
 @Composable
 private fun TalkScreen(state: UiState, actions: UiActions) {
     val call = state.call
     if (call != null) {
-        CallPanel(call, actions, state.user, state.speaker, state.callFailure)
+        CallPanel(call, actions, state.user, state.speaker, state.callFailure, state.privateTargets)
         return
     }
     val adhoc = remember { mutableStateListOf<String>() }
@@ -570,18 +683,31 @@ private fun TalkScreen(state: UiState, actions: UiActions) {
         item { Section("Groups") }
         items(state.groups) { g ->
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().heightIn(min = 60.dp)) {
-                RadioButton(selected = g.selected, onClick = { actions.selectGroup(g.id) })
+                RadioButton(selected = g.selected, onClick = { actions.selectGroup(g.id) }, enabled = g.callable)
                 Column(Modifier.weight(1f)) {
                     Text(g.id.short(), style = MaterialTheme.typography.titleMedium)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Box(Modifier.size(7.dp).background(if (g.affiliated) Mcx.OkDot else Color.Transparent, CircleShape)
                             .border(1.dp, if (g.affiliated) Mcx.OkDot else Mcx.Muted, CircleShape))
-                        Text(if (g.affiliated) "affiliated" else "not affiliated", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                        // TS 24.379 §9.3.1.2: the status the server notified; a monitored group says so.
+                        Text(groupStatusText(g), style = MaterialTheme.typography.bodySmall, color = Mcx.Muted,
+                            modifier = Modifier.testTag(Tags.groupStatus(g.id)))
                     }
                 }
-                Button(onClick = { actions.callGroup(g.id) }, enabled = state.registered,
-                    modifier = Modifier.testTag(Tags.callGroup(g.id))) { Text("Call") }
-                GroupOptions(g.id, state.registered, actions)
+                if (g.kind == "monitored" || g.kind == "available") {
+                    // Monitor a group of the user profile besides the base groups (TS 24.379 §9.2.1.2).
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Switch(checked = g.monitored, onCheckedChange = { actions.setMonitored(g.id, it) }, enabled = state.registered,
+                            modifier = Modifier.testTag(Tags.monitor(g.id)))
+                        Text("Monitor", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                    }
+                }
+                if (g.callable) {
+                    // A chat group call is joined (TS 24.379 §10.1.2.2.1.1); the same request starts it.
+                    Button(onClick = { actions.callGroup(g.id) }, enabled = state.registered,
+                        modifier = Modifier.testTag(Tags.callGroup(g.id))) { Text(if (g.chat) "Join" else "Call") }
+                    GroupOptions(g.id, state.registered, actions, broadcast = !g.chat)
+                }
             }
         }
         item { Section("Private calls") }
@@ -591,12 +717,46 @@ private fun TalkScreen(state: UiState, actions: UiActions) {
                 Text(t.short(), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
                 OutlinedButton(onClick = { actions.callPrivate(t) }, enabled = state.registered,
                     modifier = Modifier.testTag(Tags.callPrivate(t))) { Text("Call") }
-                CallOptions(t, state.registered, actions)
+                CallOptions(t, state.registered, actions, state.groups.firstOrNull { it.selected }?.id)
+            }
+        }
+        // TS 24.379 §11.1.5.2.2: call-back requests received, each called back with manual commencement (§11.1.5.2.3);
+        // §11.1.5.2.1: those sent, until called back or withdrawn.
+        if (state.callBacks.isNotEmpty() || state.callBacksSent.isNotEmpty()) item { Section("Call-back requests") }
+        items(state.callBacks) { r ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("${r.from.short()} asks you to call back", style = MaterialTheme.typography.titleMedium)
+                    Text("Urgency ${r.urgency}" + (r.time?.let { " · ${it.substringAfter('T')} UTC" } ?: ""),
+                        style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                }
+                Button(onClick = { actions.fulfilCallBack(r.from) }, enabled = state.registered,
+                    modifier = Modifier.testTag(Tags.callBackFulfil(r.from))) { Text("Call back") }
+            }
+        }
+        items(state.callBacksSent) { (target, how) ->
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp)) {
+                Column(Modifier.weight(1f)) {
+                    Text("You asked ${target.short()} to call back", style = MaterialTheme.typography.titleMedium)
+                    Text(how, style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                }
+                OutlinedButton(onClick = { actions.cancelCallBack(target) }, enabled = state.registered,
+                    modifier = Modifier.testTag(Tags.callBackCancel(target))) { Text("Withdraw") }
             }
         }
         item {
-            Button(onClick = { actions.callAdhoc(adhoc.toList()) }, enabled = state.registered && adhoc.isNotEmpty(),
-                modifier = Modifier.padding(vertical = 8.dp)) { Text("Ad hoc call with ${adhoc.size} selected") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Button(onClick = { actions.callAdhoc(adhoc.toList()) }, enabled = state.registered && adhoc.isNotEmpty(),
+                    modifier = Modifier.padding(vertical = 8.dp)) { Text("Ad hoc call with ${adhoc.size} selected") }
+                // TS 24.379 §11.1.1.2.1.1: the first of two or more users to answer takes the call.
+                OutlinedButton(onClick = { actions.callFirstToAnswer(adhoc.toList()) }, enabled = state.registered && adhoc.size >= 2,
+                    modifier = Modifier.testTag(Tags.FIRST_TO_ANSWER)) { Text("First to answer") }
+            }
+            // TS 24.379 §11.1.7.2.1: the first user selected is asked to call the second (a remotely initiated call).
+            if (adhoc.size == 2) OutlinedButton(onClick = { actions.remoteCall(adhoc[0], adhoc[1]) }, enabled = state.registered,
+                modifier = Modifier.testTag(Tags.REMOTE_CALL)) { Text("Have ${adhoc[0].short()} call ${adhoc[1].short()}") }
+            state.serviceNote?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = Mcx.Ink, modifier = Modifier.testTag(Tags.SERVICE_NOTE)) }
+            if (state.adhocCallChoices.isNotEmpty()) AdhocCriteriaPicker(state, actions)
             Text("Press PTT with no call to call the selected group.", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
         }
         if (state.alertServices.isNotEmpty()) {
@@ -671,7 +831,7 @@ private fun FunctionalAliases(state: UiState, actions: UiActions) {
                 Text(when (alias.service) { "mcdata" -> "MCData"; "mcvideo" -> "MCVideo"; else -> "MCPTT" }, color = Mcx.Muted,
                     style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(end = 8.dp))
                 val (label, ink) = when (alias.status) {
-                    "active" -> (if (alias.inUse) "Active · on your calls" else "Active") to Mcx.OkInk
+                    "active" -> ((if (alias.inUse) "Active · on your calls" else "Active") + if (alias.byLocation) " · by location" else "") to Mcx.OkInk
                     "take-over-possible" -> "Held by another user" to Mcx.WarnInk
                     else -> "Not active" to Mcx.Muted
                 }
@@ -741,7 +901,8 @@ private val FloorLabel = TextStyle(fontFamily = Condensed, fontWeight = FontWeig
 
 /** The active call: who, the floor with the talk time left, a press-and-hold PTT key and the recent talkers. */
 @Composable
-fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Boolean? = null, failure: String? = null) {
+fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Boolean? = null, failure: String? = null,
+              transferTargets: List<String> = emptyList()) {
     // Without floor control both talk at once: the big key mutes the microphone instead of requesting the floor.
     val duplex = !call.floorControl
     val look = if (!duplex) floorLook(call) else if (call.muted)
@@ -777,7 +938,16 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
     Column(Modifier.fillMaxSize().background(Mcx.Ivory)) {
         Column(Modifier.padding(start = 20.dp, end = 20.dp, top = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(when (call.type) { CallType.PRIVATE -> "Private call"; CallType.PREARRANGED -> "Group call"; CallType.ADHOC -> "Ad hoc call" },
+                Text(when {
+                    call.ambientRole == "listening" -> "Ambient listening"
+                    call.ambientRole == "listened-to" -> "Ambient listening: you are heard"
+                    call.service == "transfer" -> "Transferred call"
+                    call.service == "forwarding" -> "Forwarded call"
+                    call.firstToAnswer -> "First-to-answer call"
+                    call.broadcast -> if (call.type == CallType.ADHOC) "Ad hoc broadcast call" else "Broadcast call"
+                    else -> when (call.type) { CallType.PRIVATE -> "Private call"; CallType.PREARRANGED -> "Group call"
+                        CallType.ADHOC -> if (call.criteria != null) "Ad hoc call by criteria" else "Ad hoc call"; CallType.CHAT -> "Chat group call" }
+                },
                     color = Mcx.Muted, style = MaterialTheme.typography.labelLarge, modifier = Modifier.weight(1f))
                 if (call.startedAt > 0) Text(clock(now - call.startedAt), color = Mcx.Muted, style = MaterialTheme.typography.labelLarge.merge(Tabular))
             }
@@ -881,6 +1051,23 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
                 shape = RoundedCornerShape(14.dp), border = BorderStroke(1.5.dp, Mcx.OnStop)) {
                 Text(if (emergency) "Cancel emergency" else "Emergency", color = Mcx.OnStop, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
             }
+            // TS 24.379 §11.1.8.2.1: hand the other party of a private call over to a third user.
+            val transferable = transferTargets.filter { it.short() != call.title && it.short() != user }
+            if (call.type == CallType.PRIVATE && call.ambientRole == null && !emergency && transferable.isNotEmpty()) {
+                var open by remember { mutableStateOf(false) }
+                Box(Modifier.weight(1f)) {
+                    OutlinedButton(onClick = { open = true }, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag(Tags.TRANSFER),
+                        shape = RoundedCornerShape(14.dp), border = BorderStroke(1.5.dp, Mcx.Ink)) {
+                        Text("Transfer", color = Mcx.Ink, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                    }
+                    DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                        transferable.forEach { t ->
+                            DropdownMenuItem(text = { Text("Transfer to ${t.short()}") }, modifier = Modifier.testTag(Tags.transferTo(t)),
+                                onClick = { open = false; actions.transfer(t) })
+                        }
+                    }
+                }
+            }
             if (call.type != CallType.PRIVATE && !emergency) {
                 val peril = call.priority == "imminent"
                 OutlinedButton(onClick = { actions.callPriority(false, !peril) }, modifier = Modifier.weight(1f).heightIn(min = 48.dp).testTag(Tags.CALL_IMMINENT),
@@ -902,7 +1089,8 @@ fun CallPanel(call: CallItem, actions: UiActions, user: String = "", speaker: Bo
                 contentAlignment = Alignment.Center) {
                 VideoButton("Video call", Modifier.testTag(Tags.VIDEO)) { actions.videoCall(call.members.firstOrNull { it.short() != user } ?: call.title) }
             }
-            Button(onClick = actions::hangup, modifier = Modifier.weight(1f).height(56.dp).testTag(Tags.HANGUP), shape = RoundedCornerShape(16.dp),
+            // §11.1.6.2.1.3 step 1: an ambient listening call is ended here only with the server's release capability.
+            Button(onClick = actions::hangup, enabled = call.mayRelease, modifier = Modifier.weight(1f).height(56.dp).testTag(Tags.HANGUP), shape = RoundedCornerShape(16.dp),
                 colors = ButtonDefaults.buttonColors(containerColor = Mcx.Stop, contentColor = Color.White)) {
                 Text("Hang up", fontWeight = FontWeight.Bold, fontSize = 17.sp)
             }
@@ -1039,7 +1227,7 @@ private fun WarningIcon(colour: Color, size: Dp) = Canvas(Modifier.size(size)) {
 
 /** ▾ beside a private Call: connect at once (the default) or ring the other phone first. */
 @Composable
-private fun CallOptions(target: String, enabled: Boolean, actions: UiActions) {
+private fun CallOptions(target: String, enabled: Boolean, actions: UiActions, group: String? = null) {
     var open by remember { mutableStateOf(false) }
     Box {
         MoreButton("More ways to call ${target.short()}", Tags.callOptions(target), enabled) { open = true }
@@ -1053,6 +1241,19 @@ private fun CallOptions(target: String, enabled: Boolean, actions: UiActions) {
                 onClick = { open = false; actions.callPrivateEmergency(target) })
             DropdownMenuItem(text = { Text("Where are they? (location)") }, modifier = Modifier.testTag(Tags.locate(target)),
                 onClick = { open = false; actions.locate(target) })
+            // TS 24.379 §11.1.5.2.1: ask them to call back.
+            DropdownMenuItem(text = { Text("Ask them to call back") }, modifier = Modifier.testTag(Tags.callBack(target)),
+                onClick = { open = false; actions.requestCallBack(target) })
+            // §11.1.6.2.1.1: listen to their surroundings without them doing anything, or let them listen to yours.
+            DropdownMenuItem(text = { Text("Listen in (ambient listening)") }, modifier = Modifier.testTag(Tags.ambient(target)),
+                onClick = { open = false; actions.ambientListen(target, local = false) })
+            DropdownMenuItem(text = { Text("Let them listen to me (ambient)") }, modifier = Modifier.testTag(Tags.ambientLocal(target)),
+                onClick = { open = false; actions.ambientListen(target, local = true) })
+            // §10.1.5.2.1: have their phone call the selected group.
+            group?.let { g ->
+                DropdownMenuItem(text = { Text("Have them call ${g.short()}") }, modifier = Modifier.testTag(Tags.remoteGroup(target)),
+                    onClick = { open = false; actions.remoteGroupCall(target, g) })
+            }
         }
     }
 }
@@ -1153,13 +1354,42 @@ private fun EmergencyAlert(state: UiState, actions: UiActions) {
     )
 }
 
-/** A group's other calls: emergency and imminent peril (TS 24.379 §6.2.8.1). */
+/**
+ * An ad hoc group call by participant criteria (TS 24.379 §17.2.2.1.1 step 12): the server determines who is called,
+ * from the criteria chosen here (the members of, or those affiliated to, one of the user's groups).
+ */
 @Composable
-private fun GroupOptions(group: String, enabled: Boolean, actions: UiActions) {
+private fun AdhocCriteriaPicker(state: UiState, actions: UiActions) {
+    var choosing by remember { mutableStateOf(false) }
+    OutlinedButton(onClick = { choosing = true }, enabled = state.registered, modifier = Modifier.testTag(Tags.ADHOC_CRITERIA)) {
+        Text("Ad hoc call by criteria…")
+    }
+    if (choosing) AlertDialog(
+        onDismissRequest = { choosing = false },
+        title = { Text("Ad hoc group call") },
+        text = {
+            Column {
+                Text("Call everyone who is:", style = MaterialTheme.typography.bodySmall, color = Mcx.Muted)
+                state.adhocCallChoices.forEach { c ->
+                    TextButton(onClick = { choosing = false; actions.callAdhocCriteria(c.criteria) },
+                        modifier = Modifier.fillMaxWidth().testTag(Tags.adhocCriteria(c.criteria))) { Text(c.label, modifier = Modifier.fillMaxWidth()) }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = { choosing = false }) { Text("Cancel") } },
+    )
+}
+
+/** A group's other calls: broadcast (TS 24.379 §6.2.8.2), emergency and imminent peril (§6.2.8.1). */
+@Composable
+private fun GroupOptions(group: String, enabled: Boolean, actions: UiActions, broadcast: Boolean = true) {
     var open by remember { mutableStateOf(false) }
     Box {
         MoreButton("More ways to call ${group.short()}", Tags.groupOptions(group), enabled) { open = true }
         DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            if (broadcast) DropdownMenuItem(text = { Text("Broadcast call (only you talk)") }, modifier = Modifier.testTag(Tags.callBroadcast(group)),
+                onClick = { open = false; actions.callGroupBroadcast(group) })
             DropdownMenuItem(text = { Text("Emergency group call", color = Mcx.OnStop) }, modifier = Modifier.testTag(Tags.callEmergency(group)),
                 onClick = { open = false; actions.callGroupPriority(group, "emergency") })
             DropdownMenuItem(text = { Text("Imminent peril group call", color = Mcx.OnRequesting) }, modifier = Modifier.testTag(Tags.callImminent(group)),
@@ -1242,12 +1472,37 @@ private fun MessagesScreen(state: UiState, actions: UiActions) {
         Row(Modifier.fillMaxWidth()) {
             SmallClear("Clear messages", enabled = state.messages.isNotEmpty(), tag = Tags.CLEAR_MESSAGES) { confirmClear = true }
         }
+        // The pre-established session (TS 24.282 §18.3): SDS goes over it while it is up.
+        state.preSessions?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = Mcx.Muted,
+            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp).testTag(Tags.PRE_SESSION)) }
+        // The open SDS session (TS 24.282 §9.2.4): what is sent to its target goes into it, until it is ended.
+        val session = state.sdsSession
+        if (session != null) Row(Modifier.fillMaxWidth().background(Mcx.Strip, RoundedCornerShape(8.dp)).padding(horizontal = 10.dp)
+            .testTag(Tags.SESSION), verticalAlignment = Alignment.CenterVertically) {
+            Text(session.title + when { session.emergency -> " · emergency"; session.imminent -> " · imminent peril"; else -> "" },
+                style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+            TextButton(onClick = actions::closeSession, modifier = Modifier.testTag(Tags.SESSION_END)) { Text("End") }
+        }
+        // Files offered over the media plane wait for the user (TS 24.282 §10.2.5.2.4 7)).
+        for (offer in state.fileOffers) Row(Modifier.fillMaxWidth().padding(top = 4.dp).background(Mcx.Card, RoundedCornerShape(8.dp))
+            .padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("${offer.name}${offer.size?.let { " (${AttachmentFiles.readableSize(it)})" } ?: ""} from ${offer.from.short()}",
+                style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+            for ((decision, label) in listOf("accept" to "Accept", "decline" to "Decline", "defer" to "Later"))
+                TextButton(onClick = { actions.answerFileOffer(offer.id, decision) }, modifier = Modifier.testTag(Tags.fileOffer(offer.id, decision))) { Text(label) }
+        }
         LazyColumn(Modifier.weight(1f)) {
             items(state.messages, key = { it.id }) { m -> MessageRow(m, actions) }
         }
+        // The message store, enhanced status and IP connectivity (TS 24.282 §21, §14, §20): McdataPanel.kt.
+        McdataPanel(target, group, state.registered)
         // Pill-shaped fields, as chat apps draw them.
-        OutlinedTextField(target, { target = it }, label = { Text("To (group or MCData ID)") }, singleLine = true,
-            shape = RoundedCornerShape(28.dp), modifier = Modifier.fillMaxWidth().testTag(Tags.MESSAGE_TARGET))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(target, { target = it }, label = { Text("To (group or MCData ID)") }, singleLine = true,
+                shape = RoundedCornerShape(28.dp), modifier = Modifier.weight(1f).testTag(Tags.MESSAGE_TARGET))
+            TextButton(onClick = { actions.openSession(target, group) }, enabled = state.registered && session == null && target.isNotBlank(),
+                modifier = Modifier.testTag(Tags.SESSION_START)) { Text("Session") }
+        }
         if (attachment != null) PendingAttachment(attachment, limit, tooLarge, actions)
         Row(verticalAlignment = Alignment.CenterVertically) {
             // The paperclip sits inside the message box, at its right edge.
@@ -1258,7 +1513,9 @@ private fun MessagesScreen(state: UiState, actions: UiActions) {
             val canSend = state.registered && target.isNotBlank() && (text.isNotBlank() || fileReady)
             IconButton(onClick = {
                 if (fileReady) actions.sendAttachment(target, group)
-                if (text.isNotBlank()) actions.send(target, group, text)
+                if (text.isNotBlank()) {
+                    if (session != null && session.target == target) actions.sessionSend(text) else actions.send(target, group, text)
+                }
                 text = ""
             }, enabled = canSend, modifier = Modifier.testTag(Tags.SEND).semantics { contentDescription = "Send" }) {
                 SendIcon(if (canSend) Mcx.Ink else Mcx.Line, 28.dp)

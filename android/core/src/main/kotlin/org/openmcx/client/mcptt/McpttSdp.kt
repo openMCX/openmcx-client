@@ -22,7 +22,22 @@ data class LocalMedia(val address: String, val audioPort: Int, val floorPort: In
                       val queueing: Boolean = false,
                       /** SRTP media (RTP/SAVP, TS 33.180 7.4/7.5, RFC 3711) and, for a private call, the PCK's
                        *  MIKEY-SAKKE I_MESSAGE in a=key-mgmt (RFC 4567; TS 24.379 §6.2.1 step 4 b)). */
-                      val protected: Boolean = false, val keyMgmt: String? = null)
+                      val protected: Boolean = false, val keyMgmt: String? = null,
+                      /**
+                       * The offer is an implicit floor request ("mc_implicit_request", TS 24.380 §14.2.5): only in the
+                       * initial INVITE's offer (§14.5); with it the speech SSRC [audioSsrc] is announced in a=ssrc, so
+                       * that the answer can return it in "mc_ssrc" (§14.3.6).
+                       */
+                      val implicitRequest: Boolean = false,
+                      /** "mc_granted" (§14.2.4): we accept the floor granted in the SIP 200 (OK); only with [implicitRequest]. */
+                      val granted: Boolean = false,
+                      /** The "mc_priority" of an offer (TS 24.380 §14.3.3): the highest floor priority asked for; null: none. */
+                      val floorPriority: Int? = null,
+                      /**
+                       * The speech direction (RFC 3264 §5.1): `sendrecv`, or for an ambient listening call (TS 24.379
+                       * §6.2.1 item 2c) `recvonly` for the listening user and `sendonly` for the listened-to user.
+                       */
+                      val direction: String = "sendrecv")
 
 /** What the other side (the MCPTT server) negotiated. */
 data class RemoteMedia(
@@ -43,13 +58,23 @@ data class RemoteMedia(
     /** RTP/SAVP audio, and the base64 MIKEY message of `a=key-mgmt:mikey` (RFC 4567), if any. */
     val protected: Boolean = false,
     val keyMgmt: String? = null,
+    /** The answer's "mc_implicit_request" (§14.3.5: the implicit floor request accepted), "mc_granted" (§14.3.4). */
+    val implicitRequest: Boolean = false,
+    val granted: Boolean = false,
+    /** The answer's "mc_ssrc" (§14.3.6): the RTP SSRC to send with once granted; null without one. */
+    val grantedSsrc: Long? = null,
+    /** The speech direction attribute (RFC 3264 §5.1); `sendrecv` without one. */
+    val direction: String = "sendrecv",
+    /** "mc_no_floor_ctrl" (TS 24.380 §14.2.6): a call over a pre-established session without floor control. */
+    val noFloorControl: Boolean = false,
 )
 
 /**
  * SDP for an MCPTT on-demand session (TS 24.379 §6.2.1, §6.2.2; TS 24.380 §14): one
  * AMR-WB audio stream and one floor control stream, `m=application <port> udp MCPTT`.
- * This client offers no implicit floor request; it offers queueing (`mc_queueing`) when the service configuration has a
- * floor request queue, since the server rejects an offer of queueing it does not support.
+ * The initial INVITE's offer may be an implicit floor request (`mc_implicit_request`, with `mc_granted` when configured);
+ * queueing (`mc_queueing`) is offered when the service configuration has a floor request queue, since the server
+ * rejects an offer of queueing it does not support.
  */
 object McpttSdp {
     const val PAYLOAD_TYPE = 96
@@ -72,6 +97,17 @@ object McpttSdp {
 
     private fun sessionId() = (random.nextInt() and 0x7fffffff).toLong()
 
+    /**
+     * The o= line of one call's SDP (RFC 4566 §5.2, RFC 3264 §8): the same session ID for the whole session, and a
+     * version one higher in each new offer or answer, so that a subsequent answer is told apart from the one before.
+     */
+    class Origin {
+        val sessionId = McpttSdp.sessionId()
+        @Volatile var version = 0L
+            private set
+        @Synchronized fun next(address: String): String = "- $sessionId ${++version} IN IP4 $address"
+    }
+
     private fun audio(local: LocalMedia, pt: Int, octetAligned: Boolean) = MediaDescription(
         "audio", local.audioPort, if (local.protected) "RTP/SAVP" else "RTP/AVP", listOf(pt.toString()), info = "speech",
         attributes = listOf(
@@ -81,29 +117,41 @@ object McpttSdp {
             "ptime" to "20",
             "maxptime" to "240",
             "rtcp" to (local.audioPort + 1).toString(),
-            "sendrecv" to null,
-        ) + (if (!local.floorControl) listOf("ssrc" to "${local.audioSsrc} cname:mcptt") else emptyList()),
+            local.direction to null,
+        ) + (if (local.audioSsrc != 0L) listOf("ssrc" to "${local.audioSsrc} cname:mcptt") else emptyList()),
     )
 
-    private fun floor(local: LocalMedia, priority: Int?, queueing: Boolean) = MediaDescription(
+    /**
+     * The media-floor control entity (TS 24.380 §14): [implicit] and [granted] only in an offer (an answer carries
+     * neither, §14.3.6: they are the server's).
+     */
+    private fun floor(local: LocalMedia, priority: Int?, queueing: Boolean, implicit: Boolean = false, granted: Boolean = false) = MediaDescription(
         "application", local.floorPort, "udp", listOf("MCPTT"),
         attributes = listOf("fmtp" to "MCPTT mc_floor_ssrc=${local.floorSsrc}" + (priority?.let { ";mc_priority=$it" } ?: "") +
-            if (queueing) ";mc_queueing" else ""),
+            (if (queueing) ";mc_queueing" else "") + (if (implicit) ";mc_implicit_request" else "") +
+            if (implicit && granted) ";mc_granted" else ""),
     )
 
-    fun offer(local: LocalMedia): String = SessionDescription(
-        origin = "- ${sessionId()} 1 IN IP4 ${local.address}",
+    fun offer(local: LocalMedia, origin: Origin = Origin()): String = SessionDescription(
+        origin = origin.next(local.address),
         connection = "IN IP4 ${local.address}",
-        media = listOfNotNull(audio(local, PAYLOAD_TYPE, false), if (local.floorControl) floor(local, null, local.queueing) else null),
+        media = listOfNotNull(audio(local, PAYLOAD_TYPE, false),
+            if (local.floorControl) floor(local, local.floorPriority, local.queueing, local.implicitRequest, local.granted) else null),
         attributes = listOfNotNull(local.keyMgmt?.let { "key-mgmt" to "mikey $it" }),
     ).encode()
 
     /** Answer [offer]: its payload type and octet alignment, its floor priority echoed, queueing when both support it (§14.2.2). */
-    fun answer(offer: RemoteMedia, local: LocalMedia): String = SessionDescription(
-        origin = "- ${sessionId()} 1 IN IP4 ${local.address}",
+    fun answer(offer: RemoteMedia, local: LocalMedia, origin: Origin = Origin(), keyMgmt: String? = null): String = SessionDescription(
+        origin = origin.next(local.address),
         connection = "IN IP4 ${local.address}",
         media = listOfNotNull(audio(local, offer.payloadType, offer.octetAligned),
-            if (offer.floorControl && local.floorControl) floor(local, offer.floorPriority, offer.queueing && local.queueing) else null),
+            // TS 24.380 §14.2.6, §14.3.7: an offer with "mc_no_floor_ctrl" (a call over a pre-established session
+            // without floor control) is answered with it and none of the floor control attributes.
+            if (offer.floorControl && local.floorControl && offer.noFloorControl) MediaDescription("application", local.floorPort, "udp",
+                listOf("MCPTT"), attributes = listOf("fmtp" to "MCPTT mc_no_floor_ctrl"))
+            else if (offer.floorControl && local.floorControl) floor(local, offer.floorPriority, offer.queueing && local.queueing) else null),
+        // TS 24.379 §11.1.1.2.1.2 step 5: a first-to-answer invitee's answer carries the PCK it made.
+        attributes = listOfNotNull(keyMgmt?.let { "key-mgmt" to "mikey $it" }),
     ).encode()
 
     /** The remote side of [sdp] (an offer or an answer). */
@@ -122,6 +170,11 @@ object McpttSdp {
         return RemoteMedia(address, audio.port, floor?.port ?: 0, pt, fmtp["octet-align"] == "1", ssrc, floorParams["mc_priority"]?.toIntOrNull(),
             floorControl = floor != null, modeSet = modeSet, queueing = floor != null && "mc_queueing" in floorParams,
             protected = audio.proto == "RTP/SAVP",
+            implicitRequest = floor != null && "mc_implicit_request" in floorParams,
+            granted = floor != null && "mc_granted" in floorParams,
+            grantedSsrc = floorParams["mc_ssrc"]?.toLongOrNull(),
+            noFloorControl = floor != null && "mc_no_floor_ctrl" in floorParams,
+            direction = audio.direction,
             keyMgmt = (session.attributes.firstOrNull { it.first == "key-mgmt" }?.second ?: audio.attribute("key-mgmt"))
                 ?.trim()?.takeIf { it.startsWith("mikey ") }?.removePrefix("mikey ")?.trim())
     }

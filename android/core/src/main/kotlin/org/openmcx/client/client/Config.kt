@@ -50,6 +50,8 @@ data class ClientConfig(
      * only (TS 24.484 §7.2.2.7 g) gives no private key and no pre-shared key identity for mutual).
      */
     val httpProxy: String? = null,
+    /** The SEAL location management server's base URI (`lms`, TS 24.545 clause 6.2.2), or null without one. */
+    val lms: String? = null,
 ) {
     data class Sip(
         val publicUserId: String, val privateUserId: String, val password: String,
@@ -115,6 +117,23 @@ data class ClientConfig(
         val gmsSubscriptionPsi: String? = null,
         /** The UE ID of the UE configuration document (TS 24.484 §8.2.1) (`ue_id`, by default the client ID). */
         val ueId: String? = null,
+        /**
+         * TS 24.379 §6.4, TS 24.380 §14.2.5: the initial INVITE of a call with floor control is an implicit floor request
+         * (`mc_implicit_request`) (`implicit_floor_request`, off by default, as the Linux client's).
+         */
+        val implicitFloorRequest: Boolean = false,
+        /**
+         * TS 24.380 §14.2.4: "mc_granted" in the offer of an initial INVITE that carries "mc_implicit_request", to accept
+         * the floor granted in the SIP 200 (OK) (`offer_granted`, off by default, as the Linux client's
+         * `mcptt.offer_granted`). The clause leaves the offer to the client ("when it is acceptable").
+         */
+        val offerGranted: Boolean = false,
+        /**
+         * TS 24.380 §14.3.3: the highest floor priority this client asks for in its group calls' "mc_priority"
+         * (`floor_priority`, 0 to 255); without it the group document's <user-priority>, else the user profile's
+         * <MCPTT-group-call>/<Priority> ([org.openmcx.client.mcptt.GroupCallRules.floorPriorityOffer]).
+         */
+        val floorPriority: Int? = null,
     )
 
     data class Mcdata(
@@ -144,6 +163,15 @@ data class ClientConfig(
          * the PCK's own Expiry time when it is earlier (TS 33.180 annex E.6.10).
          */
         val pckLifetimeS: Long = DEFAULT_PCK_LIFETIME_S,
+        /** TS 24.282 §20.2.0a step 1: this client's IP address in an IP connectivity tunnel (`ipconn.address`). */
+        val ipconnAddress: String? = null,
+        /**
+         * TS 24.282 §21.1 and §21.2: the MCData message store (`msgstore`, its server root) and the notification server
+         * (`notification`) of the NMS REST API; `msgstore_store` is the store name (default "mcdata").
+         */
+        val msgstore: String? = null,
+        val notification: String? = null,
+        val msgstoreStore: String = "mcdata",
     )
 
     data class Media(val portRange: IntRange, val amrWbMode: Int)
@@ -156,6 +184,20 @@ data class ClientConfig(
         val width: Int = 640, val height: Int = 480, val frameRate: Int = 15, val bitrate: Int = 500_000,
         /** The MCVideo functional aliases this user may activate (TS 24.281 §20.2.1), as [Mcptt.functionalAliases]. */
         val functionalAliases: List<String> = emptyList(),
+        /**
+         * TS 24.581 §14.2.4: "mc_granted" in the offer of an initial INVITE with an implicit transmission request
+         * (`offer_granted`, default false: the client's choice, "when it is acceptable").
+         */
+        val offerGranted: Boolean = false,
+        /** TS 24.581 §11.1.1, §11.2.1: T100 to T104 (ms) and C100 to C104 (`transmission_timers`: "t100" ... "c104"). */
+        val timers: org.openmcx.client.mcvideo.TransmissionTimers = org.openmcx.client.mcvideo.TransmissionTimers(),
+        /** TS 24.581 §14.2.2: "mc_queueing" offered (`queueing`, default false). */
+        val queueing: Boolean = false,
+        /**
+         * The transmission and reception priority (TS 24.581 §14.2.3, §14.2.6) when provisioned (`priority`); otherwise
+         * the MCVideo user profile's <Priority> (TS 24.484 §9.3.2.1).
+         */
+        val priority: Int? = null,
     )
 
     /**
@@ -223,26 +265,43 @@ data class ClientConfig(
                         idms.optStr("jwks_uri"))),
                 cms = root.str("cms"),
                 gms = root.str("gms"),
+                lms = root.optStr("lms")?.ifEmpty { null },
                 mcptt = (root["mcptt"] as? JsonObject)?.let {
                     Mcptt(it.str("user_id"), it.str("psi"), it.strings("groups"), it.optStr("answer_mode") ?: "automatic",
                         it.int("session_expires", 1800), it.int("manual_answer_timeout", 20),
                         it.int("profile_index", 1).takeIf { index -> index in 1..255 } ?: 1, it.strings("functional_aliases"),
                         it.bool("subscribe_configuration", true), it.bool("subscribe_group_documents", true),
                         it.bool("documents_on_notify", false), it.optStr("cms_subscription_psi")?.also(::sipUri),
-                        it.optStr("gms_subscription_psi")?.also(::sipUri), it.optStr("ue_id"))
+                        it.optStr("gms_subscription_psi")?.also(::sipUri), it.optStr("ue_id"),
+                        it.flag("implicit_floor_request"), it.flag("offer_granted"),
+                        (it["floor_priority"] as? JsonPrimitive)?.intOrNull?.takeIf { p -> p in 0..255 })
                 },
                 mcdata = (root["mcdata"] as? JsonObject)?.let {
                     Mcdata(it.str("user_id"), it.str("psi"), it.strings("groups"), it.int("max_payload_size_sds_cplane_bytes", 1000),
                         it.int("tdu1_seconds", 10), FdConfig.parse(it["fd"] as? JsonObject), it.strings("functional_aliases"),
                         it.flag("protect_payload"), it.flag("protect_signalling"), it.flag("authenticate_payload"),
-                        it.count("pck_lifetime_s", DEFAULT_PCK_LIFETIME_S, 1))
+                        it.count("pck_lifetime_s", DEFAULT_PCK_LIFETIME_S, 1),
+                        (it["ipconn"] as? JsonObject)?.optStr("address"), it.optStr("msgstore"), it.optStr("notification"),
+                        it.optStr("msgstore_store") ?: "mcdata")
                 },
                 media = Media(ports[0]..ports[1], media.int("amr_wb_mode", 2)),
                 mcvideo = (root["mcvideo"] as? JsonObject)?.let {
                     Mcvideo(it.str("user_id"), it.str("psi"), it.strings("groups"), it.optStr("answer_mode") ?: "automatic",
                         it.strings("chat_groups"),
                         it.int("width", 640), it.int("height", 480), it.int("frame_rate", 15), it.int("bitrate", 500_000),
-                        it.strings("functional_aliases"))
+                        it.strings("functional_aliases"), it.bool("offer_granted", false),
+                        (it["transmission_timers"] as? JsonObject)?.let { t ->
+                            val d = org.openmcx.client.mcvideo.TransmissionTimers()
+                            runCatching {
+                                org.openmcx.client.mcvideo.TransmissionTimers(t.count("t100", d.t100Ms, 1), t.count("t101", d.t101Ms, 1),
+                                    t.count("t102", d.t102Ms, 1), t.count("t103", d.t103Ms, 1), t.count("t104", d.t104Ms, 1),
+                                    t.count("c100", d.c100.toLong(), 1).toInt(), t.count("c101", d.c101.toLong(), 1).toInt(),
+                                    t.count("c102", d.c102.toLong(), 1).toInt(), t.count("c103", d.c103.toLong(), 1).toInt(),
+                                    t.count("c104", d.c104.toLong(), 1).toInt())
+                            }.getOrElse { e -> throw ConfigError("mcvideo.transmission_timers: ${e.message}") }
+                        } ?: org.openmcx.client.mcvideo.TransmissionTimers(),
+                        it.bool("queueing", false),
+                        it.optStr("priority")?.let { p -> p.toIntOrNull()?.takeIf { v -> v in 0..255 } ?: throw ConfigError("mcvideo.priority must be 0 to 255") })
                 },
                 security = (root["security"] as? JsonObject)?.let {
                     val profile = it.obj("key_parameter_profile")

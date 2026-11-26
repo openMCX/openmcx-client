@@ -24,7 +24,25 @@ import org.openmcx.client.mcptt.FloorState
 import org.openmcx.client.mcvideo.TxState
 import java.util.UUID
 
-data class GroupItem(val id: String, val affiliated: Boolean, val selected: Boolean)
+/**
+ * A group of the Call tab: its affiliation status as the server notified it (TS 24.379 §9.2.1.3: "affiliated",
+ * "affiliating", "deaffiliating", or null when not listed); [kind] "base" for a group affiliated at start-up,
+ * "monitored" for one of the user profile affiliated besides them (§9.2.1.2), "available" for one that may be monitored,
+ * "regroup" for a regroup the user was told of (§16.2.1.3) and "temporary" for a temporary group (TS 24.481 §6.3.14).
+ * [chat]: a chat group (§10.1.2), joined rather than called; [constituents] of a regroup.
+ */
+data class GroupItem(val id: String, val affiliated: Boolean, val selected: Boolean, val status: String? = null,
+                     val kind: String = "base",
+                     /** Why a location rule changed its affiliation (TS 24.379 §9.2.1.7, §12.1.1.4), or null. */
+                     val rule: String? = null, val chat: Boolean = false, val constituents: List<String> = emptyList()) {
+    val monitored: Boolean get() = kind == "monitored"
+    /** A chat group needs no affiliation first: joining affiliates (TS 24.379 §9.2.2.3.6). */
+    val callable: Boolean get() = kind != "available" || chat
+    val regrouped: Boolean get() = kind == "regroup" || kind == "temporary"
+}
+
+/** A received negotiated-mode affiliation request awaiting the user's answer (TS 24.379 §9.2.1.5). */
+data class AffiliationRequestItem(val from: String, val affiliate: List<String>, val deaffiliate: List<String>)
 
 data class CallItem(
     val id: Int,
@@ -52,17 +70,38 @@ data class CallItem(
     val queuePosition: Int? = null,
     /** The functional alias of the call (TS 24.379 §9A): "as <alias>" for a caller's alias, "to <alias>" for a called one. */
     val alias: String? = null,
+    /** A broadcast group call (§6.2.8.2): only its initiator talks. A first-to-answer call (§11.1.1). */
+    val broadcast: Boolean = false,
+    val firstToAnswer: Boolean = false,
+    /** An ad hoc call's participant criteria (§17.2.2.1.1 step 12). */
+    val criteria: String? = null,
+    /** An ambient listening call (TS 24.379 §11.1.6): "listening" or "listened-to"; whether this phone may release it. */
+    val ambientRole: String? = null,
+    val mayRelease: Boolean = true,
+    /** The private call service the call is for (transfer, forwarding, remote, call-back), if any. */
+    val service: String? = null,
 )
+
+/** A call-back request another user sent this user (TS 24.379 §11.1.5.2.2). */
+data class CallBackItem(val from: String, val urgency: String, val time: String?)
 
 /**
  * One of this user's functional aliases (TS 24.379 §9A.2.1): `active`, `take-over-possible` (held by someone else,
  * this user may take it over) or `inactive`; [inUse] when it is presented on this user's outgoing calls.
  */
 /** A functional alias of this user: its status, whether its calls present it, and the outcome of the last change of it. */
-data class AliasItem(val id: String, val status: String, val inUse: Boolean, val service: String = "mcptt", val outcome: String? = null)
+data class AliasItem(val id: String, val status: String, val inUse: Boolean, val service: String = "mcptt", val outcome: String? = null,
+                     /** Activated by a location criterion of the user profile (TS 24.379 §9A.2.1.4). */
+                     val byLocation: Boolean = false)
 
 /** Another user's location, as their report gave it. */
 data class LocatedItem(val name: String, val latitude: Double?, val longitude: Double?, val cell: String?, val at: Long)
+
+/** The open SDS session (TS 24.282 §9.2.4) in Messages. */
+data class SessionItem(val id: Int, val title: String, val target: String, val group: Boolean, val emergency: Boolean, val imminent: Boolean)
+
+/** A file offered over the media plane that waits for the user (TS 24.282 §10.2.5.2.4 7)a)). */
+data class FileOfferItem(val id: Int, val from: String, val group: String?, val name: String, val size: Long?)
 
 data class MessageItem(
     val id: String,
@@ -159,6 +198,10 @@ data class UiState(
     val call: CallItem? = null,
     val incoming: CallItem? = null,
     val messages: List<MessageItem> = emptyList(),
+    val sdsSession: SessionItem? = null,
+    /** The pre-established sessions (TS 24.282 §18.3, TS 24.379 §8): one line, null when there is none. */
+    val preSessions: String? = null,
+    val fileOffers: List<FileOfferItem> = emptyList(),
     val history: List<HistoryEntry> = emptyList(),
     val error: String? = null,
     val provisioned: Boolean = false,
@@ -171,6 +214,11 @@ data class UiState(
     val serverAddressEdited: Boolean = false,
     /** Ordinary private calls to this phone ring first (manual answer). */
     val ringFirst: Boolean = false,
+    /** The outcome of the last service settings PUBLISH (TS 24.379 §7.2.3), and the answer modes the server notified (§7.2.4). */
+    val settingsNote: String? = null,
+    val notifiedAnswerModes: List<Pair<String, String>> = emptyList(),
+    /** A negotiated-mode affiliation request from another user, until it is answered (§9.2.1.5). */
+    val affiliationRequest: AffiliationRequestItem? = null,
     /** Why the last call attempt failed, until the next attempt or a dismiss. */
     val callFailure: String? = null,
     /** The provisioned identities and servers, as label and value, for the Logs tab. */
@@ -192,6 +240,8 @@ data class UiState(
     val ownAlert: List<String> = emptyList(),
     val ownAdhoc: String? = null,
     val adhocChoices: List<AlertChoice> = emptyList(),
+    /** The criteria an ad hoc group call can be made by (TS 24.379 §17.2.2.1.1 step 12), from the user's groups. */
+    val adhocCallChoices: List<AlertChoice> = emptyList(),
     /** The outcome of the last alert request, or the last area notice. */
     val alertResult: String? = null,
     /** Other people's active emergency alerts, one each. */
@@ -212,6 +262,13 @@ data class UiState(
     val fileLimits: Map<String, Long> = emptyMap(),
     /** The network and SIM as label and value, for Settings (NetworkStatus). */
     val network: List<Pair<String, String>> = emptyList(),
+    /** Call-back requests received (§11.1.5.2.2), and those sent with their state (§11.1.5.2.1). */
+    val callBacks: List<CallBackItem> = emptyList(),
+    val callBacksSent: List<Pair<String, String>> = emptyList(),
+    /** The last private call service notice: a request carried out, or the outcome of the user's own. */
+    val serviceNote: String? = null,
+    /** The forwarding target the Forward action offers first (Settings). */
+    val forwardTarget: String? = null,
 ) {
     fun fileLimit(target: String, group: Boolean): Long? = fileLimits[if (group) target else ONE_TO_ONE]
 
@@ -220,6 +277,12 @@ data class UiState(
 
 /** What the screens can ask for. */
 interface UiActions {
+    /** TS 24.282 §9.2.4: open an SDS session with [target], send in it, end it. */
+    fun openSession(target: String, group: Boolean) {}
+    fun sessionSend(text: String) {}
+    fun closeSession() {}
+    /** TS 24.282 §10.2.5.2.4 7): accept, decline or defer a file offered over the media plane. */
+    fun answerFileOffer(id: Int, decision: String) {}
     fun selectGroup(group: String) {}
     fun callGroup(group: String) {}
     fun callPrivate(target: String) {}
@@ -238,7 +301,30 @@ interface UiActions {
     fun callAlias(alias: String, service: String = "mcptt") {}
     fun setMuted(muted: Boolean) {}
     fun setRingFirst(on: Boolean) {}
+    /** Monitor (affiliate to) a group of the user profile besides the base groups, or stop (TS 24.379 §9.2.1.2). */
+    fun setMonitored(group: String, on: Boolean) {}
+    /** Accept or decline the received negotiated-mode affiliation request (TS 24.379 §9.2.1.5). */
+    fun answerAffiliationRequest(accept: Boolean) {}
     fun callAdhoc(targets: List<String>) {}
+    /** An ad hoc group call by participant criteria (§17.2.2.1.1 step 12). */
+    fun callAdhocCriteria(criteria: String) {}
+    /** A first-to-answer call to two or more users (§11.1.1.2.1.1). */
+    fun callFirstToAnswer(targets: List<String>) {}
+    /** TS 24.379 §11.1.5.2.1: ask [target] to call back; cancel it; §11.1.5.2.3: call back [from]. */
+    fun requestCallBack(target: String) {}
+    fun cancelCallBack(target: String) {}
+    fun fulfilCallBack(from: String) {}
+    /** §11.1.6.2.1.1: listen to [target] (remote-init), or let [target] listen ([local], local-init). */
+    fun ambientListen(target: String, local: Boolean) {}
+    /** §11.1.7.2.1: ask [remote] to call [target]; §10.1.5.2.1: ask [remote] to call [group]. */
+    fun remoteCall(remote: String, target: String) {}
+    fun remoteGroupCall(remote: String, group: String) {}
+    /** §11.1.8.2.1: transfer the private call to [target]; §11.1.9.2.1: forward the ringing private call to [target]. */
+    fun transfer(target: String) {}
+    fun forward(target: String) {}
+    fun setForwardTarget(target: String?) {}
+    /** A broadcast group call (§10.1.1.2.1.1, §6.2.8.2). */
+    fun callGroupBroadcast(group: String) {}
     fun answer() {}
     fun reject() {}
     fun hangup() {}
@@ -364,9 +450,31 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
     val status = client.status.value
     val mcptt = Engine.mcptt
     val profile = client.profile
-    val groups = (client.config.mcptt?.groups ?: emptyList()).map {
-        GroupItem(it, Affiliation.counts(status.mcptt.affiliations[it]), Engine.selectedGroup.value == it)
+    // The base groups, then the monitored ones, then those of the user profile that may be monitored.
+    val monitored = client.monitoredGroups
+    val base = if (client.config.mcptt != null) client.wantedGroups(org.openmcx.client.body.McService.MCPTT).filter { it !in monitored } else emptyList()
+    // A base group a location rule or the group's area made this client leave stays listed, as not affiliated.
+    val rules = client.locationRules.state.value[org.openmcx.client.body.McService.MCPTT]
+    val left = if (client.config.mcptt != null) (client.baseGroups(org.openmcx.client.body.McService.MCPTT) + rules?.areaLeft.orEmpty())
+        .filter { it !in base && it !in monitored }.distinct() else emptyList()
+    val listed = ((base + left).map { it to "base" } + monitored.map { it to "monitored" } +
+        client.monitorableGroups.filter { it !in monitored && it !in base && it !in left }.map { it to "available" }).map { (id, kind) ->
+        GroupItem(id, Affiliation.counts(status.mcptt.affiliations[id]), Engine.selectedGroup.value == id, status.mcptt.affiliations[id], kind,
+            when (id) {
+                in rules?.areaLeft.orEmpty() -> "left: outside the group's area"
+                in rules?.ruleAffiliated.orEmpty() -> "by a location rule"
+                else -> null
+            }, chat = mcptt?.regroups?.configurationOf(id)?.chat == true)
     }
+    // The regroups and temporary groups the user was told of (TS 24.379 §16.2.1.3), after them: considered affiliated
+    // (§16.2.2.4 step 3 h)) and called at once with their preconfigured group's configuration (§16.1).
+    val regroups = mcptt?.regroups?.state?.value?.regroups?.values ?: emptyList()
+    val groups = listed + regroups.map { r ->
+        GroupItem(r.uri, true, Engine.selectedGroup.value == r.uri, "regrouped", if (r.temporary) "temporary" else "regroup",
+            chat = mcptt?.regroups?.configurationOf(r.uri)?.chat == true,
+            constituents = r.groups.ifEmpty { client.groupDocuments[r.uri]?.temporaryConstituents ?: emptyList() })
+    }
+    val procedures = client.procedures?.state?.value
     fun item(call: Call): CallItem {
         val floor = call.media?.takeIf { it.isStarted }?.floor
         val state = when (floor?.state?.value) {
@@ -381,6 +489,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
             CallType.PRIVATE -> call.peer?.short() ?: "private call"
             CallType.PREARRANGED -> call.groupId?.short() ?: "group"
             CallType.ADHOC -> "ad hoc: ${call.groupId?.short() ?: ""}"
+            CallType.CHAT -> call.groupId?.short() ?: "chat group"
         }
         val limit = call.floorEvents.lastOrNull { it.startsWith("granted") }?.let { Regex("""(\d+)s$""").find(it)?.groupValues?.get(1)?.toIntOrNull() }
         val self = client.config.mcptt?.userId
@@ -392,20 +501,32 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         val shown = if (call.type == CallType.PRIVATE) CallDisplay.privateCall(call.outgoing, call.peer, call.callingAlias, call.calledAlias)
             else CallDisplay.groupCall(title, call.outgoing, call.callingAlias)
         return CallItem(call.id, shown.title, call.type, call.state, state, floor?.talker, call.floorEvents.lastOrNull(), limit, call.startedAt, members,
-            call.floorControl, call.media?.muted == true, call.priority, floor?.queuePosition?.value, shown.subtitle)
+            call.floorControl, call.media?.muted == true, call.priority, floor?.queuePosition?.value, shown.subtitle,
+            call.broadcast, call.firstToAnswer, call.criteria, call.ambientRole, call.mayRelease, call.service)
     }
-    val calls = mcptt?.calls?.value ?: emptyList()
+    // A hidden ambient listening call (the listened-to user of a remote-init call, TS 24.379 §11.1.6.2.1.2) is not shown.
+    val calls = mcptt?.calls?.value?.filter { !it.hidden } ?: emptyList()
     val incoming = calls.firstOrNull { !it.outgoing && it.state == "ringing" }
-    val active = calls.firstOrNull { it.state != "released" && it != incoming }
+    val active = calls.lastOrNull { it.state != "released" && it != incoming }
+    val services = mcptt?.services?.state?.value
     val mcdata = Engine.mcdata
+    // Where a message travelled when not by SIP MESSAGE: "media plane" (MSRP) or "session" (an SDS session).
+    fun plane(p: String) = when (p) { "media" -> " · media plane"; "session" -> " · session"
+        "pre-established" -> " · pre-established session"; "pre-established-session" -> " · session (pre-established)"; else -> "" }
+    val media = Engine.mcdataMedia?.communications?.value ?: emptyList()
     val messages = buildList {
         mcdata?.inbox?.value?.forEach {
-            add(MessageItem(it.messageId.toString(), true, it.sender, it.group, it.text,
-                if (it.displayed) "read" else "new", it.at, it.displayed))
+            add(MessageItem(it.messageId.toString(), true, it.sender, it.group, org.openmcx.client.app.McdataExtras.displayText(it),
+                (if (it.displayed) "read" else "new") + plane(it.plane), it.at, it.displayed))
         }
         mcdata?.outbox?.value?.forEach { m ->
             val status = if (m.notifications.isEmpty()) "sent" else m.notifications.entries.joinToString { "${it.key.short()} ${it.value.name.lowercase().replace('_', ' ')}" }
-            add(MessageItem(m.messageId.toString(), false, m.target, if (m.group) m.target else null, m.text, status, m.at, true))
+            add(MessageItem(m.messageId.toString(), false, m.target, if (m.group) m.target else null, m.text, status + plane(m.plane), m.at, true))
+        }
+        // Files over the media plane (TS 24.282 §10.2.5), shown as a line with their state.
+        media.filter { it.kind == "fd" && it.state != "offered" }.forEach { c ->
+            add(MessageItem("media-${c.id}-${c.startedAt}", !c.outgoing, c.peer ?: c.group ?: "", c.group,
+                "File: ${c.fileName} (${c.fileSize?.let(AttachmentFiles::readableSize) ?: "?"})", "${c.state} · media plane", c.startedAt, true))
         }
         Engine.fd?.records?.value?.forEach { r ->
             add(MessageItem(r.id, r.incoming, r.peer, r.group, r.metadata.name, fileStatus(r), r.at, true, fileItem(r)))
@@ -430,7 +551,8 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         val state = client.aliasesOf(service).value
         state.available.map { a ->
             AliasItem(a, when (a) { in state.active -> "active"; in state.takeOverPossible -> "take-over-possible"; else -> "inactive" },
-                a == state.inUse, service.name.lowercase(), state.lastOutcomes[a])
+                a == state.inUse, service.name.lowercase(), state.lastOutcomes[a],
+                a in client.locationRules.state.value[service]?.aliasesByLocation.orEmpty())
         }
     }
     val aliasNote = aliasState.lastAction?.let { action ->
@@ -459,6 +581,13 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         call = active?.let(::item),
         incoming = incoming?.let(::item),
         messages = messages,
+        sdsSession = Engine.mcdataMedia?.session?.let { c ->
+            val target = c.group ?: c.peer ?: ""
+            SessionItem(c.id, (if (c.group != null) "Group session: " else "Session with ") + target.short(), target, c.group != null, c.emergency, c.imminentPeril)
+        },
+        preSessions = Engine.preSessionLine(),
+        fileOffers = media.filter { it.kind == "fd" && it.state == "offered" && !it.outgoing }
+            .map { FileOfferItem(it.id, it.peer ?: "", it.group, it.fileName ?: "file", it.fileSize) },
         history = Engine.history?.recent(50) ?: emptyList(),
         error = status.lastError ?: listOfNotNull(status.mcptt.refused, status.mcdata.refused, status.mcvideo.refused)
             .joinToString(". ").ifEmpty { null },
@@ -496,6 +625,17 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         speaker = Engine.telecom?.speaker?.value,
         callFailure = Engine.callFailure.value,
         ringFirst = mcptt?.answerMode == "manual",
+        settingsNote = procedures?.settingsPublication?.let { r ->
+            if (r.status in 200..299) "Answer mode sent to the server" else
+                "The server did not take the answer mode: ${if (r.status == 0) "no answer" else r.status.toString()}${r.warning?.let { " ($it)" } ?: ""}"
+        },
+        notifiedAnswerModes = procedures?.serviceSettings?.entries?.mapNotNull { (id, c) ->
+            c.answerMode?.let { (if (c.own) "This phone" else "Other device ${id.takeLast(8)}") to it }
+        } ?: emptyList(),
+        // TS 24.379 §9.2.1.5 and TS 24.281 §8.2.1.5: the MCPTT request first, then the MCVideo one.
+        affiliationRequest = procedures?.affiliationRequest?.let { AffiliationRequestItem(it.from?.short() ?: "an authorised user", it.affiliate, it.deaffiliate) }
+            ?: client.videoProcedures?.state?.value?.affiliationRequest?.let {
+                AffiliationRequestItem((it.from?.short() ?: "an authorised user") + " (MCVideo)", it.affiliate, it.deaffiliate) },
         filesEnabled = Engine.fd != null,
         videoChatGroups = client.config.mcvideo?.chatGroups ?: emptyList(),
         videoRecordings = Engine.mcvideo?.recordings?.value ?: emptyList(),
@@ -505,6 +645,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
         ownAlert = Engine.alerts?.own()?.keys?.sortedBy { it.ordinal }?.map(AlertCenter::label) ?: emptyList(),
         ownAdhoc = Engine.alerts?.ownAdhoc()?.let { (criteria, via) -> "${AlertChoices.describe(criteria)} (${via.joinToString(", ", transform = AlertCenter::label)})" },
         adhocChoices = if (Engine.alerts?.adhocServices().isNullOrEmpty()) emptyList() else AlertChoices.of(groups.map { it.id }),
+        adhocCallChoices = AlertChoices.of(groups.filter { !it.regrouped }.map { it.id }),
         alertResult = Engine.alertResult.value,
         receivedAlerts = Engine.alerts?.received()?.map { a ->
             AlertItem(a.person.replaceFirstChar { it.uppercase() },
@@ -538,9 +679,31 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
                 media?.stats?.picturesReceived?.get() ?: 0, v.events.lastOrNull(), v.ambientRole, v.mayRelease)
         },
         videoFailure = Engine.videoFailure.value,
+        callBacks = services?.callBacksReceived?.values?.map { CallBackItem(it.from, it.urgency, it.time) } ?: emptyList(),
+        callBacksSent = services?.callBacksSent?.entries?.map { it.key to it.value.substringAfter(": ") } ?: emptyList(),
+        serviceNote = services?.let { s -> (s.outcomes + s.handled).maxByOrNull { it.at }?.let(::serviceText) },
+        forwardTarget = Engine.forwardTarget.value,
         attachment = pending,
         fileLimits = fileLimits,
     )
+}
+
+/** A private call service record, as the Call tab says it. */
+fun serviceText(r: org.openmcx.client.mcptt.ServiceRecord): String {
+    val who = r.peer.short(); val target = r.target?.short()
+    val outcome = r.outcome?.let { if (it == "success") ": done" else ": failed" } ?: ""
+    return when (r.type) {
+        org.openmcx.client.mcptt.PrivateServiceRules.CALL_BACK -> "$who asks you to call back"
+        org.openmcx.client.mcptt.PrivateServiceRules.CALL_BACK_CANCEL -> "$who withdrew the call-back request"
+        org.openmcx.client.mcptt.PrivateServiceRules.REMOTE_PRIVATE -> "$who asked this phone to call $target$outcome"
+        org.openmcx.client.mcptt.PrivateServiceRules.REMOTE_GROUP -> "$who asked this phone to call $target$outcome"
+        org.openmcx.client.mcptt.PrivateServiceRules.TRANSFER -> "$who transferred you to $target$outcome"
+        org.openmcx.client.mcptt.PrivateServiceRules.FORWARD -> "Call forwarded by $who to $target$outcome"
+        "transfer-private-call-response" -> "Transfer of $who to $target$outcome"
+        "forward-private-call-response" -> "Forwarding to $target$outcome"
+        "remotely-initiated-private-call-response", "remotely-initiated-group-call-response" -> "$who's call to $target$outcome"
+        else -> "${r.type.replace('-', ' ')}$outcome"
+    }
 }
 
 /** The actions against the engine. */
@@ -598,11 +761,41 @@ object EngineActions : UiActions {
     }
     override fun setMuted(muted: Boolean) { Engine.mcptt?.setMuted(muted) }
     override fun setRingFirst(on: Boolean) = Engine.setRingFirst(on)
+    override fun setMonitored(group: String, on: Boolean) = launch {
+        val client = Engine.client ?: return@launch
+        client.monitor(if (on) client.monitoredGroups + group else client.monitoredGroups - group)
+    }
+    override fun answerAffiliationRequest(accept: Boolean) = launch {
+        val client = Engine.client ?: return@launch
+        val pending = listOfNotNull(client.procedures, client.videoProcedures).firstOrNull { it.state.value.affiliationRequest != null }
+        pending?.answerAffiliationRequest(accept)
+    }
     override fun logOff() = launch { runCatching { Engine.client?.logOff() }.onFailure { Engine.log.add("log-off: ${it.message}") } }
     override fun logOn() { runCatching { Engine.client?.logOn() }.onFailure { Engine.log.add("log-on: ${it.message}") } }
     override fun retryNow() { Engine.client?.retryNow() }
     override fun signIn() { runCatching { Engine.client?.signIn() }.onFailure { Engine.log.add("sign-in: ${it.message}") } }
     override fun callAdhoc(targets: List<String>) = place("the ad hoc group") { Engine.mcptt?.adhocCall(targets) }
+    override fun callAdhocCriteria(criteria: String) = place("the ad hoc group") { Engine.mcptt?.adhocCall(emptyList(), criteria) }
+    override fun callFirstToAnswer(targets: List<String>) = place("the first to answer") { Engine.mcptt?.firstToAnswerCall(targets) }
+    override fun callGroupBroadcast(group: String) = place(group) { Engine.mcptt?.broadcastCall(group) }
+    /** A private call service request; its refusal is shown on the Call tab. */
+    private fun request(what: String, block: suspend () -> Unit) {
+        Engine.callFailure.value = null
+        Engine.scope.launch {
+            runCatching { block() }.onFailure { Engine.log.add("$what: ${it.message}"); Engine.callFailure.value = "$what: ${it.message}" }
+        }
+    }
+    override fun requestCallBack(target: String) = request("Call-back request to ${target.short()}") { Engine.mcptt?.services?.requestCallBack(target) }
+    override fun cancelCallBack(target: String) = request("Call-back cancel to ${target.short()}") { Engine.mcptt?.services?.cancelCallBack(target) }
+    override fun fulfilCallBack(from: String) = place(from) { Engine.mcptt?.services?.fulfilCallBack(from) }
+    override fun ambientListen(target: String, local: Boolean) = place(target) { Engine.mcptt?.ambientCall(target, local) }
+    override fun remoteCall(remote: String, target: String) =
+        request("${remote.short()} calling ${target.short()}") { Engine.mcptt?.services?.remotePrivateCall(remote, target) }
+    override fun remoteGroupCall(remote: String, group: String) =
+        request("${remote.short()} calling ${group.short()}") { Engine.mcptt?.services?.remoteGroupCall(remote, group) }
+    override fun transfer(target: String) = request("Transfer to ${target.short()}") { Engine.mcptt?.services?.transfer(target) }
+    override fun forward(target: String) = request("Forward to ${target.short()}") { Engine.mcptt?.services?.forward(target) }
+    override fun setForwardTarget(target: String?) = Engine.setForwardTarget(target)
     override fun answer() { Engine.mcptt?.answer() }
     override fun reject() { Engine.mcptt?.reject() }
     override fun hangup() = launch { Engine.mcptt?.hangup() }
@@ -610,6 +803,10 @@ object EngineActions : UiActions {
     override fun send(target: String, group: Boolean, text: String) = launch {
         Engine.mcdata?.send(target, text, group, DispositionRequest.DELIVERY_AND_READ)?.let(Engine::sent)
     }
+    override fun openSession(target: String, group: Boolean) = launch { Engine.mcdataMedia?.openSession(target, group) }
+    override fun sessionSend(text: String) = launch { Engine.mcdataMedia?.sessionSend(text, DispositionRequest.DELIVERY_AND_READ)?.let(Engine::sent) }
+    override fun closeSession() = launch { Engine.mcdataMedia?.close() }
+    override fun answerFileOffer(id: Int, decision: String) { Engine.mcdataMedia?.answerFile(decision, id) }
     override fun displayed(messageId: String) { Engine.mcdata?.display(UUID.fromString(messageId)) }
     override fun setSpeaker(on: Boolean) { Engine.telecom?.setSpeaker(on) }
     override fun clearLogs() = Engine.clearLogs()

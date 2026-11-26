@@ -118,10 +118,10 @@ class VideoMediaSessionTest {
         val audio = RtpPacket.parse(receive(server[0])!!.first)!!
         assertEquals(0xaaaaL, audio.ssrc); assertEquals(96, audio.payloadType)
         withTimeout(2000) { while (session.stats.picturesSent.get() < 5) delay(10) } // counted once a picture is out
-        // Release: the camera stops and a Transmission Release goes to the server.
+        // Release: the camera stops and a Transmission end request goes to the server (TS 24.581 §6.2.4.5.3).
         session.control.release()
         var released = false
-        while (!released) released = TransmissionMessage.decode(receive(server[2])!!.first).type == TxType.RELEASE
+        while (!released) released = TransmissionMessage.decode(receive(server[2])!!.first).type == TxType.END_REQUEST
         session.stop()
         server.forEach { it.close() }
     }
@@ -210,9 +210,11 @@ class VideoMediaSessionTest {
             val end = System.currentTimeMillis() + ms
             while (System.currentTimeMillis() < end) receive(server[1], 500)?.let { times += RtpPacket.parse(it.first)!!.timestamp }
             session.control.release()
-            // The server answers the release with Transmission Idle (TS 24.581 §6.2.4.6): no transmitter until the next.
+            // The server answers the end request (TS 24.581 §6.2.4.6.4); Idle follows: no transmitter until the next.
             var release: Pair<ByteArray, InetSocketAddress>
-            do { release = receive(server[2])!! } while (TransmissionMessage.decode(release.first).type != TxType.RELEASE)
+            do { release = receive(server[2])!! } while (TransmissionMessage.decode(release.first).type != TxType.END_REQUEST)
+            val response = TransmissionMessage(TxType.END_RESPONSE, 111).encode()
+            server[2].send(DatagramPacket(response, response.size, release.second))
             val idle = TransmissionMessage(TxType.IDLE, 111).encode()
             server[2].send(DatagramPacket(idle, idle.size, release.second))
             withTimeout(3000) { while (session.control.state.value != TxState.NO_PERMISSION) delay(10) }

@@ -13,20 +13,22 @@ data class FdSignalling(
     val mandatoryDownload: Boolean = false, val applicationId: Int? = null,
     val sender: String? = null, val inReplyTo: UUID? = null,
 ) {
-    fun encode(): ByteArray = Writer().apply {
-        require(fileUrl.isNotBlank()) { "HTTP FD requires a FILEURL" }
+    /** [mediaPlane]: TS 24.282 §6.2.2.3, an FD over the media plane carries no Payload IE (the file goes by MSRP). */
+    fun encode(mediaPlane: Boolean = false): ByteArray = Writer().apply {
+        require(mediaPlane || fileUrl.isNotBlank()) { "HTTP FD requires a FILEURL" }
         fdHeader(2, time, conversationId, messageId)
         inReplyTo?.let { u8(0x21); uuid(it) }
         applicationId?.let { require(it in 0..255); u8(0x22); u8(it) }
         if (completionRequested) u8(0x91)
         if (mandatoryDownload) u8(0xa1)
-        tlvE(0x78, byteArrayOf(4) + fileUrl.toByteArray(Charsets.UTF_8))
+        if (fileUrl.isNotBlank()) tlvE(0x78, byteArrayOf(4) + fileUrl.toByteArray(Charsets.UTF_8))
         metadata?.let { tlvE(0x79, it.toByteArray(Charsets.UTF_8)) }
         sender?.let { tlvE(0x51, it.toByteArray(Charsets.UTF_8)) }
     }.bytes()
 
     companion object {
-        fun decode(data: ByteArray): FdSignalling {
+        /** [mediaPlane]: the FILEURL is not required (TS 24.282 §6.2.2.3); it is "" when absent. */
+        fun decode(data: ByteArray, mediaPlane: Boolean = false): FdSignalling {
             val r = Reader(data); r.expectType(2)
             val time = r.dateTime(); val conversation = r.uuid(); val message = r.uuid()
             var url: String? = null; var metadata: String? = null; var sender: String? = null
@@ -54,8 +56,8 @@ data class FdSignalling(
                     else -> throw McdataCodecError("unsupported FD IE $ie")
                 }
             }
-            if (url.isNullOrBlank()) throw McdataCodecError("HTTP FD requires a FILEURL")
-            return FdSignalling(time, conversation, message, url, metadata, completion, mandatory, app, sender, reply)
+            if (url.isNullOrBlank() && !mediaPlane) throw McdataCodecError("HTTP FD requires a FILEURL")
+            return FdSignalling(time, conversation, message, url ?: "", metadata, completion, mandatory, app, sender, reply)
         }
     }
 }
@@ -122,4 +124,53 @@ data class FdNetworkNotification(val type: FdNetworkNotificationType, val time: 
 private fun Writer.fdHeader(type: Int?, time: Long, conversation: UUID, message: UUID) {
     require(time in 0..0xffffffffffL) { "timestamp outside 40 bits" }
     type?.let(::u8); dateTime(time); uuid(conversation); uuid(message)
+}
+
+/** TS 24.282 table 15.2.22-1: the termination information type of an FD HTTP TERMINATION. */
+enum class TerminationType(val code: Int) {
+    REQUEST(1), RESPONSE(2), TRANSMISSION_STOPPED(3), INTENT_TO_RELEASE(4), EXTENSION_REQUEST(5), EXTENSION_RESPONSE(6),
+    AUTHORISED_USER_REQUEST(7);
+    companion object { fun of(code: Int) = entries.find { it.code == code } ?: throw McdataCodecError("reserved termination information type") }
+}
+
+/**
+ * TS 24.282 §15.1.13.1: FD HTTP TERMINATION, the release of a file distribution over HTTP (§6.2.2.4, §13.2.1.2,
+ * §13.2.4.5, §13.2.5.3, §13.2.6.3): the conversation and message identifiers, the termination type, the release response
+ * (§15.2.23: 1 success, 2 failed), the extension response (§15.2.21: 1 accepted, 2 rejected) and the FILEURL Payload IE.
+ */
+data class FdHttpTermination(
+    val conversationId: UUID, val messageId: UUID, val type: TerminationType, val applicationId: Int? = null,
+    val releaseSucceeded: Boolean? = null, val extensionAccepted: Boolean? = null, val fileUrl: String? = null,
+) {
+    fun encode(): ByteArray = Writer().apply {
+        u8(MESSAGE_TYPE); uuid(conversationId); uuid(messageId); u8(type.code)
+        applicationId?.let { require(it in 0..255); u8(0x22); u8(it) }
+        extensionAccepted?.let { u8((0xc shl 4) or if (it) 1 else 2) }
+        releaseSucceeded?.let { u8((0xd shl 4) or if (it) 1 else 2) }
+        fileUrl?.takeIf { it.isNotBlank() }?.let { tlvE(0x78, byteArrayOf(4) + it.toByteArray(Charsets.UTF_8)) }
+    }.bytes()
+
+    companion object {
+        const val MESSAGE_TYPE = 0x0d
+        fun decode(data: ByteArray): FdHttpTermination {
+            val r = Reader(data); r.expectType(MESSAGE_TYPE)
+            val conversation = r.uuid(); val message = r.uuid(); val type = TerminationType.of(r.u8())
+            var app: Int? = null; var release: Boolean? = null; var extension: Boolean? = null; var url: String? = null
+            val seen = mutableSetOf<Int>()
+            while (r.remaining > 0) {
+                val octet = r.u8()
+                val ie = if (octet shr 4 in 0xc..0xd) octet shr 4 else octet
+                if (!seen.add(ie)) throw McdataCodecError("duplicate FD HTTP TERMINATION IE")
+                when (ie) {
+                    0xc -> extension = when (octet and 15) { 1 -> true; 2 -> false; else -> throw McdataCodecError("reserved extension response") }
+                    0xd -> release = when (octet and 15) { 1 -> true; 2 -> false; else -> throw McdataCodecError("reserved release response") }
+                    0x22 -> app = r.u8()
+                    0x78 -> { val v = r.lengthValue(); if (v.isNotEmpty() && v[0].toInt() == 4) url = String(v, 1, v.size - 1, Charsets.UTF_8) }
+                    0x7d -> r.lengthValue()
+                    else -> throw McdataCodecError("unsupported FD HTTP TERMINATION IE")
+                }
+            }
+            return FdHttpTermination(conversation, message, type, app, release, extension, url)
+        }
+    }
 }

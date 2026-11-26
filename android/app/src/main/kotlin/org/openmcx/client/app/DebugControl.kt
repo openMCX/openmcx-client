@@ -87,10 +87,10 @@ class DebugControl(private val context: Context) {
         // The process ends as on a crash (SIGKILL, as kill -9) just after the reply, so that the tests can check that
         // Android restarts the sticky service without root on the phone.
         "die" -> "dying".also { Thread { Thread.sleep(300); android.os.Process.killProcess(android.os.Process.myPid()) }.start() }
-        // private <target> [auto|manual|force] [no-floor]
+        // private <target> [auto|manual|force] [no-floor] [emergency] [implicit|explicit] [granted] [<wav>]
         "private" -> call { it.privateCall(args[0], when (args.getOrNull(1) ?: "auto") {
             "manual" -> Commencement.MANUAL; "force" -> Commencement.FORCED; else -> Commencement.AUTOMATIC }, floorControl = "no-floor" !in args,
-            emergency = "emergency" in args) }
+            emergency = "emergency" in args, implicit = implicitChoice(args)) }
         // Functional aliases (TS 24.379 §9A), as the reference client: fa activate|takeover|deactivate <alias>..., fa use <alias>|none
         "fa" -> functionalAlias(args, org.openmcx.client.body.McService.MCPTT)
         // The same for MCData (TS 24.282 §22) and MCVideo (TS 24.281 §20), as the reference client's mcdata-fa and mcvideo-fa.
@@ -105,11 +105,106 @@ class DebugControl(private val context: Context) {
         "private-fa" -> call { it.privateCallToAlias(args[0], when (args.getOrNull(1) ?: "auto") {
             "manual" -> Commencement.MANUAL; "force" -> Commencement.FORCED; else -> Commencement.AUTOMATIC }, floorControl = "no-floor" !in args) }
         "mute" -> { mcptt().setMuted(args.firstOrNull() != "off"); "ok" }
+        // group [<group>] [emergency|imminent] [implicit|explicit] [granted] [<wav>]
         "group" -> call { it.groupCall(args.firstOrNull { a -> a.startsWith("sip:") } ?: Engine.client!!.config.mcptt!!.groups.first(),
-            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }) }
+            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }, implicitChoice(args)) }
         // priority emergency|imminent on|off: the state of the call in progress (§6.2.8)
         "priority" -> { mcptt().setPriority(args[0] == "emergency", args.getOrNull(1) != "off"); mcptt().active?.priority ?: "no call" }
-        "adhoc" -> call { it.adhocCall(args) }
+        // adhoc [broadcast] <MCPTT ID>... | adhoc [broadcast] criteria <criteria> (TS 24.379 §17.2.2.1.1 steps 9, 11, 12)
+        "adhoc" -> call {
+            val broadcast = args.firstOrNull() == "broadcast"
+            val rest = if (broadcast) args.drop(1) else args
+            if (rest.firstOrNull() == "criteria") it.adhocCall(emptyList(), rest.drop(1).joinToString(" "), broadcast)
+            else it.adhocCall(rest, broadcast = broadcast)
+        }
+        // adhoc-modify add <MCPTT ID>... [remove <MCPTT ID>...] | adhoc-modify remove ... | adhoc-modify criteria <criteria> (§17.2.6.1.1)
+        "adhoc-modify" -> {
+            if (args.firstOrNull() == "criteria") JSONObject().put("result", mcptt().modifyAdhoc(criteria = args.drop(1).joinToString(" ")))
+            else {
+                val add = mutableListOf<String>(); val remove = mutableListOf<String>(); var into: MutableList<String>? = null
+                for (a in args) when (a) { "add" -> into = add; "remove" -> into = remove
+                    else -> (into ?: throw IllegalArgumentException("usage: adhoc-modify add|remove <MCPTT ID>... | criteria <criteria>")) += a }
+                JSONObject().put("result", mcptt().modifyAdhoc(add, remove))
+            }
+        }
+        // adhoc-leave: leave the ad hoc call without releasing it (§17.2.4.1.1); adhoc-release: release it for all (§17.2.3.1.1)
+        "adhoc-leave" -> { mcptt().hangup(releaseAll = false); lastChat = null; "left" }
+        "adhoc-release" -> { mcptt().hangup(releaseAll = true); "released" }
+        // rejoin [chat|adhoc]: the last chat group joined (§10.1.2.2.1.1) or the ad hoc call left (§17.2.5.1.1), by
+        // default the one left last
+        "rejoin" -> call { s -> when (args.firstOrNull()) {
+            "adhoc" -> s.rejoinAdhoc()
+            "chat" -> s.chatCall(lastChat ?: throw IllegalStateException("no chat group joined"))
+            else -> lastChat?.let { s.chatCall(it) } ?: s.rejoinAdhoc()
+        } }
+        // chat [<group>] [emergency|imminent] [implicit|explicit]: initiate or join a chat group call (§10.1.2.2.1.1); leave with hangup
+        "chat" -> call {
+            val group = args.firstOrNull { a -> a.startsWith("sip:") } ?: Engine.client!!.config.mcptt!!.groups.first()
+            lastChat = group
+            it.chatCall(group, when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }, implicitChoice(args))
+        }
+        // broadcast [<group>] [emergency|imminent]: a broadcast group call (§10.1.1.2.1.1, §6.2.8.2)
+        "broadcast" -> call { it.broadcastCall(args.firstOrNull { a -> a.startsWith("sip:") } ?: Engine.client!!.config.mcptt!!.groups.first(),
+            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }) }
+        // first-to-answer <MCPTT ID> <MCPTT ID>... [emergency] [no-floor] [implicit|explicit] (§11.1.1.2.1.1 steps 10, 15)
+        "first-to-answer" -> call { it.firstToAnswerCall(args.filter { a -> a.startsWith("sip:") }, emergency = "emergency" in args,
+            floorControl = "no-floor" !in args, implicit = implicitChoice(args)) }
+        // floor-priority <0..255>|none: the floor priority offered in group calls (TS 24.380 §14.3.3)
+        "floor-priority" -> { mcptt().floorPriority = args.single().takeIf { it != "none" }?.toInt()?.also { require(it in 0..255) { "0..255" } }
+            JSONObject().put("floor_priority", mcptt().floorPriority ?: JSONObject.NULL) }
+        // regroup create <tgi> <preconfigured> <group>,<group>... | regroup users <tgi> <preconfigured> <MCPTT ID>,... | regroup remove <tgi>
+        "regroup" -> resultJson(when (args.firstOrNull()) {
+            "create" -> mcptt().regroups.request("create", args[1], args[2], groups = args[3].split(',').filter { it.isNotBlank() })
+            "users" -> mcptt().regroups.request("create", args[1], args[2], users = args[3].split(',').filter { it.isNotBlank() })
+            "remove" -> mcptt().regroups.request("remove", args[1])
+            else -> throw IllegalArgumentException("usage: regroup create|users <tgi> <preconfigured> <list> | regroup remove <tgi>")
+        })
+        "regroups" -> regroupsJson()
+        // temporary-create <document> <temporary group ID> <group>,<group>... [chat] [protected] (TS 24.481 §6.3.14.2)
+        "temporary-create" -> resultJson(mcptt().regroups.temporaryCreate(args[0], args[1], args[2].split(',').filter { it.isNotBlank() },
+            chat = "chat" in args.drop(3), protect = "protected" in args.drop(3)))
+        // temporary-delete <document> (TS 24.481 §6.3.15.2)
+        "temporary-delete" -> resultJson(mcptt().regroups.temporaryDelete(args.single()))
+        // group-document <group>: read the group's document again and show what the client uses of it
+        "group-document" -> Engine.client!!.refreshGroupDocument(args.single())?.let { d ->
+            JSONObject().put("uri", d.uri).put("type", d.type).put("members", JSONArray(d.members))
+                .put("preconfigured_use_only", d.preconfiguredUseOnly).put("user_priorities", JSONObject(d.userPriorities))
+                .put("temporary_constituents", JSONArray(d.temporaryConstituents)).put("regrouped_into", JSONArray(d.regroupedInto))
+        } ?: JSONObject.NULL
+        // Ambient listening (TS 24.379 §11.1.6.2.1.1): ambient remote <MCPTT ID> listens to that user (remote-init);
+        // ambient local <MCPTT ID> lets that user listen (local-init). ambient-source <wav>|none: what this phone's
+        // microphone gives next when it is listened to (the lab's devices have none).
+        "ambient" -> {
+            require(args.size == 2 && args[0] in setOf("remote", "local")) { "usage: ambient remote|local <MCPTT ID>" }
+            call { it.ambientCall(args[1], local = args[0] == "local") }
+        }
+        "ambient-source" -> {
+            Engine.fileAudio?.nextSource = args.single().takeIf { it != "none" }?.let { java.io.File(it).also { f -> require(f.canRead()) { "cannot read $it" } } }
+            "ok"
+        }
+        // Private call services, as the reference client (TS 24.379 §11.1.5, §11.1.7, §10.1.5, §11.1.8, §11.1.9):
+        //   callback <MCPTT ID> [low|normal|high] | callback-cancel <MCPTT ID> | callback-fulfil <MCPTT ID>
+        //   remote-call <remote ID> <target ID> [auto|manual|force-auto] [silent] [priority=<namespace.value>]
+        //   remote-group-call <remote ID> <group> [silent] [priority=<namespace.value>]
+        //   transfer <MCPTT ID> [fa] | forward <MCPTT ID> [fa] | call-services
+        "callback" -> resultJson(mcptt().services.requestCallBack(args[0], args.getOrNull(1) ?: "normal"))
+        "callback-cancel" -> resultJson(mcptt().services.cancelCallBack(args.single()))
+        "callback-fulfil" -> callJson(mcptt().services.fulfilCallBack(args.single()))
+        "remote-call" -> {
+            require(args.size >= 2) { "usage: remote-call <remote ID> <target ID> [auto|manual|force-auto] [silent] [priority=<namespace.value>]" }
+            val mode = when { "force-auto" in args -> Commencement.FORCED; "manual" in args -> Commencement.MANUAL; "auto" in args -> Commencement.AUTOMATIC
+                else -> null }
+            resultJson(mcptt().services.remotePrivateCall(args[0], args[1], mode, notify = "silent" !in args,
+                priority = args.firstOrNull { it.startsWith("priority=") }?.removePrefix("priority=")))
+        }
+        "remote-group-call" -> {
+            require(args.size >= 2) { "usage: remote-group-call <remote ID> <group> [silent] [priority=<namespace.value>]" }
+            resultJson(mcptt().services.remoteGroupCall(args[0], args[1], notify = "silent" !in args,
+                priority = args.firstOrNull { it.startsWith("priority=") }?.removePrefix("priority=")))
+        }
+        "transfer" -> resultJson(mcptt().services.transfer(args[0], toAlias = args.getOrNull(1) == "fa"))
+        "forward" -> resultJson(mcptt().services.forward(args[0], toAlias = args.getOrNull(1) == "fa"))
+        "call-services" -> callServicesJson()
         "answer" -> mcptt().answer()
         "reject" -> mcptt().reject()
         "hangup" -> { mcptt().hangup(); "released" }
@@ -125,7 +220,79 @@ class DebugControl(private val context: Context) {
         "floor-confirm" -> if (mcptt().confirmFloor()) "ok" else throw IllegalStateException("no queued floor grant awaiting confirmation")
         "queue-status" -> if (mcptt().requestQueuePosition()) "ok" else throw IllegalStateException("no queued floor request")
         "ptt" -> ptt(args[0], args.getOrNull(1)?.toDouble() ?: 5.0)
-        "answer-mode" -> { mcptt().answerMode = args[0]; args[0] }
+        // answer-mode automatic|manual: the local answer mode, then the settings-only PUBLISH (TS 24.379 §7.2.3).
+        "answer-mode" -> {
+            require(args.firstOrNull() in setOf("automatic", "manual")) { "usage: answer-mode automatic|manual" }
+            mcptt().answerMode = args[0]
+            val published = if (Engine.client?.status?.value?.mcptt?.authorised == true) procedures().settingsPublish() else null
+            JSONObject().put("answer_mode", args[0]).put("settings_publication", published?.let(::resultJson) ?: JSONObject.NULL)
+        }
+        // Service settings (TS 24.379 §7.2.3, §7.2.4), as the reference client: settings-publish [remove],
+        // settings-subscribe [fetch], settings-resubscribe, settings-unsubscribe.
+        "settings-publish" -> {
+            require(args.isEmpty() || args == listOf("remove")) { "usage: settings-publish [remove]" }
+            resultJson(procedures().settingsPublish(remove = args.firstOrNull() == "remove"))
+        }
+        "settings-subscribe" -> {
+            require(args.isEmpty() || args == listOf("fetch")) { "usage: settings-subscribe [fetch]" }
+            resultJson(procedures().settingsSubscribe(fetch = args.firstOrNull() == "fetch"))
+        }
+        "settings-resubscribe" -> resultJson(procedures().settingsResubscribe())
+        "settings-unsubscribe" -> resultJson(procedures().settingsResubscribe(end = true))
+        // monitor <group>... | monitor none: the groups of the user profile affiliated besides the base ones (§9.2.1.2).
+        "monitor" -> {
+            require(args.isNotEmpty() && ("none" !in args || args.size == 1)) { "usage: monitor <group>... | monitor none" }
+            Engine.client!!.monitor(if (args == listOf("none")) emptyList() else args)
+            JSONObject().put("monitored_groups", JSONArray(Engine.client!!.monitoredGroups))
+                .put("affiliations", JSONObject(Engine.client!!.status.value.mcptt.affiliations))
+        }
+        // Affiliation of other users (§9.2.1.2 to §9.2.1.5): affiliation-subscribe <ID> [fetch], affiliation-unsubscribe <ID>,
+        // affiliate-remote <ID> <group> affiliate|deaffiliate mandatory|negotiated, affiliation-accept [<group>...],
+        // affiliation-decline.
+        "affiliation-subscribe" -> {
+            require(args.size in 1..2 && (args.size == 1 || args[1] == "fetch")) { "usage: affiliation-subscribe <MCPTT ID> [fetch]" }
+            resultJson(procedures().affiliationSubscribe(args[0], fetch = args.getOrNull(1) == "fetch"))
+        }
+        "affiliation-unsubscribe" -> resultJson(procedures().affiliationUnsubscribe(args.single()))
+        "affiliate-remote" -> {
+            require(args.size == 4 && args[2] in setOf("affiliate", "deaffiliate") && args[3] in setOf("mandatory", "negotiated")) {
+                "usage: affiliate-remote <MCPTT ID> <group> affiliate|deaffiliate mandatory|negotiated" }
+            resultJson(procedures().affiliateRemote(args[0], args[1], affiliate = args[2] == "affiliate", negotiated = args[3] == "negotiated"))
+        }
+        "affiliation-accept" -> { procedures().answerAffiliationRequest(true, args.toSet()); proceduresJson() }
+        "affiliation-decline" -> { procedures().answerAffiliationRequest(false); proceduresJson() }
+        // Group dynamic data (§9.2.1.6): gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated],
+        // gdd-resubscribe <group>, gdd-unsubscribe <group>.
+        "gdd-subscribe" -> {
+            val items = args.drop(1).filter { it != "fetch" }
+            require(args.isNotEmpty() && items.all { it in org.openmcx.client.body.GroupDynamicData.ITEMS }) {
+                "usage: gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]" }
+            resultJson(procedures().gddSubscribe(args[0], fetch = "fetch" in args.drop(1), items = items))
+        }
+        "gdd-resubscribe" -> resultJson(procedures().gddResubscribe(args.single()))
+        "gdd-unsubscribe" -> resultJson(procedures().gddResubscribe(args.single(), end = true))
+        "procedures" -> proceduresJson()
+        // MCVideo affiliation (TS 24.281 §8.2.1.2 to §8.2.1.5), the MCVideo instance of the procedures above, as the
+        // reference client's mcvideo-affiliate <group>, mcvideo-deaffiliate <group>, mcvideo-affiliation-accept
+        // [<group>...], mcvideo-affiliation-decline: video-affiliate <group>, video-deaffiliate <group>,
+        // video-affiliation-accept [<group>...], video-affiliation-decline, video-affiliation-subscribe <ID> [fetch],
+        // video-affiliation-unsubscribe <ID>, video-affiliate-remote <ID> <group> affiliate|deaffiliate
+        // mandatory|negotiated, video-procedures.
+        "video-affiliate" -> videoAffiliation(args, affiliate = true)
+        "video-deaffiliate" -> videoAffiliation(args, affiliate = false)
+        "video-affiliation-accept" -> { videoProcedures().answerAffiliationRequest(true, args.toSet()); proceduresJson(org.openmcx.client.body.McService.MCVIDEO) }
+        "video-affiliation-decline" -> { videoProcedures().answerAffiliationRequest(false); proceduresJson(org.openmcx.client.body.McService.MCVIDEO) }
+        "video-affiliation-subscribe" -> {
+            require(args.size in 1..2 && (args.size == 1 || args[1] == "fetch")) { "usage: video-affiliation-subscribe <MCVideo ID> [fetch]" }
+            resultJson(videoProcedures().affiliationSubscribe(args[0], fetch = args.getOrNull(1) == "fetch"))
+        }
+        "video-affiliation-unsubscribe" -> resultJson(videoProcedures().affiliationUnsubscribe(args.single()))
+        "video-affiliate-remote" -> {
+            require(args.size == 4 && args[2] in setOf("affiliate", "deaffiliate") && args[3] in setOf("mandatory", "negotiated")) {
+                "usage: video-affiliate-remote <MCVideo ID> <group> affiliate|deaffiliate mandatory|negotiated" }
+            resultJson(videoProcedures().affiliateRemote(args[0], args[1], affiliate = args[2] == "affiliate", negotiated = args[3] == "negotiated"))
+        }
+        "video-procedures" -> proceduresJson(org.openmcx.client.body.McService.MCVIDEO)
         "import" -> { Provisioning(context).import(java.io.File(args[0]).readText()); Engine.restart(context); "imported" }
         // What the QR code scanner gives the app, as text: the same loading path without the camera.
         // An MCX Admin activation code and the account's password (slice F2), without the camera.
@@ -167,6 +334,39 @@ class DebugControl(private val context: Context) {
         "sds" -> sds(args, group = false)
         "sds-group" -> sds(args, group = true)
         "display" -> (Engine.mcdata ?: throw IllegalStateException("MCData not provisioned")).display(java.util.UUID.fromString(args[0]))
+        // The MCData media plane (MSRP; the phone is the active endpoint). Targets are an MCData ID or group=<group>.
+        // TS 24.282 §9.2.3.2.3: sds-media <target> <text…> [--disposition none|delivery|read|delivery-read]
+        "sds-media" -> sdsMedia(args)
+        // §9.2.4.2.3: sds-session <target> [emergency|imminent] [alert] | send [delivery|read|both] <text…> | close [all]
+        "sds-session" -> sdsSession(args)
+        // §6.2.8: sds-session-priority emergency|imminent on|off (a re-INVITE in the open session)
+        "sds-session-priority" -> mediaJson(media().setPriority(args[0] == "emergency", args.getOrNull(1) != "off"))
+        // §10.2.5.2.3: fd-media <target> <path on the device> [name=<name>] [type=<MIME>] [mandatory] [completed] [emergency|imminent]
+        "fd-media" -> fdMedia(args)
+        // §10.2.5.2.4 7): fd-media-answer accept|decline|defer [<id>]; fd-media-policy ask|accept|decline
+        "fd-media-answer" -> media().answerFile(args[0], args.getOrNull(1)?.toInt())
+        "fd-media-policy" -> { val p = args[0]; require(p in setOf("ask", "accept", "decline")); media().fileDecision = { p }; p }
+        "mcdata-media" -> JSONArray(media().communications.value.map(::mediaJson))
+        // TS 24.282 §18.3 (the Linux client's commands): mcdata-pre-establish | mcdata-pre-release | mcdata-pre-session;
+        // while established, sds-media and sds-session go over it by REFER (§9.2.5).
+        // TS 24.379 §8 (the Linux client's commands): pre-establish [implicit] | pre-session-modify [implicit|explicit]
+        // [update] | pre-session-release | pre-session; while established, calls go over it by REFER (§10.1.1.2.2.1 ...).
+        "pre-establish" -> mcpttPreJson(mcptt().preSession.establish(implicitFloor = "implicit" in args))
+        "pre-session-modify" -> mcpttPreJson(mcptt().preSession.modify(
+            implicitFloor = if ("implicit" in args) true else if ("explicit" in args) false else null, update = "update" in args))
+        "pre-session-release" -> mcpttPreJson(mcptt().preSession.release())
+        "pre-session" -> mcptt().preSession.status.value?.let(::mcpttPreJson) ?: JSONObject.NULL
+        "mcdata-pre-establish" -> preJson(media().preSession.establish())
+        "mcdata-pre-release" -> preJson(media().preSession.release())
+        "mcdata-pre-session" -> media().preSession.status.value?.let(::preJson) ?: JSONObject.NULL
+        // §13.2.4-§13.2.6: mcdata-release extend | now [reason…] | intent [query] [reason…] | accept | reject
+        "mcdata-release" -> {
+            val query = args.getOrNull(1) == "query"
+            val reason = args.drop(if (query) 2 else 1).joinToString(" ").ifBlank { null }
+            JSONObject().put("status", media().release(args[0], reason, query))
+        }
+        // IP connectivity, enhanced status, the message store, ad hoc and alias media (TS 24.282 §20, §14, §21, §24): McdataCommands.kt.
+        in McdataCommands.NAMES -> McdataCommands.execute(cmd, args)
         "events" -> JSONArray(Engine.log.last(args.firstOrNull()?.toInt() ?: 50))
         // File distribution. Paths are on the device (adb push to /data/local/tmp, then chmod 644).
         "fd-send" -> fdSend(args, group = false)
@@ -176,6 +376,12 @@ class DebugControl(private val context: Context) {
         "fd-cancel" -> { fd().cancel(args[0]); "ok" }
         "fd-files" -> JSONArray(fd().records.value.map(::fdJson))
         "fd-discover" -> fd().discover(args.firstOrNull())
+        // TS 24.282 §6.2.2.4, §13.2.5.3.2.1, §13.2.4.5.2.2, §13.2.6.3.2.1, §13.2.6.3.2.3: the release of an FD over HTTP.
+        "fd-terminate" -> fdJson(fd().terminate(args[0], "cancel"))
+        "fd-release" -> fdJson(fd().terminate(args[0], "release"))
+        "fd-extend" -> fdJson(fd().terminate(args[0], "extend"))
+        "fd-release-intent" -> fdJson(fd().terminate(args[0], "release-intent", reason = args.drop(1).joinToString(" ").ifBlank { null }))
+        "fd-extension-response" -> fdJson(fd().terminate(args[1], "extension-response", accept = args[0] == "accept"))
         "fd-config" -> Engine.client!!.config.mcdata!!.fd.let { c ->
             JSONObject().put("content_server", c.contentServer).put("service_max_bytes", c.serviceMaxBytes)
                 .put("user_max_bytes", c.userMaxBytes).put("device_max_bytes", c.deviceMaxBytes)
@@ -191,8 +397,34 @@ class DebugControl(private val context: Context) {
         // MCVideo private calls.
         "video-call" -> videoJson(mcvideo().privateCall(Engine.mcvideoId(args[0]),
             if ("manual" in args) Commencement.MANUAL else Commencement.AUTOMATIC, transmissionControl = "notc" !in args,
-            emergency = "emergency" in args))
-        "video-emergency" -> { mcvideo().setPriority(emergency = true, enabled = args.firstOrNull() != "off"); mcvideo().active?.priority ?: "none" }
+            emergency = "emergency" in args, implicit = "implicit" in args))
+        // video-emergency on|off [alert=<MCVideo ID>]: with alert=, the cancellation also cancels that user's emergency alert.
+        "video-emergency" -> { mcvideo().setPriority(emergency = true, enabled = args.firstOrNull() != "off",
+            cancelAlertOf = args.firstOrNull { it.startsWith("alert=") }?.removePrefix("alert=")); mcvideo().active?.priority ?: "none" }
+        // TS 24.281 §22.2.2.1.1: video-adhoc <MCVideo ID>... | criteria=<criteria> [emergency|imminent] [implicit]
+        "video-adhoc" -> videoJson(mcvideo().adhocCall(args.filter { it.startsWith("sip:") }.map { Engine.mcvideoId(it) },
+            args.firstOrNull { it.startsWith("criteria=") }?.removePrefix("criteria="),
+            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }, implicit = "implicit" in args))
+        // §22.2.3.1.1: release the ad hoc group call for everyone; video-hangup leaves it (§22.2.4.1.1).
+        "video-adhoc-release" -> { mcvideo().hangup(releaseForAll = true); "released" }
+        "video-rejoin" -> videoJson(mcvideo().rejoin())
+        // TS 24.281 §7.2.3: video-settings-publish [remove]
+        "video-settings-publish" -> JSONObject().put("status", mcvideo().publishSettings(remove = args.firstOrNull() == "remove"))
+        // §8.2.1.6: video-gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated];
+        // video-gdd-resubscribe <group>; video-gdd-unsubscribe <group>; video-gdd [group]
+        "video-gdd-subscribe" -> JSONObject().put("status", mcvideo().subscribeGdd(args[0], "fetch" in args,
+            org.openmcx.client.mcvideo.GroupDynamicData.Item.entries.filter { it.name.lowercase() in args }))
+        "video-gdd-resubscribe" -> JSONObject().put("status", mcvideo().refreshGdd(args[0], resubscribe = true))
+        "video-gdd-unsubscribe" -> JSONObject().put("status", mcvideo().refreshGdd(args[0], resubscribe = false))
+        "video-gdd" -> JSONObject(mcvideo().groupDynamicData.filterKeys { args.isEmpty() || it == args[0] }.mapValues { (_, d) ->
+            JSONObject().put("status", d.status).put("modified_by", d.modifiedBy).put("call_ongoing", d.callOngoing)
+                .put("broadcast_alias", d.broadcastAlias).put("regroup_alias", d.regroupAlias)
+                .put("members", JSONArray(d.members.map { m -> JSONObject().put("id", m.id).put("clients", JSONArray(m.clients)) }))
+        })
+        "video-rejoinable" -> JSONObject().put("session", mcvideo().rejoinable?.first).put("group", mcvideo().rejoinable?.second)
+            .put("type", mcvideo().rejoinable?.third)
+        // §9.2.5.2.1: video-imminent-cancel [group]
+        "video-imminent-cancel" -> JSONObject().put("state", mcvideo().cancelImminent(args.firstOrNull() ?: Engine.client!!.config.mcvideo!!.groups.first()))
         "video-imminent" -> { mcvideo().setPriority(emergency = false, enabled = args.firstOrNull() != "off"); mcvideo().active?.priority ?: "none" }
         "video-chat" -> videoJson(mcvideo().joinChat(args.firstOrNull() ?: Engine.client!!.config.mcvideo!!.chatGroups.first()))
         // video-alert on|off [latitude longitude] [group]: without coordinates the phone's own location is used.
@@ -213,7 +445,13 @@ class DebugControl(private val context: Context) {
         // The emergency alert of the Call tab: alert on|off [mcptt|mcdata|video]
         "alert" -> JSONObject().put("result", Engine.emergencyAlert(args.firstOrNull() != "off", args.getOrNull(1))).put("state", alertState())
         // adhoc-alert <criteria> [mcptt|video]   or   adhoc-alert cancel
-        "adhoc-alert" -> if (args.firstOrNull() == "cancel") {
+        // TS 24.281 §12.1A.1.4: adhoc-alert modify <criteria> (MCVideo)
+        "adhoc-alert" -> if (args.firstOrNull() == "modify") {
+            val video = Engine.alertHandlers.firstOrNull { it.service == org.openmcx.client.location.LocationService.MCVIDEO }
+                ?: throw IllegalStateException("MCVideo not provisioned")
+            video.modifyAdhoc(args[1], Engine.positionOverride ?: Engine.currentLocation(context))
+            JSONObject().put("criteria", args[1]).put("state", alertState())
+        } else if (args.firstOrNull() == "cancel") {
             val done = Engine.alertHandlers.filter { it.adhoc.value != null }.map { h -> h.service.lower to runCatching { h.cancelAdhoc() }.exceptionOrNull()?.message }
             Engine.alertsChanged()
             JSONObject().put("cancelled", JSONObject(done.toMap())).put("state", alertState())
@@ -227,10 +465,35 @@ class DebugControl(private val context: Context) {
             Engine.deviceLocation?.override = point
             JSONObject().put("position", point?.let { JSONObject().put("lat", it.lat).put("lon", it.lon) })
         }
+        // Location rules (TS 24.379 §9A.2.1.4, §9.2.1.7; TS 24.282 §22.2.1.4, §8.2.6.2): what each service's rules hold.
+        "location-rules" -> locationRulesJson()
+        // affiliate|deaffiliate <group> [mcptt|mcdata|mcvideo]: the user's affiliation status change (§9.2.1.2,
+        // TS 24.282 §8.2.2), refused outside the group's geographic area (§9.2.1.7.3) or while a locking rule holds it.
+        "affiliate", "deaffiliate" -> {
+            val service = serviceOf(args.getOrNull(1))
+            Engine.client!!.locationRules.userAffiliation(service, args[0], cmd == "affiliate")
+            JSONObject().put("affiliations", JSONObject(affiliationsOf(service))).put("rules", locationRulesJson())
+        }
+        // seal start|stop|offline|online|status: the SEAL location management client (TS 24.545 §6.2.2, §6.2.20).
+        "seal" -> {
+            val seal = Engine.client!!.seal
+            when (args.firstOrNull() ?: "status") {
+                "start" -> seal.start()
+                "stop" -> seal.stop()
+                "offline" -> seal.offline()
+                "online" -> seal.online()
+                "status" -> {}
+                else -> throw IllegalArgumentException("usage: seal start|stop|offline|online|status")
+            }
+            sealJson()
+        }
         "video-alerts" -> JSONObject(mcvideo().alerts.value.mapValues { (_, a) ->
             JSONObject().put("group", a.group).put("latitude", a.location?.latitude).put("longitude", a.location?.longitude)
         })
         "video-tamper-pck" -> { mcvideo().tamperNextPck = true; "next PCK tampered" }
+        // TS 33.180 §5.2.8.2: video-pck-kms <KMS URI>: the next PCK names that receiver KMS (the key still under this
+        // client's KMS), to see the server's KMS Redirect Response and the call keyed again.
+        "video-pck-kms" -> { mcvideo().mislabelNextPckKms = args[0]; "next PCK's receiver KMS ${args[0]}" }
         "keys" -> JSONObject().put("kms", Engine.client?.keysOf(org.openmcx.client.body.McService.MCPTT)?.kms?.kmsUri)
             .put("csk_id", Engine.client?.cskOf(org.openmcx.client.body.McService.MCPTT)?.csbId)
             .put("identity", Engine.client?.keysOf(org.openmcx.client.body.McService.MCPTT)?.identity)
@@ -249,7 +512,12 @@ class DebugControl(private val context: Context) {
         "video-remote" -> { mcvideo().remoteTransmission(args[0], args.getOrNull(1) != "stop"); "requested" }
         "video-recordings" -> JSONArray(mcvideo().recordings.value)
         "video-group" -> videoJson(mcvideo().groupCall(args.firstOrNull { it.startsWith("sip:") } ?: Engine.client!!.config.mcvideo!!.groups.first(),
-            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }))
+            when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }, implicit = "implicit" in args))
+        // TS 24.581 §6.2.4.9.3 and §6.2.5.5.3: the queue position while queued; stop receiving the current transmission.
+        "video-queue-position" -> JSONObject().put("sent", mcvideo().queuePosition()).put("position", mcvideo().active?.media?.control?.queuePosition)
+        "video-reception-end" -> JSONObject().put("sent", mcvideo().endReception())
+        "video-profile" -> JSONObject().put("priority", mcvideo().configuredPriority)
+            .put("private_call_kms", JSONObject(mcvideo().readProfile()?.privateCallKms ?: emptyMap<String, String>()))
         "video-transmit" -> videoTransmit(args.getOrNull(0)?.toDouble() ?: 5.0)
         "video-release" -> { mcvideo().stopTransmit(); "ok" }
         "video-hangup" -> { mcvideo().hangup(); "released" }
@@ -339,12 +607,147 @@ class DebugControl(private val context: Context) {
 
     private fun mcptt(): McpttService = Engine.mcptt ?: throw IllegalStateException("MCPTT not provisioned")
 
+    /** The chat group last joined from this endpoint, for `rejoin`. */
+    @Volatile private var lastChat: String? = null
+
+    /** The regroups notified (TS 24.379 §16.2.1.3) and the last regroup and temporary group requests. */
+    private fun regroupsJson(): JSONObject {
+        val state = Engine.mcptt?.regroups?.state?.value ?: return JSONObject()
+        return JSONObject().put("regroups", JSONObject(state.regroups.mapValues { (_, r) ->
+            JSONObject().put("preconfigured", r.preconfigured).put("groups", JSONArray(r.groups)).put("users", JSONArray(r.users))
+                .put("temporary", r.temporary)
+        })).put("notifications", state.notifications)
+            .put("last_request", state.lastRequest?.let(::resultJson) ?: JSONObject.NULL)
+            .put("last_temporary", state.lastTemporary?.let(::resultJson) ?: JSONObject.NULL)
+    }
+
+    private fun procedures(): org.openmcx.client.client.ServiceProcedures =
+        Engine.client?.procedures ?: throw IllegalStateException("MCPTT not provisioned")
+
+    /** The MCVideo instance of the same procedures (TS 24.281 §7.2.3, §7.2.4, §8.2.1.2 to §8.2.1.6). */
+    private fun videoProcedures(): org.openmcx.client.client.ServiceProcedures =
+        Engine.client?.videoProcedures ?: throw IllegalStateException("MCVideo not provisioned")
+
+    /**
+     * TS 24.281 §8.2.1.2: `video-affiliate <group>` / `video-deaffiliate <group>`: the client's interest in that one
+     * MCVideo group added or removed, the others kept (the PUBLISH lists every group still wanted; Expires 0 when none
+     * is left, step 4). De-affiliating from a group not affiliated is an error, as the reference client's.
+     */
+    private suspend fun videoAffiliation(args: List<String>, affiliate: Boolean): JSONObject {
+        val client = Engine.client ?: throw IllegalStateException("not started")
+        val video = org.openmcx.client.body.McService.MCVIDEO
+        require(args.size == 1) { "usage: video-${if (affiliate) "" else "de"}affiliate <group>" }
+        if (!client.status.value.mcvideo.authorised) throw IllegalStateException("MCVideo not authorised")
+        val group = args[0]
+        val affiliated = org.openmcx.client.body.Affiliation.counts(client.status.value.mcvideo.affiliations[group])
+        if (!affiliate && !affiliated) throw IllegalStateException("not affiliated to $group")
+        if (affiliate) client.changeAffiliation(video, listOf(group), emptyList()) else client.changeAffiliation(video, emptyList(), listOf(group))
+        return JSONObject().put("affiliations", JSONObject(client.status.value.mcvideo.affiliations))
+            .put("wanted_groups", JSONArray(client.wantedGroups(video)))
+    }
+
+    /**
+     * The call's implicit floor request (TS 24.380 §14.2.5): `implicit` (with `granted`, "mc_granted" in the offer,
+     * §14.2.4), `explicit`, or the configured choice; a `.wav` argument is what its talk burst sends once granted.
+     */
+    private fun implicitChoice(args: List<String>): McpttService.Implicit? {
+        args.firstOrNull { it.endsWith(".wav") }?.let { Engine.fileAudio?.nextSource = java.io.File(it) }
+        return when {
+            "implicit" in args -> McpttService.Implicit(true, "granted" in args)
+            "explicit" in args -> McpttService.Implicit(false, false)
+            else -> null
+        }
+    }
+
+    private fun resultJson(r: org.openmcx.client.client.ProcedureResult): JSONObject = JSONObject()
+        .put("action", r.action).put("status", r.status).put("warning", r.warning ?: JSONObject.NULL)
+
+    /**
+     * The state of the service settings and affiliation procedures (keys as the reference client's status):
+     * service_settings, settings_subscribed, settings_publication, target_affiliations, remote_affiliation,
+     * affiliation_command (the pending §9.2.1.5 request), last_affiliation_answer, group_dynamic_data, monitored_groups.
+     */
+    private fun proceduresJson(service: org.openmcx.client.body.McService = org.openmcx.client.body.McService.MCPTT): JSONObject {
+        val client = Engine.client ?: return JSONObject()
+        val p = client.proceduresOf(service)?.state?.value ?: return JSONObject()
+        return JSONObject()
+            .put("service_settings", JSONObject(p.serviceSettings.mapValues { (_, c) ->
+                JSONObject().put("answer_mode", c.answerMode).put("profile_index", c.profileIndex)
+                    .put("multiplex_support", c.multiplexSupport).put("own", c.own) }))
+            .put("settings_subscribed", p.settingsSubscribed)
+            .put("settings_subscription", p.settingsSubscription?.let(::resultJson) ?: JSONObject.NULL)
+            .put("settings_publication", p.settingsPublication?.let(::resultJson) ?: JSONObject.NULL)
+            .put("answer_mode", client.answerModeOf(service))
+            .put("target_affiliations", JSONObject(p.targetAffiliations.mapValues { (_, t) ->
+                JSONObject().put("subscribed", t.subscribed).put("status", t.status).put("notifications", t.notifications)
+                    .put("clients", JSONObject(t.clients.mapValues { JSONObject(it.value) })) }))
+            .put("remote_affiliation", p.remoteAffiliation?.let(::resultJson) ?: JSONObject.NULL)
+            .put("affiliation_command", p.affiliationRequest?.let {
+                JSONObject().put("from", it.from).put("affiliate", JSONArray(it.affiliate)).put("de-affiliate", JSONArray(it.deaffiliate)) }
+                ?: JSONObject.NULL)
+            .put("last_affiliation_answer", p.lastAffiliationAnswer ?: JSONObject.NULL)
+            .put("group_dynamic_data", JSONObject(p.groupDynamicData.mapValues { (_, g) ->
+                JSONObject().put("subscribed", g.subscribed).put("subscription_status", g.status).put("notifications", g.notifications)
+                    .put("group_status", g.data?.groupStatus).put("modified_by", g.data?.modifiedBy)
+                    .put("broadcast_alias", g.data?.broadcastAlias).put("regroup_alias", g.data?.regroupAlias)
+                    .put("call_ongoing", g.data?.callOngoing ?: JSONObject.NULL)
+                    .put("members", JSONArray(g.data?.members?.map { m ->
+                        JSONObject().put("id", m.id).put("clients", JSONArray(m.clients)).put("functional_aliases", JSONArray(m.functionalAliases)) }
+                        ?: emptyList<JSONObject>())) }))
+            .put("monitored_groups", JSONArray(if (service == org.openmcx.client.body.McService.MCPTT) client.monitoredGroups else emptyList()))
+            .put("monitorable_groups", JSONArray(if (service == org.openmcx.client.body.McService.MCPTT) client.monitorableGroups else emptyList()))
+            .put("wanted_groups", JSONArray(client.wantedGroups(service)))
+            .put("affiliations", JSONObject(when (service) {
+                org.openmcx.client.body.McService.MCVIDEO -> client.status.value.mcvideo.affiliations
+                else -> client.status.value.mcptt.affiliations }))
+    }
+
     private suspend fun functionalAlias(args: List<String>, service: org.openmcx.client.body.McService): Any {
         val client = Engine.client ?: throw IllegalStateException("not started")
         val action = args.firstOrNull() ?: throw IllegalArgumentException("usage: activate|takeover|deactivate <alias>... | use <alias>|none")
         if (action == "use") client.useAlias(args.getOrNull(1)?.takeIf { it != "none" }, service)
-        else client.aliasRequest(action, args.drop(1), service)
+        else {
+            // §9A.2.1.2 (TS 24.282 §22.2.1.2, TS 24.281 §20.2.1.2): not an alias a met location criterion holds and locks.
+            if (action == "deactivate") client.locationRules.checkUserDeactivation(service, args.drop(1))
+            client.aliasRequest(action, args.drop(1), service)
+        }
         return aliasJson(service)
+    }
+
+    private fun serviceOf(name: String?) = when (name ?: "mcptt") {
+        "mcptt" -> org.openmcx.client.body.McService.MCPTT
+        "mcdata" -> org.openmcx.client.body.McService.MCDATA
+        "mcvideo", "video" -> org.openmcx.client.body.McService.MCVIDEO
+        else -> throw IllegalArgumentException("service: mcptt, mcdata or mcvideo")
+    }
+
+    private fun affiliationsOf(service: org.openmcx.client.body.McService) = Engine.client!!.status.value.let {
+        when (service) {
+            org.openmcx.client.body.McService.MCPTT -> it.mcptt
+            org.openmcx.client.body.McService.MCDATA -> it.mcdata
+            org.openmcx.client.body.McService.MCVIDEO -> it.mcvideo
+        }.affiliations
+    }
+
+    private fun locationRulesJson(): JSONObject {
+        val rules = Engine.client?.locationRules ?: return JSONObject()
+        val out = JSONObject().put("position", rules.position?.let { JSONObject().put("lat", it.lat).put("lon", it.lon) } ?: JSONObject.NULL)
+        for ((service, v) in rules.state.value) out.put(service.name.lowercase(), JSONObject().put("loaded", v.loaded)
+            .put("functional_aliases", JSONArray(v.aliases)).put("affiliation_rules", v.rules).put("locked", JSONArray(v.locked.toList()))
+            .put("aliases_by_location", JSONArray(v.aliasesByLocation.toList())).put("rule_affiliated", JSONArray(v.ruleAffiliated.toList()))
+            .put("area_left", JSONArray(v.areaLeft.toList())).put("group_areas", JSONArray(v.groupAreas.toList()))
+            .put("notes", JSONArray(v.notes)).put("error", v.error ?: JSONObject.NULL)
+            .put("affiliations", JSONObject(affiliationsOf(service)))
+            .put("active_aliases", JSONArray(Engine.client!!.aliasesOf(service).value.active.toList())))
+        return out
+    }
+
+    private fun sealJson(): JSONObject {
+        val s = Engine.client?.seal?.state?.value ?: return JSONObject()
+        return JSONObject().put("started", s.started).put("offline", s.offline).put("periodic", s.periodic)
+            .put("minimum_interval", s.minimumInterval).put("reports_sent", s.reportsSent).put("stored", s.stored)
+            .put("stored_total", s.storedTotal).put("history_sent", s.historySent).put("last_status", s.lastStatus)
+            .put("report_uri", s.reportUri).put("last_error", s.lastError ?: JSONObject.NULL)
     }
 
     private fun aliasJson(service: org.openmcx.client.body.McService = org.openmcx.client.body.McService.MCPTT): JSONObject {
@@ -398,8 +801,92 @@ class DebugControl(private val context: Context) {
         }
         val sent = service.send(words.first(), words.drop(1).joinToString(" "), group, disposition, toAlias = toAlias)
         Engine.sent(sent)
-        return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("dppk_id", sent.dppkId ?: JSONObject.NULL)
+        return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("dppk_id", sent.dppkId ?: JSONObject.NULL).put("plane", sent.plane)
     }
+
+    private fun mcpttPreJson(p: org.openmcx.client.mcptt.McpttPreSessionStatus): JSONObject = JSONObject().put("state", p.state)
+        .put("uri", p.uri ?: JSONObject.NULL).put("call_id", p.callId ?: JSONObject.NULL).put("control", p.control)
+        .put("implicit", p.implicit).put("call", p.callIdOver ?: JSONObject.NULL).put("calls", p.calls)
+        .put("last_control", p.lastControl ?: JSONObject.NULL).put("floor_priority", p.floorPriority ?: JSONObject.NULL)
+        .put("refreshes", p.refreshes).put("modified", p.modified).put("resumed", p.resumed).put("reestablished", p.reestablished)
+        .put("error", p.error ?: JSONObject.NULL).put("release_reason", p.releaseReason ?: JSONObject.NULL)
+        .put("audio_port", p.audioPort ?: JSONObject.NULL).put("floor_port", p.floorPort ?: JSONObject.NULL)
+        .put("usable", Engine.mcptt?.preSession?.usable == true).put("wanted", Engine.mcptt?.preSession?.wanted == true)
+
+    private fun preJson(p: org.openmcx.client.mcdata.PreSessionStatus): JSONObject = JSONObject().put("state", p.state)
+        .put("uri", p.uri ?: JSONObject.NULL).put("call_id", p.callId ?: JSONObject.NULL)
+        .put("communication", p.communication ?: JSONObject.NULL).put("communication_uri", p.communicationUri ?: JSONObject.NULL)
+        .put("communication_id", p.communicationId ?: JSONObject.NULL).put("last_state", p.lastState ?: JSONObject.NULL)
+        .put("established", p.established).put("terminated", p.terminated).put("setup", p.setup ?: JSONObject.NULL)
+        .put("session_expires", p.sessionExpires).put("refreshes", p.refreshes).put("resumed", p.resumed)
+        .put("reestablished", p.reestablished).put("error", p.error ?: JSONObject.NULL)
+        .put("release_reason", p.releaseReason ?: JSONObject.NULL).put("usable", Engine.mcdataMedia?.preSession?.usable == true)
+        .put("wanted", Engine.mcdataMedia?.preSession?.wanted == true)
+
+    private fun media(): org.openmcx.client.mcdata.McdataMediaService = Engine.mcdataMedia ?: throw IllegalStateException("MCData not provisioned")
+
+    /** An MCData ID, or a group as group=<group>: (target, is a group). */
+    private fun mediaTarget(word: String) = if (word.startsWith("group=")) word.removePrefix("group=") to true else word to false
+
+    private fun disposition(word: String?) = when (word) {
+        "delivery" -> DispositionRequest.DELIVERY; "read" -> DispositionRequest.READ
+        "delivery-read", "both" -> DispositionRequest.DELIVERY_AND_READ; else -> null
+    }
+
+    private suspend fun sdsMedia(args: List<String>): Any {
+        val words = args.toMutableList()
+        val flag = words.indexOf("--disposition")
+        val disposition = if (flag >= 0) disposition(words.getOrNull(flag + 1)).also { words.subList(flag, minOf(flag + 2, words.size)).clear() } else null
+        val (target, group) = mediaTarget(words.first())
+        val sent = media().sendStandalone(target, words.drop(1).joinToString(" "), group, disposition)
+        Engine.sent(sent)
+        return JSONObject().put("message_id", sent.messageId.toString()).put("status", sent.status).put("plane", sent.plane)
+            .put("communication", media().communications.value.lastOrNull()?.let(::mediaJson))
+    }
+
+    private suspend fun sdsSession(args: List<String>): Any = when (args.firstOrNull()) {
+        "send" -> {
+            val d = disposition(args.getOrNull(1))
+            val text = args.drop(if (d != null) 2 else 1).joinToString(" ")
+            require(text.isNotBlank()) { "sds-session send [delivery|read|both] <text>" }
+            val sent = media().sessionSend(text, d)
+            Engine.sent(sent)
+            JSONObject().put("message_id", sent.messageId.toString())
+        }
+        "close" -> {
+            // TS 24.282 §13.2.2.2.4.3 step 3A: "close all" asks for the end of the communication for every participant.
+            media().close(reason = if (args.getOrNull(1) == "all") "SIP;cause=200;text=\"User requested release\"" else null)
+            "released"
+        }
+        null -> media().session?.let(::mediaJson) ?: JSONObject.NULL
+        else -> {
+            val (target, group) = mediaTarget(args[0])
+            val priority = when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }
+            mediaJson(media().openSession(target, group, priority, alert = "alert" in args))
+        }
+    }
+
+    private suspend fun fdMedia(args: List<String>): Any {
+        val (target, group) = mediaTarget(args[0])
+        val source = java.io.File(args[1])
+        if (!source.canRead()) throw IllegalArgumentException("cannot read ${args[1]}")
+        fun option(name: String) = args.firstOrNull { it.startsWith("$name=") }?.removePrefix("$name=")
+        val name = option("name") ?: source.name
+        val priority = when { "emergency" in args -> "emergency"; "imminent" in args -> "imminent"; else -> "normal" }
+        return mediaJson(media().sendFile(target, group, name, source.readBytes(), option("type") ?: AttachmentFiles.mediaType(null, name),
+            mandatory = "mandatory" in args, completion = "completed" in args, priority = priority))
+    }
+
+    private fun mediaJson(c: org.openmcx.client.mcdata.MediaCommunication): JSONObject = JSONObject()
+        .put("id", c.id).put("kind", c.kind).put("outgoing", c.outgoing).put("peer", c.peer).put("group", c.group)
+        .put("state", c.state).put("status", c.status).put("warning", c.warning).put("error", c.error)
+        .put("emergency", c.emergency).put("imminent_peril", c.imminentPeril).put("message_id", c.messageId?.toString())
+        .put("adhoc", c.adhoc).put("sender_alias", c.senderAlias).put("called_alias", c.calledAlias)
+        .put("conversation_id", c.conversationId.toString()).put("security", c.security).put("release", c.release)
+        .put("file", c.fileName).put("size", c.fileSize).put("sha256", c.sha256).put("path", c.filePath)
+        .put("transferred_size", c.transferredSize).put("transferred_sha256", c.transferredSha256)
+        .put("messages", JSONArray(c.messages.map { it.take(120) })).put("pre_established", c.preEstablished)
+        .put("resource_priority", c.resourcePriority)
 
     private fun mcvideo(): McvideoService = Engine.mcvideo ?: throw IllegalStateException("MCVideo not provisioned")
 
@@ -464,7 +951,7 @@ class DebugControl(private val context: Context) {
                     .put("adhoc", a.adhoc).put("criteria", a.criteria).put("lat", a.latitude).put("lon", a.longitude)
             }))
             .put("notices", JSONArray(Engine.alertHandlers.flatMap { h -> h.notices.map { n ->
-                JSONObject().put("service", n.service.lower).put("alert_area", n.alertArea).put("entered", n.entered).put("group", n.group).put("alerted", n.alerted)
+                JSONObject().put("service", n.service.lower).put("alert_area", n.alertArea).put("entered", n.entered).put("group", n.group).put("alerted", n.alerted).put("affiliation", n.affiliation).put("at", n.at)
             } }))
             .put("result", Engine.alertResult.value)
             .put("events", JSONArray(Engine.alertHandlers.flatMap { h -> h.events.toList() }))
@@ -484,6 +971,15 @@ class DebugControl(private val context: Context) {
             .put("transmission", media?.takeIf { it.isStarted }?.control?.state?.value?.name)
             .put("transmitter", media?.takeIf { it.isStarted }?.control?.transmitter)
             .put("receiving", media?.takeIf { it.isStarted }?.control?.receiving)
+            .put("reception", media?.takeIf { it.isStarted }?.control?.reception?.value?.name)
+            .put("queue_position", media?.takeIf { it.isStarted }?.control?.queuePosition)
+            .put("timeouts", JSONArray(media?.takeIf { it.isStarted }?.control?.timeouts ?: emptyList<String>()))
+            .put("granted_by_sdp", call.grantedBySdp)
+            .put("kms_uri", call.kmsUri).put("kms_source", call.kmsSource)
+            .put("krr", call.krr?.let { JSONObject().put("creator", it.creator).put("receiver_kms", it.receiverKms).put("receiver_list", JSONArray(it.receiverList)) })
+            .put("request_priority", media?.takeIf { it.isStarted }?.control?.priority)
+            .put("request_reception_priority", media?.takeIf { it.isStarted }?.control?.receptionPriority)
+            .put("negotiated_priority", call.negotiatedPriority).put("negotiated_reception_priority", call.negotiatedReceptionPriority)
             .put("events", JSONArray(call.events)).put("participants", JSONObject(call.participants))
             .put("pictures_sent", media?.stats?.picturesSent?.get()).put("pictures_received", media?.stats?.picturesReceived?.get())
             .put("undecoded", media?.stats?.undecoded?.get()).put("skipped_before_key", media?.stats?.skippedBeforeKey?.get())
@@ -512,10 +1008,10 @@ class DebugControl(private val context: Context) {
         .put("size", r.metadata.size).put("sha256", r.metadata.sha256).put("url", r.url).put("state", r.state.name.lowercase())
         .put("transferred", r.transferred).put("error", r.error).put("mandatory", r.mandatory)
         .put("notifications", JSONObject(r.notifications.mapValues { it.value.name.lowercase() }))
-        .put("openable", AttachmentFiles.openable(r) != null)
+        .put("openable", AttachmentFiles.openable(r) != null).put("release", r.release)
 
     private fun callJson(call: Call): JSONObject = JSONObject()
-        .put("id", call.id).put("type", call.type.sessionType).put("outgoing", call.outgoing)
+        .put("id", call.id).put("pre_established", call.preEstablished).put("session_uri", call.sessionUri).put("type", call.type.sessionType).put("outgoing", call.outgoing)
         .put("peer", call.peer).put("group", call.groupId).put("state", call.state).put("reason", call.releaseReason)
         .put("floor", call.media?.let { if (it.isStarted) it.floor.state.value.name else null })
         .put("floor_control", call.floorControl).put("muted", call.media?.muted == true).put("priority", call.priority)
@@ -524,12 +1020,34 @@ class DebugControl(private val context: Context) {
         .put("queue_position", call.media?.takeIf { it.isStarted }?.floor?.queuePosition?.value)
         .put("pending_floor_confirmation", call.media?.takeIf { it.isStarted }?.floor?.offered?.value == true)
         .put("floor_events", JSONArray(call.floorEvents))
+        .put("implicit_floor_request", call.implicitFloorRequest ?: JSONObject.NULL).put("granted_offered", call.grantedOffered)
+        .put("first_to_answer", call.firstToAnswer).put("invitees", JSONArray(call.invitees)).put("broadcast", call.broadcast)
+        .put("criteria", call.criteria ?: JSONObject.NULL).put("associated_group", call.associatedGroup ?: JSONObject.NULL)
+        .put("floor_priority", call.floorPriority ?: JSONObject.NULL).put("session_uri", call.sessionUri ?: JSONObject.NULL)
+        .put("last_modification", call.lastModification ?: JSONObject.NULL)
+        .put("ambient_type", call.ambientType ?: JSONObject.NULL).put("ambient_role", call.ambientRole ?: JSONObject.NULL)
+        .put("hidden", call.hidden).put("may_release", call.mayRelease).put("service", call.service ?: JSONObject.NULL)
+        .put("answer_mode", call.answerMode ?: JSONObject.NULL).put("forwarding_sequence", call.forwardingSequence)
         .put("bursts", JSONArray(call.media?.bursts?.map { b ->
             JSONObject().put("direction", b.direction).put("ssrc", b.ssrc).put("frames", b.payloadHashes.size)
                 .put("hashes", JSONArray(b.payloadHashes)).put("started_at", b.startedAt)
                 .put("requested_at", b.requestedAt).put("granted_at", b.grantedAt)
                 .put("first_playout_at", b.firstPlayoutAt).put("concealed", b.concealed).put("late", b.late)
         } ?: emptyList<JSONObject>()))
+
+    /** The call-back requests sent and received, the requests carried out and the outcomes of this user's own. */
+    private fun callServicesJson(): JSONObject {
+        val st = Engine.mcptt?.services?.state?.value ?: return JSONObject()
+        fun record(r: org.openmcx.client.mcptt.ServiceRecord) = JSONObject().put("type", r.type).put("peer", r.peer)
+            .put("target", r.target ?: JSONObject.NULL).put("outcome", r.outcome ?: JSONObject.NULL).put("notify", r.notify).put("at", r.at)
+        return JSONObject().put("callbacks_sent", JSONObject(st.callBacksSent))
+            .put("callbacks_received", JSONObject(st.callBacksReceived.mapValues { (_, r) ->
+                JSONObject().put("urgency", r.urgency).put("time", r.time ?: JSONObject.NULL) }))
+            .put("handled", JSONArray(st.handled.map(::record))).put("outcomes", JSONArray(st.outcomes.map(::record)))
+            .put("last_request", st.lastRequest?.let(::resultJson) ?: JSONObject.NULL)
+            .put("group_states", JSONObject(Engine.alertHandlers.firstOrNull { it.service == org.openmcx.client.location.LocationService.MCPTT }?.groupStates?.value?.mapValues { (_, g) ->
+                JSONObject().put("emergency", g.emergency).put("imminent_peril", g.imminentPeril).put("by", g.by ?: JSONObject.NULL) } ?: emptyMap<String, JSONObject>()))
+    }
 
     private fun status(): JSONObject {
         val network = NetworkStatus.current.value?.json() ?: JSONObject.NULL
@@ -559,6 +1077,9 @@ class DebugControl(private val context: Context) {
             .put("fgs_types", (context as? android.app.Service)?.takeIf { android.os.Build.VERSION.SDK_INT >= 29 }?.foregroundServiceType ?: JSONObject.NULL)
             .put("calls", JSONArray(Engine.mcptt?.calls?.value?.map(::callJson) ?: emptyList<JSONObject>()))
             .put("functional_aliases", aliasJson())
+            .put("procedures", proceduresJson())
+            .put("regroups", regroupsJson())
+            .put("call_services", callServicesJson())
             .put("mcdata_functional_aliases", aliasJson(org.openmcx.client.body.McService.MCDATA))
             .put("mcvideo_functional_aliases", aliasJson(org.openmcx.client.body.McService.MCVIDEO))
             .put("history", JSONArray(Engine.mcptt?.history?.map(::callJson) ?: emptyList<JSONObject>()))
@@ -568,11 +1089,15 @@ class DebugControl(private val context: Context) {
                     .put("sender_alias", m.senderAlias).put("called_alias", m.calledAlias)
                     .put("disposition", m.disposition?.name).put("displayed", m.displayed).put("notified", m.notified?.name)
                     .put("protected", m.dppkId != null).put("dppk_id", m.dppkId ?: JSONObject.NULL).put("authenticated", m.authenticated)
+                    .put("plane", m.plane).put("length", m.text.length)
             } ?: emptyList<JSONObject>()))
             .put("files", JSONArray(Engine.fd?.records?.value?.map(::fdJson) ?: emptyList<JSONObject>()))
+            .put("media", JSONArray(Engine.mcdataMedia?.communications?.value?.map(::mediaJson) ?: emptyList<JSONObject>()))
+            .put("pre_session", Engine.mcptt?.preSession?.status?.value?.let(::mcpttPreJson) ?: JSONObject.NULL)
+            .put("mcdata_pre_session", Engine.mcdataMedia?.preSession?.status?.value?.let(::preJson) ?: JSONObject.NULL)
             .put("outbox", JSONArray(Engine.mcdata?.outbox?.value?.map { m ->
                 JSONObject().put("message_id", m.messageId.toString()).put("target", m.target).put("group", m.group)
-                    .put("text", m.text).put("status", m.status).put("dppk_id", m.dppkId ?: JSONObject.NULL)
+                    .put("text", m.text).put("status", m.status).put("dppk_id", m.dppkId ?: JSONObject.NULL).put("plane", m.plane)
                     .put("notifications", JSONObject(m.notifications.mapValues { it.value.name }))
             } ?: emptyList<JSONObject>()))
     }

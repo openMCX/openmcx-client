@@ -65,9 +65,15 @@ class ServerTransaction internal constructor(
     }
 
     suspend fun send(response: SipResponse) {
-        if (finalSent) return
-        if (response.isFinal) finalSent = true
+        if (!claim(response.isFinal)) return
         ua.sendResponse(this, response)
+    }
+
+    /** One final response only, whichever coroutine sends it (RFC 3261 §17.2.1); false when one went already. */
+    @Synchronized private fun claim(final: Boolean): Boolean {
+        if (finalSent) return false
+        if (final) finalSent = true
+        return true
     }
 }
 
@@ -398,9 +404,11 @@ class UserAgent(
                 val tx = ServerTransaction(this, request, from)
                 if (invite == null) { tx.respond(481); return }
                 tx.respond(200)
+                // RFC 3261 §9.2: the 487 goes before the INVITE's handler learns of the CANCEL, which would otherwise
+                // race it with a final response of its own (a ringing MCPTT call's 480).
                 if (!invite.finalSent) {
-                    invite.cancelled.complete(Unit)
                     invite.respond(487)
+                    invite.cancelled.complete(Unit)
                 }
                 return
             }

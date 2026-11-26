@@ -26,6 +26,8 @@ import org.openmcx.client.body.McService
 import org.openmcx.client.body.Multipart
 import org.openmcx.client.body.Part
 import org.openmcx.client.body.ResourceLists
+import org.openmcx.client.body.descendants
+import org.openmcx.client.body.text
 import org.openmcx.client.client.Icsi
 import org.openmcx.client.client.McxClient
 import org.openmcx.client.client.ServiceHandler
@@ -51,12 +53,18 @@ class VideoCall internal constructor(
     /** The other party's MCVideo ID (private), or who called the group. */
     @Volatile var peer: String?,
     val transmissionControl: Boolean,
-    /** The group of a group call; null for a private call. */
-    val groupId: String? = null,
-    /** `private`, `prearranged` or `chat` (the session-type). */
+    /** The group of a group call (an ad hoc call's once the server names it); null for a private call. */
+    @Volatile var groupId: String? = null,
+    /** `private`, `prearranged`, `chat` or `adhoc` (the session-type). */
     val sessionType: String = "private",
 ) {
-    val isGroup get() = groupId != null
+    val isGroup get() = groupId != null || sessionType == McvideoService.ADHOC
+    val isAdhoc get() = sessionType == McvideoService.ADHOC
+    /** An ad hoc call (§22.2.2.1.1): the MCVideo IDs to call (step 11) or the participant criteria (step 12). */
+    internal var adhocTargets: List<String> = emptyList()
+    @Volatile var adhocCriteria: String? = null
+    /** A re-join (§22.2.5.1.1, §9.2.1.2.4.1): the session identity the INVITE goes to. */
+    internal var rejoinUri: String? = null
     /** A call with the MCVideo server itself: a push to it or a pull of a recording from it. */
     val withServer get() = sessionType == McvideoService.PUSH_TO_SERVER || sessionType == McvideoService.PULL_FROM_SERVER
     /** An ambient viewing call (§15): `remote-init` or `local-init`; null for any other call. */
@@ -67,6 +75,12 @@ class VideoCall internal constructor(
     @Volatile var mayRelease: Boolean = true
     /** The viewed-to user of a remotely initiated ambient viewing call gets no indication of it (§15.2.1.2 step 8, NOTE 4). */
     val hidden get() = ambientType == "remote-init" && ambientRole == "viewed-to"
+    /** The KMS the PCK is keyed to (TS 24.281 §6.2.8.3.9) and where it came from: user-profile, initial-configuration, kms-redirect. */
+    @Volatile var kmsUri: String? = null
+    @Volatile var kmsSource: String? = null
+    /** The KMS a redirected call is keyed to (TS 33.180 §5.2.8.2.5), and the KMS Redirect Response received. */
+    internal var targetKms: String? = null
+    @Volatile var krr: KmsRedirect? = null
     /** The PCK-ID of a protected one-to-one call (TS 33.180 7.4), once selected. */
     @Volatile var pckId: Long? = null
     /** Where the server saved the video of a push to it (§13.2.3.2.3). */
@@ -80,6 +94,13 @@ class VideoCall internal constructor(
     @Volatile var calledAlias: String? = null
     /** A private call to a functional alias, before the server names who holds it (§10.2.2.2.1, 300). */
     internal var toAlias: Boolean = false
+    /** The user asked to transmit with the call setup: an implicit transmission request (§6.4, TS 24.581 §14.2.5). */
+    internal var implicitAsked: Boolean = false
+    /** The 200 (OK)'s "mc_granted" granted the implicit request (TS 24.581 §12.1.2.2 NOTE 3). */
+    @Volatile var grantedBySdp: Boolean = false
+    /** TS 24.581 §14.3.3, §14.4: the negotiated maximum transmission and reception priorities (null: the default). */
+    @Volatile var negotiatedPriority: Int? = null
+    @Volatile var negotiatedReceptionPriority: Int? = null
     /** Group calls: who is in the call, MC ID to endpoint status, from the conference event package (§9.2.3). */
     @Volatile var participants: Map<String, String> = emptyMap()
     /** RFC 4575 §4.6: the version of the last conference notification applied. */
@@ -143,9 +164,28 @@ class McvideoService(
     private val _recordings = MutableStateFlow<List<String>>(emptyList())
     /** URLs of this user's pushes to the server, newest last: videos to pull again. */
     val recordings: StateFlow<List<String>> = _recordings
+    /** The Call-IDs of the conference subscriptions ended with their calls, whose last NOTIFY may still come. */
+    private val endedConferences: MutableSet<String> = java.util.Collections.synchronizedSet(LinkedHashSet())
     private val _alerting = MutableStateFlow<Set<String>>(emptySet())
+    /**
+     * The group session this user last left and may re-join (TS 24.281 §22.2.5.1.1 for an ad hoc group session left
+     * by §22.2.4.1.1, or removed from it; one released for everyone, §22.2.3.1.1, has ended): (session URI, group, type).
+     */
+    @Volatile var rejoinable: Triple<String, String?, String>? = null
+        private set
+    /** The imminent peril state of groups cancelled without a call (TS 24.281 §9.2.5.2.1, annex G.7): "MVIG 1" ... */
+    val imminentStates: MutableMap<String, String> = java.util.concurrent.ConcurrentHashMap()
     /** The groups on which this user's own emergency alert is active. */
     val alerting: StateFlow<Set<String>> = _alerting
+
+    /** The MCVideo user profile (TS 24.484 §9.3), read once the service is authorised. */
+    @Volatile var profile: McvideoProfile? = null
+        private set
+    /**
+     * TS 24.581 §14.2.3 and §14.2.6: the configured transmission and reception priority: provisioned (`mcvideo.priority`),
+     * else the MCVideo user profile's <Priority> (TS 24.484 §9.3.2.1 item 8 e) v)); 0 is the default priority.
+     */
+    val configuredPriority: Int get() = config.priority ?: profile?.priority ?: 0
 
     /** Each group's GMKs (TS 33.180 5.7), their CSB-IDs the GMK-IDs; from the GKTP subscriptions. */
     private val groupKeys = GroupKeys()
@@ -154,6 +194,10 @@ class McvideoService(
     private val keySubscriptions = GroupKeySubscriptions()
 
     init {
+        // TS 24.484 §9.3.1A: the MCVideo user profile, of the profile index in use, once authorised.
+        scope.launch {
+            client.status.map { it.mcvideo.authorised }.distinctUntilChanged().collect { authorised -> if (authorised) readProfile() }
+        }
         // TS 24.281 4.7.1: once authorised, subscribe to each group's GMK at the MCVideo server; each subscription is
         // refreshed in its dialog before it expires (TS 24.481 §6.3.13.2.1 re-SUBSCRIBE, RFC 6665 §4.1.2.2).
         if (client.config.security?.protectMedia == true) scope.launch {
@@ -166,6 +210,16 @@ class McvideoService(
         }
     }
     private var keyRefresh: Job? = null
+
+    /** Read the MCVideo user profile (TS 24.484 §9.3.1A); one of another user is not taken. */
+    suspend fun readProfile(): McvideoProfile? {
+        val index = client.config.mcptt?.profileIndex ?: 1
+        return runCatching { McvideoProfile.parse(client.cmsDocument(McvideoProfile.path(org.openmcx.client.security.KeyClient.xcapSegment(config.userId), index))) }
+            .mapCatching { if (it.userId != null && it.userId != config.userId) throw IllegalStateException("profile of ${it.userId}") else it }
+            .onSuccess { profile = it; event("user profile: priority ${it.priority}, private call KMSs ${it.privateCallKms}") }
+            .onFailure { event("user profile: ${it.message}") }
+            .getOrNull()
+    }
 
     private suspend fun subscribeGroupKeys() {
         val token = client.tokens?.accessToken ?: return
@@ -289,8 +343,13 @@ class McvideoService(
         val ports = VideoPorts.bind(InetAddress.getByName(address), client.config.media.portRange)
         return ports to LocalVideoMedia(address, ports.audio.localPort, ports.video.localPort,
             if (transmissionControl) ports.control.localPort else null,
-            McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), implicitRequest && transmissionControl, direction)
+            McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), implicitRequest && transmissionControl, direction,
+            // TS 24.581 §14.2.2, §14.2.3, §14.2.6 (and §14.5 for later offers): queueing and the configured priorities.
+            priority = TransmissionPriority.offered(configuredPriority).takeIf { transmissionControl },
+            receptionPriority = TransmissionPriority.offered(configuredPriority).takeIf { transmissionControl },
+            queueing = config.queueing && transmissionControl)
     }
+
 
     /** Debug builds: corrupt the next PCK offered, to see the called side refuse it (488, warning 136). */
     @Volatile var tamperNextPck = false
@@ -331,6 +390,9 @@ class McvideoService(
             override fun requestFailed() = note(call, "request failed")
             override fun reception(receiving: Boolean, rejectCause: Int?) = note(call, if (receiving) "receiving" else "reception refused $rejectCause")
             override fun remoteResult(start: Boolean, done: Boolean?) = note(call, "remote ${if (start) "start" else "stop"} ${if (done == true) "done" else "not done"}")
+            override fun queued(position: Int?) = note(call, "queued${position?.let { " at $it" } ?: ""}")
+            override fun timeout(what: String) = note(call, what)
+            override fun ended(byServer: Boolean) = note(call, if (byServer) "ended by the server" else "transmission ended")
         }
     }
 
@@ -340,8 +402,9 @@ class McvideoService(
 
     /** A private call; with [emergency], an emergency private call (§6.2.8.3). */
     suspend fun privateCall(target: String, commencement: Commencement = Commencement.AUTOMATIC, transmissionControl: Boolean = true,
-                            emergency: Boolean = false): VideoCall =
-        originate(VideoCall(ids.incrementAndGet(), true, target, transmissionControl).also { if (emergency) it.priority = "emergency" }, commencement)
+                            emergency: Boolean = false, implicit: Boolean = false): VideoCall =
+        originate(VideoCall(ids.incrementAndGet(), true, target, transmissionControl).also {
+            if (emergency) it.priority = "emergency"; it.implicitAsked = implicit }, commencement)
 
     /**
      * A private call to a functional alias (TS 24.281 §10.2.2.2.1 with §20): the request names the alias with
@@ -363,8 +426,9 @@ class McvideoService(
      * A prearranged group call (§9.2.1.2.1): the server invites the group's affiliated members. With
      * [priority] `emergency` or `imminent`, an emergency or imminent peril group call (§6.2.8.1).
      */
-    suspend fun groupCall(group: String = config.groups.firstOrNull() ?: throw CallError("no MCVideo group"), priority: String = "normal"): VideoCall =
-        originate(VideoCall(ids.incrementAndGet(), true, null, true, group, "prearranged").also { it.priority = priority }, null)
+    suspend fun groupCall(group: String = config.groups.firstOrNull() ?: throw CallError("no MCVideo group"), priority: String = "normal",
+                          implicit: Boolean = false): VideoCall =
+        originate(VideoCall(ids.incrementAndGet(), true, null, true, group, "prearranged").also { it.priority = priority; it.implicitAsked = implicit }, null)
 
     /**
      * Join a chat group's call (§9.2.2.2.1): nobody is invited; the server creates the group's
@@ -372,6 +436,149 @@ class McvideoService(
      */
     suspend fun joinChat(group: String = config.chatGroups.firstOrNull() ?: throw CallError("no MCVideo chat group")): VideoCall =
         originate(VideoCall(ids.incrementAndGet(), true, null, true, group, "chat"), null)
+
+    /**
+     * An ad hoc group call (TS 24.281 §22.2.2.1.1) to [targets] (step 11) or to the users [criteria] select (step 12);
+     * with [priority] `emergency` (§6.2.8.1.19) or `imminent` (§6.2.8.1.23). The server names the ad hoc group in its 2xx.
+     */
+    suspend fun adhocCall(targets: List<String> = emptyList(), criteria: String? = null, priority: String = "normal",
+                          implicit: Boolean = false): VideoCall {
+        if (targets.isEmpty() && criteria.isNullOrBlank()) throw CallError("an ad hoc call needs MCVideo IDs or criteria")
+        return originate(VideoCall(ids.incrementAndGet(), true, null, true, null, ADHOC).also {
+            it.adhocTargets = targets; it.adhocCriteria = criteria; it.priority = priority; it.implicitAsked = implicit }, null)
+    }
+
+    /**
+     * Re-join the group session this user last left (TS 24.281 §22.2.5.1.1 for an ad hoc group session: the INVITE of
+     * §22.2.2.1.1 to the session identity, naming the ad hoc group; §9.2.1.2.4.1 for a prearranged or chat group).
+     */
+    suspend fun rejoin(): VideoCall {
+        val (uri, group, type) = rejoinable ?: throw CallError("no group session to re-join")
+        return originate(VideoCall(ids.incrementAndGet(), true, null, true, group, type).also { it.rejoinUri = uri }, null)
+    }
+
+    /**
+     * TS 24.281 §9.2.5.2.1: cancel the in-progress imminent peril state of [group] on which there is no call: a MESSAGE
+     * to the MCVideo PSI with the group, <imminentperil-ind> "false", the client ID and the alias in use (step 5); the
+     * state "MVIG 3: cancel-pending" (step 7) until a 2xx ("MVIG 1: no-imminent-peril") or a failure ("MVIG 2: in-progress").
+     * With a call on the group, the cancellation is that call's re-INVITE (§9.2.1.2.1.5).
+     */
+    suspend fun cancelImminent(group: String = config.groups.firstOrNull() ?: throw CallError("no MCVideo group")): String {
+        active?.takeIf { it.groupId == group && it.state == "established" }?.let { setPriority(emergency = false, enabled = false, call = it); return "MVIG 1: no-imminent-peril" }
+        val request = ua.newRequest("MESSAGE", config.psi, NameAddr(config.psi))
+        request.headers.add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCVIDEO)}\";require;explicit")
+            .add("Accept-Contact", "*;+g.3gpp.mcvideo;require;explicit").add("P-Preferred-Service", Icsi.MCVIDEO)
+        val info = McvideoInfo(requestUri = group, imminentPeril = false, clientId = client.config.clientId,
+            functionalAlias = client.aliasesOf(McService.MCVIDEO).value.inUse)
+        request.headers.add("Content-Type", McvideoInfo.CONTENT_TYPE)
+        imminentStates[group] = "MVIG 3: cancel-pending"
+        val response = ua.send(SipRequest(request.method, request.uri, request.headers, info.encode().toByteArray()))
+        imminentStates[group] = if (response.isSuccess) "MVIG 1: no-imminent-peril" else "MVIG 2: in-progress"
+        event("imminent peril of $group cancelled without a call: ${response.status}")
+        if (!response.isSuccess) throw CallError("${response.status} ${response.reason}${response.headers["Warning"]?.let { " ($it)" } ?: ""}", response.status)
+        return imminentStates[group]!!
+    }
+
+    /**
+     * §22.2.2.1.1: whether the MCVideo service configuration document allows ad hoc group calls: an
+     * <allow-adhoc-group-call-support> "true" in the <adhoc-group-call> of the <anyExt> of <on-network> (absent: not).
+     */
+    private suspend fun adhocSupported(): Boolean {
+        val text = runCatching { client.cmsDocument("org.3gpp.mcvideo.service-config/global/service-config.xml") }.getOrElse {
+            event("service configuration: ${it.message}"); return false }
+        return adhocSupport(text)
+    }
+
+    // Service settings (TS 24.281 §7.2.3) and group dynamic data (§8.2.1.6).
+
+    /** The entity-tag of the settings-only publication (RFC 3903), apart from the service authorisation's. */
+    @Volatile private var settingsEtag: String? = null
+    /** The outcome of the last settings-only PUBLISH: its status. */
+    @Volatile var settingsStatus: Int? = null
+        private set
+
+    /**
+     * TS 24.281 §7.2.3 with §7.2.1A: a SIP PUBLISH for the MCVideo service settings only, to the MCVideo PSI with the
+     * MCVideo ICSI, Event poc-settings, Expires 4294967295 (or 0 with [remove], which logs the client off the service,
+     * §7.2.1A NOTE 3); the mcvideo-info with this user's MCVideo ID and the client ID (steps 2, 3), the poc-settings with
+     * the answer mode, the selected user profile index and <multiplex-support> (step 4). Protection (steps 2 and 5) is
+     * the signalling filter's. A modification names the publication in SIP-If-Match; a 412 publishes anew (RFC 3903 §5).
+     */
+    suspend fun publishSettings(remove: Boolean = false): Int {
+        suspend fun send(etag: String?): org.openmcx.client.sip.SipResponse {
+            val request = ua.newRequest("PUBLISH", config.psi, NameAddr(config.psi))
+            request.headers.add("P-Preferred-Service", Icsi.MCVIDEO).add("Event", "poc-settings")
+                .add("Expires", if (remove) "0" else "4294967295")
+            etag?.let { request.headers.add("SIP-If-Match", it) }
+            val (contentType, body) = Multipart.encode(listOf(
+                Part(McvideoInfo.CONTENT_TYPE, McvideoInfo(requestUri = config.userId, clientId = client.config.clientId).encode().toByteArray()),
+                Part(org.openmcx.client.body.PocSettings.CONTENT_TYPE,
+                    org.openmcx.client.body.PocSettings.encode(client.config.clientId, if (answerMode == "manual") "manual" else "automatic").toByteArray())))
+            request.headers.add("Content-Type", contentType)
+            return ua.send(SipRequest(request.method, request.uri, request.headers, body))
+        }
+        var response = send(settingsEtag)
+        if (response.status == 412 && settingsEtag != null && !remove) { settingsEtag = null; response = send(null) }
+        settingsStatus = response.status
+        if (response.isSuccess) settingsEtag = if (remove) null else response.headers["SIP-ETag"] ?: settingsEtag
+        event("service settings ${if (remove) "removed" else "published"}: ${response.status}")
+        if (!response.isSuccess) throw CallError("${response.status} ${response.reason}${response.headers["Warning"]?.let { " ($it)" } ?: ""}", response.status)
+        return response.status
+    }
+
+    /** Per-group dynamic data (§8.2.1.6), by group, from the NOTIFYs. */
+    val groupDynamicData: MutableMap<String, GroupDynamicData.State> = java.util.concurrent.ConcurrentHashMap()
+    private val gddDialogs = java.util.concurrent.ConcurrentHashMap<String, Dialog>()
+    private val gddCallIds = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /**
+     * TS 24.281 §8.2.1.6: subscribe to [group]'s dynamic data: SUBSCRIBE (Event presence) to the MCVideo PSI (step 1)
+     * with an mcvideo-info naming the group (step 2), the MCVideo ICSI (step 3), Expires 4294967295 (step 4) or 0 to
+     * fetch the current state only (step 5), Accept application/pidf+xml (step 6) and the simple-filter of the group
+     * (step 7, §8.3.2.2) with the [items] asked for.
+     */
+    suspend fun subscribeGdd(group: String, fetch: Boolean = false, items: Collection<GroupDynamicData.Item> = emptyList()): Int {
+        if (gddDialogs.containsKey(group)) throw CallError("already subscribed to $group")
+        val request = ua.newRequest("SUBSCRIBE", config.psi, NameAddr(config.psi))
+        request.headers.add("Contact", client.contactFor(McService.MCVIDEO)).add("P-Preferred-Service", Icsi.MCVIDEO)
+            .add("Event", GroupDynamicData.EVENT).add("Accept", GroupDynamicData.PIDF_TYPE).add("Expires", if (fetch) "0" else "4294967295")
+        val (contentType, body) = Multipart.encode(listOf(
+            Part(McvideoInfo.CONTENT_TYPE, McvideoInfo(requestUri = group, clientId = client.config.clientId).encode().toByteArray()),
+            Part(GroupDynamicData.FILTER_TYPE, GroupDynamicData.filter(group, "gdd-" + java.util.UUID.randomUUID().toString().take(8), items).toByteArray())))
+        request.headers.add("Content-Type", contentType)
+        val subscribe = SipRequest(request.method, request.uri, request.headers, body)
+        gddCallIds[subscribe.callId] = group // a NOTIFY may beat the 200
+        val response = runCatching { ua.send(subscribe) }.getOrNull()
+        event("group dynamic data of $group${if (fetch) " (fetch)" else ""}: ${response?.status}")
+        if (response == null || !response.isSuccess) { gddCallIds.remove(subscribe.callId); throw CallError("group dynamic data subscription: ${response?.status}") }
+        if (!fetch) Dialog.fromResponse(ua.lastSent[subscribe.callId] ?: subscribe, response).let { gddDialogs[group] = it }
+        return response.status
+    }
+
+    /** §8.2.1.6: re-subscribe ([resubscribe], Expires 4294967295) or de-subscribe (Expires 0) in the subscription's dialog. */
+    suspend fun refreshGdd(group: String, resubscribe: Boolean): Int? {
+        val dialog = gddDialogs[group] ?: throw CallError("no group dynamic data subscription to $group")
+        val request = ua.inDialog(dialog, "SUBSCRIBE")
+        request.headers.add("Contact", client.contactFor(McService.MCVIDEO)).add("Event", GroupDynamicData.EVENT)
+            .add("Accept", GroupDynamicData.PIDF_TYPE).add("Expires", if (resubscribe) "4294967295" else "0")
+        if (!resubscribe) gddDialogs.remove(group)
+        val response = runCatching { ua.send(request, dialog) }.getOrNull()
+        event("group dynamic data of $group ${if (resubscribe) "re-subscribed" else "de-subscribed"}: ${response?.status}")
+        return response?.status
+    }
+
+    /** §8.2.1.6, last paragraph: the per-group dynamic data of a NOTIFY's application/pidf+xml (§8.3.1). */
+    private fun gddNotify(group: String, request: SipRequest) {
+        if (request.headers["Subscription-State"]?.startsWith("terminated") == true) { gddDialogs.remove(group); gddCallIds.remove(request.callId) }
+        val part = Multipart.parse(request.contentType, request.body).firstOrNull { it.mediaType == GroupDynamicData.PIDF_TYPE } ?: return
+        runCatching { GroupDynamicData.parse(part.text) }
+            .onSuccess { state ->
+                if (state.group != null && state.group != group) { event("group dynamic data of another group ${state.group}"); return }
+                groupDynamicData[group] = state
+                event("group dynamic data of $group: status ${state.status}, ${state.members.size} members, call ${state.callOngoing}")
+            }
+            .onFailure { event("group dynamic data of $group unread: ${it.message}") }
+    }
 
     // Video push and pull (§12.2, §13.2): private calls in which one side sends without asking.
 
@@ -411,7 +618,27 @@ class McvideoService(
         media.control.remote(user, start)
     }
 
-    private suspend fun originate(call: VideoCall, commencement: Commencement?): VideoCall {
+    /** Debug builds: name the next PCK's receiver KMS as this URI, to see the server's KMS Redirect Response. */
+    @Volatile var mislabelNextPckKms: String? = null
+
+    /** A 488 with a KMS Redirect Response (TS 33.180 §5.2.8.2.5): the receiver KMS chosen, to key the call again to. */
+    private class KmsRedirected(val kms: String) : Exception("KMS redirect to $kms")
+
+    /**
+     * Originate [call]; on a KMS Redirect Response to its PCK (TS 33.180 §5.2.8.2.5), once, the same call again with the
+     * PCK keyed to the first receiver KMS listed that this client holds the certificate of.
+     */
+    private suspend fun originate(call: VideoCall, commencement: Commencement?): VideoCall = try {
+        originateOnce(call, commencement)
+    } catch (e: KmsRedirected) {
+        originateOnce(VideoCall(ids.incrementAndGet(), true, call.peer, call.transmissionControl, null, call.sessionType).also {
+            it.priority = call.priority; it.ambientType = call.ambientType; it.ambientRole = call.ambientRole
+            it.mayRelease = call.mayRelease; it.implicitAsked = call.implicitAsked; it.pushUrl = call.pushUrl
+            it.calledAlias = call.calledAlias; it.targetKms = e.kms; it.krr = call.krr
+        }, commencement)
+    }
+
+    private suspend fun originateOnce(call: VideoCall, commencement: Commencement?): VideoCall {
         // The user knows nothing of a hidden ambient viewing call: a call of their own ends it (the server
         // releases it too, with call-request-initiated-by-viewed-to-client, §15.4.3).
         active?.takeIf { it.hidden }?.let { release(it, "call-request-initiated-by-viewed-to-client") }
@@ -421,27 +648,46 @@ class McvideoService(
         // §10.2.2.2.1 step 11, §15.2.1.1 with TS 33.180 7.4: a protected one-to-one call's media under a PCK we
         // generate for the called MCVideo ID, offered in a=key-mgmt. Calls with the server itself stay clear.
         // A call to an alias is keyed once the server names the user who holds it (the 300, then the call to them).
+        // §22.2.2.1.1: an ad hoc group call needs <allow-adhoc-group-call-support> "true" in the service configuration.
+        if (call.isAdhoc && call.rejoinUri == null && !adhocSupported()) throw CallError("ad hoc group calls are not allowed (service configuration)")
         val pck = if (protectedMedia && !call.isGroup && !call.withServer && !call.toAlias) {
             val keys = client.videoKeys ?: throw CallError("no MCVideo keys for a protected call")
-            keys.makePck(target ?: throw CallError("no one to call"))
+            val who = target ?: throw CallError("no one to call")
+            // §10.2.2.2.1 step 8 d) with §6.2.8.3.9: keyed to the KMS of the called user: the user profile's
+            // <PrivateCallKMSURI> for them, else this client's own KMS; after a KMS Redirect Response, the receiver KMS
+            // chosen (TS 33.180 §5.2.8.2.5).
+            val (kms, source) = call.targetKms?.let { it to "kms-redirect" }
+                ?: profile?.privateCallKms?.get(who)?.takeIf { it.isNotBlank() }?.let { it to "user-profile" }
+                ?: (keys.ownKmsUri to "initial-configuration")
+            call.kmsUri = kms; call.kmsSource = source
+            if (!keys.knowsKms(kms)) throw CallError("no KMS certificate for the KMS URI of $who: $kms")
+            keys.makePck(who, kms, mislabelled = mislabelNextPckKms.also { mislabelNextPckKms = null })
         } else null
         // Calls with the MCVideo server itself (recording, playback) stay in the clear, transmission control too.
         // A protected group or chat call's media under the group's GMK (TS 33.180 7.3).
-        val gmk = if (protectedMedia && call.isGroup) awaitGroupKey(call.groupId ?: throw CallError("no group")) else null
+        // An ad hoc group's GMK is not known before the server names the group: an ad hoc call's media go in the
+        // clear, its transmission control under the CSK when floor control is protected (TS 33.180 §9.4.2, as the
+        // MCVideo server does for ad hoc calls, and as MCPTT ad hoc calls).
+        val gmk = if (protectedMedia && call.isGroup && !call.isAdhoc) awaitGroupKey(call.groupId ?: throw CallError("no group")) else null
         val protection = if (call.withServer) null else protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
         _calls.value = _calls.value + call
         val (ports, bound) = bindMedia(transmissionControl,
-            implicitRequest = call.sessionType == PUSH || call.sessionType == PUSH_TO_SERVER || call.ambientType == "local-init",
+            implicitRequest = call.sessionType == PUSH || call.sessionType == PUSH_TO_SERVER || call.ambientType == "local-init" || call.implicitAsked,
             direction = when (call.ambientRole) { "viewing" -> "recvonly"; "viewed-to" -> "sendonly"; else -> "sendrecv" })
         // A test of the called side's check (debug builds): one flipped bit in the I_MESSAGE's signature.
         val offered = pck?.second?.let { if (tamperNextPck) { tamperNextPck = false; tamper(it) } else it }
-        val local = if (pck != null) bound.copy(protected = true, keyMgmt = offered) else if (gmk != null) bound.copy(protected = true) else bound
-        val media = newMedia(call, ports, local)
+        val keyed = if (pck != null) bound.copy(protected = true, keyMgmt = offered) else if (gmk != null) bound.copy(protected = true) else bound
+        // TS 24.581 §14.2.4: "mc_granted" in the initial offer only, with this client's own implicit request
+        // (mcvideo.offer_granted); §14.5: never in a later offer (the media keep the offer without it).
+        val local = keyed.copy(granted = config.offerGranted && keyed.implicitRequest)
+        val media = newMedia(call, ports, keyed)
         media.protection = protection
         pck?.let { call.pckId = it.first.csbId; event("call ${call.id}: PCK %08x for $target".format(it.first.csbId)) }
         call.media = media
         try {
-            val request = ua.newRequest("INVITE", config.psi, NameAddr(config.psi))
+            // §22.2.5.1.1 and §9.2.1.2.4.1: a re-join goes to the session identity; otherwise to the MCVideo PSI.
+            val requestUri = call.rejoinUri ?: config.psi
+            val request = ua.newRequest("INVITE", requestUri, NameAddr(requestUri))
             commonHeaders(request, initialInvite = true)
             request.headers.add("Session-Expires", "1800").add("Min-SE", "90")
             when (commencement) {
@@ -456,7 +702,10 @@ class McvideoService(
             call.callingAlias = presented
             if (call.toAlias) call.calledAlias = target
             val aliasCalled = call.calledAlias.takeIf { !call.toAlias }
-            val info = priorityInfo(if (call.isGroup) McvideoInfo(sessionType = call.sessionType, requestUri = call.groupId, clientId = client.config.clientId,
+            val info = priorityInfo(if (call.isAdhoc) McvideoInfo(sessionType = ADHOC, requestUri = call.groupId, clientId = client.config.clientId,
+                    // §22.2.2.1.1 steps 10 b), 12: the ad hoc group when known (a re-join), the criteria when asked.
+                    functionalAlias = presented, participantCriteria = call.adhocCriteria)
+                else if (call.isGroup) McvideoInfo(sessionType = call.sessionType, requestUri = call.groupId, clientId = client.config.clientId,
                     functionalAlias = presented)
                 else McvideoInfo(sessionType = call.sessionType, callingUserId = config.userId, clientId = client.config.clientId,
                     videoPullUrl = if (call.sessionType == PULL_FROM_SERVER) call.pushUrl else null, ambientViewingType = call.ambientType,
@@ -465,11 +714,14 @@ class McvideoService(
             val parts = mutableListOf(Part("application/sdp", McvideoSdp.offer(local).toByteArray()), Part(McvideoInfo.CONTENT_TYPE, info.encode().toByteArray()))
             // A call with the server names nobody (§13.2.2.4, §12.2.2.4).
             if (!call.isGroup && !call.withServer) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOfNotNull(target)).toByteArray())
+            // §22.2.2.1.1 step 11: the MCVideo users to call (RFC 5366).
+            if (call.isAdhoc && call.adhocTargets.isNotEmpty()) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(call.adhocTargets).toByteArray())
             val (contentType, body) = Multipart.encode(parts)
             request.headers.add("Content-Type", contentType)
             val invite = SipRequest(request.method, request.uri, request.headers, body)
             call.invite = invite
-            event("call ${call.id}: " + if (call.isGroup) "${call.sessionType} group video call on ${call.groupId}"
+            event("call ${call.id}: " + if (call.isAdhoc) "ad hoc group video call${call.rejoinUri?.let { " re-joining $it" } ?: ""} to ${call.adhocTargets.ifEmpty { listOfNotNull(call.adhocCriteria) }}"
+                else if (call.isGroup) "${call.sessionType} group video call on ${call.groupId}"
                 else if (call.ambientType != null) "${call.ambientType} ambient viewing call to $target"
                 else "private video call to $target${if (transmissionControl) "" else " without transmission control"}")
             val response = ua.send(invite, provisional = { r ->
@@ -484,6 +736,13 @@ class McvideoService(
                 event("call ${call.id}: functional alias ${redirect.calledFunctionalAlias ?: target} is $selected")
                 throw AliasRedirect(selected, redirect.calledFunctionalAlias)
             }
+            // TS 33.180 §5.2.8.2.5: a KMS Redirect Response to our PCK: key it again to a receiver KMS we know, once.
+            if (response.status == 488 && call.pckId != null && call.targetKms == null) KmsRedirect.of(response.contentType, response.body)?.let { krr ->
+                call.krr = krr
+                val chosen = krr.choose { client.videoKeys?.knowsKms(it) == true }
+                event("call ${call.id}: KMS Redirect Response from ${krr.creator}: receiver KMSs ${krr.receiverList}, chosen $chosen")
+                throw if (chosen != null) KmsRedirected(chosen) else CallError("KMS Redirect Response: no acceptable receiver KMS", 488)
+            }
             if (!response.isSuccess) {
                 val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""
                 // 480 after ringing, without a decline (warning 110), is the callee's no-answer timeout: report it as one.
@@ -496,10 +755,22 @@ class McvideoService(
             ua.ack(dialog, sent)
             val sdp = Multipart.parse(response.contentType, response.body).firstOrNull { it.mediaType == "application/sdp" }
                 ?: throw CallError("200 without SDP")
+            // §22.2.2.1.1, on the 2xx: the ad hoc group's identity in <mcvideo-calling-group-id>; and the priority state
+            // the server confirms (§6.2.8.1.20).
+            Multipart.parse(response.contentType, response.body).firstOrNull { it.mediaType == McvideoInfo.CONTENT_TYPE }
+                ?.let { runCatching { McvideoInfo.parse(it.text) }.getOrNull() }?.let { answered ->
+                    if (call.isAdhoc) answered.callingGroupId?.let { call.groupId = it }
+                }
             val remote = McvideoSdp.remote(sdp.text)
             if (remote.transmissionControl != transmissionControl) throw CallError("transmission control not negotiated as offered")
             if (remote.protected != local.protected) throw CallError("media protection not negotiated as offered")
-            media.start(remote, McvideoSdp.VIDEO_PT)
+            // TS 24.581 §12.1.2.2 NOTE 3: "mc_granted" in the answer to our offer with it grants the implicit request;
+            // §14.4: in an answer to an offer without it, discarded.
+            call.grantedBySdp = local.granted && remote.granted && remote.implicitRequest
+            call.negotiatedPriority = TransmissionPriority.negotiated(false, local.priority, remote.priority)
+            call.negotiatedReceptionPriority = TransmissionPriority.negotiated(false, local.receptionPriority, remote.receptionPriority)
+            startMedia(call, media, remote, McvideoSdp.VIDEO_PT)
+            if (call.grantedBySdp) note(call, "granted in the 200 (OK)")
             call.sessionUri = response.headers["Contact"]?.let { runCatching { NameAddr.parse(it).uri }.getOrNull() }
             if (call.ambientType != null) call.mayRelease = releaseCapability(response.headers.values("Feature-Caps"))
             call.state = "established"
@@ -531,7 +802,15 @@ class McvideoService(
             keyNotify(group, tx)
             return true
         }
+        if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == GroupDynamicData.EVENT) {
+            val group = gddCallIds[request.callId] ?: return false
+            tx.respond(200)
+            gddNotify(group, request)
+            return true
+        }
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "conference") {
+            // RFC 6665 §4.1.2.3: the NOTIFY that ends a subscription we ended with the call is answered too.
+            if (request.callId in endedConferences) { tx.respond(200); return true }
             val call = _calls.value.firstOrNull { it.conferenceCallId == request.callId } ?: return false
             tx.respond(200)
             conferenceNotify(call, request)
@@ -575,7 +854,7 @@ class McvideoService(
         val sdp = parts.firstOrNull { it.mediaType == "application/sdp" }?.text
         if (info == null || sdp == null) { tx.respond(400, "Bad Request"); return }
         val sessionType = info.sessionType ?: "private"
-        if (sessionType !in setOf("private", "prearranged", "chat", PUSH, PULL, AMBIENT)) { tx.respond(488); event("$sessionType video calls are not supported"); return }
+        if (sessionType !in setOf("private", "prearranged", "chat", ADHOC, PUSH, PULL, AMBIENT)) { tx.respond(488); event("$sessionType video calls are not supported"); return }
         if (active != null) { tx.respond(486); return }
         val remote = try { McvideoSdp.remote(sdp) } catch (e: SdpNegotiationError) { event("offer refused: ${e.message}"); tx.respond(488); return }
         // One-to-one calls (private, push, pull, ambient viewing) name no group, even with a request URI in the info.
@@ -594,7 +873,7 @@ class McvideoService(
         var pck: KeyMessage? = null
         var gmk: KeyMessage? = null
         if (remote.protected) {
-            if (group != null) {
+            if (group != null && sessionType != ADHOC) {
                 gmk = runCatching { awaitGroupKey(group) }.getOrNull()
                 if (gmk == null) { tx.respond(488); event("protected call on $group without its group key"); return }
             } else try {
@@ -614,9 +893,10 @@ class McvideoService(
             else if (call.ambientType != null) "${call.ambientType} ambient viewing call from" else "private video call from"} ${info.callingUserId}")
         val manual = when {
             call.ambientType != null -> false // §15.2.1.2 step 6: always answered automatically
-            request.headers["Priv-Answer-Mode"].equals("Auto", true) -> false
-            request.headers["Answer-Mode"].equals("Manual", true) -> true
-            request.headers["Answer-Mode"].equals("Auto", true) -> answerMode == "manual"
+            // RFC 5373 §2: the token before any parameter ("Auto;require").
+            answerModeToken(request.headers["Priv-Answer-Mode"]) == "auto" -> false
+            answerModeToken(request.headers["Answer-Mode"]) == "manual" -> true
+            answerModeToken(request.headers["Answer-Mode"]) == "auto" -> answerMode == "manual"
             else -> answerMode == "manual"
         }
         if (!call.hidden) listener?.incoming(call)
@@ -646,6 +926,7 @@ class McvideoService(
         }
         val media = newMedia(call, ports, local)
         media.protection = try {
+            // An ad hoc group call: no GMK (media in the clear), transmission control under the CSK when protected.
             protection(pck, localInitiator = false, gmk = gmk, call = call)
         } catch (e: CallError) {
             tx.respond(480); release(call, e.message ?: "no keys"); return
@@ -659,7 +940,10 @@ class McvideoService(
             "Session-Expires" to "$offered;refresher=uas", "Allow" to ALLOW))
         call.dialog = Dialog.fromRequest(request, tx.localTag)
         call.sessionUri = request.headers["Contact"]?.let { runCatching { NameAddr.parse(it).uri }.getOrNull() }
-        media.start(remote, remote.videoPayloadType)
+        // TS 24.581 §14.3.3: as answerer the offered maxima are returned, and so negotiated.
+        call.negotiatedPriority = TransmissionPriority.negotiated(true, null, remote.priority)
+        call.negotiatedReceptionPriority = TransmissionPriority.negotiated(true, null, remote.receptionPriority)
+        startMedia(call, media, remote, remote.videoPayloadType)
         tx.send(response)
         call.state = "established"
         startRefresh(call)
@@ -690,7 +974,10 @@ class McvideoService(
         val request = ua.inDialog(dialog, "SUBSCRIBE")
         request.headers.add("Contact", client.contactFor(McService.MCVIDEO)).add("Event", "conference")
             .add("Accept", ConferenceInfo.CONTENT_TYPE).add("Expires", "4294967295")
-        event("call ${call.id}: conference subscription refreshed ${runCatching { ua.send(request, dialog) }.getOrNull()?.status}")
+            .add("Content-Type", McvideoInfo.CONTENT_TYPE)
+        val refresh = SipRequest(request.method, request.uri, request.headers,
+            McvideoInfo(requestUri = call.groupId, clientId = client.config.clientId).encode().toByteArray())
+        event("call ${call.id}: conference subscription refreshed ${runCatching { ua.send(refresh, dialog) }.getOrNull()?.status}")
     }
 
     /** A conference NOTIFY (RFC 4575): update the call's participants. */
@@ -718,7 +1005,7 @@ class McvideoService(
             ?.let { notePriority(call, it) }
         val sdp = parts.firstOrNull { it.mediaType == "application/sdp" }?.text
         val remote = sdp?.let { runCatching { McvideoSdp.remote(it) }.getOrNull() }
-        val answer = remote?.let { McvideoSdp.answer(it, media.local.copy(keyMgmt = null)) }
+        val answer = remote?.let { McvideoSdp.answer(it, media.local.copy(keyMgmt = null, granted = false)) }
         tx.respond(200, body = answer?.toByteArray() ?: ByteArray(0), contentType = answer?.let { "application/sdp" },
             extra = sessionTimerHeaders(tx.request))
     }
@@ -779,7 +1066,14 @@ class McvideoService(
 
     // Emergency and imminent peril (§6.2.8).
 
-    private fun priorityInfo(info: McvideoInfo, priority: String) = when (priority) {
+    private fun priorityInfo(info: McvideoInfo, priority: String) = when {
+        // §6.2.8.1.19 step 2 and §6.2.8.1.23 1) a): an ad hoc group call's <adhoc-emergency-ind> or <imminentperil-ind>.
+        info.sessionType == ADHOC && priority == "emergency" -> info.copy(adhocEmergency = true)
+        info.sessionType == ADHOC && priority == "imminent" -> info.copy(imminentPeril = true)
+        else -> priorityInfoGroup(info, priority)
+    }
+
+    private fun priorityInfoGroup(info: McvideoInfo, priority: String) = when (priority) {
         // §6.2.8.1.1 step 3: an emergency call states that it is not an alert.
         "emergency" -> info.copy(emergency = true, alert = false)
         "imminent" -> info.copy(imminentPeril = true)
@@ -793,6 +1087,9 @@ class McvideoService(
     /** Follow the call state in a request from the server: its emergency and imminent peril indications. */
     private fun notePriority(call: VideoCall, info: McvideoInfo) {
         val next = when {
+            // §22.2.2.2.1 steps 4 and 5: an ad hoc group call's indications.
+            info.adhocEmergency == true -> "emergency"
+            info.adhocEmergency == false && call.isAdhoc && call.priority == "emergency" -> "normal"
             info.emergency == true -> "emergency"
             info.imminentPeril == true -> "imminent"
             info.emergency == false || info.imminentPeril == false -> "normal"
@@ -810,8 +1107,10 @@ class McvideoService(
      * Raise or cancel the emergency (or imminent peril) state of the call in progress by re-INVITE
      * in its dialog (§6.2.8.1.4, §6.2.8.1.9, §6.2.8.3): the server tells the other participants.
      */
-    suspend fun setPriority(emergency: Boolean, enabled: Boolean, call: VideoCall? = active) {
+    suspend fun setPriority(emergency: Boolean, enabled: Boolean, call: VideoCall? = active, cancelAlertOf: String? = null) {
         call ?: throw CallError("no video call")
+        require(cancelAlertOf == null || (emergency && !enabled)) { "only an emergency cancellation cancels another user's alert" }
+        require(cancelAlertOf != config.userId) { "the alert to cancel is another user's" }
         val dialog = call.dialog ?: throw CallError("the call is not established")
         val media = call.media ?: throw CallError("no media")
         val wanted = if (!enabled) "normal" else if (emergency) "emergency" else "imminent"
@@ -819,11 +1118,14 @@ class McvideoService(
         else McvideoInfo(sessionType = "private", callingUserId = config.userId, clientId = client.config.clientId)
         info = when {
             emergency && enabled -> info.copy(emergency = true, alert = false)
+            // §6.2.8.1.14 step 3 and §6.2.8.3.8 step 3: cancelling another user's emergency alert with the emergency:
+            // <alert-ind> "false" and <originated-by> that user.
+            emergency && cancelAlertOf != null -> info.copy(emergency = false, alert = false, originatedBy = cancelAlertOf)
             emergency -> info.copy(emergency = false)
             enabled -> info.copy(imminentPeril = true)
             else -> info.copy(imminentPeril = false)
         }
-        val parts = mutableListOf(Part("application/sdp", McvideoSdp.offer(media.local.copy(keyMgmt = null)).toByteArray()), Part(McvideoInfo.CONTENT_TYPE, info.encode().toByteArray()))
+        val parts = mutableListOf(Part("application/sdp", McvideoSdp.offer(media.local.copy(keyMgmt = null, granted = false)).toByteArray()), Part(McvideoInfo.CONTENT_TYPE, info.encode().toByteArray()))
         if (!call.isGroup) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOfNotNull(call.peer)).toByteArray())
         val request = ua.inDialog(dialog, "INVITE")
         commonHeaders(request)
@@ -837,6 +1139,7 @@ class McvideoService(
             val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""
             throw CallError("${response.status} ${response.reason}$warning", response.status)
         }
+        if (cancelAlertOf != null) { _alerts.value = _alerts.value - cancelAlertOf; call.events += "cancelled the alert of $cancelAlertOf" }
         call.priority = wanted
         call.events += "priority $wanted"
         event("call ${call.id}: $wanted")
@@ -866,7 +1169,23 @@ class McvideoService(
         }
     }
 
+    /**
+     * Start [call]'s media: the request priorities (TS 24.581 §6.2.4.3.2 step 2a, §6.2.5.3.3 step 1a) from the configured
+     * priority capped by the negotiated ones, the timers of §11.1.1 and §11.2.1, and the grant of the 200 (OK).
+     */
+    private fun startMedia(call: VideoCall, media: VideoMediaSession, remote: RemoteVideoMedia, payloadType: Int) =
+        media.start(remote, payloadType, TransmissionPriority.request(configuredPriority, call.negotiatedPriority),
+            TransmissionPriority.request(configuredPriority, call.negotiatedReceptionPriority), config.timers, call.grantedBySdp)
+
     // User actions.
+
+    /** TS 24.581 §6.2.4.9.3: ask for our queue position while queued; false when not queued. */
+    suspend fun queuePosition(call: VideoCall? = active): Boolean =
+        call?.media?.takeIf { it.isStarted }?.control?.queuePositionRequest() ?: throw CallError("no established video call")
+
+    /** TS 24.581 §6.2.5.5.3: stop receiving the current transmission; false when not receiving. */
+    suspend fun endReception(call: VideoCall? = active): Boolean =
+        call?.media?.takeIf { it.isStarted }?.control?.endReception() ?: throw CallError("no established video call")
 
     fun answer(): Boolean = _calls.value.firstOrNull { it.state == "ringing" && !it.outgoing }?.answered?.complete(true) ?: false
     fun reject(): Boolean = _calls.value.firstOrNull { it.state == "ringing" && !it.outgoing }?.answered?.complete(false) ?: false
@@ -880,7 +1199,12 @@ class McvideoService(
 
     suspend fun stopTransmit(call: VideoCall? = active) { call?.media?.takeIf { it.isStarted }?.control?.release() }
 
-    suspend fun hangup(call: VideoCall? = active) {
+    /**
+     * Leave the call (BYE); [releaseForAll] in an ad hoc group call releases it for every participant (§22.2.3.1.1,
+     * the BYE's Reason "SIP;cause=200;text=\"User requested release\""); leaving it alone (§22.2.4.1.1) lets it be
+     * re-joined (§22.2.5.1.1), as a prearranged or chat group session (§9.2.1.2.4.1).
+     */
+    suspend fun hangup(call: VideoCall? = active, releaseForAll: Boolean = false) {
         call ?: throw CallError("no video call")
         // §15.2.1.3 step 1: an ambient viewing call is released only with the release capability.
         if (!call.mayRelease && call.state == "established") throw CallError("this ambient viewing call may not be released here")
@@ -889,8 +1213,16 @@ class McvideoService(
             dialog != null -> {
                 call.media?.takeIf { it.isStarted }?.let { m -> if (m.control.state.value == TxState.HAS_PERMISSION) m.control.release() }
                 val bye = ua.inDialog(dialog, "BYE")
+                if (releaseForAll && call.isAdhoc) bye.headers.add("Reason", "SIP;cause=200;text=\"User requested release\"")
                 runCatching { withTimeoutOrNull(5_000) { ua.send(bye, dialog) } }
-                release(call, "released")
+                val session = call.sessionUri
+                rejoinable = when {
+                    session != null && call.isGroup && !(releaseForAll && call.isAdhoc) && call.sessionType != PULL_FROM_SERVER ->
+                        Triple(session, call.groupId, call.sessionType)
+                    rejoinable?.first == session -> null
+                    else -> rejoinable
+                }
+                release(call, if (releaseForAll && call.isAdhoc) "released for everyone" else "released")
             }
             call.outgoing && call.invite != null -> { ua.cancel(call.invite!!); release(call, "cancelled") }
             call.incoming != null -> call.answered.complete(false)
@@ -907,6 +1239,7 @@ class McvideoService(
         while (history.size > 20) history.removeAt(0)
         call.refresher?.cancel()
         runCatching { call.media?.stop() }
+        call.conferenceCallId?.let { endedConferences += it; while (endedConferences.size > 50) endedConferences.remove(endedConferences.first()) }
         call.conferenceCallId = null
         call.conference?.let { d ->
             // End the conference subscription (Expires 0); the server may have ended it with the session already.
@@ -914,8 +1247,14 @@ class McvideoService(
             scope.launch {
                 val unsubscribe = ua.inDialog(d, "SUBSCRIBE")
                 commonHeaders(unsubscribe)
-                unsubscribe.headers.add("Event", "conference").add("Expires", "0")
-                runCatching { withTimeoutOrNull(3_000) { ua.send(unsubscribe, d) } }
+                // RFC 6665 §7.2 with TS 37.579-1 table 5.5.2.14-1: the Accept of the subscription on its end too.
+                unsubscribe.headers.add("Event", "conference").add("Accept", ConferenceInfo.CONTENT_TYPE).add("Expires", "0")
+                    .add("Content-Type", McvideoInfo.CONTENT_TYPE)
+                // TS 24.281 §9.2.3.2: the mcvideo-info body of the subscription (the group and the client ID) on its end too.
+                val end = SipRequest(unsubscribe.method, unsubscribe.uri, unsubscribe.headers,
+                    McvideoInfo(requestUri = call.groupId, clientId = client.config.clientId).encode().toByteArray())
+                val answer = runCatching { withTimeoutOrNull(3_000) { ua.send(end, d) } }.getOrNull()
+                event("call ${call.id}: conference subscription ended ${answer?.status}")
             }
         }
         _calls.value = _calls.value - call
@@ -931,6 +1270,8 @@ class McvideoService(
      */
     override suspend fun logOff() {
         _calls.value.forEach { call -> runCatching { hangup(call) }.onFailure { release(call, "logged off") } }
+        for (group in gddDialogs.keys.toList()) runCatching { refreshGdd(group, resubscribe = false) }
+        settingsEtag = null
         endGroupKeySubscriptions()
     }
 
@@ -944,10 +1285,25 @@ class McvideoService(
         const val PUSH_TO_SERVER = "one-to-server video push"
         const val PULL_FROM_SERVER = "one-from-server video pull"
         const val AMBIENT = "ambient-viewing"
+        const val ADHOC = "adhoc"
         val ONE_TO_ONE = setOf("private", PUSH, PULL, AMBIENT)
         /** Annex D.3: the release capability of an ambient viewing call, in Feature-Caps. */
         const val AMBIENT_RELEASE = "g.3gpp.mcvideo.ambient-viewing-call-release"
 
         fun releaseCapability(featureCaps: List<String>) = featureCaps.any { AMBIENT_RELEASE in it }
+
+        /** §22.2.2.1.1: <on-network>/<anyExt>/<adhoc-group-call>/<allow-adhoc-group-call-support> "true" in [serviceConfig]. */
+        fun adhocSupport(serviceConfig: String): Boolean = runCatching {
+            val root = org.openmcx.client.body.Xml.parse(serviceConfig)
+            root.descendants("adhoc-group-call").any { call ->
+                call.descendants("allow-adhoc-group-call-support").any { it.text().let { v -> v == "true" || v == "1" } }
+            }
+        }.getOrDefault(false)
+
+        /**
+         * RFC 5373 §2: the Answer-Mode and Priv-Answer-Mode value is the token before any parameter ("Auto;require" is
+         * "Auto"), compared without regard to case.
+         */
+        fun answerModeToken(value: String?): String? = value?.substringBefore(';')?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
     }
 }

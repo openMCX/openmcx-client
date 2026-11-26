@@ -49,6 +49,23 @@ class PhoneRoles(unittest.TestCase):
                 androidlab.RUNS = old
 
 
+class Down(unittest.TestCase):
+    def test_down_removes_the_run_directory(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = androidlab.RUNS
+            androidlab.RUNS = Path(d)
+            try:
+                lab = Path(d) / "x1"
+                (lab / "fixture" / "artifacts").mkdir(parents=True)
+                (lab / "lab.json").write_text(json.dumps({"clients": [], "server_image": "none"}))
+                (lab / "android-scenarios.json").write_text("[]")
+                androidlab.remove_run("x1")
+                self.assertFalse(lab.exists())
+                androidlab.remove_run("x1")  # already gone: nothing to do
+            finally:
+                androidlab.RUNS = old
+
+
 class FileDistributionSettings(unittest.TestCase):
     def test_lab_fd_policy_is_consistent(self):
         with tempfile.TemporaryDirectory() as d:

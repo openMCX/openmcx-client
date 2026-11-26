@@ -114,7 +114,9 @@ interface ServiceHandler {
  * the epoch) is when the client tries it again on the same registration.
  */
 data class ServiceState(val authorised: Boolean = false, val affiliations: Map<String, String> = emptyMap(),
-    val refused: String? = null, val nextRetryAt: Long? = null)
+    val refused: String? = null, val nextRetryAt: Long? = null,
+    /** Successful service authorisations, so each new one (a new registration's) can be followed (pre-established sessions). */
+    val authorisations: Int = 0)
 
 /** What the client reports: its start-up phase and the state of each service. */
 data class ClientStatus(
@@ -212,7 +214,8 @@ class McxClient(
                 "video".takeIf { config.mcvideo != null }),
             if (config.security == null) emptyList()
             else listOfNotNull("ptt".takeIf { config.mcptt != null }, "data".takeIf { config.mcdata != null },
-                "video".takeIf { config.mcvideo != null })),
+                "video".takeIf { config.mcvideo != null }),
+            location = config.lms != null),
         clock = clock, endpoints = config.idms.endpoints)
 
     /**
@@ -295,7 +298,7 @@ class McxClient(
     /** The CSKs go (TS 33.180 9.2.1: a new one with the next service authorisation). */
     private fun dropCsks() { csks.clear(); cskUploads.clear() }
 
-    private val documents = DocumentClient(http, config.cms, config.gms)
+    internal val documents = DocumentClient(http, config.cms, config.gms)
 
     @Volatile var tokens: Tokens? = null
         internal set // set by the module's tests too
@@ -313,6 +316,29 @@ class McxClient(
         private set
 
     val handlers = mutableListOf<ServiceHandler>()
+
+    /**
+     * The MCPTT service settings and the affiliation procedures towards other users (TS 24.379 §7.2.3, §7.2.4,
+     * §9.2.1.2 to §9.2.1.6); null without MCPTT.
+     */
+    val procedures: ServiceProcedures? by lazy { config.mcptt?.let { ServiceProcedures(this, McService.MCPTT) } }
+
+    /**
+     * The same procedures of MCVideo (TS 24.281 §7.2.3, §7.2.4, §8.2.1.2 to §8.2.1.6), another instance with the
+     * mcvideo-info, the MCVideo PSI and the MCVideo affiliation command; null without MCVideo.
+     */
+    val videoProcedures: ServiceProcedures? by lazy { config.mcvideo?.let { ServiceProcedures(this, McService.MCVIDEO) } }
+
+    /** The procedures of [service], when it has them (MCPTT and MCVideo). */
+    fun proceduresOf(service: McService): ServiceProcedures? = when (service) {
+        McService.MCPTT -> procedures; McService.MCVIDEO -> videoProcedures; McService.MCDATA -> null
+    }
+
+    private val allProcedures: List<ServiceProcedures> get() = listOfNotNull(procedures, videoProcedures)
+    /** Location based functional aliases and rules based affiliation (TS 24.379 §9A.2.1.4, §9.2.1.7; TS 24.282 §22.2.1.4, §8.2.6.2). */
+    val locationRules: LocationRuleProcedures by lazy { LocationRuleProcedures(this) }
+    /** The SEAL location management client (TS 24.545), reporting the position the location rules last had. */
+    val seal: SealLocationClient by lazy { SealLocationClient(this, http, config.lms) { locationRules.position } }
     private var registration: SipRequest? = null
     /** The IMS AKA registration of this life of the client, when it registered with IMS AKA. */
     @Volatile var imsAka: ImsAkaRegistrar? = null
@@ -398,6 +424,7 @@ class McxClient(
 
     /** Start and keep the client up: on any failure, back off and start again. */
     fun start() {
+        locationRules.start()
         scope.launch {
             var backoff = config.recovery.firstRetryMs
             while (isActive) {
@@ -424,6 +451,7 @@ class McxClient(
                     // goes with its flow (a start-up that failed after the registration left it in place).
                     regCancel()
                     dropDocumentSubscriptions()
+                    allProcedures.forEach { it.drop() }
                     // Back off, unless told to reconnect now (a new network, or the user's Retry now).
                     if (!reconnectNow.isCompleted) withTimeoutOrNull(backoff) { reconnectNow.await() }
                     backoff = nextBackoff(backoff)
@@ -498,6 +526,7 @@ class McxClient(
         housekeeping?.cancel()
         setPhase("logging-off")
         handlers.forEach { runCatching { it.logOff() } }
+        allProcedures.forEach { runCatching { it.logOff() } }
         for (channel in aliasChannels.values) {
             channel.request?.callId?.let(endingSubscriptions::add)
             channel.dialog?.let { unsubscribe(it, channel.service, FunctionalAliasPidf.CONTENT_TYPE) }
@@ -567,13 +596,17 @@ class McxClient(
     /** The protection of the SIP flow's own connection (e.g. "TLS 1.3"), null without one or for plain TCP. */
     val sipConnectionSecurity: String? get() = ua.flow?.connection?.security
 
-    /** Run a refresh now instead of at its timer: `register`, `subscription` or `token`. */
+    /**
+     * Run a refresh now instead of at its timer: `register`, `subscription` (MCPTT's own affiliation subscription),
+     * `video-subscription` (MCVideo's, TS 24.281 §8.2.1.3) or `token`.
+     */
     suspend fun refreshNow(what: String) {
         when (what) {
             "register" -> register(registerExpires())
             "subscription" -> refreshSubscription(McService.MCPTT)
+            "video-subscription" -> refreshSubscription(McService.MCVIDEO)
             "token" -> renewToken()
-            else -> throw IllegalArgumentException("refresh register|subscription|token")
+            else -> throw IllegalArgumentException("refresh register|subscription|video-subscription|token")
         }
         setPhase("ready")
     }
@@ -654,9 +687,9 @@ class McxClient(
         authenticateUser(lifeline)
         if (documentsOnNotify()) configureFromNotify(lifeline)
         try {
-            config.mcptt?.let { bringUp(McService.MCPTT, it.groups.ifEmpty { profile?.groups ?: emptyList() }, lifeline) }
+            config.mcptt?.let { bringUp(McService.MCPTT, wantedGroups(McService.MCPTT), lifeline) }
             config.mcdata?.let { bringUp(McService.MCDATA, it.groups, lifeline) }
-            config.mcvideo?.let { bringUp(McService.MCVIDEO, it.groups, lifeline) }
+            config.mcvideo?.let { bringUp(McService.MCVIDEO, wantedGroups(McService.MCVIDEO), lifeline) }
             servicesSettled()
             _status.update { it.copy(offlineSince = null, nextRetryAt = null) }
             housekeeping?.cancel()
@@ -674,6 +707,7 @@ class McxClient(
         regCancel()
         dropDocumentSubscriptions()
         subscriptions.clear()
+        allProcedures.forEach { it.drop() }
         handlers.forEach { runCatching { it.flowLost() } }
         throw IllegalStateException("flow closed: ${cause?.message ?: "locally"}")
     }
@@ -782,6 +816,10 @@ class McxClient(
             .onFailure { event("user profile: ${it.message}") }
     }
 
+    /** A CMS document by its path under the XCAP root, with the current access token (the MCVideo user profile). */
+    suspend fun cmsDocument(path: String): String =
+        documents.cmsDocument(path, tokens?.accessToken ?: throw IllegalStateException("not logged in"))
+
     /** A service configuration document: the floor queue (MCPTT), signalling protection, Resource-Priority values. */
     private suspend fun readServiceConfiguration(service: String, token: String) {
         runCatching { documents.serviceConfiguration(service, token) }
@@ -794,6 +832,18 @@ class McxClient(
                 event("service configuration $service: $it" + if (service == "mcptt") ", floor queue $mcpttFloorQueue" else "") }
             .onFailure { event("service configuration $service: ${it.message}") }
     }
+
+    /** Read [group]'s document now (a regroup's preconfigured group, a temporary group: TS 24.379 §16.1, TS 24.481 §6.3.14). */
+    suspend fun refreshGroupDocument(group: String): GroupDocument? {
+        val token = tokens?.accessToken ?: return null
+        readGroupDocument(group, token)
+        return groupDocuments[group]
+    }
+
+    /** A request to this user's tree of the GMS (TS 24.481 §6.3.14.2, §6.3.15.2), with the access token. */
+    suspend fun gmsUserRequest(method: String, document: String, contentType: String? = null, body: ByteArray? = null) =
+        documents.gmsUserRequest(method, config.mcptt?.userId ?: throw IllegalStateException("MCPTT not provisioned"), document,
+            tokens?.accessToken ?: throw IllegalStateException("not signed in"), contentType, body)
 
     private suspend fun readGroupDocument(group: String, token: String) {
         runCatching { documents.group(group, token) }
@@ -1094,7 +1144,7 @@ class McxClient(
     private suspend fun regDocument(info: RegInfo) {
         if (loggedOff) return
         val own = runCatching { RegEventRules.contactAddress(ua.contactUri()) }.getOrNull() ?: return
-        when (val action = RegEventRules.action(info, config.sip.publicUserId, own) ?: return) {
+        when (val action = RegEventRules.action(info, config.sip.publicUserId, own, registration?.callId) ?: return) {
             is RegEventRules.Action.Shortened -> {
                 val delayS = RegEventRules.refreshDelayS(registrationDurationS, action.expires)
                 nextRegisterAt = clock() + delayS
@@ -1147,6 +1197,7 @@ class McxClient(
         }
         for (subscription in subscriptions.values) endingSubscriptions.add(subscription.request.callId)
         subscriptions.clear()
+        allProcedures.forEach { it.drop() }
         dropDocumentSubscriptions()
         authEtags.clear(); affiliationEtags.clear()
         dropCsks()
@@ -1155,18 +1206,18 @@ class McxClient(
 
     // Service authorisation: PUBLISH poc-settings (TS 24.379 §7.2.2, TS 24.282 §7.2.2).
 
-    private fun psi(service: McService) = when (service) {
+    internal fun psi(service: McService) = when (service) {
         McService.MCPTT -> config.mcptt!!.psi; McService.MCDATA -> config.mcdata!!.psi; McService.MCVIDEO -> config.mcvideo!!.psi
     }
-    private fun icsi(service: McService) = when (service) { McService.MCPTT -> Icsi.MCPTT; McService.MCDATA -> Icsi.MCDATA; McService.MCVIDEO -> Icsi.MCVIDEO }
-    private fun ownId(service: McService) = when (service) {
+    internal fun icsi(service: McService) = when (service) { McService.MCPTT -> Icsi.MCPTT; McService.MCDATA -> Icsi.MCDATA; McService.MCVIDEO -> Icsi.MCVIDEO }
+    internal fun ownId(service: McService) = when (service) {
         McService.MCPTT -> config.mcptt!!.userId; McService.MCDATA -> config.mcdata!!.userId; McService.MCVIDEO -> config.mcvideo!!.userId
     }
     fun contactFor(service: McService) = "<${ua.contactUri()}>" + when (service) {
         McService.MCPTT -> Icsi.mcpttContactTags; McService.MCDATA -> Icsi.mcdataContactTags; McService.MCVIDEO -> Icsi.mcvideoContactTags
     }
 
-    private fun infoPart(service: McService, token: String? = null, requestUri: String? = null, withClientId: Boolean = true): Part {
+    internal fun infoPart(service: McService, token: String? = null, requestUri: String? = null, withClientId: Boolean = true): Part {
         val clientId = if (withClientId) config.clientId else null
         return when (service) {
             McService.MCPTT -> Part(McpttInfo.CONTENT_TYPE, McpttInfo(accessToken = token, requestUri = requestUri, clientId = clientId).encode().toByteArray())
@@ -1175,7 +1226,7 @@ class McxClient(
         }
     }
 
-    private fun serviceRequest(service: McService, method: String, event: String, parts: List<Part>): SipRequest {
+    internal fun serviceRequest(service: McService, method: String, event: String, parts: List<Part>): SipRequest {
         val request = ua.newRequest(method, psi(service), NameAddr(psi(service)))
         val (type, body) = Multipart.encode(parts)
         request.headers.add("P-Preferred-Service", icsi(service)).add("Event", event)
@@ -1222,14 +1273,12 @@ class McxClient(
         }
         setPhase("authorising-${service.name.lowercase()}")
         val token = tokens?.accessToken ?: throw IllegalStateException("no access token")
-        val answerMode = when (service) {
-            McService.MCPTT -> config.mcptt!!.answerMode; McService.MCVIDEO -> config.mcvideo!!.answerMode; McService.MCDATA -> null
-        }
+        val answerMode = answerModeOf(service)
         if (keyed(service)) provisionKeys(service, token)
         // TS 24.281 7.2.5: the MCVideo CSK goes to the MCVideo server with the authorisation, in application/mikey.
         // TS 33.180 9.2.1.2 and 9.2.1.3: it is uploaded at the initial connection and stays in use for the session, so a
         // later authorisation (a renewed access token) carries none; the server keeps it with the publication.
-        val parts = { listOfNotNull(infoPart(service, token = token), Part(PocSettings.CONTENT_TYPE, PocSettings.encode(config.clientId, answerMode).toByteArray()),
+        val parts = { listOfNotNull(infoPart(service, token = token), Part(PocSettings.CONTENT_TYPE, pocSettings(service, answerMode).toByteArray()),
             cskUploads[service]?.let { Part("application/mikey", it.toByteArray()) }) }
         var request = serviceRequest(service, "PUBLISH", "poc-settings", parts()).also { it.headers.add("Expires", "4294967295") }
         authEtags[service]?.let { request.headers.add("SIP-If-Match", it) }
@@ -1248,13 +1297,50 @@ class McxClient(
         // once that one logs off or its authorisation ends. A refused request may still have spent its CSK upload (the
         // server opens it first): the retry uploads a new CSK.
         if (!response.isSuccess && cskUploads[service] != null) csks.remove(service)
-        if (!response.isSuccess) throw IllegalStateException("${service.name} service authorisation: ${response.status} ${response.reason}" +
-            (response.headers["Warning"]?.let { " ($it)" } ?: ""))
+        if (!response.isSuccess) throw AuthorisationRefused("${service.name} service authorisation: ${response.status} ${response.reason}" +
+            (response.headers["Warning"]?.let { " ($it)" } ?: ""), response.status, response.headers["Retry-After"])
         response.headers["SIP-ETag"]?.let { authEtags[service] = it }
         cskUploads.remove(service) // the server has the CSK
-        updateService(service) { it.copy(authorised = true, refused = null) }
+        updateService(service) { it.copy(authorised = true, refused = null, authorisations = it.authorisations + 1) }
         event("${service.name} authorised")
         return true
+    }
+
+    /**
+     * The current answer mode of [service] (TS 24.379 §7.2.3 4) a)): the user's ([setAnswerMode]), else the configured
+     * one; null for MCData, whose settings have none.
+     */
+    fun answerModeOf(service: McService): String? = answerModes[service] ?: when (service) {
+        McService.MCPTT -> config.mcptt?.answerMode; McService.MCVIDEO -> config.mcvideo?.answerMode; McService.MCDATA -> null
+    }
+    private val answerModes = ConcurrentHashMap<McService, String>()
+
+    /** The answer mode the user chose for [service] ("automatic" or "manual"), sent with its next service settings. */
+    fun setAnswerMode(service: McService, mode: String) {
+        require(mode == "automatic" || mode == "manual") { "answer mode automatic|manual" }
+        answerModes[service] = mode
+    }
+
+    /**
+     * The poc-settings of this client for [service] (TS 24.379 §7.2.3 4), §7.2.2): the answer mode, the selected user
+     * profile's "user-profile-index" (MCPTT: the configured `profile_index`, TS 24.484 §7.2.2.1) and <multiplex-support>.
+     */
+    internal fun pocSettings(service: McService, answerMode: String? = answerModeOf(service)): String =
+        PocSettings.encode(config.clientId, answerMode, if (service == McService.MCPTT) config.mcptt?.profileIndex ?: 0 else 0)
+
+    /** RFC 3903: the entity-tag of the service's poc-settings publication (the service authorisation's, §7.2.2). */
+    internal fun settingsEtag(service: McService): String? = authEtags[service]
+    internal fun settingsEtag(service: McService, etag: String?) { if (etag == null) authEtags.remove(service) else authEtags[service] = etag }
+
+    /**
+     * TS 24.379 §7.2.1A NOTE 3 (§7.3.5 at the server): the removal of the service settings (a settings-only PUBLISH
+     * with Expires 0) logs the client off the service, its affiliations removed with them.
+     */
+    internal fun settingsRemoved(service: McService) {
+        authEtags.remove(service); affiliationEtags.remove(service)
+        subscriptions.remove(service)?.let { endingSubscriptions.add(it.request.callId) }
+        updateService(service) { ServiceState(refused = "${service.name} settings removed: logged off the service") }
+        event("${service.name} service settings removed: logged off the service")
     }
 
     // Configuration management and group document subscriptions (TS 24.484 §6.3.13.2.2, TS 24.481 §6.3.13.2.1).
@@ -1403,7 +1489,10 @@ class McxClient(
             val dialog = subscription.dialog ?: continue
             if (!send) continue
             val request = ua.inDialog(dialog, "SUBSCRIBE")
-            request.headers.add("P-Preferred-Service", icsi(McService.MCPTT)).add("Event", DocumentSubscriptions.EVENT).add("Expires", "0")
+            // TS 37.579-1 table 5.5.2.14-1: Accept application/xcap-diff+xml in every xcap-diff SUBSCRIBE, this one too
+            // (RFC 6665 §7.2 leaves it optional; RFC 5875 makes xcap-diff the default), as the Linux client.
+            request.headers.add("P-Preferred-Service", icsi(McService.MCPTT)).add("Event", DocumentSubscriptions.EVENT)
+                .add("Accept", DocumentSubscriptions.ACCEPT).add("Expires", "0")
             val status = runCatching { ua.send(request).status }.getOrNull()
             event("document subscription ended (SUBSCRIBE Expires 0): $status")
         }
@@ -1457,6 +1546,8 @@ class McxClient(
         withTimeoutOrNull(5_000) { subscription.firstNotify.await() }
         val body = Affiliation.publish(service, ownId(service), config.clientId, groups)
         val parts = listOf(infoPart(service, requestUri = ownId(service)), Part(Affiliation.CONTENT_TYPE, body.toByteArray()))
+        // The groups this PUBLISH gives up: affiliated now, not wanted any more.
+        val leaving = subscription.affiliations.filter { (g, st) -> g !in groups && Affiliation.counts(st) }.keys
         // §9.2.1.2 steps 4 and 5: Expires 0 when no group is wanted.
         val expires = if (groups.isEmpty()) "0" else "4294967295"
         val request = serviceRequest(service, "PUBLISH", "presence", parts).also { it.headers.add("Expires", expires) }
@@ -1470,9 +1561,12 @@ class McxClient(
         }
         if (!response.isSuccess) throw IllegalStateException("${service.name} affiliation: ${response.status} ${response.reason}")
         response.headers["SIP-ETag"]?.let { affiliationEtags[service] = it }
-        // Affiliated when a NOTIFY says so for every group (§9.2.1.3); the p-id is not reliable.
+        // Affiliated when a NOTIFY says so for every group (§9.2.1.3); the p-id is not reliable. A group given up is
+        // waited for too (TS 24.281 §8.2.1.2: the de-affiliation from one group shows in the next NOTIFY), without
+        // failing when the server does not notify it in time.
         val deadline = System.currentTimeMillis() + 10_000
-        while (groups.any { !Affiliation.counts(subscription.affiliations[it]) }) {
+        val left = { subscription.affiliations.filter { (g, st) -> g in leaving && Affiliation.counts(st) }.keys }
+        while (groups.any { !Affiliation.counts(subscription.affiliations[it]) } || left().isNotEmpty()) {
             val wait = deadline - System.currentTimeMillis()
             if (wait <= 0 || withTimeoutOrNull(wait) { subscription.changed.await() } == null) break
             subscription.changed = CompletableDeferred()
@@ -1487,23 +1581,34 @@ class McxClient(
      * and a retry on the same registration after the start-up's growing delay ([ClientConfig.recovery], no value of the
      * specifications: TS 33.180 C-2 and C-3 "may be repeated ... as necessary", without a timer), at once on Retry now.
      */
-    private fun refuseService(service: McService, groups: List<String>, lifeline: CompletableDeferred<Throwable?>, reason: String) {
+    private fun refuseService(service: McService, groups: List<String>, lifeline: CompletableDeferred<Throwable?>, reason: String,
+                              firstDelayMs: Long = config.recovery.firstRetryMs) {
         val message = "${service.name} not authorised: $reason"
         event(message)
         updateService(service) { it.copy(authorised = false, refused = message) }
         _status.update { it.copy(lastError = message) }
         if (serviceRetries[service]?.isActive == true) return
-        serviceRetries[service] = scope.launch { retryService(service, groups, lifeline) }
+        serviceRetries[service] = scope.launch { retryService(service, groups, lifeline, firstDelayMs) }
     }
 
-    private suspend fun retryService(service: McService, groups: List<String>, lifeline: CompletableDeferred<Throwable?>) {
+    /**
+     * The delay before the next authorisation attempt after [e]: the Retry-After of a 500 or 503 (RFC 3261 §20.33,
+     * [ClientRules.authorisationRetryDelayMs]), else [backoffMs].
+     */
+    private fun retryDelay(e: Throwable, backoffMs: Long): Long =
+        (e as? AuthorisationRefused)?.let { ClientRules.authorisationRetryDelayMs(it.status, it.retryAfter, backoffMs) } ?: backoffMs
+
+    private suspend fun retryService(service: McService, groups: List<String>, lifeline: CompletableDeferred<Throwable?>,
+                                     firstDelayMs: Long) {
         var backoff = config.recovery.firstRetryMs
+        var wait = firstDelayMs
         while (true) {
             val now = serviceRetryNow
-            updateService(service) { it.copy(nextRetryAt = clock() + backoff / 1000) }
-            withTimeoutOrNull(backoff) { select<Unit> { now.onAwait {}; lifeline.onAwait {} } }
+            updateService(service) { it.copy(nextRetryAt = clock() + wait / 1000) }
+            withTimeoutOrNull(wait) { select<Unit> { now.onAwait {}; lifeline.onAwait {} } }
             if (lifeline.isCompleted || loggedOff || signedOut) return
             backoff = if (now.isCompleted) config.recovery.firstRetryMs else (backoff * 2).coerceAtMost(config.recovery.lastRetryMs)
+            wait = backoff
             updateService(service) { it.copy(nextRetryAt = null) }
             try {
                 if (authorise(service)) bringUpAuthorised(service, groups)
@@ -1514,6 +1619,8 @@ class McxClient(
             } catch (e: Exception) {
                 if (lifeline.isCompleted || loggedOff || signedOut) return
                 val message = "${service.name} not authorised: ${e.message ?: e}"
+                wait = retryDelay(e, backoff)
+                if (wait != backoff) event("${service.name}: Retry-After ${wait / 1000} s")
                 event(message)
                 updateService(service) { it.copy(authorised = false, refused = message) }
                 _status.update { it.copy(lastError = message) }
@@ -1546,7 +1653,7 @@ class McxClient(
             throw e
         } catch (e: Exception) {
             if (loggedOff || signedOut || lifeline.isCompleted) throw e
-            refuseService(service, groups, lifeline, e.message ?: e.toString())
+            refuseService(service, groups, lifeline, e.message ?: e.toString(), retryDelay(e, config.recovery.firstRetryMs))
             return
         }
         if (!authorised) return
@@ -1688,7 +1795,74 @@ class McxClient(
     }
 
     /** Change the groups of [service] (full state, TS 24.379 §9.2.1.2). */
-    suspend fun setAffiliations(service: McService, groups: List<String>) = affiliate(service, groups)
+    suspend fun setAffiliations(service: McService, groups: List<String>) {
+        val phase = _status.value.phase
+        try { affiliate(service, groups) } finally { if (_status.value.phase.startsWith("affiliating")) setPhase(phase) }
+    }
+
+    // The groups this client wants to be affiliated to (TS 24.379 §9.2.1.2: each PUBLISH names all of them).
+
+    /** The groups of [service] the provisioning names (MCPTT: else those of the user profile), affiliated at start-up. */
+    fun baseGroups(service: McService): List<String> = when (service) {
+        McService.MCPTT -> config.mcptt?.groups.orEmpty().ifEmpty { profile?.groups ?: emptyList() }
+        McService.MCDATA -> config.mcdata?.groups.orEmpty()
+        McService.MCVIDEO -> config.mcvideo?.groups.orEmpty()
+    }.distinct()
+
+    /**
+     * Groups affiliated besides the base ones ([monitor], or accepted in a negotiated-mode request, §9.2.1.5), and base
+     * groups the user gave up in such a request; both kept across new registrations.
+     */
+    private val extraGroups = ConcurrentHashMap<McService, List<String>>()
+    private val droppedGroups = ConcurrentHashMap<McService, Set<String>>()
+
+    /** The groups of [service] this client is to be affiliated to: the base groups left and the extra ones. */
+    fun wantedGroups(service: McService): List<String> =
+        (baseGroups(service).filter { it !in droppedGroups[service].orEmpty() } + extraGroups[service].orEmpty()).distinct()
+
+    /** The MCPTT groups monitored besides the base ones (TS 24.379 §9.2.1.2). */
+    val monitoredGroups: List<String> get() = extraGroups[McService.MCPTT].orEmpty()
+
+    /** The groups of the MCPTT user profile (TS 24.484 §8.3.2 <MCPTTGroupInfo>) that may be monitored: not base groups. */
+    val monitorableGroups: List<String> get() = (profile?.groups ?: emptyList()).filter { it !in baseGroups(McService.MCPTT) }.distinct()
+
+    /**
+     * TS 24.379 §9.2.1.2: affiliate, besides the base groups, to [groups] of the user profile (`monitor <group>...`;
+     * none: `monitor none`): their group calls and alerts are received too. The PUBLISH lists every group wanted.
+     */
+    suspend fun monitor(groups: List<String>) {
+        if (!_status.value.mcptt.authorised) throw IllegalStateException("MCPTT not authorised")
+        val base = baseGroups(McService.MCPTT)
+        val wanted = groups.filter { it !in base }.distinct()
+        val profileGroups = profile?.groups ?: emptyList()
+        wanted.firstOrNull { it !in profileGroups }?.let { throw IllegalArgumentException("$it is not a group of the user profile") }
+        if (wanted.size > MAX_MONITORED) throw IllegalArgumentException("at most $MAX_MONITORED groups are monitored")
+        extraGroups[McService.MCPTT] = wanted
+        event("monitored groups: $wanted")
+        reaffiliate(McService.MCPTT)
+    }
+
+    /**
+     * TS 24.379 §9.2.1.5 step 3 (as §9.2.1.2): affiliate to each of [affiliate] not affiliated, de-affiliate from each of
+     * [leave] affiliated; no other group changes. One PUBLISH with every group wanted, when anything changes.
+     */
+    suspend fun changeAffiliation(service: McService, affiliate: List<String>, leave: List<String>) {
+        val current = when (service) { McService.MCPTT -> _status.value.mcptt; McService.MCDATA -> _status.value.mcdata; McService.MCVIDEO -> _status.value.mcvideo }
+        val join = affiliate.filter { !Affiliation.counts(current.affiliations[it]) }.distinct()
+        val part = leave.filter { Affiliation.counts(current.affiliations[it]) }.distinct()
+        if (join.isEmpty() && part.isEmpty()) { event("${service.name} affiliation unchanged"); return }
+        val base = baseGroups(service)
+        extraGroups[service] = (extraGroups[service].orEmpty() + join.filter { it !in base } - part.toSet()).distinct()
+        droppedGroups[service] = droppedGroups[service].orEmpty() - join.toSet() + part.filter { it in base }
+        event("${service.name} affiliation change: affiliate $join, de-affiliate $part")
+        reaffiliate(service)
+    }
+
+    /** The affiliation PUBLISH of [service]'s wanted groups while up: the phase returns to what it was ("ready"). */
+    private suspend fun reaffiliate(service: McService) {
+        val phase = _status.value.phase
+        try { affiliate(service, wantedGroups(service)) } finally { if (_status.value.phase.startsWith("affiliating")) setPhase(phase) }
+    }
 
     private fun updateService(service: McService, change: (ServiceState) -> ServiceState) = _status.update {
         when (service) {
@@ -1765,6 +1939,9 @@ class McxClient(
             if ((request.headers["Subscription-State"] ?: "").trim().startsWith("terminated")) endingSubscriptions.remove(request.callId)
             return
         }
+        // TS 24.379 §7.2.4, §9.2.1.3, §9.2.1.6: the NOTIFYs of the procedures' subscriptions; §9.2.1.5: an affiliation
+        // command in a MESSAGE (TS 24.281 §8.2.1.5 for MCVideo's, application/vnd.3gpp.mcvideo-affiliation-command+xml).
+        for (p in allProcedures) if (p.handle(tx)) return
         // TS 24.484 §6.3.13.2.2, TS 24.481 §6.3.13.2.1: a NOTIFY of a document subscription, answered 200 (RFC 6665
         // §4.1.3), its documents read after the answer; "terminated" ends the subscription.
         if (request.method == "NOTIFY" && eventPackage(request) == DocumentSubscriptions.EVENT) {
@@ -1795,7 +1972,8 @@ class McxClient(
         }
         if (request.method == "NOTIFY" && request.headers["Event"]?.substringBefore(';')?.trim() == "presence") {
             val subscription = subscriptions.values.firstOrNull { it.request.callId == request.callId }
-            if (subscription == null) { tx.respond(481); return }
+            // Another presence subscription of a service (MCVideo group dynamic data, TS 24.281 §8.2.1.6) is its handler's.
+            if (subscription == null) { for (handler in handlers) if (handler.handle(tx)) return; tx.respond(481); return }
             tx.respond(200)
             if (request.body.isNotEmpty()) {
                 val body = Multipart.parse(request.contentType, request.body).firstOrNull { it.mediaType == Affiliation.CONTENT_TYPE }?.text
@@ -1831,6 +2009,9 @@ class McxClient(
         if (reconnectNow.isCompleted) config.recovery.firstRetryMs else (backoff * 2).coerceAtMost(config.recovery.lastRetryMs)
 }
 
+/** A refused service authorisation PUBLISH (TS 24.379 §7.2.2): its status and the Retry-After it carried. */
+class AuthorisationRefused(message: String, val status: Int, val retryAfter: String?) : IllegalStateException(message)
+
 /** A bounded log of client events and SIP messages, for the status view and the debug endpoint. */
 class EventLog(private val capacity: Int = 500) {
     private val events = ArrayDeque<String>()
@@ -1847,6 +2028,9 @@ class EventLog(private val capacity: Int = 500) {
 
     fun trace(direction: String, message: SipMessage) { tracer?.invoke(direction, message) }
 }
+
+/** At most this many groups are monitored besides the base groups (as the Linux client). */
+const val MAX_MONITORED = 16
 
 /** TS 24.229 §5.1.1.2.1: "the value of 600 000 seconds as the value desired for the duration of the registration". */
 private const val IMS_AKA_REGISTER_EXPIRES = 600_000

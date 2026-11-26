@@ -36,6 +36,8 @@ data class SentSds(
     val at: Long = System.currentTimeMillis(),
     /** TS 24.282 §6.6.3.2: the DPPK-ID the payload was protected with; null when sent in the clear. */
     val dppkId: Long? = null,
+    /** "signalling", "media" (standalone over MSRP) or "session" (TS 24.282 §9.2.3, §9.2.4). */
+    val plane: String = "signalling",
     /** Notifier MCData ID to the latest notification type from them. */
     val notifications: MutableMap<String, DispositionNotification> = ConcurrentHashMap(),
 )
@@ -57,10 +59,14 @@ data class ReceivedSds(
     val dppkId: Long? = null,
     /** TS 33.180 §8.5.5: the payload was signed by its sender and verified. */
     val authenticated: Boolean = false,
+    /** Where it came: "signalling" (SIP MESSAGE), "media" (standalone SDS over MSRP) or "session" (an SDS session). */
+    val plane: String = "signalling",
 ) {
     @Volatile var displayed = false
     @Volatile var notified: DispositionNotification? = null
     internal var tdu1: Job? = null
+    /** TS 24.582 §6.1.2.5.1: while the SDS session it came in lasts, its notifications go in that session (true: sent). */
+    @Volatile internal var inBand: (suspend (SdsNotification) -> Boolean)? = null
     val text: String get() = payloads.filter { it.type == PayloadType.TEXT }.joinToString("\n") { it.text }
 }
 
@@ -89,11 +95,19 @@ class McdataService(private val client: McxClient) : ServiceHandler {
     /** The user cleared the messages: forget the received and sent short data. */
     fun clear() { _inbox.value = emptyList(); _outbox.value = emptyList() }
     var listener: SdsListener? = null
+    /** Whether a received message goes on to be delivered (the enhanced status of TS 24.282 §14.2.1.2; null: all). */
+    var accept: (suspend (ReceivedSds) -> Boolean)? = null
+    /** The media plane (TS 24.282 §9.2.3, §9.2.4): standalone SDS above the signalling-plane limit, SDS sessions. */
+    var media: McdataMediaService? = null
 
     private fun event(text: String) = client.event("mcdata: $text")
     private fun now() = System.currentTimeMillis() / 1000
 
-    private fun message(parts: List<Part>): SipRequest {
+    /** What the ad hoc group SDS of Adhoc.kt reaches. */
+    internal val mcxClient: McxClient get() = client
+    internal val clientConfig get() = config
+
+    internal fun message(parts: List<Part>): SipRequest {
         val request = ua.newRequest("MESSAGE", config.psi, NameAddr(config.psi))
         request.headers.add("Accept-Contact", "*;+g.3gpp.mcdata.sds;require;explicit")
             .add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCDATA_SDS)}\";require;explicit")
@@ -109,10 +123,17 @@ class McdataService(private val client: McxClient) : ServiceHandler {
      */
     suspend fun send(target: String, text: String, group: Boolean, disposition: DispositionRequest? = null,
                      conversationId: UUID = UUID.randomUUID(), inReplyTo: UUID? = null, toAlias: Boolean = false,
-                     calledAlias: String? = null): SentSds {
-        val data = DataPayload(listOf(Payload.text(text)))
-        // Above the signalling-plane limit the media plane (MSRP) is required, which this client does not have.
-        if (data.size > config.maxPayloadSizeSdsCplaneBytes) throw SdsError("payload of ${data.size} octets is above the signalling-plane limit")
+                     calledAlias: String? = null, payloadType: Int = PayloadType.TEXT): SentSds {
+        // §9.2.2.2.1 step 3A: an ad hoc group, written adhoc=... (Adhoc.kt).
+        AdhocTarget.of(target)?.let { return sendAdhoc(it, text, disposition, conversationId) }
+        // §15.2.13: the payload content type, TEXT unless another is asked for (ENHANCED STATUS, §14.2.1.1).
+        val data = DataPayload(listOf(Payload(payloadType, text.toByteArray(Charsets.UTF_8))))
+        // TS 24.282 §9.2.1.1: above <max-payload-size-sds-cplane-bytes> the message goes over the media plane (§9.2.3).
+        if (data.size > config.maxPayloadSizeSdsCplaneBytes) {
+            val media = media ?: throw SdsError("payload of ${data.size} octets is above the signalling-plane limit")
+            // §22 over the media plane: the INVITE names the alias, a 300 the user to invite (Adhoc.kt, AliasTarget).
+            return media.sendStandalone(if (toAlias) AliasTarget.PREFIX + target else target, text, group, disposition, conversationId, inReplyTo)
+        }
         val signalling = SdsSignalling(now(), conversationId, UUID.randomUUID(), inReplyTo, disposition = disposition)
         // §9.2.2.2.1 steps 2b ii and 3b v: an alias presented only while it is active for this user, and a one-to-one
         // SDS to an alias (<call-to-functional-alias-ind>), or to the MCData ID the server selected for it.
@@ -135,7 +156,8 @@ class McdataService(private val client: McxClient) : ServiceHandler {
                 ?.let { McdataInfo.parse(it.text) }
             val selected = redirect?.requestUri ?: throw SdsError("functional alias redirect without an MCData ID", 300)
             event("SDS to functional alias $target: sent to $selected")
-            return send(selected, text, false, disposition, conversationId, inReplyTo, calledAlias = redirect.calledFunctionalAlias ?: target)
+            return send(selected, text, false, disposition, conversationId, inReplyTo, calledAlias = redirect.calledFunctionalAlias ?: target,
+                payloadType = payloadType)
         }
         if (!response.isSuccess) {
             val warning = response.headers["Warning"]?.let { " ($it)" } ?: ""
@@ -202,7 +224,7 @@ class McdataService(private val client: McxClient) : ServiceHandler {
         return true
     }
 
-    private class Opened(val data: ByteArray?, val dppkId: Long? = null, val authenticated: Boolean = false,
+    internal class Opened(val data: ByteArray?, val dppkId: Long? = null, val authenticated: Boolean = false,
                          val failure: List<Pair<String, String>>? = null)
 
     /**
@@ -210,7 +232,7 @@ class McdataService(private val client: McxClient) : ServiceHandler {
      * (bit 8, TS 33.180 §8.5.5) and decrypt a protected one (bit 7) end to end; a failure is answered 606, with warning
      * 136 for a refused I_MESSAGE (as the Linux client).
      */
-    private suspend fun openPayload(parts: List<Part>, info: McdataInfo, payload: ByteArray): Opened {
+    internal suspend fun openPayload(parts: List<Part>, info: McdataInfo, payload: ByteArray): Opened {
         val sender = info.callingUserId ?: ""
         val protection = protection
         for (part in parts.filter { it.mediaType == McdataProtection.MIKEY }) {
@@ -250,15 +272,21 @@ class McdataService(private val client: McxClient) : ServiceHandler {
         return Opened(data, dppk, authenticated)
     }
 
-    private fun received(info: McdataInfo, signalling: SdsSignalling, data: DataPayload, dppkId: Long? = null, authenticated: Boolean = false) {
+    /** A message this client sent over the media plane (TS 24.282 §9.2.3, §9.2.4), kept with the others. */
+    internal fun recordSent(sent: SentSds) { _outbox.value = (_outbox.value + sent).takeLast(100) }
+
+    internal suspend fun received(info: McdataInfo, signalling: SdsSignalling, data: DataPayload, dppkId: Long? = null, authenticated: Boolean = false,
+                          plane: String = "signalling", inBand: (suspend (SdsNotification) -> Boolean)? = null) {
         // A re-delivery after an UNDELIVERED report carries the same message ID: answer, but once.
         if (_inbox.value.any { it.messageId == signalling.messageId }) { event("duplicate SDS ${signalling.messageId}"); return }
         val sender = info.callingUserId ?: signalling.sender ?: "unknown"
         val message = ReceivedSds(signalling.messageId, signalling.conversationId, sender, info.callingGroupId,
             data.payloads, signalling.disposition, signalling.inReplyTo, senderAlias = info.functionalAlias, calledAlias = info.calledFunctionalAlias,
-            dppkId = dppkId, authenticated = authenticated)
+            dppkId = dppkId, authenticated = authenticated, plane = plane)
+        message.inBand = inBand
+        if (accept?.invoke(message) == false) { event("SDS ${message.messageId} from $sender not delivered"); return }
         _inbox.value = (_inbox.value + message).takeLast(100)
-        event("received SDS ${message.messageId} from $sender${message.group?.let { " on $it" } ?: ""}: ${message.text}")
+        event("received SDS ${message.messageId} from $sender${message.group?.let { " on $it" } ?: ""}${if (plane != "signalling") " ($plane)" else ""}: ${message.text}")
         // Messages for an application are not shown to the user (§9.2.1.2); this client has no applications.
         listener?.received(message)
         when (message.disposition) {
@@ -291,6 +319,10 @@ class McdataService(private val client: McxClient) : ServiceHandler {
         message.notified = type
         scope.launch {
             val notification = SdsNotification(type, now(), message.conversationId, message.messageId, sender = config.userId)
+            // TS 24.582 §6.1.2.5.1: in the SDS session the message came in while it lasts, else by SIP MESSAGE (§12.2.1.1).
+            if (runCatching { message.inBand?.invoke(notification) }.getOrNull() == true) {
+                event("sent ${type.name} for ${message.messageId} in the SDS session"); return@launch
+            }
             val info = McdataInfo(callingGroupId = message.group)
             val parts = listOf(Part(McdataInfo.CONTENT_TYPE, info.encode().toByteArray()),
                 Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOf(message.sender)).toByteArray()),
@@ -300,7 +332,7 @@ class McdataService(private val client: McxClient) : ServiceHandler {
         }
     }
 
-    private fun notification(info: McdataInfo, notification: SdsNotification) {
+    internal fun notification(info: McdataInfo, notification: SdsNotification) {
         val from = notification.sender ?: info.callingUserId ?: "unknown"
         val sent = _outbox.value.firstOrNull { it.messageId == notification.messageId }
         event("${notification.type.name} from $from for ${notification.messageId}${if (sent == null) " (unknown message)" else ""}")

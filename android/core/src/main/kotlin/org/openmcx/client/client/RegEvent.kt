@@ -72,14 +72,19 @@ object RegEventRules {
      *   with one contact per client this removes its only binding, so the identity is deregistered):
      *   [Action.Deregistered]. Other events ("expired", "probation" of RFC 3680 §4.7.1) are no deregistration of
      *   §5.1.1.7.
-     * Null when the document asks nothing; a deregistration wins over a shortening in the same document.
+     * Null when the document asks nothing; a deregistration wins over a shortening in the same document. A contact
+     * whose callid is not [ownCallId] (the Call-ID of this client's current registration) is another binding's.
      */
-    fun action(info: RegInfo, aor: String, ownContact: String): Action? {
+    fun action(info: RegInfo, aor: String, ownContact: String, ownCallId: String? = null): Action? {
         var shortened: Action? = null
         for (registration in info.registrations) {
             if (registration.aor != aor) continue
             for (contact in registration.contacts) {
                 if (contactAddress(contact.uri) != ownContact) continue
+                // A contact made by another REGISTER (its callid, RFC 3680 §5.1) is not this registration's: after a
+                // deregistration the client registers anew with a new Call-ID, at the same contact address, and a
+                // document still naming the old binding as terminated does not deregister the new one.
+                if (ownCallId != null && contact.callId != null && contact.callId != ownCallId) continue
                 if (contact.state == "terminated" && contact.event in DEREGISTRATION_EVENTS) return Action.Deregistered(contact.event)
                 if (registration.state == "active" && contact.state == "active" && contact.event == "shortened" && contact.expires != null)
                     shortened = Action.Shortened(contact.expires)

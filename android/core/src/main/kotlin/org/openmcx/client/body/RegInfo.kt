@@ -15,7 +15,8 @@ import java.math.BigInteger
  */
 data class RegInfo(val version: BigInteger, val full: Boolean, val registrations: List<Registration>) {
     data class Registration(val aor: String, val state: String, val contacts: List<Contact>)
-    data class Contact(val uri: String, val state: String, val event: String, val expires: Long?)
+    /** [callId]: the contact's optional callid attribute (RFC 3680 §5.1), the Call-ID of the REGISTER that made it. */
+    data class Contact(val uri: String, val state: String, val event: String, val expires: Long?, val callId: String? = null)
 
     companion object {
         const val CONTENT_TYPE = "application/reginfo+xml"
@@ -46,7 +47,8 @@ data class RegInfo(val version: BigInteger, val full: Boolean, val registrations
                     val uris = own(contact, "uri")
                     if (uris.size != 1) throw IllegalArgumentException("reginfo contact without one uri")
                     Contact(uris[0].text(), contactState, event,
-                        contact.getAttribute("expires").takeIf { it.isNotEmpty() }?.let(::seconds))
+                        contact.getAttribute("expires").takeIf { it.isNotEmpty() }?.let(::seconds),
+                        contact.getAttribute("callid").takeIf { it.isNotEmpty() })
                 })
             }
             return RegInfo(nonNegative(root.getAttribute("version")), state == "full", registrations)

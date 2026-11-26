@@ -11,7 +11,8 @@ interoperability-certified implementation.
 | MCPTT private call | TS 24.379 §11.1.1.2.1; automatic and manual commencement, and forced commencement where policy allows it |
 | MCPTT prearranged group call | TS 24.379 §10.1.1.2.1 |
 | MCPTT ad hoc group call | TS 24.379 §17.2 |
-| MCData short data service | TS 24.282 §9.2.2, one-to-one and group, with delivery and read notifications (§9.2.1.3, §12.2) |
+| MCData short data service | TS 24.282 §9.2.2, one-to-one and group, with delivery and read notifications (§9.2.1.3, §12.2); over the media plane (MSRP, the phone as the active endpoint): long messages, SDS sessions, files, their emergency and imminent peril and their release (§9.2.3, §9.2.4, §10.2.5, §13.2; [CONFORMANCE.md](docs/CONFORMANCE.md#mcdata-media-plane-phase-4)) |
+| Pre-established sessions | MCPTT (TS 24.379 §8: calls by REFER, received by Connect, re-INVITE or INVITE with Replaces) and MCData (TS 24.282 §18.3, §9.2.5: SDS and SDS sessions by REFER, emergency included); host candidates only, the phone still never listens ([CONFORMANCE.md](docs/CONFORMANCE.md#pre-established-sessions-phase-5)) |
 | MCData file distribution, MCVideo, emergency alerts, location | [ATTACHMENTS.md](docs/ATTACHMENTS.md), [VIDEO.md](docs/VIDEO.md), [ALERTS.md](docs/ALERTS.md), [LOCATION.md](docs/LOCATION.md) |
 | Start-up | OIDC with PKCE (TS 24.482), CMS user profile and GMS group documents, REGISTER, service authorisation by PUBLISH poc-settings, affiliation |
 | Floor control | TS 24.380 floor participant; AMR-WB speech (RFC 4867) through the platform codec |
@@ -49,7 +50,7 @@ This directory is `android/` of the openmcx-client repository; the openmcx-serve
 | `tools` | `gradle-docker.sh` (Dockerised Gradle), `build-image/` (the build image), `instrumented-test.sh` |
 | `lab/androidlab.py` | Builds a lab: the OpenMCX servers with redroid (Android 15) containers as the MC UEs, or real phones |
 | `lab/nettools`, `lab/capture` | Helper images: nftables and tc for coverage loss and impairment in a client's network namespace; packet capture |
-| `tests/` | `scenarios.py` (end-to-end S1-S16 and S18), `video.py`, `attachments.py` (phone labs) and `test_androidlab.py` (unit tests of the lab tool) |
+| `tests/` | `scenarios.py` (end-to-end S1-S24), `video.py`, `attachments.py` (phone labs) and `test_androidlab.py` (unit tests of the lab tool) |
 | `docs/` | Feature documents, wire contracts, conformance matrix and test report |
 
 ## Build
@@ -87,7 +88,7 @@ lab/androidlab.py create --name a1          # the OpenMCX fixture, provisioning 
 lab/androidlab.py up a1                     # servers and three redroid clients; installs and provisions the APK
 lab/androidlab.py exec a1 client-a status
 tests/scenarios.py a1               # S1-S11; results in lab/run/a1/android-scenarios.json
-lab/androidlab.py down a1                   # logs the phones off first, then removes the lab
+lab/androidlab.py down a1                   # logs the phones off first, then removes the lab and lab/run/a1 (--keep keeps it)
 ```
 
 In the lab, `client-a` is alice, `client-b` is bob and `client-c` is client-c. All three are members of
@@ -113,11 +114,41 @@ Debug builds listen on the abstract socket `@mcxclient-control` for one JSON req
 |---|---|
 | `status` | Phase, registration, authorisation and affiliation per service, calls (with floor events and payload hashes per talk burst), SDS inbox and outbox |
 | `events [N]` | The last N client events, including the SIP start lines |
-| `private <mcptt-id> [auto\|manual\|force]`, `group [<group>]`, `adhoc <id> <id>…` | Place a call |
-| `answer`, `reject`, `hangup`, `answer-mode automatic\|manual` | Call control |
+| `private <mcptt-id> [auto\|manual\|force] [no-floor] [emergency] [implicit\|explicit] [granted] [<wav>]`, `group [<group>] [emergency\|imminent] [implicit\|explicit] [granted] [<wav>]`, `adhoc <id> <id>…` | Place a call; `implicit` requests the floor in the INVITE (TS 24.380 §14.2.5), `granted` adds `mc_granted` (§14.2.4), the WAV is the burst sent once granted; without either, `mcptt.implicit_floor_request` and `mcptt.offer_granted` decide |
+| `answer`, `reject`, `hangup` | Call control |
+| `first-to-answer <mcptt-id> <mcptt-id>… [emergency] [no-floor]` | First-to-answer call (TS 24.379 §11.1.1.2.1.1) |
+| `chat [<group>] [emergency\|imminent]`, `rejoin [chat\|adhoc]` | Join a chat group call (§10.1.2.2.1.1), leave with `hangup`; join again, or rejoin the ad hoc call left (§17.2.5.1.1) |
+| `broadcast [<group>] [emergency\|imminent]` | Broadcast group call (§6.2.8.2) |
+| `adhoc [broadcast] criteria <criteria>`, `adhoc-modify add\|remove <mcptt-id>…`, `adhoc-modify criteria <criteria>`, `adhoc-leave`, `adhoc-release` | Ad hoc call by criteria (§17.2.2.1.1), its modification (§17.2.6.1.1), leave (§17.2.4.1.1) and release (§17.2.3.1.1) |
+| `floor-priority <0..255>\|none` | The floor priority offered in group calls (TS 24.380 §14.3.3) |
+| `ambient remote\|local <mcptt-id>`, `ambient-source <wav>\|none` | Ambient listening call (TS 24.379 §11.1.6.2.1.1): listen to the user (remote-init) or be listened to (local-init); what this phone sends when it is listened to |
+| `callback <mcptt-id> [low\|normal\|high]`, `callback-cancel <mcptt-id>`, `callback-fulfil <mcptt-id>` | Call-back request and its cancel (§11.1.5.2.1); call back a received request (§11.1.5.2.3) |
+| `remote-call <remote-id> <target-id> [auto\|manual\|force-auto] [silent] [priority=<ns.value>]`, `remote-group-call <remote-id> <group> [silent] [priority=<ns.value>]` | Ask another user's phone to place a private (§11.1.7.2.1) or group call (§10.1.5.2.1) |
+| `transfer <mcptt-id> [fa]`, `forward <mcptt-id> [fa]` | Transfer the established private call (§11.1.8.2.1); forward the ringing one (§11.1.9.2.1) |
+| `call-services` | Call-back requests sent and received, the service requests carried out and the outcomes reported, the groups' emergency and imminent peril states (§12.1.1.3); also in `status`, key `call_services` |
+| `regroup create <tgi> <preconfigured> <group>,…`, `regroup users <tgi> <preconfigured> <mcptt-id>,…`, `regroup remove <tgi>`, `regroups` | Regroups (TS 24.379 §16.2.1, §16.3.1) and the notices received |
+| `temporary-create <document> <tgi> <group>,… [chat] [protected]`, `temporary-delete <document>`, `group-document <group>` | Temporary groups at the GMS (TS 24.481 §6.3.14.2, §6.3.15.2); a group document as read |
+| `answer-mode automatic\|manual` | The local answer mode, then the settings-only PUBLISH (TS 24.379 §7.2.3) |
+| `settings-publish [remove]`, `settings-subscribe [fetch]`, `settings-resubscribe`, `settings-unsubscribe` | Service settings (§7.2.3, §7.2.4) |
+| `monitor <group>…`, `monitor none` | Groups of the user profile affiliated besides the provisioned ones (§9.2.1.2) |
+| `affiliation-subscribe <mcptt-id> [fetch]`, `affiliation-unsubscribe <mcptt-id>` | Another user's affiliation (§9.2.1.3) |
+| `affiliate-remote <mcptt-id> <group> affiliate\|deaffiliate mandatory\|negotiated` | Change another user's affiliation (§9.2.1.2, §9.2.1.4) |
+| `affiliation-accept [<group>…]`, `affiliation-decline` | Answer a received negotiated-mode request (§9.2.1.5), all or some of its groups |
+| `gdd-subscribe <group> [fetch] [status] [broadcast] [regroup] [call] [affiliated]`, `gdd-resubscribe <group>`, `gdd-unsubscribe <group>` | Group dynamic data (§9.2.1.6) |
+| `procedures` | The state of the procedures above (also in `status`, key `procedures`) |
+| `video-affiliate <group>`, `video-deaffiliate <group>` | MCVideo affiliation to or de-affiliation from one group, the others kept (TS 24.281 §8.2.1.2) |
+| `video-affiliation-accept [<group>…]`, `video-affiliation-decline` | Answer a received MCVideo negotiated-mode request (§8.2.1.5), all or some of its groups |
+| `video-affiliation-subscribe <mcvideo-id> [fetch]`, `video-affiliation-unsubscribe <mcvideo-id>`, `video-affiliate-remote <mcvideo-id> <group> affiliate\|deaffiliate mandatory\|negotiated`, `video-procedures` | The MCVideo instance of the procedures above (§8.2.1.2 to §8.2.1.4) and its state |
+| `affiliate <group> [mcptt\|mcdata\|mcvideo]`, `deaffiliate <group> […]` | The user's affiliation change of one group (§9.2.1.2, TS 24.282 §8.2.2), refused outside the group's area (§9.2.1.7.3) or while a locking rule holds it |
+| `location-position <lat> <lon>`, `location-position clear`, `location-rules` | Stand in for the phone's position; what the location rules hold (§9A.2.1.4, §9.2.1.7; [LOCATION.md](docs/LOCATION.md)) |
+| `seal start\|stop\|offline\|online\|status` | The SEAL location management client (TS 24.545) |
 | `ptt <wav> [seconds]`, `floor request\|release`, `audio-next <wav>` | Talk a file (the devices have no microphone) |
-| `sds <mcdata-id> <text> [--disposition delivery\|read\|delivery-read]`, `sds-group <group> <text> …`, `display <message-id>` | Short data |
-| `refresh register\|subscription\|token`, `drop-flow` | Force a refresh or a new flow |
+| `sds <mcdata-id> <text> [--disposition delivery\|read\|delivery-read]`, `sds-group <group> <text> …`, `display <message-id>` | Short data (over the media plane on its own above the signalling-plane limit) |
+| `sds-media <target> <text…>`, `sds-session <target> [emergency\|imminent] [alert]`, `sds-session send [delivery\|read\|both] <text…>`, `sds-session close [all]`, `sds-session-priority emergency\|imminent on\|off`, `fd-media <target> <path> [name=…] [type=…] [mandatory] [completed] [emergency\|imminent]`, `fd-media-answer accept\|decline\|defer [id]`, `fd-media-policy ask\|accept\|decline`, `mcdata-media`, `mcdata-release extend\|now [reason]\|intent [query] [reason]\|accept\|reject` | The MCData media plane (TS 24.282 §9.2.3, §9.2.4, §10.2.5, §6.2.8, §13.2); a target is an MCData ID or `group=<group>` |
+| `pre-establish [implicit]`, `pre-session-modify [implicit\|explicit] [update]`, `pre-session-release`, `pre-session` | The MCPTT pre-established session (TS 24.379 §8.2.1, §8.3.1.1, §8.4.1.1); while it is up, calls go over it; also in `status`, key `pre_session` |
+| `mcdata-pre-establish`, `mcdata-pre-release`, `mcdata-pre-session` | The MCData pre-established session (TS 24.282 §18.3.2.1, §18.3.3.1.1); while it is up, `sds-media` and `sds-session` go over it; also in `status`, key `mcdata_pre_session` |
+| `fd-terminate <id>`, `fd-release <id>`, `fd-extend <id>`, `fd-release-intent <id> [reason]`, `fd-extension-response accept\|reject <id>` | Release and extension of an FD over HTTP (§6.2.2.4, §13.2.4.5, §13.2.5.3, §13.2.6.3) |
+| `refresh register\|subscription\|video-subscription\|token`, `drop-flow` | Force a refresh or a new flow |
 | `history [N]`, `telecom`, `resolve <host>`, `sip-probe` | Diagnostics |
 | `import <path>` | Install a `.mcxprov` provisioning file from the device and restart the engine |
 
