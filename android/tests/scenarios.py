@@ -283,10 +283,13 @@ class Lab:
         self.check("alice learns bob and client-c delivered it",
                    n.get(MCDATA[B]) == "DELIVERED" and n.get(MCDATA[C]) == "DELIVERED", notifications=n)
         # Group, read only: a read notification after the display indication. (client-c may not
-        # transmit on the group in the a1 fixture: 403 warning 201.)
+        # transmit on the group in the a1 fixture: the group document grants it no
+        # <mcdata-allow-transmit-data-in-this-group>, so the client refuses it itself, TS 24.282 clause 11.1 2);
+        # the server's 403 warning 201 when the document cannot be read.)
         refused = self.cmd(C, "sds-group", GROUP, f"Not allowed {stamp}", ok=False)
-        self.check("client-c's group SDS is refused by policy (403 201)", "403" in (refused.get("error") or "")
-                   and "201" in refused.get("error", ""), error=refused.get("error"))
+        error = refused.get("error") or ""
+        self.check("client-c's group SDS is refused by policy (11.1 2), or 403 201)",
+                   "mcdata-allow-transmit-data-in-this-group" in error or ("403" in error and "201" in error), error=error)
         text = f"Status report {stamp}"
         sent = self.cmd(B, "sds-group", GROUP, text, "--disposition", "read")
         got = self.inbox_message(A, text)
