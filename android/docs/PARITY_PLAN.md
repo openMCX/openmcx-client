@@ -53,7 +53,7 @@ regression on the server fixes"). JVM unit tests 583 and app unit tests 15, all 
 | 4b: IP connectivity, enhanced status, message store | partial | IP connectivity to the phone's own IP stack (no `VpnService`/TUN), the implicit target by IP information, IPv6 in the tunnel; message store upload, retrieve, folder copy/move and notification restart; FD by reference to a stored object |
 | 5: pre-established sessions | partial | ICE connectivity checks (host candidates only); protected calls over the MCPTT session; the SIP INFO of §6.2.8.1.13; FD over the MCData session (TS 24.282 has none) |
 | 6: location rules | done, with limits | MCData group configuration rules (§8.2.6.3, as the Linux client), MCVideo affiliation rules and the MCVideo group geographic area notice, hysteresis |
-| 7: MCVideo remainder and protection | partial | other KMSs' certificates (KMS CertCache); ad hoc participant modification |
+| 7: MCVideo remainder and protection | partial | other KMSs' certificates (KMS CertCache); ad hoc participant modification. The p7 suite failures are fixed on `android-q3-mcvideo` (TEST_REPORT.md, "MCVideo suite fixes") |
 
 Also open outside the phases: P-Access-Network-Info (planned), `authorise_by_register`, MCData data streaming, the
 per-alias user status subscription and FD over HTTP to an alias.

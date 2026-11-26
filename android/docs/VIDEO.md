@@ -384,6 +384,28 @@ The OpenMCX MCVideo server lets an ad hoc call go on without its initiator (TS 2
 BYE's Reason, and its ad hoc re-INVITE changes the participants only: an ad hoc call's emergency cannot be cancelled
 in the call there (it ends with the call). `tests/video.py` needs the phones' cameras and was not run on redroid.
 
+### Suite fixes (android-q3-mcvideo)
+
+The MCVideo failures of the suite run `android-mcvideo-real-p7`, fixed (TEST_REPORT.md, "MCVideo suite fixes";
+CONFORMANCE.md, MCVideo):
+- **SDP origin:** every offer and answer of a call keeps the call's `o=` session ID and increments its version
+  (RFC 3264 §8): the upgrade and cancellation re-INVITEs and the answers to the server's re-INVITEs used to start a
+  new session.
+- **Media reception end request:** it names the transmitting user and its audio and video SSRCs (TS 24.581
+  §6.2.5.5.3 step 1b), as the response to the server's request does (§9.2.27); a Media reception override
+  notification is answered with a reception end request and T104 (§6.2.5.5.4).
+- **Implicit requests:** an answer carries `mc_implicit_request` only when the offer did (TS 24.581 §14.3.1: the
+  pulled user's answer had it); a remotely initiated ambient viewing offer carries it, as the request to grant the
+  viewed-to user (TS 24.281 §15.2.1.1 step 13, §6.4), without `mc_granted` and without a request of the viewer's own.
+- **Push:** the called user of a video push answers `recvonly` (RFC 3264 §6.1).
+- **Authorisation by the user profile:** emergency, imminent peril and alert requests, their cancellations and the
+  ad hoc ones are checked against the MCVideo user profile's rights and target entries before anything is sent
+  (TS 24.281 §6.2.8.1.6 to §6.2.8.1.27, §6.2.8.3.1.1; `McvideoAuthorisation`), as the Linux client does. A refused
+  request is reported to the user and sends nothing; a request made before the profile was read reads it first.
+- **Area notices:** the MCVideo emergency alert area notice raises the alert on the selected group (TS 24.281
+  §11.2.1.5) and the group geographic area notice changes the affiliation (§11.2.1.4).
+- **Ad hoc alert:** an MCVideo ad hoc group emergency alert is not sent without the phone's location (§12.1A.1.1 5)).
+
 ## Not yet
 
 - The KMS CertCache of other KMSs (TS 33.180 §5.2.8.3): only the client's own KMS can key a PCK.
