@@ -19,7 +19,7 @@ redroid containers as the MC UEs, each running the Android client.
     lab/androidlab.py create --name m1 --phones-only --admin --admin-image openmcx-admin:0.1 --phone-device ...   # MCX Admin manages the accounts
     lab/androidlab.py admin-activate m1 client-a --user p1   # a new user in MCX Admin, activated on the phone from its code
     lab/androidlab.py admin-activate m1 --user p2 --qr       # the same for a phone the lab does not drive: shows its QR code
-    lab/androidlab.py down a1
+    lab/androidlab.py down a1               # the containers and lab/run/a1 (--keep keeps the directory)
 
 The server side comes from OpenMCX's own fixture generator (tools/prepare-prearranged-test.py),
 unchanged: its SIP core reaches these clients, which have no listener, over the connections
@@ -359,6 +359,25 @@ def keycloak_at_host(fixture: Path, compose: dict, hostip: str, port: int) -> No
     subprocess.run(["openssl", "x509", "-req", "-in", str(tls / "idms-host.csr"), "-CA", str(tls / "ca.crt"),
                     "-CAkey", str(tls / "ca.key"), "-CAcreateserial", "-days", "30", "-extfile",
                     str(tls / "idms-host.ext"), "-out", str(tls / "idms.crt")], check=True, capture_output=True)
+
+
+def remove_run(name: str, image: str | None = None) -> None:
+    """down: remove lab/run/NAME, so that the name can be created again. The servers write some of its files as root
+    (fixture/artifacts), which go through a container of the lab's server image; the scenario results
+    (android-scenarios.json) go with it, so copy them first or use down --keep."""
+    lab = RUNS / name
+    if not lab.is_dir():
+        return
+    image = image or (meta(name).get("server_image") if (lab / "lab.json").exists() else None)
+    try:
+        shutil.rmtree(lab)
+    except PermissionError:
+        if not image:
+            raise
+        subprocess.run(["docker", "run", "--rm", "--entrypoint", "sh", "-v", f"{lab}:/lab", image, "-c",
+                        "rm -rf /lab/* /lab/.[!.]* 2>/dev/null; true"], check=False, capture_output=True)
+        shutil.rmtree(lab)
+    print(f"removed {lab}")
 
 
 def create(args) -> None:
@@ -1106,6 +1125,9 @@ def main() -> None:
     for action in ("up", "down", "ps", "logs", "install"):
         p = sub.add_parser(action)
         p.add_argument("name")
+        if action == "down":
+            p.add_argument("--keep", action="store_true",
+                           help="keep lab/run/NAME (fixture, provisioning, scenario results) instead of removing it")
     ip = sub.add_parser("install-phone")
     ip.add_argument("name")
     ip.add_argument("--serial", help="the phone's adb serial (adb devices); default: the one given at create")
@@ -1158,6 +1180,8 @@ def main() -> None:
             except (subprocess.CalledProcessError, RuntimeError):
                 pass
         compose(args.name, "down", "-v")
+        if not args.keep:
+            remove_run(args.name)
     elif args.action == "ps":
         compose(args.name, "ps")
     elif args.action == "logs":

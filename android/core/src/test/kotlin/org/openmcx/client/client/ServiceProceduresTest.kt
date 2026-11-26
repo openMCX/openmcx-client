@@ -255,6 +255,35 @@ class ServiceProceduresTest {
         client.stop()
     }
 
+    /**
+     * §9.2.2.2.8: the server passes the negotiated-mode request on from its PSI, the requester in the service
+     * information's <mcptt-calling-user-id> (the target in <mcptt-request-uri>): the request shows the requester, not
+     * the PSI of the From header. Without a calling user, the From header is all there is.
+     */
+    @Test fun negotiatedRequestNamesTheRequester() = runBlocking {
+        val cores = CopyOnWriteArrayList<FakeSipCore>()
+        val client = start(cores)
+        val core = cores[0]
+        val procedures = client.procedures!!
+        val requester = "sip:bob.mcptt@mcx.test"
+        val (type, multipart) = Multipart.encode(listOf(
+            org.openmcx.client.body.Part(McpttInfo.CONTENT_TYPE, McpttInfo(requestUri = alice, callingUserId = requester).encode().toByteArray()),
+            org.openmcx.client.body.Part(AffiliationCommand.contentType(McService.MCPTT), AffiliationCommand.encode(emptyList(), listOf(group)).toByteArray())))
+        core.message(type, String(multipart), from = "sip:mcptt@mcx.test", extra = listOf("P-Asserted-Service" to Icsi.MCPTT))
+        assertEquals(200, core.answer().status)
+        waitFor("request pending") { procedures.state.value.affiliationRequest != null }
+        assertEquals(requester, procedures.state.value.affiliationRequest!!.from)
+        assertEquals(listOf(group), procedures.state.value.affiliationRequest!!.deaffiliate)
+        procedures.answerAffiliationRequest(accept = false)
+        val (type2, body2) = Multipart.encode(listOf(org.openmcx.client.body.Part(AffiliationCommand.contentType(McService.MCPTT),
+            AffiliationCommand.encode(listOf(group), emptyList()).toByteArray())))
+        core.message(type2, String(body2), from = "sip:mcptt@mcx.test")
+        assertEquals(200, core.answer().status)
+        waitFor("second request") { procedures.state.value.affiliationRequest?.affiliate == listOf(group) }
+        assertEquals("sip:mcptt@mcx.test", procedures.state.value.affiliationRequest!!.from)
+        client.stop()
+    }
+
     /** §9.2.1.6: the SUBSCRIBE naming the group with the per-group filter; the NOTIFY's dynamic data; de-subscribe. */
     @Test fun groupDynamicDataSubscription() = runBlocking {
         val cores = CopyOnWriteArrayList<FakeSipCore>()

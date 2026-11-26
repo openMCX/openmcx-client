@@ -88,7 +88,7 @@ lab/androidlab.py create --name a1          # the OpenMCX fixture, provisioning 
 lab/androidlab.py up a1                     # servers and three redroid clients; installs and provisions the APK
 lab/androidlab.py exec a1 client-a status
 tests/scenarios.py a1               # S1-S11; results in lab/run/a1/android-scenarios.json
-lab/androidlab.py down a1                   # logs the phones off first, then removes the lab
+lab/androidlab.py down a1                   # logs the phones off first, then removes the lab and lab/run/a1 (--keep keeps it)
 ```
 
 In the lab, `client-a` is alice, `client-b` is bob and `client-c` is client-c. All three are members of

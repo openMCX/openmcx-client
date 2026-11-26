@@ -104,10 +104,10 @@ class PrivateServicesTest {
 
     private fun start(floorPriority: String = "", status: (SipRequest) -> Int? = { null },
                       headers: (SipRequest) -> List<Pair<String, String>> = { emptyList() },
-                      answer: (SipRequest) -> Pair<String, ByteArray>? = { null }): Lab {
+                      answer: (SipRequest) -> Pair<String, ByteArray>? = { null }, hold: (SipRequest) -> Boolean = { false }): Lab {
         val cores = CopyOnWriteArrayList<FakeSipCore>()
         val client = McxClient(CoroutineScope(SupervisorJob() + Dispatchers.Default), config(floorPriority), noHttp,
-            connector = { _, _ -> FakeSipCore(statusFor = status, bodyFor = answer, headersFor = { r -> headers(r) +
+            connector = { _, _ -> FakeSipCore(statusFor = status, holdFor = hold, bodyFor = answer, headersFor = { r -> headers(r) +
                 // The MCPTT session identity in the 200 (OK)'s Contact (§17.2.5.1.1).
                 (if (r.method == "INVITE" && r.to.tag == null) listOf("Contact" to "<sip:mcptt@127.0.0.1:5061;transport=tls;isfocus>") else emptyList()) }).also { cores += it } })
         client.tokens = tokens()
@@ -464,6 +464,34 @@ class PrivateServicesTest {
         val report = messages(lab).last()
         assertEquals("success", info(report).service["forwarding-call-outcome"])
         assertEquals(listOf(carol), ResourceLists.parse(part(report, ResourceLists.CONTENT_TYPE)!!))
+        lab.service.hangup()
+        lab.client.stop()
+    }
+
+    /**
+     * §11.1.9.2.2: the server's forwarding request may arrive before the 480 of the call it forwards (ms apart). The
+     * call to bob still takes the forwarded call's answer mode (Manual) and sequence number: the forwarded call is
+     * looked up after it has ended, not while it is still current.
+     */
+    @Test
+    fun forwardingRequestBeforeThe480() = runBlocking {
+        val toCarol = { r: SipRequest -> r.method == "INVITE" && carol in String(r.body) }
+        val lab = start(status = { r -> if (toCarol(r)) 480 else null }, hold = toCarol,
+            headers = { r -> if (toCarol(r)) listOf("Warning" to "399 mcx \"175 call is forwarded\"") else emptyList() },
+            answer = { r -> ok(r, McpttInfo(sessionType = "private", requestUri = bob)) })
+        val first = async(Dispatchers.Default) { runCatching { lab.service.privateCall(carol, Commencement.MANUAL) } }
+        waitFor("the INVITE to client-c") { lab.core.requests.any(toCarol) }
+        fromServer(lab, McpttInfo(callingUserId = carol, requestType = PrivateServiceRules.FORWARD, service = mapOf(
+            "forwarding-reason" to "no-answer", "forwarded-by-mcptt-id" to carol, "forwarding-target-id" to bob, "forwarding-target-orig-id" to bob)))
+        Thread.sleep(300)
+        assertFalse("no call to bob before the 480", lab.core.requests.any { it.method == "INVITE" && bob in String(it.body) })
+        lab.core.releaseHeld()
+        assertTrue(first.await().isFailure)
+        waitFor("reported") { messages(lab).any { info(it).service["response-type"] == "forward-private-call-response" } }
+        val invite = lab.core.requests.last { it.method == "INVITE" }
+        assertTrue(bob in String(invite.body))
+        assertEquals("Manual", invite.headers["Priv-Answer-Mode"])
+        assertEquals(1, info(invite).forwardingSequenceNumber)
         lab.service.hangup()
         lab.client.stop()
     }

@@ -384,12 +384,13 @@ class PrivateServices(private val client: McxClient, private val calls: McpttSer
         event("$type from $from: call $target")
         record(ServiceRecord(type, from, target, notify = notify), notify)
         // The call the request follows: the transferred call (ours with the requester), or our call to the forwarding user.
-        val followed = if (forward) calls.history.lastOrNull { it.outgoing && it.type == CallType.PRIVATE && it.peer == requester }
-            else calls.active?.takeIf { it.peer == from && it.type == CallType.PRIVATE }
-        if (forward) {
-            // The 480 of the call forwarded may come after the request: let that call end first.
+        val followed = if (forward) {
+            // The 480 of the call forwarded may come after the request (ms apart): that call is then still current, and
+            // in the history only once it has ended. Let it end first, then take it (its answer mode and sequence number).
+            val forwarded = calls.active?.takeIf { it.outgoing && it.type == CallType.PRIVATE && it.peer == requester }
             withTimeoutOrNull(3_000) { while (calls.active != null) delay(100) }
-        }
+            forwarded ?: calls.history.lastOrNull { it.outgoing && it.type == CallType.PRIVATE && it.peer == requester }
+        } else calls.active?.takeIf { it.peer == from && it.type == CallType.PRIVATE }
         val extra = PrivateServiceRules.followUp(type, info, followed?.answerMode, followed?.forwardingSequence ?: 0,
             alongside = type == PrivateServiceRules.TRANSFER && followed != null)
         val commencement = if (type == PrivateServiceRules.REMOTE_PRIVATE) PrivateServiceRules.commencement(info.service["ric-commencement-mode"])

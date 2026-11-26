@@ -168,7 +168,7 @@ def s84_adhoc_and_alias_media(lab) -> None:
     media plane (standalone, session) and an ad hoc group FD over the media plane, the participants listed, the ad hoc
     group the server creates learned from its 2xx; clause 22 with 9.2.2.2.1 step 3A b ii: a functional alias among the
     participants reaches the user who activated it, told the alias called. A one-to-one media-plane communication to an
-    alias goes to the server with <call-to-functional-alias-ind> (recorded: the server's answer)."""
+    alias goes to the server with <call-to-functional-alias-ind>; its 300 names the user to invite (clause 9.2.3.4.4)."""
     if C not in lab.devices:
         print("  [SKIP] S84 needs client-c"); lab.skipped.append("S84"); return
     stamp = time.strftime("%H%M%S")
@@ -217,10 +217,17 @@ def s84_adhoc_and_alias_media(lab) -> None:
     lab.cmd(A, "sds-media", f"adhoc={PATROL}", text, timeout=60)
     m = inbox(lab, C, text)
     lab.check("the alias in an ad hoc list reaches client-c, told the alias called", m["called_alias"] == PATROL and m["plane"] == "media", got=m)
-    r = lab.cmd(A, "sds-media", f"fa={PATROL}", f"one-to-one to the alias {stamp} " + "z" * 1100, ok=False, timeout=60)
+    # TS 24.282 §9.2.3.4.4 step 6a1: the server redirects a one-to-one media-plane SDS to an alias with 300, naming
+    # the user who activated it; alice's app invites client-c, the alias called (fixed on openmcx-server branch
+    # android-server-faults: it was refused 403 warning 229, the alias taken for a user).
+    text = f"one-to-one to the alias {stamp} " + "z" * 1100
+    r = lab.cmd(A, "sds-media", f"fa={PATROL}", text, ok=False, timeout=60)
     one = lab.wait("alice's alias communication ends", lambda: next((x for x in reversed(lab.status(A)["media"]) if x["kind"] == "sds" and not x["adhoc"]), None))
-    lab.check("a one-to-one media-plane SDS to an alias is sent with the alias named (the server's answer recorded)",
-              one["state"] in ("delivered", "refused", "failed"), reply=r, communication={k: one.get(k) for k in ("state", "status", "warning", "peer", "called_alias")})
+    lab.check("a one-to-one media-plane SDS to an alias is redirected (300) to client-c and delivered",
+              one["state"] == "delivered" and one.get("peer") == MCDATA[C] and one.get("called_alias") == PATROL,
+              reply=r, communication={k: one.get(k) for k in ("state", "status", "warning", "peer", "called_alias")})
+    m = inbox(lab, C, text)
+    lab.check("client-c receives it over the media plane, told the alias called", m["called_alias"] == PATROL and m["plane"] == "media", got=m)
     lab.cmd(C, "mcdata-fa", "deactivate", PATROL, ok=False)
 
 

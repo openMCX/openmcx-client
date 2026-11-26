@@ -16,6 +16,8 @@ import org.openmcx.client.body.Multipart
 import org.openmcx.client.body.Part
 import org.openmcx.client.body.PocSettings
 import org.openmcx.client.body.SimpleFilter
+import org.openmcx.client.mcptt.McpttInfo
+import org.openmcx.client.mcvideo.McvideoInfo
 import org.openmcx.client.sip.Dialog
 import org.openmcx.client.sip.NameAddr
 import org.openmcx.client.sip.ServerTransaction
@@ -264,7 +266,7 @@ class ServiceProcedures(private val client: McxClient, val service: McService) {
     private suspend fun affiliationCommand(tx: ServerTransaction, body: String) {
         val (affiliate, leave) = runCatching { AffiliationCommand.parse(body) }.getOrElse { tx.respond(400); return }
         tx.respond(200)
-        val request = AffiliationRequest(tx.request.from.uri, affiliate, leave, System.currentTimeMillis())
+        val request = AffiliationRequest(requester(service, tx.request), affiliate, leave, System.currentTimeMillis())
         _state.update { it.copy(affiliationRequest = request) }
         event("affiliation request from ${request.from}: affiliate $affiliate, de-affiliate $leave")
         listener?.invoke(request)
@@ -426,8 +428,25 @@ class ServiceProcedures(private val client: McxClient, val service: McService) {
             groupDynamicData = s.groupDynamicData.mapValues { it.value.copy(subscribed = false) }) }
     }
 
-    private companion object {
-        const val FOREVER = "4294967295"
-        const val SETTINGS = "settings"
+    companion object {
+        private const val FOREVER = "4294967295"
+        private const val SETTINGS = "settings"
+
+        /**
+         * The user asking for a negotiated-mode change: the server passes the request on from its PSI with the
+         * requester in the service information's <mcptt-calling-user-id> (<mcvideo-calling-user-id>), TS 24.379
+         * §9.2.2.2.8 (TS 24.281 §8.2.2.2.8); the From header only when the service information names nobody.
+         */
+        fun requester(service: McService, request: SipRequest): String? {
+            val parts = runCatching { Multipart.parse(request.contentType, request.body) }.getOrDefault(emptyList())
+            val calling = when (service) {
+                McService.MCPTT -> parts.firstOrNull { it.mediaType == McpttInfo.CONTENT_TYPE }
+                    ?.let { runCatching { McpttInfo.parse(it.text).callingUserId }.getOrNull() }
+                McService.MCVIDEO -> parts.firstOrNull { it.mediaType == McvideoInfo.CONTENT_TYPE }
+                    ?.let { runCatching { McvideoInfo.parse(it.text).callingUserId }.getOrNull() }
+                McService.MCDATA -> null
+            }
+            return calling?.takeIf { it.isNotBlank() } ?: runCatching { request.from.uri }.getOrNull()
+        }
     }
 }

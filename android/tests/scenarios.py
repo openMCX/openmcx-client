@@ -96,13 +96,11 @@ class Lab:
             self.wait(f"{c} has no call", lambda c=c: self.call(c) is None, timeout=10)
 
     def group_call_over(self) -> None:
-        """Every member of the group has left the group call, not only the two phones checked: when the initiator
-        leaves, the MCPTT server BYEs the others but keeps the session until each has answered, and a new group call
-        INVITE in that time joins the session being released, which then ends with its last answer (see
-        TEST_REPORT.md, "S16"). The reference client cannot be asked, so it gets a grace period."""
-        self.idle_everywhere(list(self.devices))
-        if meta(self.name).get("reference_clients"):
-            time.sleep(2)
+        """The two phones a scenario checks have left the group call. The others may still be answering the MCPTT
+        server's BYE: a new call for the group then gets a new session (TS 24.379 §10.1.1.4.2 steps 9 and 14; fixed on
+        openmcx-server branch android-server-faults, where it joined the session being released, see TEST_REPORT.md
+        "S16"), so they need not be waited for."""
+        self.idle_everywhere([A, B])
 
     # Speech: talk and verify every listener got the talker's payloads unchanged.
     def talk_and_verify(self, talker: str, listeners: list[str], seconds: float = 3.0) -> None:
@@ -779,12 +777,24 @@ class Lab:
         self.wait("bob's phone shows the emergency cancelled", lambda: priority(B) == "normal")
         self.check("alice cancels the emergency in the call; bob's phone follows", priority(A) == "normal")
         self.check("alice's location reporting is back to normal", self.location_of(A)["emergency"] is False)
+        first = self.call(A) or {}
         self.hangup(A)
-        self.group_call_over()
+        # A quick new call for the group, while the server may still be releasing the last one (its BYEs to bob and
+        # client-c not all answered): it gets a new session (§10.1.1.4.2 steps 9 and 14), and alice no BYE.
+        self.idle_everywhere([A])
         self.cmd(A, "group", GROUP, "imminent", timeout=30)
-        self.established(B)
-        self.wait("bob's phone shows imminent peril", lambda: priority(B) == "imminent")
+        again = self.call(A) or {}
+        self.check("the quick new group call is a new session", again.get("state") == "established"
+                   and again.get("id") != first.get("id") and again.get("session_uri") != first.get("session_uri"),
+                   first=first.get("session_uri"), again=again.get("session_uri"))
+        self.wait("bob joins the imminent peril call", lambda: (c := self.call(B)) and c.get("state") == "established"
+                  and c.get("priority") == "imminent", timeout=20)
         self.check("an imminent peril group call reaches bob as one", priority(A) == "imminent")
+        time.sleep(2)
+        still = self.call(A) or {}
+        self.check("alice's new call is not ended by the server (no BYE)", still.get("id") == again.get("id")
+                   and still.get("state") == "established" and (self.last_released(A) or {}).get("id") == first.get("id"),
+                   call=still, released=self.last_released(A))
         self.cmd(B, "priority", "emergency", "on")
         self.wait("alice's phone shows bob's emergency", lambda: priority(A) == "emergency")
         self.check("bob raises an emergency in the call; alice's phone follows", priority(B) == "emergency")
@@ -1162,11 +1172,25 @@ class Lab:
             self.check(f"{c} stays affiliated to {GROUP}", self.status(c)["mcptt"]["affiliations"].get(GROUP) == "affiliated")
 
     def s23_remote_affiliation(self) -> None:
-        # TS 24.379 §9.2.1.3: the affiliation of another user. The OpenMCX participating function authorises no user for
-        # another's affiliation status (§9.2.2.2.4: 403), so the subscription to bob is refused; this user's own is
-        # accepted, and its NOTIFY lists alice's client.
+        # TS 24.379 §9.2.1.3: the affiliation of another user. With --fixture-arg=--remote-affiliation alice's profile has
+        # <allow-request-affiliated-groups> and <allow-request-to-affiliate-other-users>: the participating function
+        # grants her bob's affiliation status (§9.2.2.2.4 step 4) and relays her negotiated-mode request to bob
+        # (§9.2.2.2.8); without them, the subscription to bob is refused (403). Each subscription has its own dialog
+        # (§9.2.2.2.5): alice's own is accepted and notified as well.
+        rights = "--remote-affiliation" in (self.meta.get("fixture_args") or [])
         r = self.cmd(A, "affiliation-subscribe", MCPTT[B])
-        self.check("the subscription to bob's affiliation is refused by the server (403)", r["status"] == 403, result=r)
+        bob_groups = lambda: [g for v in (self.procedures(A)["target_affiliations"].get(MCPTT[B]) or {}).get("clients", {}).values()
+                              for g, st in v.items() if st == "affiliated"]
+        if rights:
+            self.check("the subscription to bob's affiliation is accepted (200)", r["status"] == 200, result=r)
+            try:
+                self.wait("bob's affiliation notified", lambda: GROUP in bob_groups(), timeout=15)
+            except Failed:
+                pass
+            self.check("the NOTIFY lists bob's client affiliated to the group", GROUP in bob_groups(),
+                       target=self.procedures(A)["target_affiliations"].get(MCPTT[B]))
+        else:
+            self.check("the subscription to bob's affiliation is refused by the server (403, no right)", r["status"] == 403, result=r)
         r = self.cmd(A, "affiliation-subscribe", MCPTT[A])
         self.check("alice's subscription to her own affiliation is accepted", r["status"] == 200, result=r)
         groups = lambda: [g for v in (self.procedures(A)["target_affiliations"].get(MCPTT[A]) or {}).get("clients", {}).values()
@@ -1193,17 +1217,33 @@ class Lab:
                    "urn:uuid:" in publish and "<mcpttPI10:p-id>" in publish and 'status="' not in publish.split("application/pidf+xml", 1)[-1])
         r = self.cmd(A, "affiliation-unsubscribe", MCPTT[A])
         self.check("alice's subscription to her own affiliation ends", r["status"] == 200, result=r)
-        # The server notifies one subscription per user: the client's own takes it back with its refresh.
-        self.cmd(A, "refresh", "subscription")
-        # §9.2.1.4 negotiated mode: the MESSAGE with the affiliation command. The OpenMCX servers do not pass it on to
-        # bob (no clause 9.2.2 procedure of theirs handles it), so its final answer is what is checked.
+        if rights:
+            r = self.cmd(A, "affiliation-unsubscribe", MCPTT[B])
+            self.check("alice's subscription to bob's affiliation ends", r["status"] == 200, result=r)
+        # §9.2.1.4 negotiated mode: the MESSAGE with the affiliation command, relayed to bob's client (§9.2.2.2.8), the
+        # requester named in <mcptt-calling-user-id>; bob declines it (§9.2.1.5) and stays affiliated.
         r = self.cmd(A, "affiliate-remote", MCPTT[B], GROUP, "deaffiliate", "negotiated")
-        self.check("the negotiated-mode MESSAGE gets a final answer", r["status"] >= 200, result=r)
         message = self.last_sent(A, "MESSAGE ") or ""
         self.check("the MESSAGE carries the affiliation command naming bob",
                    "application/vnd.3gpp.mcptt-affiliation-command+xml" in message and "<de-affiliate><group>" in message
                    and f"<mcpttURI>{MCPTT[B]}</mcpttURI>" in message, message=message[-1200:])
-        self.check("bob got no request (the server does not relay it)", self.procedures(B)["affiliation_command"] is None)
+        if rights:
+            self.check("the negotiated-mode request reaches a client of bob (2xx)", 200 <= r["status"] < 300, result=r)
+            try:
+                got = self.wait("bob's request", lambda: self.procedures(B)["affiliation_command"], timeout=15)
+            except Failed:
+                got = None
+            self.check("bob gets the request from alice (<mcptt-calling-user-id>), to leave the group",
+                       bool(got) and got["from"] == MCPTT[A] and got["de-affiliate"] == [GROUP], request=got)
+            received = self.last_received(B, "MESSAGE ", "affiliation-command") or ""
+            self.check("bob's MESSAGE names alice in <mcptt-calling-user-id>",
+                       f"<mcptt-calling-user-id><mcpttURI>{MCPTT[A]}</mcpttURI>" in received.replace(" ", "").replace("\n", "")
+                       or (MCPTT[A] in received and "mcptt-calling-user-id" in received))
+            if got:
+                self.cmd(B, "affiliation-decline")
+            self.check("bob declines; he stays affiliated", self.status(B)["mcptt"]["affiliations"].get(GROUP) == "affiliated")
+        else:
+            self.check("the negotiated-mode MESSAGE gets a final answer", r["status"] >= 200, result=r)
         s = self.status(A)
         self.check("alice is still affiliated to the group", s["mcptt"]["affiliations"].get(GROUP) == "affiliated")
 
@@ -1292,13 +1332,20 @@ class Lab:
             sent = [b for b in ((self.call(talker) or {}).get("bursts") or []) if b["direction"] == "sent"]
             return (sent[-1] if sent else None), None
 
-    def reached(self, client: str) -> dict:
-        """The call that reaches [client]: answered if it rings. The OpenMCX server gives the invitee of a forwarded
-        call Answer-Mode Auto whatever Priv-Answer-Mode the caller sent, so it may connect at once."""
+    def reached(self, client: str, manual: bool) -> dict:
+        """The forwarded call that reaches [client], checked: the server passes <call-forwarding-ind> on to the target
+        (TS 24.379 §6.3.3.1.2 step 11) and gives it the caller's answer mode (§11.1.1.3.1.1 step 18): with [manual] the
+        target rings and is answered here, else it connects at once."""
         call = self.wait(f"{client} gets the call", lambda: (c := self.call(client)) and c.get("state") in ("ringing", "established") and c,
                          timeout=15)
-        if call["state"] == "ringing":
-            self.cmd(client, "answer")
+        invite = self.last_received(client, "INVITE ", "call-forwarding-ind") or ""
+        self.check(f"{client}'s INVITE carries <call-forwarding-ind>", "<call-forwarding-ind>true</call-forwarding-ind>" in invite)
+        if manual:
+            self.check(f"{client} rings (manual commencement)", call["state"] == "ringing", call=call)
+            if call["state"] == "ringing":
+                self.cmd(client, "answer")
+        else:
+            self.check(f"{client} answers at once (automatic commencement)", call["state"] == "established", call=call)
         return self.established(client)
 
     def hang_up_all(self, clients) -> None:
@@ -1485,8 +1532,10 @@ class Lab:
         self.established(B)
         self.cmd(A, "transfer", MCPTT[C])
         carol = self.established(C)
-        # The OpenMCX server does not pass <call-transfer-ind> on to the target.
         self.check("client-c gets the transferred call from bob", carol["peer"] == MCPTT[B], call=carol)
+        # TS 24.379 §6.3.3.1.2 step 11: the server passes <call-transfer-ind> on to the target.
+        got = self.last_received(C, "INVITE ", "call-transfer-ind") or ""
+        self.check("client-c's INVITE carries <call-transfer-ind>", "<call-transfer-ind>true</call-transfer-ind>" in got)
         invite = self.last_sent(B, "INVITE ", MCPTT[C]) or ""
         self.check("bob's INVITE: <call-transfer-ind> true, Priv-Answer-Mode Auto",
                    "<call-transfer-ind>true</call-transfer-ind>" in invite and "Priv-Answer-Mode: Auto" in invite)
@@ -1520,7 +1569,7 @@ class Lab:
         self.check("bob's request: manual-input, forwarded by bob, client-c the target",
                    "<forwarding-reason>manual-input</forwarding-reason>" in message and MCPTT[C] in message)
         t.join(30)
-        carol = self.reached(C)
+        carol = self.reached(C, manual=True)
         self.check("alice's forwarded call reaches client-c", carol["peer"] == MCPTT[A], call=carol)
         invite = self.last_sent(A, "INVITE ", "call-forwarding-ind") or ""
         self.check("alice's INVITE: <call-forwarding-ind>, sequence number 1, Priv-Answer-Mode Manual",
@@ -1545,7 +1594,7 @@ class Lab:
         t.join(30)
         r = result.get("r") or {}
         self.check("alice's call to client-c ends with 480 and warning 175 after 4 s", not r.get("ok") and "480" in (r.get("error") or ""), result=r)
-        bob = self.reached(B)
+        bob = self.reached(B, manual=True)
         self.check("the forwarded call reaches bob", bob["peer"] == MCPTT[A], call=bob)
         alice = self.established(A)
         self.check("alice's call to bob is the forwarded one", alice["service"] == "forwarding" and alice["peer"] == MCPTT[B], call=alice)
@@ -1555,7 +1604,7 @@ class Lab:
         offline = MCPTT[A].replace("alice", "offline")
         r = self.cmd(A, "private", offline, "auto", ok=False, timeout=30)
         self.check("alice's call to offline is forwarded at once", not r.get("ok") and "480" in (r.get("error") or ""), result=r)
-        bob = self.reached(B)
+        bob = self.reached(B, manual=False)
         self.check("alice's forwarded call reaches bob", bob["peer"] == MCPTT[A], call=bob)
         invite = self.last_sent(A, "INVITE ", "call-forwarding-ind") or ""
         self.check("alice's INVITE to bob: Priv-Answer-Mode Auto, sequence number 1",
@@ -2263,11 +2312,13 @@ class Lab:
         return self.wait(what, lambda: next((c for c in reversed(self.media(client, kind, outgoing)) if predicate(c)), None), timeout=timeout)
 
     def notification_sent(self, client: str, message_id: str, kind: str) -> None:
-        """The client sent its notification by SIP MESSAGE; the server's answer (403 216 for a media-plane SDS) is noted."""
+        """The client sent its notification by SIP MESSAGE and the server accepted it: 202 (Accepted) from the controlling
+        MCData function (TS 24.282 §12.2.3), on either plane (a media-plane SDS's was refused 403 216 before the fix on
+        openmcx-server branch android-server-faults), or 200."""
         line = self.wait(f"{client} sends {kind} for {message_id}", lambda: next((e for e in self.cmd(client, "events", "200")
                          if f"sent {kind} for {message_id}" in e), None), timeout=20)
         answer = line.rsplit(": ", 1)[-1]
-        self.check(f"{client} sends the {kind} notification by MESSAGE (the server answers {answer})", answer in ("200", "403"), event=line)
+        self.check(f"{client} sends the {kind} notification by MESSAGE (the server answers {answer})", answer in ("200", "202"), event=line)
 
     def s60_long_sds(self) -> None:
         stamp = time.strftime("%H%M%S")
@@ -2282,10 +2333,11 @@ class Lab:
         self.check("alice receives it whole over the media plane", got["plane"] == "media" and got["length"] == len(text), plane=got["plane"], length=got["length"])
         self.check("alice sees bob as the sender", got["sender"] == MCDATA[B])
         self.check("alice's copy has bob's message ID", got["message_id"] == sent["message_id"])
-        # §9.2.1.3: the DELIVERED notification goes by SIP MESSAGE (the standalone session is over). The MCData server
-        # correlates notifications with the SDS it relayed on the signalling plane only (dispatched_, TS 24.282 §12.2.3
-        # step 5), so it refuses this one with 403 warning 216: a server gap, checked here as the client's part.
+        # §9.2.1.3: the DELIVERED notification goes by SIP MESSAGE (the standalone session is over); the server
+        # correlates it with the SDS it relayed over MSRP (§12.2.3 step 5) and accepts it.
         self.notification_sent(A, sent["message_id"], "DELIVERED")
+        n = self.notifications(B, sent["message_id"], 1)
+        self.check("bob learns alice delivered it", n.get(MCDATA[A]) == "DELIVERED", notifications=n)
         a = self.last_media(A, "sds", False, "alice's terminating leg released", lambda c: c["state"] == "released")
         self.check("alice's terminating leg is released by the server", a["state"] == "released")
 
@@ -2301,6 +2353,8 @@ class Lab:
                        and got["sender"] == MCDATA[A], got=got)
         for c in (B, C):
             self.notification_sent(c, sent["message_id"], "DELIVERED")
+        n = self.notifications(A, sent["message_id"], 2)
+        self.check("alice learns bob and client-c delivered it", n.get(MCDATA[B]) == "DELIVERED" and n.get(MCDATA[C]) == "DELIVERED", notifications=n)
         # Above the group's 400 byte limit, the server discards it (TS 24.582 §6.3.1.3 step 2, 217): nobody receives it.
         big = f"Too big {stamp} " + "x" * 600
         self.cmd(A, "sds-media", f"group={GROUP}", big, ok=False)  # the server may end the leg before its 200

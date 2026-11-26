@@ -26,6 +26,8 @@ import java.util.concurrent.atomic.AtomicInteger
 internal class FakeSipCore(
                             /** A status other than 200 for a request (e.g. one service's authorisation PUBLISH), or null. */
                             val statusFor: (SipRequest) -> Int? = { null },
+                            /** Whether the final answer of a request is held back until [releaseHeld] (a late 480). */
+                            val holdFor: (SipRequest) -> Boolean = { false },
                             /** Header fields added to the answer of a request (e.g. Retry-After with a refusal). */
                             val headersFor: (SipRequest) -> List<Pair<String, String>> = { emptyList() },
                             /** A body (content type and bytes) for the answer of a request (e.g. an INVITE's SDP), or null. */
@@ -81,13 +83,22 @@ internal class FakeSipCore(
             "SUBSCRIBE" -> headers.add("Expires", if (event == "reg") "3761" else request.headers["Expires"]!!)
         }
         headersFor(request).forEach { (name, value) -> headers.add(name, value) }
-        statusFor(request)?.let { toClient.put(SipResponse(it, "Refused", headers).encode()); return }
+        statusFor(request)?.let {
+            val refusal = SipResponse(it, "Refused", headers).encode()
+            if (holdFor(request)) held += refusal else toClient.put(refusal)
+            return
+        }
         val body = bodyFor(request)
         if (body != null) headers.add("Content-Type", body.first)
         toClient.put(SipResponse(200, "OK", headers, body?.second ?: ByteArray(0)).encode())
         if (request.method == "SUBSCRIBE" && event == "presence" && request.headers["Expires"] == "0")
             notify(request, "presence", "terminated;reason=timeout", null, null)
     }
+
+    private val held = CopyOnWriteArrayList<ByteArray>()
+
+    /** Send the answers held back ([holdFor]). */
+    fun releaseHeld() { held.forEach { toClient.put(it) }; held.clear() }
 
     /** The client's contact as it registered it. */
     fun contact(): String = requests.last { it.method == "REGISTER" }.headers["Contact"]!!.substringAfter('<').substringBefore('>')
