@@ -63,6 +63,11 @@ class VideoCall internal constructor(
     /** An ad hoc call (§22.2.2.1.1): the MCVideo IDs to call (step 11) or the participant criteria (step 12). */
     internal var adhocTargets: List<String> = emptyList()
     @Volatile var adhocCriteria: String? = null
+    /**
+     * An end-to-end protected ad hoc group call (§22.2.2.1.1 2xx step 3, §22.2.2.1.2 step 8): the preconfigured group
+     * named in <preconfigured-group-id>, whose GMK keys its media (TS 33.180 §5.7, §7.3); null in the clear.
+     */
+    @Volatile var securityGroup: String? = null
     /** A re-join (§22.2.5.1.1, §9.2.1.2.4.1): the session identity the INVITE goes to. */
     internal var rejoinUri: String? = null
     /** A call with the MCVideo server itself: a push to it or a pull of a recording from it. */
@@ -223,7 +228,19 @@ class McvideoService(
 
     private suspend fun subscribeGroupKeys() {
         val token = client.tokens?.accessToken ?: return
-        for (group in (config.groups + config.chatGroups).distinct()) subscribeGroupKey(group, token)
+        // §22.1: the preconfigured groups of ad hoc calls too, so that their GMKs are held when a call names one.
+        for (group in org.openmcx.client.mcptt.AdhocSecurity.keyGroups(config.groups + config.chatGroups, config.adhocSecurityGroups))
+            subscribeGroupKey(group, token)
+    }
+
+    /**
+     * The GMK of [group], the preconfigured group an ad hoc call names (§22.2.2.1.1 2xx step 3, §22.2.2.1.2 step 8):
+     * subscribed to now unless it is already (TS 24.481 §6.3.13.2.1), then awaited.
+     */
+    private suspend fun adhocGroupKey(group: String): KeyMessage {
+        if (groupKeys.active(group) == null && group !in keySubscriptions.groupsSubscribed())
+            client.tokens?.accessToken?.let { token -> kotlinx.coroutines.withContext(kotlinx.coroutines.NonCancellable) { subscribeGroupKey(group, token) } }
+        return awaitGroupKey(group)
     }
 
     /** TS 24.481 §6.3.13.2.1: the initial SIP SUBSCRIBE request for [group]'s <GKTPs>. */
@@ -370,6 +387,11 @@ class McvideoService(
         return when {
             pck != null -> CallProtection.privateCall(csk, pck, localInitiator)
             // The sender of received group media: the transmitter, or any participant.
+            // An ad hoc call (§22.1): also its initiator and the MCVideo IDs called.
+            gmk != null && call?.isAdhoc == true -> CallProtection.Group(csk, gmk, config.userId) {
+                org.openmcx.client.mcptt.AdhocSecurity.senders(call.media?.control?.transmitter, call.peer.takeIf { !call.outgoing },
+                    call.adhocTargets + call.participants.keys, emptyList(), config.userId)
+            }
             gmk != null -> CallProtection.Group(csk, gmk, config.userId) {
                 listOfNotNull(call?.media?.control?.transmitter) + (call?.participants?.keys ?: emptySet())
             }
@@ -665,10 +687,11 @@ class McvideoService(
         } else null
         // Calls with the MCVideo server itself (recording, playback) stay in the clear, transmission control too.
         // A protected group or chat call's media under the group's GMK (TS 33.180 7.3).
-        // An ad hoc group's GMK is not known before the server names the group: an ad hoc call's media go in the
-        // clear, its transmission control under the CSK when floor control is protected (TS 33.180 §9.4.2, as the
-        // MCVideo server does for ad hoc calls, and as MCPTT ad hoc calls).
+        // An ad hoc call's GMK is the one of the preconfigured group the 2xx names (§22.2.2.1.1 2xx step 3): its offer
+        // is protected ([adhocProtected]) and keyed then; transmission control under the CSK when floor control is
+        // protected (TS 33.180 §9.4.2).
         val gmk = if (protectedMedia && call.isGroup && !call.isAdhoc) awaitGroupKey(call.groupId ?: throw CallError("no group")) else null
+        val adhocProtected = protectedMedia && call.isAdhoc
         val protection = if (call.withServer) null else protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
         _calls.value = _calls.value + call
         val (ports, bound) = bindMedia(transmissionControl,
@@ -676,7 +699,7 @@ class McvideoService(
             direction = when (call.ambientRole) { "viewing" -> "recvonly"; "viewed-to" -> "sendonly"; else -> "sendrecv" })
         // A test of the called side's check (debug builds): one flipped bit in the I_MESSAGE's signature.
         val offered = pck?.second?.let { if (tamperNextPck) { tamperNextPck = false; tamper(it) } else it }
-        val keyed = if (pck != null) bound.copy(protected = true, keyMgmt = offered) else if (gmk != null) bound.copy(protected = true) else bound
+        val keyed = if (pck != null) bound.copy(protected = true, keyMgmt = offered) else if (gmk != null || adhocProtected) bound.copy(protected = true) else bound
         // TS 24.581 §14.2.4: "mc_granted" in the initial offer only, with this client's own implicit request
         // (mcvideo.offer_granted); §14.5: never in a later offer (the media keep the offer without it).
         val local = keyed.copy(granted = config.offerGranted && keyed.implicitRequest)
@@ -704,7 +727,9 @@ class McvideoService(
             val aliasCalled = call.calledAlias.takeIf { !call.toAlias }
             val info = priorityInfo(if (call.isAdhoc) McvideoInfo(sessionType = ADHOC, requestUri = call.groupId, clientId = client.config.clientId,
                     // §22.2.2.1.1 steps 10 b), 12: the ad hoc group when known (a re-join), the criteria when asked.
-                    functionalAlias = presented, participantCriteria = call.adhocCriteria)
+                    functionalAlias = presented, participantCriteria = call.adhocCriteria,
+                    // §22.2.2.1.1 step 10 d) iii): end-to-end security for a protected ad hoc call.
+                    endToEndSecurity = org.openmcx.client.mcptt.AdhocSecurity.requested(adhocProtected))
                 else if (call.isGroup) McvideoInfo(sessionType = call.sessionType, requestUri = call.groupId, clientId = client.config.clientId,
                     functionalAlias = presented)
                 else McvideoInfo(sessionType = call.sessionType, callingUserId = config.userId, clientId = client.config.clientId,
@@ -757,11 +782,24 @@ class McvideoService(
                 ?: throw CallError("200 without SDP")
             // §22.2.2.1.1, on the 2xx: the ad hoc group's identity in <mcvideo-calling-group-id>; and the priority state
             // the server confirms (§6.2.8.1.20).
-            Multipart.parse(response.contentType, response.body).firstOrNull { it.mediaType == McvideoInfo.CONTENT_TYPE }
-                ?.let { runCatching { McvideoInfo.parse(it.text) }.getOrNull() }?.let { answered ->
+            val answeredInfo = Multipart.parse(response.contentType, response.body).firstOrNull { it.mediaType == McvideoInfo.CONTENT_TYPE }
+                ?.let { runCatching { McvideoInfo.parse(it.text) }.getOrNull() }
+            answeredInfo?.let { answered ->
                     if (call.isAdhoc) answered.callingGroupId?.let { call.groupId = it }
                 }
             val remote = McvideoSdp.remote(sdp.text)
+            // §22.2.2.1.1 2xx step 3: a protected ad hoc call's media under the GMK of the <preconfigured-group-id>;
+            // without it, or without that GMK, the call cannot be keyed and ends.
+            if (adhocProtected) when (val keying = org.openmcx.client.mcptt.AdhocSecurity.keying(remote.protected, answeredInfo?.preconfiguredGroupId)) {
+                is org.openmcx.client.mcptt.AdhocSecurity.Keying.Group -> {
+                    call.securityGroup = keying.group
+                    val key = try { adhocGroupKey(keying.group) } catch (e: CallError) { throw CallError("no GMK of the ad hoc call's preconfigured group ${keying.group}") }
+                    media.protection = protection(null, localInitiator = true, gmk = key, call = call)
+                    event("call ${call.id}: ad hoc call keyed with the GMK %08x of ${keying.group}".format(key.csbId))
+                }
+                is org.openmcx.client.mcptt.AdhocSecurity.Keying.Refused -> throw CallError(keying.reason)
+                org.openmcx.client.mcptt.AdhocSecurity.Keying.Clear -> Unit
+            }
             if (remote.transmissionControl != transmissionControl) throw CallError("transmission control not negotiated as offered")
             if (remote.protected != local.protected) throw CallError("media protection not negotiated as offered")
             // TS 24.581 §12.1.2.2 NOTE 3: "mc_granted" in the answer to our offer with it grants the implicit request;
@@ -876,6 +914,18 @@ class McvideoService(
             if (group != null && sessionType != ADHOC) {
                 gmk = runCatching { awaitGroupKey(group) }.getOrNull()
                 if (gmk == null) { tx.respond(488); event("protected call on $group without its group key"); return }
+            } else if (sessionType == ADHOC) {
+                // §22.2.2.1.2 step 8: the GMK of the preconfigured group named in <preconfigured-group-id> (TS 33.180
+                // §5.7); a protected ad hoc call without it cannot be keyed (488, as the Linux client).
+                when (val keying = org.openmcx.client.mcptt.AdhocSecurity.keying(true, info.preconfiguredGroupId)) {
+                    is org.openmcx.client.mcptt.AdhocSecurity.Keying.Group -> {
+                        gmk = runCatching { adhocGroupKey(keying.group) }.getOrNull()
+                        if (gmk == null) { tx.respond(488); event("protected ad hoc call on $group: no GMK of ${keying.group}"); return }
+                        call.securityGroup = keying.group
+                    }
+                    is org.openmcx.client.mcptt.AdhocSecurity.Keying.Refused -> { tx.respond(488); event("protected ad hoc call on $group: ${keying.reason}"); return }
+                    org.openmcx.client.mcptt.AdhocSecurity.Keying.Clear -> Unit
+                }
             } else try {
                 val keys = client.videoKeys ?: throw CallError("no MCVideo keys")
                 pck = keys.acceptPck(info.callingUserId ?: throw CallError("no caller"), remote.keyMgmt ?: throw CallError("protected call without a PCK"))
@@ -926,7 +976,7 @@ class McvideoService(
         }
         val media = newMedia(call, ports, local)
         media.protection = try {
-            // An ad hoc group call: no GMK (media in the clear), transmission control under the CSK when protected.
+            // An ad hoc group call: the preconfigured group's GMK when protected, transmission control under the CSK.
             protection(pck, localInitiator = false, gmk = gmk, call = call)
         } catch (e: CallError) {
             tx.respond(480); release(call, e.message ?: "no keys"); return

@@ -966,6 +966,7 @@ class DebugControl(private val context: Context) {
             .put("control_protected", call.media?.protection?.protectsControl == true)
             .put("gmk_id", (call.media?.protection as? org.openmcx.client.mcvideo.CallProtection.Group)?.gmkId)
             .put("protection_failures", call.media?.protection?.failures)
+            .put("security_group", call.securityGroup)
             .put("ambient_type", call.ambientType).put("ambient_role", call.ambientRole).put("may_release", call.mayRelease)
             .put("reason", call.releaseReason).put("transmission_control", call.transmissionControl)
             .put("transmission", media?.takeIf { it.isStarted }?.control?.state?.value?.name)
@@ -1028,6 +1029,10 @@ class DebugControl(private val context: Context) {
         .put("ambient_type", call.ambientType ?: JSONObject.NULL).put("ambient_role", call.ambientRole ?: JSONObject.NULL)
         .put("hidden", call.hidden).put("may_release", call.mayRelease).put("service", call.service ?: JSONObject.NULL)
         .put("answer_mode", call.answerMode ?: JSONObject.NULL).put("forwarding_sequence", call.forwardingSequence)
+        // TS 33.180 §7.3 with TS 24.379 §17.1: the speech protection, and an ad hoc call's preconfigured group.
+        .put("protected", call.media?.local?.protected == true).put("security_group", call.securityGroup ?: JSONObject.NULL)
+        .put("gmk_id", (call.media?.protection as? org.openmcx.client.mcvideo.CallProtection.Group)?.gmkId ?: JSONObject.NULL)
+        .put("protection_failures", call.media?.protection?.failures ?: JSONObject.NULL)
         .put("bursts", JSONArray(call.media?.bursts?.map { b ->
             JSONObject().put("direction", b.direction).put("ssrc", b.ssrc).put("frames", b.payloadHashes.size)
                 .put("hashes", JSONArray(b.payloadHashes)).put("started_at", b.startedAt)

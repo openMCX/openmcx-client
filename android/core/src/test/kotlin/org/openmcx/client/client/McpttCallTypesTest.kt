@@ -282,12 +282,17 @@ class McpttCallTypesTest {
     @Test
     fun adhocByCriteriaAndModified() = runBlocking {
         val adhoc = "sip:adhoc-1@mcx.test"
-        val lab = start(answer = { r -> ok(r, McpttInfo(sessionType = "adhoc", callingGroupId = adhoc)) })
+        // A <preconfigured-group-id> in the 2xx keys nothing when the media are clear (§17.2.2.1.1 2xx step 3).
+        val lab = start(answer = { r -> ok(r, McpttInfo(sessionType = "adhoc", callingGroupId = adhoc, preconfiguredGroupId = "sip:adhoc-security@mcx.test")) })
         val call = lab.service.adhocCall(emptyList(), criteria = "affiliated:$group")
         val invite = lab.core.requests.last { it.method == "INVITE" }
         assertEquals("affiliated:$group", info(invite).participantCriteria)
         assertNull(part(invite, ResourceLists.CONTENT_TYPE))
         assertEquals(adhoc, call.groupId)
+        // A client without protected media asks for no end-to-end security (§17.2.2.1.1 step 10 c) iii)) and offers RTP/AVP.
+        assertNull(info(invite).endToEndSecurity)
+        assertTrue(part(invite, "application/sdp")!!.contains("RTP/AVP"))
+        assertNull(call.securityGroup)
         lab.service.modifyAdhoc(invite = listOf(carol), remove = listOf(bob))
         val reinvite = lab.core.requests.last { it.method == "INVITE" }
         assertTrue(reinvite.to.tag != null)

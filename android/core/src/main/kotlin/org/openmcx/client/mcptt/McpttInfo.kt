@@ -60,6 +60,11 @@ data class McpttInfo(
     val releaseReason: String? = null,
     /** In `<anyExt>`: the preconfigured group whose configuration an ad hoc group call uses (§17.2.2.1.1, 2xx step 3). */
     val preconfiguredGroupId: String? = null,
+    /**
+     * In `<anyExt>`: <end-to-end-security> "true", the originator's request for an end-to-end protected ad hoc group
+     * call (§17.2.2.1.1 step 10 c) iii), annex F.1.3 al)); the 2xx names the preconfigured group that keys it.
+     */
+    val endToEndSecurity: Boolean? = null,
     /** In `<anyExt>` (annex F.1.3): the type of an ambient listening call (§11.1.6), `remote-init` or `local-init`. */
     val ambientListeningType: String? = null,
     /**
@@ -92,13 +97,14 @@ data class McpttInfo(
                 adhocAlertReceived != null || functionalAlias != null || calledFunctionalAlias != null ||
                 callToFunctionalAlias != null || requestType != null || forwardingSequenceNumber != null || releaseReason != null ||
                 preconfiguredGroupId != null || ambientListeningType != null || service.isNotEmpty() ||
-                remotelyInitiatedCallRequest != null) element("anyExt") {
+                remotelyInitiatedCallRequest != null || endToEndSecurity != null) element("anyExt") {
                 leaf("ambient-listening-type", ambientListeningType)
                 leaf("call-participants-criterias", participantCriteria)
                 leaf("emergency-alert-area-ind", emergencyAlertArea?.toString())
                 leaf("group-geo-area-ind", groupGeoArea?.toString())
                 leaf("adhoc-alert-ind", adhocAlert?.toString())
                 leaf("adhoc-alert-ind-rcvd", adhocAlertReceived?.toString())
+                leaf("end-to-end-security", endToEndSecurity?.toString())
                 wrapped("functional-alias-URI", functionalAlias, "mcpttURI")
                 wrapped("called-functional-alias-URI", calledFunctionalAlias, "mcpttURI")
                 leaf("call-to-functional-alias-ind", callToFunctionalAlias?.toString())
@@ -169,6 +175,7 @@ data class McpttInfo(
                 releaseReason = ext("release-reason")?.trim(),
                 preconfiguredGroupId = params.child("anyExt")?.descendants("preconfigured-group-id")?.firstOrNull()
                     ?.let { it.child("mcpttURI") ?: it }?.text()?.trim(),
+                endToEndSecurity = flag("end-to-end-security"),
                 ambientListeningType = ext("ambient-listening-type")?.trim(),
                 service = SERVICE_ELEMENTS.filter { it != "forwarding-sequence-number" }
                     .mapNotNull { name -> params.child("anyExt")?.descendants(name)?.firstOrNull()

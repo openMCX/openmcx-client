@@ -51,6 +51,13 @@ data class McvideoInfo(
     val calledFunctionalAlias: String? = null,
     val callToFunctionalAlias: Boolean? = null,
     val reqType: String? = null,
+    /**
+     * In `<anyExt>` (annex F.1.3): <end-to-end-security> "true", the request for an end-to-end protected ad hoc group
+     * call (§22.2.2.1.1 step 10 d) iii)), and <preconfigured-group-id>, the preconfigured group whose security related
+     * information (its GMK) keys it (§22.2.2.1.1 2xx step 3, §22.2.2.1.2 step 8).
+     */
+    val endToEndSecurity: Boolean? = null,
+    val preconfiguredGroupId: String? = null,
 ) {
     fun encode(): String = Xml.document("mcvideoinfo", NAMESPACE) {
         element("mcvideo-Params") {
@@ -67,7 +74,8 @@ data class McvideoInfo(
             wrapped("mcvideo-client-id", clientId, "mcvideoString")
             wrapped("video-pull-url", videoPullUrl, "mcvideoURI")
             if (ambientViewingType != null || participantCriteria != null || adhocAlert != null || adhocAlertReceived != null || adhocEmergency != null ||
-                functionalAlias != null || calledFunctionalAlias != null || callToFunctionalAlias != null || reqType != null) element("anyExt") {
+                functionalAlias != null || calledFunctionalAlias != null || callToFunctionalAlias != null || reqType != null ||
+                endToEndSecurity != null || preconfiguredGroupId != null) element("anyExt") {
                 leaf("ambient-viewing-type", ambientViewingType)
                 leaf("call-participants-criteria", participantCriteria)
                 leaf("adhoc-emergency-ind", adhocEmergency?.toString())
@@ -77,6 +85,8 @@ data class McvideoInfo(
                 wrapped("called-functional-alias-URI", calledFunctionalAlias, "mcvideoURI")
                 leaf("call-to-functional-alias-ind", callToFunctionalAlias?.toString())
                 leaf("req-type", reqType)
+                leaf("end-to-end-security", endToEndSecurity?.toString())
+                wrapped("preconfigured-group-id", preconfiguredGroupId, "mcvideoURI")
             }
         }
     }
@@ -117,6 +127,9 @@ data class McvideoInfo(
                 calledFunctionalAlias = params.descendants("called-functional-alias-URI").firstOrNull()?.text(),
                 callToFunctionalAlias = params.descendants("call-to-functional-alias-ind").firstOrNull()?.text()?.trim()?.let { it == "true" || it == "1" },
                 reqType = params.descendants("req-type").firstOrNull()?.text(),
+                endToEndSecurity = params.descendants("end-to-end-security").firstOrNull()?.text()?.trim()?.let { it == "true" || it == "1" },
+                preconfiguredGroupId = params.descendants("preconfigured-group-id").firstOrNull()
+                    ?.let { it.child("mcvideoURI") ?: it }?.text()?.trim()?.ifEmpty { null },
             )
         }
     }

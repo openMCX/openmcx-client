@@ -53,6 +53,9 @@ internal class GroupKeySubscriptions(private val clock: () -> Long = System::cur
         }
     }
 
+    /** The groups subscribed to (sent or accepted). */
+    fun groupsSubscribed(): Set<String> = groups.values.toSet()
+
     /** The group of the subscription with [callId], if it is one of these. */
     fun group(callId: String): String? = groups[callId]
 

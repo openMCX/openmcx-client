@@ -134,7 +134,10 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
                   "documents_on_notify": bool(ref["mcptt"].get("documents_on_notify", False)),
                   # TS 24.380 clause 14.3.3: the highest floor priority the reference client asks for (--priority:
                   # client-b 90, the others 10), offered in "mc_priority".
-                  **({"floor_priority": int(mcptt["maximum_floor_priority"])} if "maximum_floor_priority" in mcptt else {})},
+                  **({"floor_priority": int(mcptt["maximum_floor_priority"])} if "maximum_floor_priority" in mcptt else {}),
+                  # TS 24.379 clause 17.1 (TS 33.180 clause 5.7): the preconfigured groups of end-to-end protected ad hoc
+                  # calls, as the reference client has them (the fixture's --protected --adhoc).
+                  **({"adhoc_security_groups": list(mcptt["adhoc_security_groups"])} if mcptt.get("adhoc_security_groups") else {})},
         "media": {"port_range": [20000, 20400], "amr_wb_mode": 2},
     }
     if mcdata:
@@ -166,7 +169,10 @@ def provisioning(ref: dict, site: dict, role: str, debug: bool, fd: dict | None 
                              "chat_groups": chats, "answer_mode": "automatic",
                              # MCVideo functional aliases (TS 24.281 clause 20): those whose <mcvideo-user-list> names this user.
                              "functional_aliases": [fa["id"] for fa in site.get("functional_aliases", [])
-                                                    if mcvideo["user_id"] in fa.get("mcvideo_users", [])]}
+                                                    if mcvideo["user_id"] in fa.get("mcvideo_users", [])],
+                             # TS 24.281 clause 22.1: the same preconfigured groups for MCVideo ad hoc calls.
+                             **({"adhoc_security_groups": list(mcptt["adhoc_security_groups"])}
+                                if mcptt.get("adhoc_security_groups") else {})}
     security = ref.get("security")
     if security:
         # TS 33.180: the KMS, the Key Parameters wire profile, and what is protected (the fixture's --protected).
