@@ -362,6 +362,18 @@ object Engine {
             h.listener = alertListener
             h.position = { lastPosition() }
             h.defaultGroup = { center.groupFor(h.service, selectedGroup.value) }
+            if (h.service == org.openmcx.client.location.LocationService.MCVIDEO) {
+                // TS 24.281 §11.2.1.5 and §6.2.8.1.27: MCVideo's group alert is the McvideoService's, and so is the
+                // user profile that authorises an ad hoc alert.
+                h.serviceGroupAlert = object : org.openmcx.client.alert.EmergencyAlerts.ServiceGroupAlert {
+                    override fun alerting(): Set<String> = mcvideo?.alerting?.value.orEmpty()
+                    override suspend fun raise(group: String, location: org.openmcx.client.mcvideo.EmergencyLocation) {
+                        (mcvideo ?: throw IllegalStateException("MCVideo not started")).sendAlert(group, true, location)
+                        alertsChanged()
+                    }
+                }
+                h.authoriseAdhoc = { cancel -> mcvideo?.authoriseAdhocAlert(cancel) }
+            }
             c.handlers.add(0, h)
         }
         c.start()

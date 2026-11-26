@@ -78,6 +78,23 @@ class AlertInfoTest {
         assertEquals(true, McvideoInfo.parse(xml).adhocAlert)
     }
 
+    /** TS 24.281 §11.2.1.4, §11.2.1.5: the MCVideo area notices as the server writes them (associated group as text). */
+    @Test
+    fun mcvideoAreaNotices() {
+        val head = "<?xml version=\"1.0\"?><mcvideoinfo xmlns=\"urn:3gpp:ns:mcvideoInfo:1.0\"><mcvideo-Params>"
+        val alertArea = McvideoInfo.parse(head + "<anyExt><emergency-alert-area-ind>false</emergency-alert-area-ind></anyExt></mcvideo-Params></mcvideoinfo>")
+        assertEquals(false, alertArea.emergencyAlertArea)
+        val groupArea = McvideoInfo.parse(head + "<associated-group-id>sip:video-a@mcx.test</associated-group-id>" +
+            "<anyExt><group-geo-area-ind>true</group-geo-area-ind></anyExt></mcvideo-Params></mcvideoinfo>")
+        assertEquals(true, groupArea.groupGeoArea)
+        assertEquals("sip:video-a@mcx.test", groupArea.associatedGroupId)
+        val inExt = McvideoInfo.parse(head + "<anyExt><associated-group-id>sip:video-b@mcx.test</associated-group-id></anyExt></mcvideo-Params></mcvideoinfo>")
+        assertEquals("sip:video-b@mcx.test", inExt.associatedGroupId)
+        val back = McvideoInfo.parse(McvideoInfo(associatedGroupId = "sip:video-a@mcx.test", groupGeoArea = false).encode())
+        assertEquals("sip:video-a@mcx.test", back.associatedGroupId)
+        assertEquals(false, back.groupGeoArea)
+    }
+
     @Test
     fun emergencyLocationInEachServicesNamespace() {
         val location = EmergencyLocation(48.8566, 2.3522)

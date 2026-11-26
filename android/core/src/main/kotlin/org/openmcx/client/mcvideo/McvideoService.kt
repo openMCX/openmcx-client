@@ -125,6 +125,8 @@ class VideoCall internal constructor(
     val startedAt = System.currentTimeMillis()
     /** Transmission control events, newest last. */
     val events: MutableList<String> = CopyOnWriteArrayList()
+    /** The o= of this client's SDP in the call: one session ID, the version incremented per offer or answer (RFC 3264 §8). */
+    internal val origin = org.openmcx.client.mcptt.McpttSdp.Origin()
 }
 
 interface VideoCallListener {
@@ -224,6 +226,51 @@ class McvideoService(
             .onSuccess { profile = it; event("user profile: priority ${it.priority}, private call KMSs ${it.privateCallKms}") }
             .onFailure { event("user profile: ${it.message}") }
             .getOrNull()
+    }
+
+    /** The last request the MCVideo user profile refused (TS 24.281 §6.2.8.1.6 to §6.2.8.3.1), for the user. */
+    @Volatile var lastRefusal: String? = null
+        private set
+
+    /**
+     * Authorise a priority request by the MCVideo user profile ([McvideoAuthorisation]); an unauthorised one is
+     * refused here and never sent. Before the profile is read nothing is checked (the server still decides).
+     */
+    private suspend fun authorise(check: suspend McvideoAuthorisation.(McvideoProfile) -> Unit) {
+        val known = profile ?: run { event("user profile not read: the request is not checked against it"); return }
+        try { McvideoAuthorisation.check(known) } catch (e: McvideoAuthorisation.NotAuthorised) {
+            lastRefusal = e.message
+            event(e.message ?: "not authorised")
+            throw e
+        }
+    }
+
+    /** TS 24.281 §6.2.8.1.6 2) b): the targeted group's document allows this user's emergency alert (TS 24.481 §7.2.2). */
+    private suspend fun groupAllowsAlert(group: String): Boolean {
+        val token = client.tokens?.accessToken ?: return false
+        return McvideoAuthorisation.groupAllows(client.documents.groupText(group, token), "mcvideo-allow-emergency-alert", listOf(config.userId))
+    }
+
+    /** §6.2.8.1.8 1): an emergency or imminent peril group call request on [group]. */
+    private suspend fun authoriseGroupPriority(group: String?, priority: String, adhoc: Boolean) = when (priority) {
+        // §6.2.8.1.22: an ad hoc group call's rights; it targets no preconfigured group.
+        "emergency" -> if (adhoc) authorise { requireRight(it, "allow-emergency-adhoc-group-call", "emergency ad hoc group call") }
+            else authorise {
+                requireRight(it, "allow-emergency-group-call", "emergency group call")
+                requireTarget(it, McvideoProfile.EMERGENCY_GROUP_INITIATION, group, "emergency group call")
+            }
+        "imminent" -> if (adhoc) authorise { requireRight(it, "allow-imminent-peril-adhoc-group-call", "imminent peril ad hoc group call") }
+            else authorise {
+                requireRight(it, "allow-imminent-peril-call", "imminent peril group call")
+                requireTarget(it, McvideoProfile.IMMINENT_GROUP_INITIATION, group, "imminent peril group call")
+            }
+        else -> Unit
+    }
+
+    /** §6.2.8.1.27: an ad hoc group emergency alert ([cancel]: its cancellation), for the alert handler. */
+    suspend fun authoriseAdhocAlert(cancel: Boolean) = authorise {
+        if (cancel) requireRight(it, "allow-cancel-adhoc-group-emergency-alert", "ad hoc group emergency alert cancellation")
+        else requireRight(it, "allow-activate-adhoc-group-emergency-alert", "ad hoc group emergency alert")
     }
 
     private suspend fun subscribeGroupKeys() {
@@ -360,7 +407,7 @@ class McvideoService(
         val ports = VideoPorts.bind(InetAddress.getByName(address), client.config.media.portRange)
         return ports to LocalVideoMedia(address, ports.audio.localPort, ports.video.localPort,
             if (transmissionControl) ports.control.localPort else null,
-            McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), implicitRequest && transmissionControl, direction,
+            McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), McvideoSdp.newSsrc(), implicitRequest && transmissionControl, direction = direction,
             // TS 24.581 §14.2.2, §14.2.3, §14.2.6 (and §14.5 for later offers): queueing and the configured priorities.
             priority = TransmissionPriority.offered(configuredPriority).takeIf { transmissionControl },
             receptionPriority = TransmissionPriority.offered(configuredPriority).takeIf { transmissionControl },
@@ -411,6 +458,7 @@ class McvideoService(
             override fun revoked(cause: Int?) = note(call, "revoked cause $cause")
             override fun requestFailed() = note(call, "request failed")
             override fun reception(receiving: Boolean, rejectCause: Int?) = note(call, if (receiving) "receiving" else "reception refused $rejectCause")
+            override fun receptionOverridden() = note(call, "reception overridden")
             override fun remoteResult(start: Boolean, done: Boolean?) = note(call, "remote ${if (start) "start" else "stop"} ${if (done == true) "done" else "not done"}")
             override fun queued(position: Int?) = note(call, "queued${position?.let { " at $it" } ?: ""}")
             override fun timeout(what: String) = note(call, what)
@@ -424,9 +472,15 @@ class McvideoService(
 
     /** A private call; with [emergency], an emergency private call (§6.2.8.3). */
     suspend fun privateCall(target: String, commencement: Commencement = Commencement.AUTOMATIC, transmissionControl: Boolean = true,
-                            emergency: Boolean = false, implicit: Boolean = false): VideoCall =
-        originate(VideoCall(ids.incrementAndGet(), true, target, transmissionControl).also {
+                            emergency: Boolean = false, implicit: Boolean = false): VideoCall {
+        // §6.2.8.3.1.1: an emergency private call only when authorised.
+        if (emergency) authorise {
+            requireRight(it, "allow-emergency-private-call", "emergency private call")
+            requireTarget(it, McvideoProfile.EMERGENCY_PRIVATE_RECIPIENT, target, "emergency private call")
+        }
+        return originate(VideoCall(ids.incrementAndGet(), true, target, transmissionControl).also {
             if (emergency) it.priority = "emergency"; it.implicitAsked = implicit }, commencement)
+    }
 
     /**
      * A private call to a functional alias (TS 24.281 §10.2.2.2.1 with §20): the request names the alias with
@@ -449,8 +503,10 @@ class McvideoService(
      * [priority] `emergency` or `imminent`, an emergency or imminent peril group call (§6.2.8.1).
      */
     suspend fun groupCall(group: String = config.groups.firstOrNull() ?: throw CallError("no MCVideo group"), priority: String = "normal",
-                          implicit: Boolean = false): VideoCall =
-        originate(VideoCall(ids.incrementAndGet(), true, null, true, group, "prearranged").also { it.priority = priority; it.implicitAsked = implicit }, null)
+                          implicit: Boolean = false): VideoCall {
+        authoriseGroupPriority(group, priority, adhoc = false)
+        return originate(VideoCall(ids.incrementAndGet(), true, null, true, group, "prearranged").also { it.priority = priority; it.implicitAsked = implicit }, null)
+    }
 
     /**
      * Join a chat group's call (§9.2.2.2.1): nobody is invited; the server creates the group's
@@ -466,6 +522,7 @@ class McvideoService(
     suspend fun adhocCall(targets: List<String> = emptyList(), criteria: String? = null, priority: String = "normal",
                           implicit: Boolean = false): VideoCall {
         if (targets.isEmpty() && criteria.isNullOrBlank()) throw CallError("an ad hoc call needs MCVideo IDs or criteria")
+        authoriseGroupPriority(null, priority, adhoc = true)
         return originate(VideoCall(ids.incrementAndGet(), true, null, true, null, ADHOC).also {
             it.adhocTargets = targets; it.adhocCriteria = criteria; it.priority = priority; it.implicitAsked = implicit }, null)
     }
@@ -487,6 +544,8 @@ class McvideoService(
      */
     suspend fun cancelImminent(group: String = config.groups.firstOrNull() ?: throw CallError("no MCVideo group")): String {
         active?.takeIf { it.groupId == group && it.state == "established" }?.let { setPriority(emergency = false, enabled = false, call = it); return "MVIG 1: no-imminent-peril" }
+        // Step 1 (§6.2.8.1.10): unauthorised, nothing is sent.
+        authorise { requireRight(it, "allow-cancel-imminent-peril", "in-progress imminent peril group state cancellation") }
         val request = ua.newRequest("MESSAGE", config.psi, NameAddr(config.psi))
         request.headers.add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCVIDEO)}\";require;explicit")
             .add("Accept-Contact", "*;+g.3gpp.mcvideo;require;explicit").add("P-Preferred-Service", Icsi.MCVIDEO)
@@ -695,14 +754,17 @@ class McvideoService(
         val protection = if (call.withServer) null else protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
         _calls.value = _calls.value + call
         val (ports, bound) = bindMedia(transmissionControl,
-            implicitRequest = call.sessionType == PUSH || call.sessionType == PUSH_TO_SERVER || call.ambientType == "local-init" || call.implicitAsked,
+            // §15.2.1.1 steps 12 and 13 with §6.4: an ambient viewing offer carries "mc_implicit_request" either way: this
+            // client's own request (local-init) or one to grant the viewed-to user (remote-init).
+            implicitRequest = call.sessionType == PUSH || call.sessionType == PUSH_TO_SERVER || call.ambientType != null || call.implicitAsked,
             direction = when (call.ambientRole) { "viewing" -> "recvonly"; "viewed-to" -> "sendonly"; else -> "sendrecv" })
+            .let { (p, l) -> p to l.copy(implicitForPeer = call.ambientType == "remote-init" && l.implicitRequest) }
         // A test of the called side's check (debug builds): one flipped bit in the I_MESSAGE's signature.
         val offered = pck?.second?.let { if (tamperNextPck) { tamperNextPck = false; tamper(it) } else it }
         val keyed = if (pck != null) bound.copy(protected = true, keyMgmt = offered) else if (gmk != null || adhocProtected) bound.copy(protected = true) else bound
         // TS 24.581 §14.2.4: "mc_granted" in the initial offer only, with this client's own implicit request
         // (mcvideo.offer_granted); §14.5: never in a later offer (the media keep the offer without it).
-        val local = keyed.copy(granted = config.offerGranted && keyed.implicitRequest)
+        val local = keyed.copy(granted = config.offerGranted && keyed.ownImplicitRequest)
         val media = newMedia(call, ports, keyed)
         media.protection = protection
         pck?.let { call.pckId = it.first.csbId; event("call ${call.id}: PCK %08x for $target".format(it.first.csbId)) }
@@ -736,7 +798,7 @@ class McvideoService(
                     videoPullUrl = if (call.sessionType == PULL_FROM_SERVER) call.pushUrl else null, ambientViewingType = call.ambientType,
                     functionalAlias = presented, callToFunctionalAlias = if (call.toAlias) true else null, calledFunctionalAlias = aliasCalled), call.priority)
             resourcePriority(call.priority)?.let { request.headers.add("Resource-Priority", it) }
-            val parts = mutableListOf(Part("application/sdp", McvideoSdp.offer(local).toByteArray()), Part(McvideoInfo.CONTENT_TYPE, info.encode().toByteArray()))
+            val parts = mutableListOf(Part("application/sdp", McvideoSdp.offer(local, call.origin).toByteArray()), Part(McvideoInfo.CONTENT_TYPE, info.encode().toByteArray()))
             // A call with the server names nobody (§13.2.2.4, §12.2.2.4).
             if (!call.isGroup && !call.withServer) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOfNotNull(target)).toByteArray())
             // §22.2.2.1.1 step 11: the MCVideo users to call (RFC 5366).
@@ -970,7 +1032,7 @@ class McvideoService(
         // the viewed-to user of a remotely initiated ambient viewing call (§15.2.1.1 step 13).
         val (ports, local) = try {
             bindMedia(remote.transmissionControl, implicitRequest = sessionType == PULL || call.hidden,
-                direction = McvideoSdp.answerDirection(remote.direction)).let { (p, l) -> p to l.copy(protected = remote.protected) }
+                direction = McvideoSdp.answerDirection(remote.direction, receiveOnly = sessionType == PUSH)).let { (p, l) -> p to l.copy(protected = remote.protected) }
         } catch (e: Exception) {
             tx.respond(480); release(call, "no media ports"); return
         }
@@ -985,7 +1047,7 @@ class McvideoService(
         call.media = media
         val offered = request.headers["Session-Expires"]?.substringBefore(';')?.trim()?.toIntOrNull() ?: 90
         call.sessionExpires = offered
-        val response = tx.response(200, body = McvideoSdp.answer(remote, local).toByteArray(), contentType = "application/sdp", extra = listOf(
+        val response = tx.response(200, body = McvideoSdp.answer(remote, local, call.origin).toByteArray(), contentType = "application/sdp", extra = listOf(
             "Contact" to client.sessionContact(McService.MCVIDEO), "Require" to "timer", "Supported" to "timer",
             "Session-Expires" to "$offered;refresher=uas", "Allow" to ALLOW))
         call.dialog = Dialog.fromRequest(request, tx.localTag)
@@ -1055,7 +1117,7 @@ class McvideoService(
             ?.let { notePriority(call, it) }
         val sdp = parts.firstOrNull { it.mediaType == "application/sdp" }?.text
         val remote = sdp?.let { runCatching { McvideoSdp.remote(it) }.getOrNull() }
-        val answer = remote?.let { McvideoSdp.answer(it, media.local.copy(keyMgmt = null, granted = false)) }
+        val answer = remote?.let { McvideoSdp.answer(it, media.local.copy(keyMgmt = null, granted = false), call.origin) }
         tx.respond(200, body = answer?.toByteArray() ?: ByteArray(0), contentType = answer?.let { "application/sdp" },
             extra = sessionTimerHeaders(tx.request))
     }
@@ -1070,6 +1132,13 @@ class McvideoService(
                           location: EmergencyLocation? = null, originatedBy: String? = null) {
         require(originatedBy == null || !on) { "only a cancellation names another user's alert" }
         if (on && location == null) throw CallError("an emergency alert needs this phone's location")
+        // §6.2.8.1.6 (11.2.1.1 "if this is an authorised request"): the alert and its cancellation.
+        authorise {
+            if (on) {
+                requireRight(it, "allow-activate-emergency-alert", "emergency alert")
+                requireTarget(it, McvideoProfile.GROUP_EMERGENCY_ALERT, group, "emergency alert", ::groupAllowsAlert)
+            } else requireRight(it, "allow-cancel-emergency-alert", "emergency alert cancellation")
+        }
         val request = ua.newRequest("MESSAGE", config.psi, NameAddr(config.psi))
         request.headers.add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCVIDEO)}\";require;explicit")
             .add("Accept-Contact", "*;+g.3gpp.mcvideo;require;explicit")
@@ -1164,6 +1233,31 @@ class McvideoService(
         val dialog = call.dialog ?: throw CallError("the call is not established")
         val media = call.media ?: throw CallError("no media")
         val wanted = if (!enabled) "normal" else if (emergency) "emergency" else "imminent"
+        // The user's authorisation (§6.2.8.1.7, §6.2.8.1.8, §6.2.8.1.10, §6.2.8.1.22 for a group call, §6.2.8.3.1 for a
+        // private call); unauthorised, no re-INVITE (§9.2.1.2.1.4 1) b) "shall skip the remaining steps").
+        authorise {
+            when {
+                !call.isGroup -> {
+                    if (!emergency) throw CallError("a private call has no imminent peril state")
+                    requireRight(it, if (enabled) "allow-emergency-private-call" else "allow-cancel-private-emergency-call",
+                        if (enabled) "emergency private call" else "emergency private call cancellation")
+                    if (enabled) requireTarget(it, McvideoProfile.EMERGENCY_PRIVATE_RECIPIENT, call.peer, "emergency private call")
+                }
+                enabled && call.isAdhoc -> requireRight(it, if (emergency) "allow-emergency-adhoc-group-call" else "allow-imminent-peril-adhoc-group-call",
+                    if (emergency) "emergency ad hoc group call" else "imminent peril ad hoc group call")
+                emergency -> {
+                    requireRight(it, if (enabled) "allow-emergency-group-call" else "allow-cancel-group-emergency",
+                        if (enabled) "emergency group call" else "in-progress emergency group state cancellation")
+                    if (enabled) requireTarget(it, McvideoProfile.EMERGENCY_GROUP_INITIATION, call.groupId, "emergency group call")
+                }
+                else -> {
+                    requireRight(it, if (enabled) "allow-imminent-peril-call" else "allow-cancel-imminent-peril",
+                        if (enabled) "imminent peril group call" else "imminent peril group call cancellation")
+                    if (enabled) requireTarget(it, McvideoProfile.IMMINENT_GROUP_INITIATION, call.groupId, "imminent peril group call")
+                }
+            }
+            if (cancelAlertOf != null) requireRight(it, "allow-cancel-emergency-alert", "emergency alert cancellation")
+        }
         var info = if (call.isGroup) McvideoInfo(sessionType = call.sessionType, requestUri = call.groupId, clientId = client.config.clientId)
         else McvideoInfo(sessionType = "private", callingUserId = config.userId, clientId = client.config.clientId)
         info = when {
@@ -1175,7 +1269,7 @@ class McvideoService(
             enabled -> info.copy(imminentPeril = true)
             else -> info.copy(imminentPeril = false)
         }
-        val parts = mutableListOf(Part("application/sdp", McvideoSdp.offer(media.local.copy(keyMgmt = null, granted = false)).toByteArray()), Part(McvideoInfo.CONTENT_TYPE, info.encode().toByteArray()))
+        val parts = mutableListOf(Part("application/sdp", McvideoSdp.offer(media.local.copy(keyMgmt = null, granted = false), call.origin).toByteArray()), Part(McvideoInfo.CONTENT_TYPE, info.encode().toByteArray()))
         if (!call.isGroup) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOfNotNull(call.peer)).toByteArray())
         val request = ua.inDialog(dialog, "INVITE")
         commonHeaders(request)

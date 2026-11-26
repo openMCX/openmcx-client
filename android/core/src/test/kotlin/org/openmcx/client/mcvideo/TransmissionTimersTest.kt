@@ -202,6 +202,55 @@ class TransmissionTimersTest {
         assertEquals(RxState.TERMINATED, p.reception.value)
     }
 
+    /** §6.2.5.5.3 step 1b: the reception end request names the transmitting user and its audio and video SSRCs. */
+    @Test fun receptionEndNamesTheTransmitter() = runTest {
+        val p = participant()
+        p.start()
+        p.receive(server(TxType.MEDIA_TRANSMISSION_NOTIFICATION, TxField.TRANSMITTING_USER_ID to "sip:bob@mcx.test".toByteArray(),
+            TxField.AUDIO_SSRC to TransmissionMessage.ssrcValue(0x11223344), TxField.VIDEO_SSRC to TransmissionMessage.ssrcValue(0x55667788),
+            TxField.RECEPTION_MODE to TransmissionMessage.u16(0)))
+        assertEquals(RxState.HAS_PERMISSION, p.reception.value)
+        assertTrue(p.endReception()); runCurrent()
+        val end = TransmissionMessage.decode(sent.last { it.type == TxType.RECEPTION_END_REQUEST }.encode())
+        assertEquals("sip:bob@mcx.test", end.transmittingUser)
+        assertEquals(0x11223344L, end.audioSsrc)
+        assertEquals(0x55667788L, end.videoSsrc)
+        // The retransmission at T104 expiry is the same message.
+        advanceTimeBy(801); runCurrent()
+        assertEquals(end, TransmissionMessage.decode(sent.last { it.type == TxType.RECEPTION_END_REQUEST }.encode()))
+    }
+
+    /** §6.2.5.5.4: an override is answered with a Media reception end request for the stream received, T104 running. */
+    @Test fun receptionOverrideEndsTheReception() = runTest {
+        val p = participant()
+        p.start()
+        p.receive(server(TxType.MEDIA_TRANSMISSION_NOTIFICATION, TxField.TRANSMITTING_USER_ID to "sip:bob@mcx.test".toByteArray(),
+            TxField.VIDEO_SSRC to TransmissionMessage.ssrcValue(7), TxField.RECEPTION_MODE to TransmissionMessage.u16(0)))
+        p.receive(server(TxType.RECEPTION_OVERRIDE_NOTIFICATION)); runCurrent()
+        assertEquals(RxState.PENDING_RELEASE, p.reception.value)
+        val end = sent.last { it.type == TxType.RECEPTION_END_REQUEST }
+        assertEquals("sip:bob@mcx.test", end.transmittingUser)
+        assertEquals(7L, end.videoSsrc)
+        assertNull(end.audioSsrc)
+        advanceTimeBy(801); runCurrent(); assertEquals(2, of(TxType.RECEPTION_END_REQUEST))
+        p.receive(server(TxType.RECEPTION_END_RESPONSE))
+        assertEquals(RxState.TERMINATED, p.reception.value)
+    }
+
+    /** §6.2.5.5.5 with §9.2.27: the response to the server's reception end request names the stream ended. */
+    @Test fun serverReceptionEndResponseNamesTheStream() = runTest {
+        val p = participant()
+        p.start()
+        p.receive(server(TxType.MEDIA_TRANSMISSION_NOTIFICATION, TxField.TRANSMITTING_USER_ID to "sip:bob@mcx.test".toByteArray(),
+            TxField.AUDIO_SSRC to TransmissionMessage.ssrcValue(5), TxField.VIDEO_SSRC to TransmissionMessage.ssrcValue(6),
+            TxField.RECEPTION_MODE to TransmissionMessage.u16(0)))
+        p.receive(server(TxType.RECEPTION_END_REQUEST))
+        val response = sent.last { it.type == TxType.RECEPTION_END_RESPONSE }
+        assertEquals("sip:bob@mcx.test", response.transmittingUser)
+        assertEquals(5L, response.audioSsrc)
+        assertEquals(6L, response.videoSsrc)
+    }
+
     /** §6.2.4.7.2: the call's release stops every timer. */
     @Test fun stopEndsTheTimers() = runTest {
         val p = participant()
