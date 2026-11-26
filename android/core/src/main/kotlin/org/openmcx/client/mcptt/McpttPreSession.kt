@@ -7,6 +7,7 @@ package org.openmcx.client.mcptt
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.isActive
@@ -601,9 +602,7 @@ class McpttPreSession internal constructor(private val svc: McpttService) {
      */
     internal suspend fun replacedBy(replaces: String): Boolean {
         val d = dialog ?: return false
-        val callId = replaces.substringBefore(';').trim()
-        val params = replaces.substringAfter(';', "").split(';').associate { it.substringBefore('=').trim().lowercase() to it.substringAfter('=', "").trim() }
-        if (callId != d.callId || params["to-tag"] != d.localTag || params["from-tag"] != d.remoteTag) return false
+        if (!names(replaces, d)) return false
         event("replaced by an on-demand call")
         runCatching { withTimeoutOrNull(5_000) { svc.ua.send(svc.ua.inDialog(d, "BYE"), d) } }
         val keep = wanted
@@ -612,6 +611,32 @@ class McpttPreSession internal constructor(private val svc: McpttService) {
         return true
     }
 
+
+    /** RFC 3891 §3: a Replaces header field value naming the session's dialog (to-tag ours, from-tag the function's). */
+    private fun names(replaces: String, d: Dialog): Boolean {
+        val callId = replaces.substringBefore(';').trim()
+        val params = replaces.substringAfter(';', "").split(';').associate { it.substringBefore('=').trim().lowercase() to it.substringAfter('=', "").trim() }
+        return callId == d.callId && params["to-tag"] == d.localTag && params["from-tag"] == d.remoteTag
+    }
+
+    /**
+     * TS 24.379 §6.2.3.1.1 6) (manual commencement §6.2.3.2.1 by reference): the SDP answer to an INVITE whose Replaces
+     * names this session carries the parameters used for the session. Its media (ports and local media) is handed to
+     * the replacing call, which owns it from then on: the session's control channel reader stops and the session, ended
+     * by [replacedBy] (step 9), no longer closes the ports. Null when Replaces names another dialog or a call is over
+     * the session (its media is in use).
+     */
+    internal suspend fun handOver(replaces: String): Pair<MediaPorts, LocalMedia>? {
+        val d = dialog ?: return null
+        if (!names(replaces, d) || call != null) return null
+        val p = ports ?: return null
+        val l = local ?: return null
+        reader?.cancelAndJoin(); reader = null
+        ports = null
+        publish()
+        event("media handed to the call replacing it (audio ${p.audioPort}, floor ${p.floorPort})")
+        return p to l.copy(implicitRequest = false, granted = false, floorPriority = null)
+    }
 
     /** An on-demand call ended: a session it replaced (RFC 3891) is made again once no call is left. */
     internal fun afterCall() {

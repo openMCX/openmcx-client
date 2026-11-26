@@ -296,6 +296,58 @@ class McpttPreSessionTest {
         assertFalse(c.floorControl)
     }
 
+    /** An on-demand INVITE of the controlling function, outside the session's dialog, with [replaces] (RFC 3891). */
+    private fun onDemand(lab: Lab, replaces: String, info: McpttInfo) {
+        val offer = McpttSdp.offer(serverMedia.copy(floorControl = false)) // as the suite's: no m=application
+        val (type, body) = Multipart.encode(listOf(Part("application/sdp", offer.toByteArray()), Part(McpttInfo.CONTENT_TYPE, info.encode().toByteArray())))
+        val headers = Headers().add("Via", "SIP/2.0/TLS 127.0.0.1:5061;branch=z9hG4bKod${cseq}").add("Max-Forwards", "70")
+            .add("From", "<$psi>;tag=srv").add("To", "<sip:alice@mcx.test>").add("Call-ID", "on-demand-${cseq}")
+            .add("CSeq", "${cseq++} INVITE").add("Contact", "<$callIdentity>;isfocus").add("P-Asserted-Identity", "<$psi>")
+            .add("Session-Expires", "90").add("Supported", "timer").add("Replaces", replaces).add("Content-Type", type)
+        lab.core.send(SipRequest("INVITE", lab.core.contact(), headers, body))
+    }
+
+    private fun okAfterRinging(lab: Lab): org.openmcx.client.sip.SipResponse {
+        assertEquals(180, lab.core.answers.poll(5, java.util.concurrent.TimeUnit.SECONDS)!!.status)
+        waitFor("ringing") { lab.service.calls.value.firstOrNull()?.state == "ringing" }
+        assertTrue(lab.service.answer())
+        return lab.core.answers.poll(5, java.util.concurrent.TimeUnit.SECONDS)!!.also { assertEquals(200, it.status) }
+    }
+
+    /**
+     * TS 37.579-2 6.2.23 with TS 24.379 §6.2.3.1.1 6), 9) (by §6.2.3.2.1): a first-to-answer INVITE whose Replaces names
+     * the pre-established session is answered with the session's media parameters (its address and speech port, not
+     * new ones), and the session is then released by BYE in its dialog.
+     */
+    @Test fun anInviteReplacingTheSessionIsAnsweredWithTheSessionsMedia() = runBlocking {
+        val lab = established()
+        val d = lab.service.preSession.dialog!!
+        val session = McpttSdp.remote(String(preInvite(lab).body))
+        onDemand(lab, "${d.callId};to-tag=${d.localTag};from-tag=${d.remoteTag}",
+            McpttInfo(sessionType = "first-to-answer", callingUserId = bob, requestUri = alice))
+        val answer = McpttSdp.remote(String(okAfterRinging(lab).body))
+        assertEquals(session.address, answer.address)
+        assertEquals(session.audioPort, answer.audioPort)
+        waitFor("BYE") { lab.core.requests.any { it.method == "BYE" && it.callId == d.callId } }
+        assertEquals("replaced", lab.service.preSession.status.value!!.state)
+        val c = lab.service.calls.value.single()
+        assertEquals("established", c.state)
+        assertFalse(c.floorControl)
+    }
+
+    /** §6.2.3.1.1 7): a Replaces naming another dialog leaves the session alone; the call gets media of its own. */
+    @Test fun anInviteReplacingAnotherDialogGetsItsOwnMedia() = runBlocking {
+        val lab = established()
+        val d = lab.service.preSession.dialog!!
+        val session = McpttSdp.remote(String(preInvite(lab).body))
+        onDemand(lab, "${d.callId};to-tag=other;from-tag=${d.remoteTag}",
+            McpttInfo(sessionType = "first-to-answer", callingUserId = bob, requestUri = alice))
+        val answer = McpttSdp.remote(String(okAfterRinging(lab).body))
+        assertTrue(answer.audioPort != session.audioPort)
+        assertFalse(lab.core.requests.any { it.method == "BYE" })
+        assertEquals("established", lab.service.preSession.status.value!!.state)
+    }
+
     @Test fun aModificationByTheFunctionTakesTheOfferedFloorPriority() = runBlocking {
         val lab = established()
         inSession(lab, "UPDATE", listOf(Part("application/sdp", McpttSdp.offer(serverMedia.copy(floorPriority = 7)).toByteArray())))

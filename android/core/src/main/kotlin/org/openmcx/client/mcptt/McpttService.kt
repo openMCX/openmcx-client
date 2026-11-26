@@ -1004,13 +1004,19 @@ class McpttService(
                 }
             }
         }
-        accept(call, tx, remote)
-        // RFC 3891 with TS 24.379 §6.3.2.2.5.3 step 1: a call replacing the pre-established session ends it once accepted.
-        if (call.state == "established") request.headers["Replaces"]?.let { preSession.replacedBy(it) }
+        val replaces = request.headers["Replaces"]
+        val handedOver = accept(call, tx, remote, replaces)
+        // RFC 3891 with TS 24.379 §6.3.2.2.5.3 step 1, §6.2.3.1.1 9): a call replacing the pre-established session ends
+        // it once accepted (and so does a failed answer that took its media).
+        if (replaces != null && (call.state == "established" || handedOver)) preSession.replacedBy(replaces)
     }
 
-    private suspend fun accept(call: Call, tx: ServerTransaction, remote: RemoteMedia) {
-        val (ports, bound) = try { bindMedia() } catch (e: Exception) { tx.respond(480); release(call, "no media ports"); return }
+    /** The 2xx to an incoming INVITE; true when the media of the pre-established session [replaces] names was taken. */
+    private suspend fun accept(call: Call, tx: ServerTransaction, remote: RemoteMedia, replaces: String?): Boolean {
+        // §6.2.3.1.1 6): an INVITE with Replaces naming the pre-established session is answered with the session's
+        // parameters (its media ports and local media); §6.2.3.1.1 7) otherwise, new media.
+        val handed = replaces?.let { preSession.handOver(it) }
+        val (ports, bound) = handed ?: try { bindMedia() } catch (e: Exception) { tx.respond(480); release(call, "no media ports"); return false }
         // §11.1.2.3: an offer without floor control is answered without it, announcing our speech SSRC.
         val floored = if (remote.floorControl) bound else bound.copy(floorControl = false, audioSsrc = McpttSdp.newFloorSsrc())
         // §6.2.1 item 2c: the listened-to user's speech sendonly, the listening user's recvonly.
@@ -1018,7 +1024,7 @@ class McpttService(
             "listened-to" -> "sendonly"; "listening" -> "recvonly"; else -> "sendrecv" })
         // A first-to-answer invitee is the initiator of its own PCK (§11.1.1.2.1.2 step 5 NOTE 4).
         val protection = try { protection(call.keys.first, localInitiator = call.firstToAnswer, gmk = call.keys.second, call = call) }
-            catch (e: CallError) { ports.close(); tx.respond(480); release(call, e.message ?: "no keys"); return }
+            catch (e: CallError) { ports.close(); tx.respond(480); release(call, e.message ?: "no keys"); return handed != null }
         val media = newMedia(call, ports, local)
         media.protection = protection
         call.media = media
@@ -1036,8 +1042,9 @@ class McpttService(
         tx.send(response)
         call.state = "established"
         startRefresh(call) // we are the refresher (§6.2.3.1.1 step 5)
-        event("call ${call.id}: answered")
+        event("call ${call.id}: answered" + if (handed != null) " with the replaced pre-established session's media" else "")
         changed(call)
+        return handed != null
     }
 
     private fun onAck(ack: SipRequest) { /* the server marks the leg active on ACK; nothing to do here */ }
