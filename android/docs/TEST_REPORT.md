@@ -611,3 +611,75 @@ the speech of alice and of client-c arrives unchanged (the frame hashes); V2: th
 under the same group's GMK on alice and bob, bob's leave and protected re-join, emergency and imminent peril ad hoc calls.
 The Linux reference client was not a participant: it subscribes to `mcptt.adhoc_security_groups` but has no MCVideo
 counterpart (an invitation to a protected MCVideo ad hoc call is refused 488 until its first try subscribes to the GMK).
+
+## MCPTT conformance fixes (2026-11-26)
+
+Branch `android-q1-mcptt` (from client main 5d431a0): the MCPTT failures of the suite's Android run
+`android-mcptt-real-p7` (openmcx-conformance-tests worktree `suite-android`, branch `feat/android-driver`). Each fix is
+checked against TS 24.379 V19.7.0; CONFORMANCE.md has the rows.
+
+| Test case | Cause | Fix | Clause |
+|---|---|---|---|
+| 6.1.1.19, 6.1.2.13, 6.1.2.14, P.8.12 | The alias in use was presented on private and ad hoc calls only, not on prearranged and chat group calls (INVITE, and REFER over the pre-established session) | `FunctionalAliasRules.presented`: every call but an ambient listening call presents the alias in use while it is active | §10.1.1.2.1.1 14) e), §10.1.2.2.1.1 13) e) |
+| 6.1.1.22 | The documents of the provisioned groups only were read; the group of the test (`operations-preconf`) is affiliated later, so its `<preconfigured-group-use-only>` was unknown and the INVITE went out (the server refused it, 403 warning 167) | A group call on a group without a document reads it first (up to 3 s), then refuses it locally | §10.1.1.2.1.1, §10.1.2.2.1.1 (first paragraph 1), 2)) |
+| 6.2.16 | Only the listened-to side of a remote-init call was hidden; the listened-to user's own local-init call was shown | `Call.hidden` for the listened-to role of both types; `Call.concealed` (remote-init) keeps it out of `active`, so the user can still release a local-init call (contact menu "Stop letting them listen") | §11.1.6.2.0, §11.1.6.2.1.1 (200 (OK)) 3), §11.1.6.2.1.3 2), §11.1.6.2.1.4 2) |
+| P.4.6 | `<call-to-functional-alias-ind>` left out of a forwarding to an MCPTT ID | Always present: "true" to an alias, else "false" | §11.1.9.2.1 2) d) i) B) |
+| P.5.1 | The ad hoc alert rights were left to the server (an unauthorised alert was sent); without a position the alert went without its location body; the refused alert left nothing to cancel | `EmergencyAlerts.sendAdhoc` checks `<allow-activate-adhoc-group-emergency-alert>`, `cancelAdhoc` `<allow-cancel-adhoc-group-emergency-alert>`; the MCPTT alert is not sent without a position | §6.2.8.1.19, §12.1A.1.1 1), 2), 5) -> §6.2.9.1 2), §12.1A.1.2 |
+| P.10.2 | The alert cancellation (one body) went as multipart/mixed with one boundary delimiter | `Multipart.body`: one body as itself (its MIME type the Content-Type), used by the alert MESSAGEs | §6.5 (one MIME body 1)) |
+
+Shared code touched: `body/Multipart.kt` (a new `Multipart.body`; `encode` unchanged, so other callers are untouched)
+and `alert/EmergencyAlerts.kt` (its MESSAGEs, for MCPTT, MCData and MCVideo ad hoc alerts: a single body now goes
+plain; the rights and location checks apply to MCPTT only).
+
+Not client faults (the evidence is in the run directories):
+- **P.3.2, P.3.9, P.4.5 (suite):** the Floor Acks "after the UE left" are those of the next call of the test, on a new
+  floor port and Call-ID (P.3.2 p7: BYE #543 on the call with floor port 20314; the Floor Acks #634 on 20098, after the
+  next INVITE #626). `no_floor_after` (`_lib_p3.py`) and `media_stopped` (`_lib_p4.py`) take every UE floor message up
+  to the window end plus 5 s grace, and the Android DUT starts the next call within a second. With the checks limited
+  to the released call's UE floor port: P.3.9 and P.4.5 Pass, P.3.2 Inconclusive (step 7: the real server sends no SS
+  BYE on cue); re-verifying the p7 captures gives the same.
+- **P.10.4 (bench):** the lab server's private call timer (`maximum_duration_ms`, 30 s in the fixture) releases user
+  B's call 30 s after the 200 (OK), before the refresh at half the 90 s interval (45 s, RFC 4028 §10); the group call
+  is released by T4 inactivity at 60 s, and the server answers Session-Expires 1800 anyway. The client's refresh is
+  unchanged (S7: an 80 s call refreshed by UPDATE).
+- **6.6.4 (bench):** the suite lab is made without `--location`, and the real server sends the emergency alert area
+  notice only when the UE reports a position inside an area (`hazard`, 48.05 N 2.05 E). Step 1's
+  `send_message kind=emergency_alert_area` is not mapped on the real-server SS. The client raises the alert on the
+  notice by itself (S14, S44 above: the alert with no user request).
+- **P.5.1 (suite):** the driver's `adhoc_alert` sets no position before the alert (its group alert does), and the
+  criterion `organization=mcx.test` is not one the OpenMCX servers take (`affiliated:<group>` or `member:<group>`;
+  403 warning 187). With both changed, P.5.1 Pass.
+- **Pre-established sessions left at the server (server or suite):** 6.1.1.5, 6.1.2.14 and 6.2.18 pre-establish a
+  session and do not release it; the next test's `switch_on` force-stops the app, and the MCPTT server keeps the old
+  session and offers the next incoming call over it (MCPCC Connect, no acknowledgement, 408 to the caller). Every
+  test with an incoming call that runs after them is Inconclusive (6.2.4, 6.2.7, 6.2.8, 6.2.12, P.4.6, P.10.2 step 6
+  in the first runs). Run on a fresh lab before any pre-establishment, they pass.
+
+Unit tests: JVM 599 passed, 0 failed (was 593; new `PrivateServicesTest.ambientListeningLocalInitHiddenAndReleasable`,
+`preconfiguredUseOnlyGroupReadOnDemandAndNotCalled`, `groupDocumentReadOnDemandAllowsTheCall`,
+`adhocAlertAuthorisationLocationAndCancellation`, `FunctionalAliasTest.theAliasPresentedOnCalls`,
+`MultipartTest.oneBodyGoesAsItself`; `forwardRinging` and `ambientListeningLocalInitWithoutReleaseCapability`
+extended). App unit tests 15 passed, `:app:assembleDebug` built, `tests/test_androidlab.py` 8 passed.
+
+| Lab | Options | Scenarios | Checks |
+|---|---|---|---|
+| `q1loc` | `--location --functional-alias --location-rules --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1, V1-V4, V6, S13, S14, S17, S40-S45 | 132 of 132 (S17 now checks alice's group call INVITE presents her alias) |
+| `q1ps` | `--private-services --priority` | S1, S32-S39 | 98 of 98 (S33 now expects bob's local-init call hidden) |
+
+Server image `openmcx-all:adhoc-e2e-6c4ddd3` for the labs, fixture from openmcx-server main.
+
+Suite (Android DUT, `--ss openmcx`, lab `drv-q1` from `tools/android-lab-up.py`, image
+`openmcx-all:answer-mode-e7a4a79` for the final runs, results in the suite worktree):
+
+| Test case | p7 | After | Run |
+|---|---|---|---|
+| 6.1.1.19, 6.1.2.13, 6.1.2.14, 6.1.1.22, P.10.2 | Fail | Pass | `android-q1-mcptt-b` |
+| P.8.12 | Fail | Inconclusive: the alias check passes; the SS floor stimuli (Floor Taken, Deny, Idle) are not sent on cue | b |
+| 6.2.16 | Fail | Inconclusive: hidden as required; step 19, the SS's `<release-reason>` administrator-action, not sent | b |
+| P.4.6 | Fail | Inconclusive: `<call-to-functional-alias-ind>` "false" passes; the SS forwarding response and request are not sent | `android-q1-mcptt-d` |
+| P.5.1 | Fail | Fail with the suite as is (step 2 now passes; step 5 refused locally without a position); Pass with the suite changes | b; `android-q1-mcptt-patched3` (suite copy) |
+| P.3.9, P.4.5 | Fail | Fail as is; Pass with the floor checks per call | b; `patched`, `patched2` |
+| P.3.2 | Fail | Fail as is; Inconclusive with them (SS BYE stimulus) | b; `patched` |
+| P.10.4, 6.6.4 | Fail | Fail (bench) | b |
+| The 20 that passed in p7 (5.5, 5.7, 6.1.1.3, 6.1.1.5, 6.1.1.11, 6.1.1.13, 6.1.1.15, 6.1.1.21, 6.1.5.1, 6.2.3-6.2.8, 6.2.12, 6.2.18, P.1.3, P.9.1, P.10.3) | Pass | Pass (6.2.4, 6.2.7, 6.2.8, 6.2.12 on run d, before any pre-establishment) | b, d |
+| 6.1.1.4, 6.1.1.9, 6.1.1.12, 6.1.1.14 (the server's answer-mode fix) | Fail | Pass | b |
