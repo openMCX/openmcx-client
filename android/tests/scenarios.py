@@ -1977,7 +1977,7 @@ class Lab:
         self.check("bob's call is the same ad hoc group", b["session_type"] == "adhoc" and b["group"] == group, group=b["group"])
         self.wait("alice lists every participant", lambda: len((self.video(A) or {}).get("participants") or {}) == len(others) + 1)
         r = self.cmd(A, "video-transmit", "2", timeout=30)
-        self.check("alice transmits in the ad hoc call (transmission control in the clear)", r.get("granted") is True, result=r)
+        self.check("alice transmits in the ad hoc call (transmission control under the CSK on a protected lab)", r.get("granted") is True, result=r)
         self.cmd(B, "video-hangup")
         rejoin = self.cmd(B, "video-rejoinable")
         self.check("bob leaves; the ad hoc session can be re-joined", rejoin["type"] == "adhoc" and rejoin["group"] == group, rejoin=rejoin)

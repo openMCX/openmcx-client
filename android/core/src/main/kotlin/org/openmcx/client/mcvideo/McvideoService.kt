@@ -665,9 +665,11 @@ class McvideoService(
         } else null
         // Calls with the MCVideo server itself (recording, playback) stay in the clear, transmission control too.
         // A protected group or chat call's media under the group's GMK (TS 33.180 7.3).
-        // An ad hoc group's GMK is not known before the server names the group: ad hoc calls go in the clear.
+        // An ad hoc group's GMK is not known before the server names the group: an ad hoc call's media go in the
+        // clear, its transmission control under the CSK when floor control is protected (TS 33.180 §9.4.2, as the
+        // MCVideo server does for ad hoc calls, and as MCPTT ad hoc calls).
         val gmk = if (protectedMedia && call.isGroup && !call.isAdhoc) awaitGroupKey(call.groupId ?: throw CallError("no group")) else null
-        val protection = if (call.withServer || call.isAdhoc) null else protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
+        val protection = if (call.withServer) null else protection(pck?.first, localInitiator = true, gmk = gmk, call = call)
         _calls.value = _calls.value + call
         val (ports, bound) = bindMedia(transmissionControl,
             implicitRequest = call.sessionType == PUSH || call.sessionType == PUSH_TO_SERVER || call.ambientType == "local-init" || call.implicitAsked,
@@ -924,8 +926,8 @@ class McvideoService(
         }
         val media = newMedia(call, ports, local)
         media.protection = try {
-            // The MCVideo server keeps an ad hoc group call's transmission control in the clear (no group document).
-            if (sessionType == ADHOC) null else protection(pck, localInitiator = false, gmk = gmk, call = call)
+            // An ad hoc group call: no GMK (media in the clear), transmission control under the CSK when protected.
+            protection(pck, localInitiator = false, gmk = gmk, call = call)
         } catch (e: CallError) {
             tx.respond(480); release(call, e.message ?: "no keys"); return
         }
