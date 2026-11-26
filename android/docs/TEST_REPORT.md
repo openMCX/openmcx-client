@@ -885,7 +885,7 @@ Every Fail:
 | MCPTT | P.1.9 | suite | step 4 judges the cached answer modes of a step-3 SS NOTIFY that was never sent ("the SS stimulus is not in the trace"); should be Inconclusive (as p7) |
 | MCPTT | P.3.2, P.3.9, P.4.5 | suite | `no_floor_after` / `media_stopped` take the next call's Floor Acks (another floor port and Call-ID) as the left call's (q1) |
 | MCPTT | P.5.1 | driver | `adhoc_alert` sets no position and uses the criterion `organization=mcx.test`, which the server refuses (q1: Pass with both changed) |
-| MCData | 5.1 | client, not merge-caused | REGISTER #42's Contact has no `+g.3gpp.mcdata.ipconn` nor the `...icsi.mcdata.ipconn` ICSI while the client supports IPCONN (TS 24.282 §7.2.1 4); PICS `pc_mcdata_ipconn`). `IpConnectivity.FEATURE`/`ICSI` (phase 4b, 7d08078) are never used in the REGISTER; p7 had the row `na` |
+| MCData | 5.1 | client, not merge-caused | REGISTER #42's Contact has no `+g.3gpp.mcdata.ipconn` nor the `...icsi.mcdata.ipconn` ICSI while the client supports IPCONN (TS 24.282 §7.2.1 4); PICS `pc_mcdata_ipconn`). `IpConnectivity.FEATURE`/`ICSI` (phase 4b, 7d08078) are never used in the REGISTER; p7 had the row `na` | (fixed on branch `android-ipconn-reg`, below)
 | MCData | 6.2.1, 6.2.3 | suite | the media storage discovery MESSAGE has one body and goes as `application/vnd.3gpp.mcdata-info+xml` (TS 24.282 §6.4 one MIME body: q2's change); `msf_discovery` (`_lib_fd.py`) calls `message_headers` without `single=`, so it requires multipart/mixed. 6.2.1 steps 21, 30 also judge the user notification of FD notifications the SS never sent (as p7) |
 | MCData | 6.2.11; D.1.6, D.1.7, D.1.8 | bench | no protection on the suite lab: the file / DATA PAYLOAD goes in clear (as p7) |
 | MCData | 6.2.14 | suite | step 5 needs `fd_notify`, not in the openmcx SS adapter (q2) |
@@ -901,3 +901,26 @@ Every Fail:
 Every Fail row of MCData but 5.1, 6.2.1 step 14 and 6.2.3 is the same as in q2's runs (or p7's); no Fail is caused by
 the merge. MCVideo S.18.1 was Inconclusive in the full run (the transmission request answered after the driver's
 2.5 s, so step 3 counted as not performed) and Pass on the re-run.
+
+## Fix: MCData IPCONN in the REGISTER (branch `android-ipconn-reg`, 2026-11-26)
+
+TS 24.282 §7.2.1 has the MCData client register, in the REGISTER Contact, the MCData ICSI (1)) and the tag and ICSI of
+each MCData service it supports: SDS (2)), FD (3)) and IPCONN (4)). The client sent SDS and FD but never
+`+g.3gpp.mcdata.ipconn` and `urn:urn-7:3gpp-service.ims.icsi.mcdata.ipconn`: `IpConn.FEATURE`/`ICSI` (phase 4b) were
+used only in the IP connectivity INVITE and its 200 (OK). It also registered the SDS tag and the MCData ICSIs without
+MCData in the configuration. `registerContactParams` (McxClient.kt) now builds the Contact from the configuration: the
+MCPTT tag and ICSI; with MCData its ICSI, SDS and FD, and IPCONN when `mcdata.ipconn.address` is set (without an
+address `IpconService` refuses every session, 480, and cannot open one); the MCVideo tag and ICSI with MCVideo. The
+Linux client registers IPCONN with every MCData configuration. The service authorisation PUBLISH (§7.2.2) carries only
+the MCData ICSI in P-Preferred-Service, which TS 24.282 asks for; no sub-service tags are needed there.
+
+Server image `openmcx-all:session-faults-67b0493` (server main cc52507), APK sha256 `c7c89014...0da374a20`.
+
+| Suite | Result |
+|---|---|
+| `:core:test` | 645 passed, 0 failed. New: `RegisterContactTest` (4: IPCONN with an address, none without or with an empty one, no MCData tags without MCData, MCVideo last) |
+| `:app:testDebugUnitTest` | 15 passed |
+| `:app:assembleDebug`, `tests/test_androidlab.py` | Built, OK |
+| Lab `ipc-a` (`create --debug-sip --priority --functional-alias`): S1, S6, S80 | 38 of 38 |
+| Suite `results/android-ipc-mcdata` (lab `drv-ipc`, `android-lab-up.py up`) | 5.1 **Inconclusive** (was Fail): step 17 passes all seven REGISTER Contact checks, IPCONN tag and ICSI included; only the HTTPS steps 3-16 are unchecked (no TLS key log). Strict Fail from the P-Access-Network-Info remarks only. 6.7.1 Pass (46 pass, 4 remarks). 6.7.2 Inconclusive as before: the real-server SS has no mapping for `ipconn_invite`/`ipconn_ping`/`ipconn_release` (falls to the operator, not performed). D.1.1, D.1.2 Inconclusive as before (`set_service_authorisation`: no REGISTER mode in the app) |
+
