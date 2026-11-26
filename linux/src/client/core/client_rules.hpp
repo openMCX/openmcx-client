@@ -880,6 +880,18 @@ inline std::string mcdata_communication_state(std::string_view info_xml) {
 }
 
 //------------------------------------------------------------------------------
+// TS 24.282 clause 13.2.4.5.2.2 3)a): the <mcdata-controller-psi> of an FD HTTP TERMINATION message. An EXTENSION
+// REQUEST FOR COMM OVER HTTP "shall set" it to the controlling function's PSI, stored from the server's intent to
+// release (clause 13.2.4.5.2.1 2)a)iii)). With none stored (the user asks before, or without, the intent, or the intent
+// had no <mcdata-controller-psi>) the element is still mandatory: the only MCData server PSI the client knows is the one
+// the MESSAGE goes to (clause 13.2.4.5.2.2 4)). Any other termination type carries none (empty).
+inline std::string extension_controller_psi(bool extension_request, std::string_view stored,
+                                            std::string_view mcdata_psi) {
+  if (!extension_request) return {};
+  return std::string(stored.empty() ? mcdata_psi : stored);
+}
+
+//------------------------------------------------------------------------------
 // The MCData priority states of TS 24.282 annex G.4 as numbers (the n of "MDEG n: ...").
 struct McdataPriorityStates {
   int mdeg = 1, mdegc = 1, mdea = 1, mdig = 1, mdigc = 1, mdepc = 1, mdepp = 1;
