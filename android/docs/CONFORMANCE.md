@@ -184,7 +184,7 @@ MSRP (RFC 4975) in `core/…/msrp/`; the procedures in `core/…/mcdata/McdataMe
 | MCData signalling protection of MSRP bodies: the signalling of a SEND to the server sealed under the CSK, the server's opened; clear signalling while protected refused, the SEND dropped; nothing sealed past the CSK's Expiry time | TS 24.282 §6.6.3.2; TS 33.180 §8.5.1, §8.5.4, §9.5.3, annex E.6.10 | `SignallingProtection.sealMsrp`, `openMsrp`; `McdataMediaPeer` | `MsrpSignallingProtectionTest`; S83, S60-S63 on a protected lab |
 | Ad hoc group standalone SDS on the signalling plane: `ad-hoc-group-sds`, client ID, the participants in a resource list or `<comn-participants-criteria>`, or the ad hoc group already created; the ad hoc group of the 2xx kept | TS 24.282 §9.2.2.2.1 step 3A | `Adhoc.kt` `sendAdhoc`; `sds-adhoc` | S84 |
 | Ad hoc group SDS (standalone `a=sendonly`, session `a=sendrecv`) and FD over the media plane: `adhoc-group-sds-session`, `adhoc-group-fd-session`; the ad hoc group learned from the 2xx; received, a standalone SDS and a session told apart by the offer; in the clear (no group key) | TS 24.282 §24.2.2.1.1 steps 4-7, §24.4.2.1.1 step 10 | `AdhocTarget`, `McdataMediaService.requestInfo`, `targetParts`, `establish`, `handle`; `adhoc=` targets of `sds-media`, `sds-session`, `fd-media` | `AdhocMediaTest`; S84 (also on a protected lab) |
-| Media-plane communications to a functional alias: `fa=<alias>` one-to-one with `<call-to-functional-alias-ind>` and a 300 followed to the selected user, the alias then called; an alias among ad hoc participants; the sender's and the called alias of a received communication kept | TS 24.282 §22, §9.2.2.2.1 step 3A b ii, §24.4.2.2 step 15b iv | `AliasTarget`, `MediaCommunication.calledAlias` | `AdhocMediaTest`; S84 (the alias in an ad hoc list reaches client-c; the one-to-one case is refused by the server, see below) |
+| Media-plane communications to a functional alias: `fa=<alias>` one-to-one with `<call-to-functional-alias-ind>` and a 300 followed to the selected user, the alias then called; an alias among ad hoc participants; the sender's and the called alias of a received communication kept | TS 24.282 §22, §9.2.2.2.1 step 3A b ii, §24.4.2.2 step 15b iv | `AliasTarget`, `MediaCommunication.calledAlias` | `AdhocMediaTest`; S84 (the alias in an ad hoc list reaches client-c; one-to-one, the 300 is followed to client-c, told the alias called) |
 | **Not implemented:** the MDEG, MDEPC and related state machines of §6.2.8 (only the session's emergency and imminent peril flags are kept); the emergency alert with a session (`alert`, sent with the phone's last position, not tracked); ad hoc group emergency and imminent peril communications (refused locally, as the server does) | | | |
 
 ## Pre-established sessions (phase 5)
@@ -258,7 +258,8 @@ Code in `core/…/mcdata/IpConnectivity.kt`, `EnhancedStatus.kt`, `MessageStore.
 | Negotiated-mode affiliation request received: 200 at once, the user's confirmation sought (a dialog, or `video-affiliation-accept [<group>...]` / `video-affiliation-decline`); accepted for the groups named only, each applied as in §8.2.1.2 | TS 24.281 §8.2.1.5 | `McxClient.videoProcedures` (`ServiceProcedures` for MCVideo), `McxClient.changeAffiliation`; `ui/UiModel.kt` | `McvideoProceduresTest.negotiatedRequestAcceptedPerGroup`, `deaffiliationFromOneGroup`; V6 (relayed with `--remote-affiliation`; bob accepts it for the group) |
 | De-affiliation from one group (`video-deaffiliate <group>`) and affiliation to one (`video-affiliate <group>`): the PUBLISH lists the groups still wanted, Expires 0 when none is left; the change confirmed by the next NOTIFY; kept across a new registration | TS 24.281 §8.2.1.2 steps 4 and 5, §8.2.1.3 | `McxClient.changeAffiliation`, `affiliate`, `wantedGroups` | `McvideoProceduresTest.deaffiliationFromOneGroup`; V6 |
 | Another user's MCVideo affiliation (subscription), and the change for them in mandatory or negotiated mode, sent with the mcvideo-info, the MCVideo PSI and `application/vnd.3gpp.mcvideo-affiliation-command+xml` | TS 24.281 §8.2.1.2, §8.2.1.3, §8.2.1.4 | `ServiceProcedures.affiliationSubscribe`, `affiliateRemote` | `McvideoProceduresTest.requestsForAnotherUser`; V6 |
-| **Not implemented:** other KMSs' certificates (KMS CertCache); ad hoc participant modification; protected ad hoc calls | | | |
+| An ad hoc group call's transmission control under the MCVideo CSK when floor control is protected (the media in the clear: no group key) | TS 33.180 §9.4.2 | `McvideoService.originateOnce`, `protection` | V2 on a protected lab (`fz-p`) |
+| **Not implemented:** other KMSs' certificates (KMS CertCache); ad hoc participant modification; protected ad hoc call media | | | |
 
 ## Android integration
 
@@ -275,15 +276,21 @@ Code in `core/…/mcdata/IpConnectivity.kt`, `EnhancedStatus.kt`, `MessageStore.
 
 - **Server faults found on the Android labs, fixed on openmcx-server branch `android-server-faults`** (not yet on
   the server's main; images `openmcx-all:srvfix-a-a3db6b4` MCData, `srvfix-b-be65d35` MCPTT, `srvfix-c-c29be0a`
-  affiliation with SIP core `openmcx-kamailio:6.1.4-13`; TEST_REPORT.md, "Server fixes"). Faults of `mcdpre-800c657`:
+  affiliation with SIP core `openmcx-kamailio:6.1.4-13`, all of them in `srvfix-d-bb306f0` with SIP core
+  `openmcx-kamailio:6.1.4-14`; TEST_REPORT.md, "Server fixes" and "Final regression on the server fixes"). Faults of
+  `mcdpre-800c657`:
   - **A one-to-one media-plane communication to a functional alias** was taken as a user (403 warning 229); the
     server now answers 300 naming the user who activated it (TS 24.282 §9.2.3.4.4 step 6a1), and the client invites
-    that user (S84). Still open: the target's INVITE does not carry the `<called-functional-alias-URI>` alice sent.
+    that user (S84). The target's INVITE carries the `<called-functional-alias-URI>` alice sent (TS 24.282
+    §9.2.3.2.3), so client-c is told the alias called (S84 checks it).
   - **MCData on a protected lab after an app restart** was refused 403 warning 140 (the new service authorisation
     opened under the old binding's CSK); the server now opens it with the CSK it uploads (TS 33.180 §9.2.1.3).
   - **Notifications of a standalone SDS over the media plane** were refused 403 warning 216; they are now correlated
     and answered 202 (TS 24.282 §12.2.3), and reach the sender (S60, S61). A declined media-plane FD is answered with
-    the recipient's 480 and warning, not 487 (S64); an SDS above the group's limit gets MSRP 403.
+    the recipient's 480 and warning, not 487 (S64); an SDS above the group's limit gets MSRP 403. A one-to-one SDS
+    over the media plane is now held to `<max-data-size-sds-bytes>` too (TS 24.582 §6.3.1.3 step 1: MSRP 403, not
+    forwarded); the lab fixture's limit is 4096 octets, above the 1000-octet signalling-plane limit, and no scenario
+    sends a longer one-to-one SDS (the longest, S60's, is about 3000).
   - **A stale reg event document after "rejected":** the SIP core's first NOTIFY on a new reg event subscription is
     now the current registration's. The client still ignores a contact whose `callid` is another registration's
     (harmless, kept; S19).
@@ -297,9 +304,12 @@ Code in `core/…/mcdata/IpConnectivity.kt`, `EnhancedStatus.kt`, `MessageStore.
     (§9.2.2.2.8), which the client shows as the sender (S23, V6).
   - **MCPTT ad hoc calls on a protected lab:** floor control is now protected under each user's CSK when the server's
     `security.protect_floor` is set (TS 33.180 §9.4.2); S5 passes on the protected lab.
-  - **Still open:** a third-party deregistration of the old binding that reaches the MCPTT server after a quick new
-    registration's service authorisation removes the new binding (`service_binding_removed`), and the SIP core's first
-    reg event NOTIFY can then still be the old binding's (S19, once in four runs; TEST_REPORT.md, "Server fixes").
+  - **A third-party deregistration after a quick new registration:** the late deregistration of the old binding
+    (bob, "deactivated", registered again within ms) removed the new one at the MCPTT server (calls 480, his
+    affiliation 404), and the SIP core's first reg event NOTIFY could still be the old binding's. The servers now end
+    a binding only if the deregistration names its registration's Call-ID (TS 24.229 §5.4.1.7), and the SIP core's
+    first NOTIFY is the registrar's current state whenever it has a contact (Kamailio patch 0010,
+    `openmcx-kamailio:6.1.4-14`). S19 is checked repeatedly.
   - **Private call services:** `<call-transfer-ind>` and `<call-forwarding-ind>` are passed on to the target
     (TS 24.379 §6.3.3.1.2 step 11), and a forwarded call's Priv-Answer-Mode Manual becomes Answer-Mode Manual towards it
     (§11.1.1.3.1.1 step 18): the target rings (S37-S39).

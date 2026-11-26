@@ -509,7 +509,7 @@ On the combined image `openmcx-all:srvfix-0c5e503`:
 | `sfx-fc` | `--mcvideo --priority --monitor-group --fixture-arg=--remote-affiliation` | S1, S16, S19, S23, V6 | 68 of 73 (S19 11/13, S23 8/11: see below); V6 14 of 14, S16 20 of 20 |
 | `sfx-fc` | the same, after bob logged off and on | S1, S19, S23, twice | 45 of 45 each time (S19 13, S23 17) |
 
-Still open (server, not changed here):
+Then open (server), both fixed since on `android-server-faults` at 02f11ee ("Final regression on the server fixes"):
 - **A third-party deregistration after the new registration (S19, once in four runs):** bob, deregistered by the
   network with "deactivated", registered again 15 ms later on a new flow. The SIP core's first NOTIFY on his new reg
   event subscription was still the old binding's (terminated, "deactivated", the old `callid`), ending the
@@ -519,3 +519,68 @@ Still open (server, not changed here):
 - **The alias called, one-to-one over the media plane (S84):** after the 300, client-c's INVITE does not carry the
   `<called-functional-alias-URI>` alice's INVITE has, so client-c is not told the alias called (it is printed, not
   checked).
+
+
+## Final regression on the server fixes (2026-11-26)
+
+Branch `android-srvfix` against the completed server fixes: openmcx-server branch `android-server-faults` at bb306f0
+(not yet on the server's main), image `openmcx-all:srvfix-d-bb306f0`, SIP core `openmcx-kamailio:6.1.4-14` (Kamailio
+patch 0010), fixture from that checkout. Each lab was created with `lab/androidlab.py create --openmcx <srvfix
+checkout> --server-image openmcx-all:srvfix-d-bb306f0` and its own host ports in 22000-22089, three redroid 15 clients
+(`redroid/redroid:15.0.0_64only-latest`) per lab, TLS, the Linux reference client `openmcx-client:mcdemerg-ce06d65` as
+client-d on `fz-pm`; up to four labs at a time (about 3.5 GB each), all brought down at the end. The APK was rebuilt
+first (it has `sds-adhoc`).
+
+Fixed in the server since "Server fixes" (02f11ee, 5652b27, bb306f0):
+- **The deregistration race (S19):** the MCPTT, MCVideo and MCData servers end a binding on a third-party
+  deregistration only if it names the binding's registration Call-ID (TS 24.229 §5.4.1.7), and the SIP core's first
+  reg event NOTIFY of a subscription is the registrar's current state whenever it has a contact (Kamailio patch 0010).
+  S19 ran seven times (three on `fz-base`, four on `fz-c`), 13 of 13 each; S23 seven times too.
+- **The alias called (S84):** after the 300 for a one-to-one media-plane SDS to `patrol-car-12.fa`, client-c's INVITE
+  carries alice's `<called-functional-alias-URI>`. S84 now checks that client-c is told the alias called (15 checks,
+  passed on `fz-pm` and `fz-p`).
+- **The one-to-one media-plane SDS limit:** the server now holds a one-to-one SDS over the media plane to
+  `<max-data-size-sds-bytes>` (MSRP 403), 4096 octets in the lab fixture. No scenario sends a longer one: the longest,
+  S60's, is about 3000 octets (S83's 1560, S84's about 1130).
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`, `--rerun-tasks`, and again after the fix below) | 583 passed, 0 failed |
+| App unit tests (`:app:testDebugUnitTest`) | 15 passed |
+| `:app:assembleDebug` | Built |
+| `tests/test_androidlab.py` | 6 passed |
+
+| Lab | Options | Scenarios | Checks |
+|---|---|---|---|
+| `fz-base` | `--monitor-group` | S1-S12 | 153 of 153 |
+| `fz-base` | the same | S19-S24, S28; then S19, S23 twice | 98 of 98; 25 of 25 each time (S19 13, S23 12 without the rights) |
+| `fz-pm` | `--priority --functional-alias --mcdata-pre-established --pre-established --reference-client client-d --client-image openmcx-client:mcdemerg-ce06d65 --fixture-arg=--msgstore` | S1, S6, S60-S67, S80-S82, S84, S70-S79, S85 | 238 of 238 (S84 15) |
+| `fz-f` | `--priority --chat --broadcast` | S1, S16, S25-S27, S29 | 91 of 91 (S16 20) |
+| `fz-g` | `--regroup --floor-queue` | S30, S31 | 41 of 41 |
+| `fz-g` | the same | S1, S18 | 12 of 16, as before: the regroup fixture affiliates nobody to `operations` (a lab choice; S18 on `fz-q`) |
+| `fz-q` | `--floor-queue` | S1, S18 | 24 of 24 |
+| `fz-loc` | `--location --functional-alias --location-rules --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1, V1-V4, V6, S13, S14, S17, S40-S45 | 131 of 131 |
+| `fz-ps` | `--private-services --priority` | S1, S32-S39; then S38 twice | 98 of 98 (S37 12, S38 11, S39 13); 11 of 11 each time |
+| `fz-p` | `--protected --xml-protection --integrity-protection --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1-S6, S12, S16, V1-V6, S60-S66, S80, S81, S83, S84 | 251 of 252 first (V2, below); with the fix, 252 of 252 |
+| `fz-p` | the same, after `androidlab.py install` (an app restart without log-off) | S1, S6, S60 | 38 of 38 |
+| `fz-c` | `--mcvideo --priority --monitor-group --fixture-arg=--remote-affiliation` | S1, S16, S19, S23, V6; then S19, S23 three times | 79 of 79 (S19 13, S23 17, V6 14); 30 of 30 each time |
+
+Per scenario as in "Final regression", but S16 20, S23 17 with `--remote-affiliation` (12 without), S37 12, S38 11,
+S39 13 and S84 15. Not run, as before: S15 (phone mode).
+
+Failures and causes:
+- **Client, V2 on the protected lab:** alice's transmission request in the ad hoc MCVideo call timed out. The server
+  now protects an ad hoc call's floor and transmission control under each user's CSK when floor control is protected
+  (TS 33.180 §9.4.2; `adhoc_call_policy` `protect_floor`, the fix that made S5 pass), for MCVideo as for MCPTT, while
+  the client still sent MCVideo ad hoc transmission control in the clear ("Server fixes" did not run V1-V6 on the
+  protected lab). `McvideoService` now protects it under the MCVideo CSK, originating and terminating, the media
+  still in the clear (no group key); V2 11 of 11 on `fz-p`. No change on labs without protection (`protection`
+  returns none without a CSK): `fz-base`, `fz-c`, `fz-pm`, `fz-f` and `fz-loc` ran the APK before the fix, `fz-p`
+  (the table's run), `fz-ps`, `fz-q` and `fz-g` the one with it.
+- **Not a fault, `fz-ps` first run:** client-b's control endpoint did not answer when the run began (the APK was being
+  rebuilt and four labs were starting), so S1-S39 failed behind it; client-b was ready a minute later and the re-run
+  after `install` is the one in the table. Likewise, V1-V6 run straight after an `install` without S1 (which waits for
+  the services) found MCVideo not yet authorised and left one refused message in V1's absolute `refused` count; the
+  table's `fz-p` run follows a fresh install with S1 first.
+
+No server fault found in this run.

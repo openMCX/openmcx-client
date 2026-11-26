@@ -227,11 +227,11 @@ def s84_adhoc_and_alias_media(lab) -> None:
               one["state"] == "delivered" and one.get("peer") == MCDATA[C] and one.get("called_alias") == PATROL,
               reply=r, communication={k: one.get(k) for k in ("state", "status", "warning", "peer", "called_alias")})
     m = inbox(lab, C, text)
-    # The server does not pass alice's <called-functional-alias-URI> on to client-c on this path (TEST_REPORT.md,
-    # "Server fixes"), so only the delivery is checked; the alias called is printed.
-    lab.check("client-c receives it over the media plane, from alice", m["plane"] == "media" and m["sender"] == MCDATA[A],
+    # After the 300 the server passes alice's <called-functional-alias-URI> on in client-c's INVITE (openmcx-server
+    # branch android-server-faults).
+    lab.check("client-c receives it over the media plane, from alice, told the alias called",
+              m["plane"] == "media" and m["sender"] == MCDATA[A] and m.get("called_alias") == PATROL,
               got={k: m.get(k) for k in ("plane", "sender", "called_alias")})
-    print(f"  [INFO] client-c told the alias called: {m.get('called_alias')}")
     lab.cmd(C, "mcdata-fa", "deactivate", PATROL, ok=False)
 
 

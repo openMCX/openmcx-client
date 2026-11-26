@@ -30,16 +30,18 @@ State on `android-final` (2026-11-26), all phases merged; the "Status" section b
 | MCData FD | HTTP and media plane, deferral, extension, release | the same (phase 4), protected media-plane files | FD by reference to a stored object |
 | MCData other | IP connectivity, enhanced status, communication release, message store, notification channels | all (phases 4, 4b) | IP connectivity to the phone's own IP stack (no `VpnService`), IPv6 in the tunnel; message store upload, retrieve, folder copy/move, notification restart; data streaming |
 | Location | the three services, location rules, group geographic areas, SEAL (TS 24.545) | the same (phase 6) | MCData group configuration rules (as Linux), MCVideo affiliation rules, hysteresis |
-| MCVideo | see FEATURES.md | calls, push and pull, ambient viewing, remote transmission, protected video, XML signalling protection, T100-T104, priority, rejoin, ad hoc emergency, settings and remote affiliation, GDD, KMS redirect (phase 7) | other KMSs' certificates (CertCache), ad hoc participant modification, protected ad hoc calls |
-| End-to-end protection | GMK, PCK, XML signalling for the three services | the same: media, XML signalling for the three services, protected MCData payloads, files and MSRP bodies | none (protected MCPTT ad hoc floor control works with the server fix on `android-server-faults`) |
+| MCVideo | see FEATURES.md | calls, push and pull, ambient viewing, remote transmission, protected video, XML signalling protection, T100-T104, priority, rejoin, ad hoc emergency, settings and remote affiliation, GDD, KMS redirect (phase 7) | other KMSs' certificates (CertCache), ad hoc participant modification, protected ad hoc call media (their transmission control is protected) |
+| End-to-end protection | GMK, PCK, XML signalling for the three services | the same: media, XML signalling for the three services, protected MCData payloads, files and MSRP bodies | none (protected MCPTT ad hoc floor control and MCVideo ad hoc transmission control work with the server fix on `android-server-faults`) |
 
 ## Status (2026-11-26)
 
 All phases are merged on `android-final` (from `android-parity` with `android-p4b`). The full regression on redroid
 passed every scenario but S15 (phone mode, not run) and the server faults below; see TEST_REPORT.md, "Final
 regression". Those faults are fixed on openmcx-server branch `android-server-faults` (not yet on the server's main),
-and branch `android-srvfix` updates the scenarios to expect the fixed behaviour (TEST_REPORT.md, "Server fixes").
-JVM unit tests 583 and app unit tests 15, all passing.
+and branch `android-srvfix` updates the client and the scenarios to expect the fixed behaviour (TEST_REPORT.md, "Server
+fixes"). The full regression on the completed server fixes (`openmcx-all:srvfix-d-bb306f0`, SIP core
+`openmcx-kamailio:6.1.4-14`) passed every check but the regroup lab's known S1/S18 lab choice (TEST_REPORT.md, "Final
+regression on the server fixes"). JVM unit tests 583 and app unit tests 15, all passing.
 
 | Phase | State | What remains (CONFORMANCE.md) |
 |---|---|---|
@@ -51,7 +53,7 @@ JVM unit tests 583 and app unit tests 15, all passing.
 | 4b: IP connectivity, enhanced status, message store | partial | IP connectivity to the phone's own IP stack (no `VpnService`/TUN), the implicit target by IP information, IPv6 in the tunnel; message store upload, retrieve, folder copy/move and notification restart; FD by reference to a stored object |
 | 5: pre-established sessions | partial | ICE connectivity checks (host candidates only); protected calls over the MCPTT session; the SIP INFO of §6.2.8.1.13; FD over the MCData session (TS 24.282 has none) |
 | 6: location rules | done, with limits | MCData group configuration rules (§8.2.6.3, as the Linux client), MCVideo affiliation rules and the MCVideo group geographic area notice, hysteresis |
-| 7: MCVideo remainder and protection | partial | other KMSs' certificates (KMS CertCache); ad hoc participant modification; protected ad hoc calls |
+| 7: MCVideo remainder and protection | partial | other KMSs' certificates (KMS CertCache); ad hoc participant modification; protected ad hoc call media |
 
 Also open outside the phases: P-Access-Network-Info (planned), `authorise_by_register`, MCData data streaming, the
 per-alias user status subscription and FD over HTTP to an alias.
@@ -61,12 +63,14 @@ all **fixed on openmcx-server branch `android-server-faults`**, not yet on the s
 - MCData on a protected lab after an app restart: every request refused 403 warning 140 (fixed: the new service
   authorisation is opened with the CSK it uploads).
 - MCPTT ad hoc calls on a protected lab: the server kept ad hoc floor control in the clear (fixed: S5 passes there).
+  The MCVideo server now protects ad hoc transmission control the same way; the client does too (V2 on a protected lab).
 - A group call made while the last one was being released joined it, and its caller got a BYE (fixed: a new session;
   S16 re-calls the group at once and checks it).
 - A one-to-one media-plane MCData communication to a functional alias was taken as a user, 403 warning 229 (fixed:
-  300 and delivery, S84; the target is still not told the alias called on this path).
+  300 and delivery, and the target is told the alias called, S84).
 - Notifications of a standalone SDS over the media plane refused 403 warning 216; a declined media-plane FD ended with
-  487; an SDS above the group's limit ended the leg unanswered (fixed: 202, the 480 and warning, MSRP 403).
+  487; an SDS above the group's limit ended the leg unanswered (fixed: 202, the 480 and warning, MSRP 403). A
+  one-to-one SDS over the media plane is now held to `<max-data-size-sds-bytes>` (4096 octets on the lab; MSRP 403).
 - `<call-transfer-ind>` and `<call-forwarding-ind>` not passed on, and a forwarded call's invitee given Answer-Mode
   Auto (fixed: both passed on, Answer-Mode Manual; S37-S39). A client race found with it is fixed too: a forwarding
   request before the 480 sent Priv-Answer-Mode Auto.
@@ -74,9 +78,10 @@ all **fixed on openmcx-server branch `android-server-faults`**, not yet on the s
   (fixed with the `--remote-affiliation` rights: S23, V6).
 - After a "rejected" network deregistration, the SIP core's first reg event NOTIFY was the old binding's (fixed in
   SIP core `openmcx-kamailio:6.1.4-13`; the client's `callid` check stays).
-- Still open: a third-party deregistration of an old binding that reaches the MCPTT server after the new
-  registration's service authorisation removes the new binding (S19, once in four runs on `srvfix-0c5e503`;
-  TEST_REPORT.md, "Server fixes"); after a 300 for a media-plane SDS to an alias, the target is not told the alias called.
+- A third-party deregistration of an old binding that reached the MCPTT server after the new registration's service
+  authorisation removed the new binding (S19, once in four runs on `srvfix-0c5e503`). Fixed: a binding ends only if
+  the deregistration names its Call-ID, and the SIP core's first reg event NOTIFY is the registrar's current state
+  (Kamailio patch 0010, `openmcx-kamailio:6.1.4-14`).
 - Still open: the MCPTT pre-established session: the server records ICE as failed for a phone that answers no STUN and
   uses the SDP addresses (works on the lab; a NATed phone would need latching).
 
