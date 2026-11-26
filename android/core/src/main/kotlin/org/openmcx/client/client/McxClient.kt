@@ -308,6 +308,12 @@ class McxClient(
     /** The signalling protection (confidentiality, integrity) of each service configuration document read. */
     @Volatile var serviceProtection: Map<String, Pair<Boolean, Boolean>> = emptyMap()
         internal set // set by the module's tests too
+    /**
+     * TS 24.484 §10.4.2.1 item 2: the `<tx-and-rx-control>` limits of the MCData service configuration document (null
+     * until it is read: the provisioning's signalling-plane limit applies meanwhile).
+     */
+    @Volatile var mcdataTxLimits: org.openmcx.client.mcdata.McdataTxLimits? = null
+        internal set // set by the module's tests too
     /** The MCPTT service configuration has a floor request queue (TS 24.484 §8.4.2.1 `<floor-control-queue>`). */
     @Volatile var mcpttFloorQueue: Boolean = false
         private set
@@ -826,11 +832,23 @@ class McxClient(
             .mapCatching { text ->
                 if (service == "mcptt") mcpttFloorQueue = ServiceConfig.floorQueue(text)
                 serviceProtection = serviceProtection + (service to ServiceConfig.signallingProtection(text))
+                if (service == "mcdata") mcdataTxLimits = runCatching { org.openmcx.client.mcdata.McdataTxLimits.parse(text) }
+                    .onFailure { event("service configuration mcdata: <tx-and-rx-control>: ${it.message}") }.getOrNull()
                 ServiceConfig.resourcePriorities(text)
             }
             .onSuccess { serviceResourcePriorities = serviceResourcePriorities + (service to it)
                 event("service configuration $service: $it" + if (service == "mcptt") ", floor queue $mcpttFloorQueue" else "") }
             .onFailure { event("service configuration $service: ${it.message}") }
+    }
+
+    /**
+     * The group document of [group] as the GMS has it now (TS 24.481 §6.3.3), for the MCData transmission control of
+     * TS 24.282 §11.1, which a document changed since the login must govern; null when it cannot be read (the server then
+     * decides, as the Linux client).
+     */
+    suspend fun groupDocumentText(group: String): String? {
+        val token = tokens?.accessToken ?: return null
+        return runCatching { documents.groupText(group, token) }.onFailure { event("group $group: ${it.message}") }.getOrNull()
     }
 
     /** Read [group]'s document now (a regroup's preconfigured group, a temporary group: TS 24.379 §16.1, TS 24.481 §6.3.14). */

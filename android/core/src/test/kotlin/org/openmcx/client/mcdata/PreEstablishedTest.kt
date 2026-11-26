@@ -332,7 +332,7 @@ class PreEstablishedTest {
         assertFalse(c.imminentPeril)
         val (_, parts, headers) = function.refers.single()
         assertEquals(true, info(parts).imminentPeril)
-        assertEquals("mcdatap.imminent_peril", header(headers, "Resource-Priority"))
+        assertEquals("mcdatap.imminent", header(headers, "Resource-Priority"))
     }
 
     @Test fun aOneToOneEmergencyCarriesNoResourcePriority() = runBlocking {

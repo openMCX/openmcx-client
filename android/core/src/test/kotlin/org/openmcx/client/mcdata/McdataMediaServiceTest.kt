@@ -82,8 +82,9 @@ class McdataMediaServiceTest {
             val (type, body) = Multipart.encode(listOf(Part("application/sdp", answer.toByteArray())))
             return SipResponse(200, "OK", Headers().add("Content-Type", type), body) to dialog()
         }
+        val reinviteHeaders = CopyOnWriteArrayList<List<Pair<String, String>>>()
         override suspend fun reinvite(dialog: Dialog, parts: List<Part>, headers: List<Pair<String, String>>): SipResponse {
-            reinvites += parts; return SipResponse(status, "OK")
+            reinvites += parts; reinviteHeaders += headers; return SipResponse(status, "OK")
         }
         override suspend fun bye(dialog: Dialog, headers: List<Pair<String, String>>) { byes += headers }
         val infos = CopyOnWriteArrayList<Pair<List<Part>, List<Pair<String, String>>>>()
@@ -97,8 +98,10 @@ class McdataMediaServiceTest {
 
     private fun dialog() = Dialog("c1@x", "lt", "rt", NameAddr(alice), NameAddr("sip:mcdata@mcx.test"), "sip:mcdata@mcx.test", emptyList(), 1)
 
+    private var lastClient: McxClient? = null
+
     private fun services(server: FakeServer): Pair<McdataService, McdataMediaService> {
-        val client = McxClient(scope, config(), noHttp, connector = { _, _ -> throw IllegalStateException("offline") })
+        val client = McxClient(scope, config(), noHttp, connector = { _, _ -> throw IllegalStateException("offline") }).also { lastClient = it }
         val sds = McdataService(client)
         val media = McdataMediaService(scope, server, sds, SocketMsrpConnector())
         sds.media = media
@@ -485,5 +488,139 @@ class McdataMediaServiceTest {
         media.release("extend")
         assertEquals(CommunicationRelease(ReleaseType.EXTENSION_REQUEST),
             CommunicationRelease.decode(server.infos.last().first.single().content))
+    }
+
+    // TS 24.282 §6.2.8: the priority states (McdataPriority) on the media plane.
+
+    private fun rp(headers: List<Pair<String, String>>) = headers.firstOrNull { it.first == "Resource-Priority" }?.second
+
+    @Test fun aPlainGroupSessionAfterAGrantedEmergencyCarriesTheEmergencyPriority() = runBlocking {
+        val server = FakeServer()
+        val (_, media) = services(server)
+        media.openSession(group, group = true, priority = "emergency")
+        // §6.2.8.1.1 3)a) / 4): <alert-ind> "false" without an alert.
+        assertEquals(false, info(server.invites[0].first).alert)
+        assertEquals(2, media.priority.states.mdeg)
+        media.close()
+        // §9.2.4.2.3 8)e) with §6.2.8.1.2 1): MDEG 2 "in-progress": the next plain session on the group has its priority.
+        val c = media.openSession(group, group = true)
+        assertEquals("mcpttp.emergency", rp(server.invites[1].second))
+        assertNull(info(server.invites[1].first).emergency)
+        assertTrue(c.emergency)
+        // §6.2.8.1.3 with §6.2.8.1.2: the cancel re-INVITE carries the normal priority and <alert-ind> "false".
+        media.setPriority(emergency = true, enable = false, c = c)
+        assertEquals("mcpttp.normal", rp(server.reinviteHeaders.single()))
+        assertEquals(false, info(server.reinvites.single()).alert)
+        assertEquals(1, media.priority.states.mdeg)
+        media.close(c)
+        media.openSession(group, group = true)
+        assertNull(rp(server.invites[2].second))
+    }
+
+    @Test fun aRefusedPriorityRequestResetsTheStates() = runBlocking {
+        val server = FakeServer(status = 403)
+        val (_, media) = services(server)
+        assertTrue(runCatching { media.openSession(group, group = true, priority = "emergency") }.exceptionOrNull() is SdsError)
+        // §6.2.8.1.5: MDEGC 1, MDEG 4 -> 1.
+        assertEquals(McdataPriority.States(group = group), media.priority.states)
+        server.status = 200
+        media.openSession(group, group = true)
+        assertNull(rp(server.invites[1].second))
+    }
+
+    @Test fun anImminentPerilSessionAndAOneToOneEmergencyCancel() = runBlocking {
+        val server = FakeServer()
+        val (_, media) = services(server)
+        val c = media.openSession(group, group = true, priority = "imminent")
+        assertEquals("mcpttp.imminent", rp(server.invites[0].second))
+        assertTrue(c.imminentPeril)
+        media.close(c)
+        media.openSession(group, group = true)
+        // §9.2.4.2.3 8)f) with §6.2.8.1.12: MDIG 2.
+        assertEquals("mcpttp.imminent", rp(server.invites[1].second))
+        media.close()
+        // §6.2.8.4.3 -> §6.2.8.3.6: a one-to-one cancel keeps the emergency priority (§6.2.8.3.3, as the Linux client).
+        val p = media.openSession(bob, group = false, priority = "emergency")
+        assertEquals(3, media.priority.states.mdepc)
+        media.setPriority(emergency = true, enable = false, c = p)
+        assertEquals("mcpttp.emergency", rp(server.reinviteHeaders.single()))
+        assertFalse(p.emergency)
+        assertEquals(1, media.priority.states.mdepc)
+    }
+
+    @Test fun theImminentPerilLevelIsTheServiceConfigurationsImminentValue() {
+        val (_, _) = services(FakeServer())
+        val client = lastClient!!
+        client.serviceResourcePriorities = mapOf("mcdata" to mapOf("emergency" to "mcpttp.15", "imminent" to "mcpttp.10", "normal" to "mcpttp.0"))
+        val peer = ClientMediaPeer(client)
+        // TS 24.484 §10.4.2.1: <imminent-peril-resource-priority>, read under the level "imminent".
+        assertEquals("mcpttp.10", peer.resourcePriority("imminent_peril"))
+        assertEquals("mcpttp.10", peer.resourcePriority("imminent"))
+        assertEquals("mcpttp.0", peer.resourcePriority("normal"))
+    }
+
+    private fun groupReinvite(request: SipRequest, info: McdataInfo): SipRequest {
+        val (type, body) = Multipart.encode(listOf(Part(McdataInfo.CONTENT_TYPE, info.encode().toByteArray())))
+        return SipRequest("INVITE", "sip:alice@127.0.0.1", Headers().add("Via", "SIP/2.0/TLS 10.0.0.1;branch=z9hG4bKre${UUID.randomUUID()}")
+            .add("From", "<sip:mcdata@mcx.test>;tag=srv").add("To", "<$alice>;tag=ours").add("Call-ID", request.callId)
+            .add("CSeq", "2 INVITE").add("Content-Type", type), body)
+    }
+
+    @Test fun theServersGroupReinviteSetsTheInProgressStateAndAnswersWithTheMcdataIcsi() = runBlocking {
+        val (_, media) = services(FakeServer())
+        val e = PassiveEndpoint().also { endpoints += it }
+        val request = invite(e, "group-sds-session", groupId = group)
+        media.handle(Answer(request))
+        waitFor("open") { media.session != null }
+        val tx = Answer(groupReinvite(request, McdataInfo(requestType = "group-sds-session", callingUserId = bob, callingGroupId = group,
+            emergency = true, alert = true)))
+        assertTrue(media.handle(tx))
+        val (status, _, extra) = tx.responses.single()
+        assertEquals(200, status)
+        // TS 24.282 §6.2.7.4 7)-8): the g.3gpp.mcdata media feature tag and the MCData ICSI.
+        val contact = extra.single { it.first == "Contact" }.second
+        assertTrue(contact, contact.endsWith(";+g.3gpp.mcdata;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCDATA)}\""))
+        assertEquals(2, media.priority.states.mdeg)
+        assertEquals(bob, media.priority.states.groupAlertOriginator)
+        assertTrue(media.session!!.emergency)
+    }
+
+    @Test fun theSipInfoOfAPriorityGroupCommunicationCorrectsTheStates() = runBlocking {
+        val server = FakeServer()
+        val (_, media) = services(server)
+        val c = media.openSession(group, group = true, priority = "imminent")
+        // TS 24.282 §6.2.8.1.13 3): the imminent peril request carried at the emergency level.
+        val (type, body) = Multipart.encode(listOf(Part(McdataInfo.CONTENT_TYPE, McdataInfo(emergency = true, imminentPeril = false).encode().toByteArray())))
+        val infoRequest = SipRequest("INFO", "sip:alice@127.0.0.1", Headers().add("Via", "SIP/2.0/TLS 10.0.0.1;branch=z9hG4bKinfo")
+            .add("From", "<sip:mcdata@mcx.test>;tag=rt").add("To", "<$alice>;tag=lt").add("Call-ID", "c1@x").add("CSeq", "3 INFO")
+            .add("Info-Package", "g.3gpp.mcdata-info").add("Content-Type", type), body)
+        val tx = Answer(infoRequest)
+        assertTrue(media.handle(tx))
+        assertEquals(200, tx.responses.single().first)
+        assertEquals(2, media.priority.states.mdeg); assertEquals(1, media.priority.states.mdig)
+        assertTrue(c.emergency); assertFalse(c.imminentPeril)
+    }
+
+    @Test fun theSignallingPlaneLimitIsTheServiceConfigurations() = runBlocking {
+        val server = FakeServer()
+        val (sds, _) = services(server)
+        // TS 24.282 §9.2.1.1 2)b) with TS 24.484 §10.4.2.1 2b): <max-payload-size-sds-cplane-bytes> 0 forces the media plane.
+        lastClient!!.mcdataTxLimits = McdataTxLimits(maxPayloadSizeSdsCplane = 0)
+        sds.send(bob, "abcdEFGH", group = false)
+        assertEquals("one-to-one-sds", info(server.invites.single().first).requestType)
+        // TS 24.282 §11.1 3): above <max-data-size-sds-bytes> a one-to-one SDS is not sent at all.
+        lastClient!!.mcdataTxLimits = McdataTxLimits(maxDataSizeSds = 20)
+        assertTrue(runCatching { sds.send(bob, "This SDS is longer than twenty octets.!", group = false) }.exceptionOrNull() is SdsError)
+        assertEquals(1, server.invites.size)
+    }
+
+    @Test fun aOneToOneFileAboveTheServiceLimitIsNotOffered() = runBlocking {
+        val server = FakeServer()
+        val (_, media) = services(server)
+        // The ClientMediaPeer's check on the client (TS 24.282 §11.1 4)): McdataTransmission.fd.
+        lastClient!!.mcdataTxLimits = McdataTxLimits(maxDataSizeFd = 100)
+        assertTrue(runCatching { McdataTransmission.fd(lastClient!!, bob, false, 18000) }.exceptionOrNull() is SdsError)
+        McdataTransmission.fd(lastClient!!, bob, false, 58)
+        assertTrue(server.invites.isEmpty() && media.communications.value.isEmpty())
     }
 }

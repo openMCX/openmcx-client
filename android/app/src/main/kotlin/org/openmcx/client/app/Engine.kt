@@ -281,7 +281,8 @@ object Engine {
             service.media = media
             mcdataMedia = media
             // TS 24.282 §6.2.8.1.1 3)b): an emergency alert with an SDS session carries where the phone is.
-            media.alertLocation = { lastPosition() }
+            // Without a recent fix the platform's current one is asked for briefly (Engine.currentLocation).
+            media.alertLocation = { lastPosition() ?: runCatching { currentLocation(context, 2_000) }.getOrNull() }
             // TS 24.282 §18.3: the pre-established session the user asked for is made again once MCData is authorised
             // on a new registration (kept by a target refresh when the participating function still has it).
             scope.launch {
@@ -362,6 +363,11 @@ object Engine {
             h.listener = alertListener
             h.position = { lastPosition() }
             h.defaultGroup = { center.groupFor(h.service, selectedGroup.value) }
+            // TS 24.282 §6.3.7.1.2: the in-progress state of a group the user does not take part in sets MDEG / MDIG.
+            if (h.service == org.openmcx.client.location.LocationService.MCDATA) h.onGroupState = { group, user, emergency, imminent ->
+                mcdataMedia?.priority?.groupReceived(org.openmcx.client.mcdata.McdataInfo(callingGroupId = group, callingUserId = user,
+                    emergency = emergency, imminentPeril = imminent), config.mcdata?.userId)
+            }
             c.handlers.add(0, h)
         }
         c.start()
