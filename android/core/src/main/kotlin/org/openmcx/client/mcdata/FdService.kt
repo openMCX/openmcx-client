@@ -43,6 +43,8 @@ class FdError(message: String) : Exception(message)
 interface FdPeer {
     val userId: String
     val clientId: String
+    /** The MCData PSI the client sends its FD MESSAGEs to (TS 24.282 §6.2.4.1); null when unknown. */
+    val psi: String? get() = null
     /** Send a MESSAGE with the FD feature tag and ICSI (TS 24.282 §6.2.4.1) to the MCData PSI. */
     suspend fun send(parts: List<Part>): SipResponse
     /** [send] with header fields (a Reason, TS 24.282 §13.2.6.3.2.1 step 3). */
@@ -66,6 +68,7 @@ class ClientFdPeer(private val client: McxClient) : FdPeer {
     private val mcdata = client.config.mcdata!!
     override val userId get() = mcdata.userId
     override val clientId get() = client.config.clientId
+    override val psi get() = mcdata.psi
     override suspend fun send(parts: List<Part>): SipResponse = send(parts, emptyList())
     override suspend fun send(parts: List<Part>, headers: List<Pair<String, String>>): SipResponse {
         val request = client.ua.newRequest("MESSAGE", mcdata.psi, NameAddr(mcdata.psi))
@@ -391,7 +394,7 @@ class FdService(
             requestType = if (own) (if (record.group != null) "group-fd" else "one-to-one-fd") else null,
             requestUri = if (own) record.group else record.peer,
             clientId = peer.clientId,
-            controllerPsi = record.controllerPsi.takeIf { type == TerminationType.EXTENSION_REQUEST })
+            controllerPsi = if (type == TerminationType.EXTENSION_REQUEST) extensionControllerPsi(record) else null)
         val parts = mutableListOf(Part(McdataInfo.CONTENT_TYPE, info.encode().toByteArray()))
         if (own && record.group == null) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOf(record.peer)).toByteArray())
         parts += Part(McdataService.SIGNALLING, message.encode())
@@ -400,6 +403,14 @@ class FdService(
         if (!response.isSuccess) throw FdError("FD $action: ${status(response)}")
         return update(id) { it.copy(release = if (type == TerminationType.REQUEST) "terminating" else "$action requested") }!!
     }
+
+    /**
+     * TS 24.282 §13.2.4.5.2.2 3)a): the extension request "shall set <mcdata-controller-psi>" to the controlling
+     * function's PSI, stored from the intent to release (§13.2.4.5.2.1 2)a)iii)). Without one stored (the user asks
+     * before, or without, the server's intent, or the intent had no <mcdata-controller-psi>) the element is still
+     * mandatory: the only MCData server PSI the client knows is the one the MESSAGE goes to (§13.2.4.5.2.2 4)).
+     */
+    private fun extensionControllerPsi(record: FdRecord): String? = record.controllerPsi ?: peer.psi
 
     /**
      * The server's FD HTTP TERMINATION: the answer to a release (§6.3.6.1), a transmission stopped by policy
