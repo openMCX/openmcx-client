@@ -336,7 +336,7 @@ private and group communications and client-c none. client-c (and client-d) may 
 | `:app:assembleDebug` | Built |
 | `p4b-a`: S1, S6, S60-S67, S80-S82, S84 | 131 of 131; S84 and S64 again after the last fix, 28 of 28 |
 | `p4b-p`: S1, S6, S60-S63, S65, S66, S80, S81, S83, S84 | All pass: 107 of 108 in the first run, then S84 after the ad hoc file fix (S1, S83, S84: all pass) |
-| `p4b-p`: S64 | 9 of 14: the protected file arrives and is opened, but the scenario compares the selector's size and hash (of the protected series) with the clear file's |
+| `p4b-p`: S64 | 9 of 14: the protected file arrives and is opened, but the scenario compares the selector's size and hash (of the protected series) with the clear file's (fixed after the merge: the client reports the clear file, and S64 checks both lab kinds; 15 of 15 on `fin-p`) |
 
 | # | Scenario | Checks | Result |
 |---|---|---|---|
@@ -399,4 +399,57 @@ Server notes (openmcx-server `mcdpre-800c657`, not changed): the MCData particip
 and the client connects for each communication, which suits an outbound-only phone; no change is needed. The MCPTT
 function runs ICE as the controlled agent and records it as failed for a phone that answers no STUN, then uses the SDP
 addresses, so calls work; with NAT (a real phone) they would need the phone's address from latching, as on demand.
+
+## Final regression (2026-11-26)
+
+Branch `android-final`: `android-parity` (phases 0-7 but 4b) with `android-p4b` merged. Server image
+`openmcx-all:mcdpre-800c657` (fixture from the `openmcx-server` checkout at bc650a2), three redroid 15 clients
+(`redroid/redroid:15.0.0_64only-latest`) per lab, TLS, the Linux reference client `openmcx-client:mcdemerg-ce06d65`
+as client-d on `fin-pm`. Each lab was created with `--server-image openmcx-all:mcdpre-800c657` and its own host ports
+in 21000-21999 (`--sip-port`, `--idms-port`, `--proxy-port`, `--kms-port`, `--admin-port`, `--credentials-port`), at
+most two labs up at a time, all brought down at the end. On the protected lab the APK was installed by `up` only.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 581 passed, 0 failed, in each of the two last runs. An earlier run failed `McpttPreSessionTest.aModificationByTheFunctionTakesTheOfferedFloorPriority` once (fixed below) |
+| App unit tests (`:app:testDebugUnitTest`) | 15 passed |
+| `:app:assembleDebug` | Built |
+| `tests/test_androidlab.py` | 5 passed |
+
+| Lab | Options | Scenarios | Checks |
+|---|---|---|---|
+| `fin-base` | `--monitor-group` | S1-S12 | 151 of 153 (S4 15/17: client-b and client-c missed alice's last 2 of 150 frames; 17/17 on the re-run) |
+| `fin-base` | the same | S19-S24, S28 (re-run with the S19 fixes), S1, S4 | 131 of 131 |
+| `fin-pm` | `--priority --functional-alias --mcdata-pre-established --pre-established --reference-client client-d --client-image openmcx-client:mcdemerg-ce06d65 --fixture-arg=--msgstore` | S1, S6, S60-S67, S80-S82, S84, S70-S79, S85 | 235 of 235 |
+| `fin-f` | `--priority --chat --broadcast` | S1, S16, S25-S27, S29 | 89 of 89 |
+| `fin-g` | `--regroup` (and `--floor-queue`) | S30, S31 | 41 of 41 |
+| `fin-g` | the same | S1, S18 | 12 of 16: the regroup fixture affiliates nobody to `operations` (S1's three MCPTT affiliation checks), so S18's first group call is refused 403 warning 120 (a lab choice: S18 re-run on `fin-q`) |
+| `fin-q` | `--floor-queue` | S1, S18 | 24 of 24 |
+| `fin-loc` | `--location --functional-alias --location-rules --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1, V1-V4, V6, S13, S14, S17, S40-S45 | 131 of 131 |
+| `fin-ps` | `--private-services --priority` | S1, S32-S39 | 91 of 91 |
+| `fin-p` | `--protected --xml-protection --integrity-protection --priority --mcvideo --mcvideo-priority client-a=7:4 --mcvideo-priority client-b=5` | S1-S6, S12, S16, V1-V6, S60-S66, S80, S81, S83, S84 | 239 of 241 (S5 4/6: the server's clear ad hoc floor control, a known server fault) |
+
+Per scenario: S1 15 (each lab), S2 10, S3 7, S4 17, S5 12 (4/6 protected), S6 15, S7 35, S8 16, S9 7, S10 2, S11 8,
+S12 9, S13 18, S14 17, S16 18, S17 11, S18 9, S19 13, S20 19, S21 13, S22 15, S23 13, S24 7, S25 23, S26 16, S27 10,
+S28 19, S29 7, S30 24, S31 17, S32 12, S33 5, S34 11, S35 10, S36 9, S37 11, S38 9, S39 9, S40 5, S41 6, S42 4, S43 5,
+S44 4, S45 4, S60 7, S61 6, S62 7, S63 8, S64 15 (both lab kinds), S65 10, S66 8, S67 3, S70 8, S71 11, S72 8, S73 5,
+S74 3, S75 19, S76 13, S77 15, S78 5, S79 6, S80 8, S81 6, S82 10, S83 7, S84 14, S85 10, V1 9 (11 protected), V2 11,
+V3 3, V4 6, V5 4 (protected only), V6 13.
+
+Not run: **S15** (the server address edited in Settings) needs phone mode: a phone profile from `lab/run/<lab>/phone`
+and the servers on the host's published ports, MCPTT media on 4000-4199 and 5000-5199, outside this run's port range.
+S7-S10 ran (the `mcx-nettools:1` image built from `lab/nettools`, `sch_netem` loaded): S9 kept the floor under 5% loss
+and 40±20 ms jitter, S10 measured access time and mouth-to-ear on redroid.
+
+Fixed in this run:
+- **Client, S19:** after alice's "rejected" deregistration and log-on, the SIP core's first NOTIFY on her new reg
+  event subscription named her old binding as terminated, "rejected"; the client took it as its own and stayed off,
+  and S20-S28 failed behind it (158 of 169 in the first `fin-base` run). The client now ignores a contact whose
+  `callid` is not its registration's (`RegEventRulesTest`). Server fault noted in CONFORMANCE.md.
+- **Lab, S19:** the SIP core's `reginfo.shorten` takes the private user identity as well; the scenario passes it.
+- **Client, S64 on a protected lab:** media-plane files are reported with the clear file's size and hash (the
+  selector's describe the protected series); S64 checks both lab kinds.
+- **Client, flaky unit test:** the pre-established MCPTT session recorded the function's modification after sending
+  its 200.
+- **Scenario ids:** phases 4b and 5 both added an S80; phase 5's (INVITE with Replaces) is now S85.
 

@@ -72,7 +72,7 @@ Driven by the phone's position: the fused fix, or the debug override `location-p
 | Reg event subscription after the initial registration: Request-URI, From and To the public user identity, Event reg, Expires 600 000; refreshed 600 s before its expiry (half time for 1200 s or less), the NOTIFY's expiry before the 2xx's; 481 starts a new one, other errors keep it until its expiry; ended with the de-REGISTER | TS 24.229 §5.1.1.3, §5.1.1.6.1; RFC 6665 | `McxClient.regSubscribe`, `regRefresh`, `regCancel` | `RegEventClientTest`; S19 (TLS and TCP, wire check of the SUBSCRIBE) |
 | reginfo documents: RFC 3680 §5.4 types (version without upper bound), version order and refresh on a gap | RFC 3680 §5.1, §5.2, §5.4 | `body/RegInfo.kt`, `RegEventRules.versionNew`, `versionGap` | `RegInfoTest`, `RegEventRulesTest` |
 | Shortened registration renewed at the §5.1.1.4.1 time for the adjusted expiry | TS 24.229 §5.1.1.5A | `McxClient.regDocument` | `RegEventClientTest.shortenedRegistrationIsRenewed`; S19 |
-| Network-initiated deregistration of the own contact (unregistered, rejected, deactivated): registration details removed, the TLS flow closed after the NOTIFY's transaction; rejected: dialogs released, off until Log on (Settings shows "Deregistered by the network"); deactivated: initial registration on a new flow | TS 24.229 §5.1.1.7 | `McxClient.networkDeregistration`, `dropServiceState`; `app/…/ui/Screens.kt` | `RegEventClientTest` (deactivated, rejected); S19 |
+| Network-initiated deregistration of the own contact (unregistered, rejected, deactivated): registration details removed, the TLS flow closed after the NOTIFY's transaction; rejected: dialogs released, off until Log on (Settings shows "Deregistered by the network"); deactivated: initial registration on a new flow. A contact whose `callid` (RFC 3680 §5.1) is not the current registration's Call-ID is another binding's, so a stale terminated contact does not deregister a new registration at the same address | TS 24.229 §5.1.1.7 | `McxClient.networkDeregistration`, `dropServiceState`, `RegEventRules.action`; `app/…/ui/Screens.kt` | `RegEventClientTest` (deactivated, rejected), `RegEventRulesTest.aTerminatedContactOfAnEarlierRegistrationIsNotThisOne`; S19 |
 | The final NOTIFY of a subscription the client ended (log-off, network deregistration) is answered 200 | RFC 6665 §4.1.2.3 | `McxClient.dispatch` (`endingSubscriptions`) | `RegEventClientTest.finalNotifyAfterTheUnsubscribeIsAnswered`; S19 wire check |
 | Reconnect when the default network changes | RFC 5626 §4.4 | `app/…/McxService.watchNetwork` | Not exercised: redroid cannot change networks |
 | Always on: sticky foreground service, start at boot | TS 23.280 §10.2 | `McxService`, `BootReceiver` | S8 (Doze, process killed) |
@@ -180,7 +180,7 @@ MSRP (RFC 4975) in `core/…/msrp/`; the procedures in `core/…/mcdata/McdataMe
 | FD over the media plane, sending and receiving (see [ATTACHMENTS.md](ATTACHMENTS.md#fd-over-the-media-plane-phase-4)) | TS 24.282 §10.2.5.2; TS 24.582 §7 | `FdMedia`; `fd-media`, `fd-media-answer` | `McdataMediaServiceTest`; S64, S67 |
 | Communication release: received intent to release (the remaining data query answered), extension request and response; sent extension request, the authorised user's release, intent to release, extension response | TS 24.282 §13.2.4 to §13.2.6, §15.1.10.1 | `Release.kt`; `mcdata-release` | `McdataMediaServiceTest`; S66 |
 | FD over HTTP: release and extension (FD HTTP TERMINATION) | TS 24.282 §6.2.2.4, §13.2.4.5, §13.2.5.3, §13.2.6.3, §15.1.13.1 | `FdService.terminate`; `fd-terminate`, `fd-release`, `fd-extend`, `fd-release-intent`, `fd-extension-response` | `FdServiceTest`; S64 |
-| PCK in `a=key-mgmt` (one-to-one) and GMK (group) for media-plane payloads and files | TS 33.180 §8.3, §8.4, §8.5.4 | `McdataMediaService.protect` | S60-S63 on a protected lab (`p4b-p`); S64 there checks the clear size and hash against the protected series, so 5 of its checks fail by design |
+| PCK in `a=key-mgmt` (one-to-one) and GMK (group) for media-plane payloads and files | TS 33.180 §8.3, §8.4, §8.5.4 | `McdataMediaService.protect` | S60-S64 on a protected lab (`p4b-p`, `fin-p`); a received protected file is reported with the clear file's size and hash, the series transferred apart (`transferred_size`, `transferred_sha256`) |
 | MCData signalling protection of MSRP bodies: the signalling of a SEND to the server sealed under the CSK, the server's opened; clear signalling while protected refused, the SEND dropped; nothing sealed past the CSK's Expiry time | TS 24.282 §6.6.3.2; TS 33.180 §8.5.1, §8.5.4, §9.5.3, annex E.6.10 | `SignallingProtection.sealMsrp`, `openMsrp`; `McdataMediaPeer` | `MsrpSignallingProtectionTest`; S83, S60-S63 on a protected lab |
 | Ad hoc group standalone SDS on the signalling plane: `ad-hoc-group-sds`, client ID, the participants in a resource list or `<comn-participants-criteria>`, or the ad hoc group already created; the ad hoc group of the 2xx kept | TS 24.282 §9.2.2.2.1 step 3A | `Adhoc.kt` `sendAdhoc`; `sds-adhoc` | S84 |
 | Ad hoc group SDS (standalone `a=sendonly`, session `a=sendrecv`) and FD over the media plane: `adhoc-group-sds-session`, `adhoc-group-fd-session`; the ad hoc group learned from the 2xx; received, a standalone SDS and a session told apart by the offer; in the clear (no group key) | TS 24.282 §24.2.2.1.1 steps 4-7, §24.4.2.1.1 step 10 | `AdhocTarget`, `McdataMediaService.requestInfo`, `targetParts`, `establish`, `handle`; `adhoc=` targets of `sds-media`, `sds-session`, `fd-media` | `AdhocMediaTest`; S84 (also on a protected lab) |
@@ -285,6 +285,11 @@ Code in `core/…/mcdata/IpConnectivity.kt`, `EnhancedStatus.kt`, `MessageStore.
     with warning 140 ("XML content encrypted under another XPK") until the old binding ends; `authorise_csk`, which would
     take the uploaded CSK, is never reached. Any restart of the app without a log-off (a reinstall, a crash, `die`)
     shows it; MCPTT and MCVideo authorise with their new CSK.
+  - **A stale reg event document after "rejected":** when a user logs on again after a network-initiated "rejected"
+    deregistration (a new REGISTER with a new Call-ID, the same contact address), the SIP core's first NOTIFY on the new
+    reg event subscription is still the old binding's, terminated with event "rejected", and the subscription ends
+    (Subscription-State terminated). The client now ignores a contact of another registration (its `callid`); the
+    server's document and the ended subscription are a SIP core fault (seen in S19 on `fin-base`).
   - **A group call made while the last one is being released joins it:** when the initiator leaves, the MCPTT server
     BYEs the others (`end_when_initiator_leaves`) but keeps the session in `sessions_` until each BYE is answered
     (`McServer::release_departed_leg`). A new group call INVITE in that time is a "call_joined" of that session
@@ -335,7 +340,7 @@ Code in `core/…/mcdata/IpConnectivity.kt`, `EnhancedStatus.kt`, `MessageStore.
 - **Not implemented:**
   - group-broadcast and user-broadcast groups as their own call kind (a broadcast call on them is made as on any
     group); originating protected first-to-answer calls (§11.1.1.2.1.1, the 200 step 2 PCK)
-  - MCData data streaming, IP connectivity, enhanced status, the message store (the media plane: phase 4 above)
+  - MCData data streaming (IP connectivity, enhanced status and the message store: phase 4b above)
   - end-to-end media and floor protection (TS 33.180 keys)
   - off-network operation
   - **P-Access-Network-Info (planned).** The client never sends the header. TS 24.229 §5.1.2A.1.1 requires it "if
