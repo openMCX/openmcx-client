@@ -30,7 +30,7 @@ State on `android-final` (2026-11-26), all phases merged; the "Status" section b
 | MCData FD | HTTP and media plane, deferral, extension, release | the same (phase 4), protected media-plane files | FD by reference to a stored object |
 | MCData other | IP connectivity, enhanced status, communication release, message store, notification channels | all (phases 4, 4b) | IP connectivity to the phone's own IP stack (no `VpnService`), IPv6 in the tunnel; message store upload, retrieve, folder copy/move, notification restart; data streaming |
 | Location | the three services, location rules, group geographic areas, SEAL (TS 24.545) | the same (phase 6) | MCData group configuration rules (as Linux), MCVideo affiliation rules, hysteresis |
-| MCVideo | see FEATURES.md | calls, push and pull, ambient viewing, remote transmission, protected video, XML signalling protection, T100-T104, priority, rejoin, ad hoc emergency, settings and remote affiliation, GDD, KMS redirect (phase 7) | other KMSs' certificates (CertCache), ad hoc participant modification, protected ad hoc call media (their transmission control is protected) |
+| MCVideo | see FEATURES.md | calls, push and pull, ambient viewing, remote transmission, protected video, XML signalling protection, T100-T104, priority, rejoin, ad hoc emergency, settings and remote affiliation, GDD, KMS redirect (phase 7) | other KMSs' certificates (CertCache), ad hoc participant modification |
 | End-to-end protection | GMK, PCK, XML signalling for the three services | the same: media, XML signalling for the three services, protected MCData payloads, files and MSRP bodies | none (protected MCPTT ad hoc floor control and MCVideo ad hoc transmission control work with the server fix on `android-server-faults`) |
 
 ## Status (2026-11-26)
@@ -53,7 +53,7 @@ regression on the server fixes"). JVM unit tests 583 and app unit tests 15, all 
 | 4b: IP connectivity, enhanced status, message store | partial | IP connectivity to the phone's own IP stack (no `VpnService`/TUN), the implicit target by IP information, IPv6 in the tunnel; message store upload, retrieve, folder copy/move and notification restart; FD by reference to a stored object |
 | 5: pre-established sessions | partial | ICE connectivity checks (host candidates only); protected calls over the MCPTT session; the SIP INFO of §6.2.8.1.13; FD over the MCData session (TS 24.282 has none) |
 | 6: location rules | done, with limits | MCData group configuration rules (§8.2.6.3, as the Linux client), MCVideo affiliation rules and the MCVideo group geographic area notice, hysteresis |
-| 7: MCVideo remainder and protection | partial | other KMSs' certificates (KMS CertCache); ad hoc participant modification; protected ad hoc call media |
+| 7: MCVideo remainder and protection | partial | other KMSs' certificates (KMS CertCache); ad hoc participant modification |
 
 Also open outside the phases: P-Access-Network-Info (planned), `authorise_by_register`, MCData data streaming, the
 per-alias user status subscription and FD over HTTP to an alias.
@@ -64,6 +64,10 @@ all **fixed on openmcx-server branch `android-server-faults`**, not yet on the s
   authorisation is opened with the CSK it uploads).
 - MCPTT ad hoc calls on a protected lab: the server kept ad hoc floor control in the clear (fixed: S5 passes there).
   The MCVideo server now protects ad hoc transmission control the same way; the client does too (V2 on a protected lab).
+- Protected ad hoc calls (MCPTT and MCVideo, branch `android-adhoc-e2e` with openmcx-server `adhoc-e2e`): the client
+  requests end-to-end security and keys the media with the GMK of the preconfigured group the server names in
+  `<preconfigured-group-id>` (TS 24.379 §17.2.2.1.1, §17.2.2.1.2; TS 24.281 §22.2.2.1.1, §22.2.2.1.2), as the Linux
+  client; the server accepted no protected ad hoc offer before (488).
 - A group call made while the last one was being released joined it, and its caller got a BYE (fixed: a new session;
   S16 re-calls the group at once and checks it).
 - A one-to-one media-plane MCData communication to a functional alias was taken as a user, 403 warning 229 (fixed:

@@ -584,3 +584,30 @@ Failures and causes:
   table's `fz-p` run follows a fresh install with S1 first.
 
 No server fault found in this run.
+
+## Protected ad hoc calls (2026-11-26)
+
+Branch `android-adhoc-e2e` against openmcx-server branch `adhoc-e2e` (6c4ddd3, 7ef0488): end-to-end protected MCPTT and
+MCVideo ad hoc group calls (TS 24.379 §17.2.2.1.1, §17.2.2.1.2, §17.4.2.2 step 11; TS 24.281 §22.2.2.1.1, §22.2.2.1.2,
+§22.4.2.2; TS 33.180 §5.7, §7.3). Image `openmcx-all:adhoc-e2e-6c4ddd3` (`openmcx-all:srvfix-d-bb306f0` with the
+MCPTT and MCVideo servers of 6c4ddd3), fixture from that checkout: on a protected lab it adds the preconfigured group
+`sip:adhoc-security@mcx.test` (all four users, media protected) that the servers name in `<preconfigured-group-id>`
+and that the clients subscribe to from the start (`adhoc_security_groups`). Three redroid 15 clients per lab, TLS.
+
+| Suite | Result |
+|---|---|
+| JVM unit tests (`tools/gradle-docker.sh :core:test`) | 593 passed, 0 failed. New: `AdhocSecurityTest` (6), `AdhocSecurityConfigTest` (3), `GroupKeySubscriptionsTest` (+1); `McpttCallTypesTest.adhocByCriteriaAndModified` checks a clear call is unchanged |
+| App unit tests (`:app:testDebugUnitTest`) | 15 passed |
+| `:app:assembleDebug` | Built |
+| `tests/test_androidlab.py` | 8 passed (new: `AdhocSecurityGroups`, 2) |
+
+| Lab | Options | Scenarios | Checks |
+|---|---|---|---|
+| `ae-p` | `--protected --xml-protection --integrity-protection --priority --mcvideo` | S1-S5, S12, V1-V6 | 114 of 115; the one failure was V2's new check that bob decodes alice's pictures, which cannot pass on redroid (no camera: its transmissions carry no picture, as in V1). The check now runs only when pictures are sent; V2 again: 13 of 13 |
+| `ae-u` | `--mcvideo --priority` | S1, S4, S5, V2 | 55 of 55 (clear ad hoc calls unchanged) |
+
+On `ae-p`, S5: alice, bob and client-c each key the ad hoc speech with the GMK of `sip:adhoc-security@mcx.test`, and
+the speech of alice and of client-c arrives unchanged (the frame hashes); V2: the MCVideo ad hoc call is protected
+under the same group's GMK on alice and bob, bob's leave and protected re-join, emergency and imminent peril ad hoc calls.
+The Linux reference client was not a participant: it subscribes to `mcptt.adhoc_security_groups` but has no MCVideo
+counterpart (an invitation to a protected MCVideo ad hoc call is refused 488 until its first try subscribes to the GMK).

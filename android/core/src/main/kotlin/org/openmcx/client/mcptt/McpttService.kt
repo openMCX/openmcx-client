@@ -117,6 +117,13 @@ class Call internal constructor(
     @Volatile var floorPriority: Int? = null
     /** The outcome of the last modification of an ad hoc call's participants or criteria (§17.2.6.1.1). */
     @Volatile var lastModification: String? = null
+    /**
+     * An end-to-end protected ad hoc group call (§17.2.2.1.1 2xx step 3, §17.2.2.1.2 step 7): the preconfigured group
+     * named in <preconfigured-group-id>, whose GMK keys its speech (TS 33.180 §5.7, §7.3); null in the clear.
+     */
+    @Volatile var securityGroup: String? = null
+    /** An ad hoc call's listed participants (§17.2.2.1.1 step 11), candidates for the sender of its protected speech. */
+    @Volatile var adhocParticipants: List<String> = emptyList()
     /** A protected incoming call's keys, opened before it is answered: its PCK (private) or GMK (group). */
     internal var keys: Pair<org.openmcx.client.security.KeyMessage?, org.openmcx.client.security.KeyMessage?> = null to null
     /** A first-to-answer invitee's PCK I_MESSAGE for its answer's a=key-mgmt (§11.1.1.2.1.2 step 5). */
@@ -241,7 +248,23 @@ class McpttService(
     private suspend fun subscribeGroupKeys() {
         val token = client.tokens?.accessToken ?: return
         val gms = config.gmsSubscriptionPsi ?: run { event("group key subscription: no GMS-URI configured"); return }
-        for (group in config.groups.distinct()) subscribeGroupKey(gms, group, token)
+        // §17.1: the preconfigured groups of ad hoc calls too, so that their GMKs are held when a call names one.
+        for (group in AdhocSecurity.keyGroups(config.groups, config.adhocSecurityGroups)) subscribeGroupKey(gms, group, token)
+    }
+
+    /**
+     * The GMK of [group], the preconfigured group an ad hoc call names (§17.2.2.1.1 2xx step 3, §17.2.2.1.2 step 7):
+     * subscribed to now unless it is already (TS 24.481 §6.3.13.2.1), its document read for its members (the senders),
+     * then awaited.
+     */
+    private suspend fun adhocGroupKey(group: String): KeyMessage {
+        if (groupKeys.active(group) == null && group !in keySubscriptions.groupsSubscribed()) {
+            val token = client.tokens?.accessToken
+            val gms = config.gmsSubscriptionPsi
+            if (token != null && gms != null) withContext(NonCancellable) { subscribeGroupKey(gms, group, token) }
+        }
+        if (group !in client.groupDocuments) scope.launch { runCatching { client.refreshGroupDocument(group) } }
+        return awaitGroupKey(group)
     }
 
     /**
@@ -366,6 +389,11 @@ class McpttService(
             pck != null -> CallProtection.privateCall(csk, pck, localInitiator, mcvideo = false)
             // The sender of received group speech: the floor's talker, else any member of the group (its group
             // document): speech can arrive before the Floor Taken that names the talker.
+            // An ad hoc call (§17.1): the initiator, the listed participants and the preconfigured group's members.
+            gmk != null && call.type == CallType.ADHOC -> CallProtection.Group(csk, gmk, config.userId, mcvideo = false) {
+                AdhocSecurity.senders(runCatching { call.media?.floor?.talker }.getOrNull(), call.peer.takeIf { !call.outgoing },
+                    call.adhocParticipants, call.securityGroup?.let { client.groupDocuments[it]?.members } ?: emptyList(), config.userId)
+            }
             gmk != null -> CallProtection.Group(csk, gmk, config.userId, mcvideo = false) {
                 listOfNotNull(runCatching { call.media?.floor?.talker }.getOrNull()) +
                     (call.groupId?.let { client.groupDocuments[it]?.members } ?: emptyList())
@@ -566,13 +594,16 @@ class McpttService(
         val resource = resourcePriority(priority)
         // TS 33.180 7.4 (TS 24.379 §11.1.1.2.1.1): a protected private call's media under a new PCK for the called
         // MCPTT ID, offered in a=key-mgmt; 7.3: a protected group call's media under the group's GMK. A call to a
-        // functional alias has no MCPTT ID to key the PCK for yet; an ad hoc group call has no GMK (as MCVideo).
+        // functional alias has no MCPTT ID to key the PCK for yet; an ad hoc group call's GMK is the one of the
+        // preconfigured group the 2xx names (§17.2.2.1.1 2xx step 3): its offer is protected ([adhocProtected]).
         val pck = if (protectedMedia && type == CallType.PRIVATE && !toAlias && !firstToAnswer) {
             val keys = client.keysOf(McService.MCPTT) ?: throw CallError("no MCPTT keys for a protected call")
             keys.makePck(peer ?: throw CallError("no one to call"))
         } else null
         val gmk = if (protectedMedia && groupCall) awaitGroupKey(group ?: throw CallError("no group")) else null
+        val adhocProtected = protectedMedia && type == CallType.ADHOC
         val call = Call(ids.incrementAndGet(), type, true, peer, group).also {
+            if (type == CallType.ADHOC) it.adhocParticipants = targets
             it.floorControl = floorControl; it.priority = priority; it.broadcast = broadcast; it.firstToAnswer = firstToAnswer
             it.invitees = if (firstToAnswer) targets else emptyList(); it.criteria = criteria; it.associatedGroup = associated
             it.ambientType = ambientType
@@ -596,7 +627,7 @@ class McpttService(
             "listened-to" -> prioritised.copy(direction = "sendonly"); else -> prioritised }
         val local = when {
             pck != null -> directed.copy(protected = true, keyMgmt = pck.second)
-            gmk != null -> directed.copy(protected = true)
+            gmk != null || adhocProtected -> directed.copy(protected = true)
             else -> directed
         }
         // TS 24.379 §6.4, TS 24.380 §14.2.5: the initial INVITE may request the floor implicitly; §14.2.4: with
@@ -654,6 +685,8 @@ class McpttService(
                 remotelyInitiatedCallRequest = if (extra?.remoteRequest == true) true else null,
                 requestUri = group, clientId = client.config.clientId, broadcast = if (broadcast) true else null,
                 associatedGroupId = associated, participantCriteria = criteria,
+                // §17.2.2.1.1 step 10 c) iii): end-to-end security for a protected ad hoc call (a rejoin too, §17.2.5.1.1).
+                endToEndSecurity = if (type == CallType.ADHOC) AdhocSecurity.requested(adhocProtected) else null,
                 functionalAlias = presented, callToFunctionalAlias = if (toAlias) true else null, calledFunctionalAlias = calledAlias,
                 forwardingSequenceNumber = sequence), priority)
             if (overPre) {
@@ -706,8 +739,8 @@ class McpttService(
             ua.ack(dialog, sent)
             val parts2 = Multipart.parse(response.contentType, response.body)
             val sdp = parts2.firstOrNull { it.mediaType == "application/sdp" } ?: throw CallError("200 without SDP")
-            parts2.firstOrNull { it.mediaType == McpttInfo.CONTENT_TYPE }?.let {
-                val answerInfo = McpttInfo.parse(it.text)
+            val answered = parts2.firstOrNull { it.mediaType == McpttInfo.CONTENT_TYPE }?.let { McpttInfo.parse(it.text) }
+            answered?.let { answerInfo ->
                 if (type == CallType.ADHOC) call.groupId = answerInfo.callingGroupId ?: call.groupId // D8: the ad hoc group identity
                 // §11.1.1.2.1.1, 200 step 4: the invitee that answered a first-to-answer call.
                 if (firstToAnswer) call.peer = answerInfo.calledPartyId ?: answerInfo.requestUri ?: call.peer
@@ -718,6 +751,18 @@ class McpttService(
             // The MCPTT session identity, for a rejoin (§17.2.5.1.1).
             call.sessionUri = response.headers["Contact"]?.let { runCatching { NameAddr.parse(it).uri }.getOrNull() }
             val remote = McpttSdp.remote(sdp.text)
+            // §17.2.2.1.1 2xx step 3: a protected ad hoc call's speech under the GMK of the <preconfigured-group-id>;
+            // without it, or without that GMK, the call cannot be keyed and ends.
+            if (adhocProtected) when (val keying = AdhocSecurity.keying(remote.protected, answered?.preconfiguredGroupId)) {
+                is AdhocSecurity.Keying.Group -> {
+                    call.securityGroup = keying.group
+                    val key = try { adhocGroupKey(keying.group) } catch (e: CallError) { throw CallError("no GMK of the ad hoc call's preconfigured group ${keying.group}") }
+                    media.protection = protection(null, localInitiator = true, gmk = key, call = call)
+                    event("call ${call.id}: ad hoc call keyed with the GMK %08x of ${keying.group}".format(key.csbId))
+                }
+                is AdhocSecurity.Keying.Refused -> throw CallError(keying.reason)
+                AdhocSecurity.Keying.Clear -> Unit
+            }
             if (remote.floorControl != floorControl) throw CallError("floor control not negotiated as offered")
             // TS 24.380 §14.3.3: the Floor Request priority is the one negotiated.
             call.floorPriority = GroupCallRules.negotiatedFloorPriority(local.floorPriority, remote.floorPriority)
@@ -875,6 +920,18 @@ class McpttService(
             if (type == CallType.PREARRANGED && group != null) {
                 gmk = runCatching { awaitGroupKey(group) }.getOrNull()
                 if (gmk == null) { tx.respond(488); event("protected call on $group without its group key"); return }
+            } else if (type == CallType.ADHOC) {
+                // §17.2.2.1.2 step 7: the GMK of the preconfigured group named in <preconfigured-group-id> (TS 33.180
+                // §5.7); a protected ad hoc call without it cannot be keyed (488, as the Linux client).
+                when (val keying = AdhocSecurity.keying(true, info.preconfiguredGroupId)) {
+                    is AdhocSecurity.Keying.Group -> {
+                        gmk = runCatching { adhocGroupKey(keying.group) }.getOrNull()
+                        if (gmk == null) { tx.respond(488); event("protected ad hoc call on $group: no GMK of ${keying.group}"); return }
+                        call.securityGroup = keying.group
+                    }
+                    is AdhocSecurity.Keying.Refused -> { tx.respond(488); event("protected ad hoc call on $group: ${keying.reason}"); return }
+                    AdhocSecurity.Keying.Clear -> Unit
+                }
             } else if (type == CallType.PRIVATE && firstToAnswer) try {
                 // §11.1.1.2.1.2 step 5: for a first-to-answer call the invitee makes the PCK, for the caller, and offers
                 // it in its answer (NOTE 4: the invitee is the initiator of the I_MESSAGE).

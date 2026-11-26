@@ -42,6 +42,15 @@ class GroupKeySubscriptionsTest {
         assertNull(subs.group("c1"))
     }
 
+    @Test fun `the groups subscribed are known, so a preconfigured group is subscribed to once`() {
+        val subscriptions = GroupKeySubscriptions()
+        subscriptions.sent("c1", "sip:operations@mcx.test")
+        subscriptions.sent("c2", "sip:adhoc-security@mcx.test")
+        assertEquals(setOf("sip:operations@mcx.test", "sip:adhoc-security@mcx.test"), subscriptions.groupsSubscribed())
+        subscriptions.ended("c2")
+        assertEquals(setOf("sip:operations@mcx.test"), subscriptions.groupsSubscribed())
+    }
+
     @Test fun `a refused or terminated subscription leaves nothing to end`() {
         val subs = GroupKeySubscriptions()
         subs.sent("c1", "sip:g1@mcx.test"); subs.ended("c1")

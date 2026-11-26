@@ -134,6 +134,13 @@ data class ClientConfig(
          * <MCPTT-group-call>/<Priority> ([org.openmcx.client.mcptt.GroupCallRules.floorPriorityOffer]).
          */
         val floorPriority: Int? = null,
+        /**
+         * TS 24.379 §17.1 (TS 33.180 §5.7): the preconfigured groups whose security related information may key an
+         * end-to-end protected ad hoc group call (`adhoc_security_groups`, as the Linux client's `mcptt.adhoc_security_groups`):
+         * their GMKs are subscribed to from the start, so that the group the server names in <preconfigured-group-id>
+         * (§17.2.2.1.1 2xx step 3, §17.2.2.1.2 step 7) is keyed at once. Another group named is subscribed to then.
+         */
+        val adhocSecurityGroups: List<String> = emptyList(),
     )
 
     data class Mcdata(
@@ -198,6 +205,8 @@ data class ClientConfig(
          * the MCVideo user profile's <Priority> (TS 24.484 §9.3.2.1).
          */
         val priority: Int? = null,
+        /** TS 24.281 §22.1 (TS 33.180 §5.7): [Mcptt.adhocSecurityGroups] for MCVideo (`adhoc_security_groups`). */
+        val adhocSecurityGroups: List<String> = emptyList(),
     )
 
     /**
@@ -274,7 +283,8 @@ data class ClientConfig(
                         it.bool("documents_on_notify", false), it.optStr("cms_subscription_psi")?.also(::sipUri),
                         it.optStr("gms_subscription_psi")?.also(::sipUri), it.optStr("ue_id"),
                         it.flag("implicit_floor_request"), it.flag("offer_granted"),
-                        (it["floor_priority"] as? JsonPrimitive)?.intOrNull?.takeIf { p -> p in 0..255 })
+                        (it["floor_priority"] as? JsonPrimitive)?.intOrNull?.takeIf { p -> p in 0..255 },
+                        it.strings("adhoc_security_groups").onEach(::sipUri))
                 },
                 mcdata = (root["mcdata"] as? JsonObject)?.let {
                     Mcdata(it.str("user_id"), it.str("psi"), it.strings("groups"), it.int("max_payload_size_sds_cplane_bytes", 1000),
@@ -301,7 +311,8 @@ data class ClientConfig(
                             }.getOrElse { e -> throw ConfigError("mcvideo.transmission_timers: ${e.message}") }
                         } ?: org.openmcx.client.mcvideo.TransmissionTimers(),
                         it.bool("queueing", false),
-                        it.optStr("priority")?.let { p -> p.toIntOrNull()?.takeIf { v -> v in 0..255 } ?: throw ConfigError("mcvideo.priority must be 0 to 255") })
+                        it.optStr("priority")?.let { p -> p.toIntOrNull()?.takeIf { v -> v in 0..255 } ?: throw ConfigError("mcvideo.priority must be 0 to 255") },
+                        it.strings("adhoc_security_groups").onEach(::sipUri))
                 },
                 security = (root["security"] as? JsonObject)?.let {
                     val profile = it.obj("key_parameter_profile")

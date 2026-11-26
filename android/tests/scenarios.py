@@ -32,6 +32,9 @@ FGS_PHONE_CALL, FGS_MICROPHONE, FGS_SPECIAL_USE = 0x4, 0x80, 0x40000000  # Servi
 MCPTT = {A: "sip:alice.mcptt@mcx.test", B: "sip:bob.mcptt@mcx.test", C: "sip:client-c.mcptt@mcx.test"}
 MCDATA = {A: "sip:alice.mcdata@mcx.test", B: "sip:bob.mcdata@mcx.test", C: "sip:client-c.mcdata@mcx.test"}
 GROUP = "sip:operations@mcx.test"
+# The preconfigured group whose GMK keys an end-to-end protected ad hoc call on a protected lab (openmcx-server
+# tools/prepare-prearranged-test.py add_adhoc_security; TS 24.379 clause 17.4.2.2 step 11).
+ADHOC_SECURITY = "sip:adhoc-security@mcx.test"
 SPEECH = {A: f"{FILES}/speech/alpha.wav", B: f"{FILES}/speech/bravo.wav", C: f"{FILES}/speech/charlie.wav"}
 
 
@@ -217,6 +220,9 @@ class Lab:
         self.idle_everywhere([A, B, C])
 
     def s5_adhoc(self) -> None:
+        """TS 24.379 §17.2.2.1.1, §17.2.2.1.2: an ad hoc call to listed users. On a protected lab end-to-end protected
+        (step 10 c) iii), 2xx step 3, §17.2.2.1.2 step 7; TS 33.180 §5.7, §7.3): every participant keys the speech with the
+        GMK of the preconfigured group the server names in <preconfigured-group-id>, and the speech arrives unchanged."""
         call = self.cmd(A, "adhoc", MCPTT[B], MCPTT[C])
         self.check("alice's ad hoc call is established", call["state"] == "established")
         group = call.get("group") or ""
@@ -224,6 +230,12 @@ class Lab:
         for c in (B, C):
             got = self.established(c)
             self.check(f"{c} joined the ad hoc call", got["type"] == "adhoc" and got.get("group") == group, call=got)
+        if meta(self.name).get("protected"):
+            for c in (A, B, C):
+                got = self.call(c)
+                self.check(f"{c}'s ad hoc speech is protected under the GMK of {ADHOC_SECURITY}",
+                           got.get("protected") is True and got.get("security_group") == ADHOC_SECURITY and got.get("gmk_id"),
+                           call={k: got.get(k) for k in ("protected", "security_group", "gmk_id")})
         self.talk_and_verify(A, [B, C], seconds=2)
         self.talk_and_verify(C, [A, B], seconds=2)
         self.hangup(A)
@@ -1976,8 +1988,24 @@ class Lab:
         b = self.wait("bob is in the ad hoc call", lambda: (v := self.video(B)) and v["state"] == "established" and v)
         self.check("bob's call is the same ad hoc group", b["session_type"] == "adhoc" and b["group"] == group, group=b["group"])
         self.wait("alice lists every participant", lambda: len((self.video(A) or {}).get("participants") or {}) == len(others) + 1)
+        protected = bool(meta(self.name).get("protected"))
+        if protected:
+            # §22.2.2.1.1 2xx step 3, §22.2.2.1.2 step 8 (TS 33.180 §5.7, §7.3): the media under the GMK of the
+            # preconfigured group the server names in <preconfigured-group-id>.
+            for c in [x for x in (A, B) if x in self.devices]:
+                v = self.video(c) or {}
+                self.check(f"{c}'s ad hoc video is protected under the GMK of {ADHOC_SECURITY}",
+                           v.get("protected") is True and v.get("security_group") == ADHOC_SECURITY and v.get("gmk_id"),
+                           call={k: v.get(k) for k in ("protected", "security_group", "gmk_id")})
+        seen = (self.video(B) or {}).get("pictures_received") or 0
         r = self.cmd(A, "video-transmit", "2", timeout=30)
         self.check("alice transmits in the ad hoc call (transmission control under the CSK on a protected lab)", r.get("granted") is True, result=r)
+        # A camera that sends pictures (a phone; redroid has none, its transmissions carry no picture): bob decodes them
+        # under the preconfigured group's GMK.
+        if protected and (r.get("pictures") or 0) > 0:
+            self.wait("bob decodes alice's protected ad hoc video",
+                      lambda: ((self.video(B) or {}).get("pictures_received") or 0) > seen, timeout=10)
+            self.check("bob decodes alice's protected ad hoc video", True)
         self.cmd(B, "video-hangup")
         rejoin = self.cmd(B, "video-rejoinable")
         self.check("bob leaves; the ad hoc session can be re-joined", rejoin["type"] == "adhoc" and rejoin["group"] == group, rejoin=rejoin)
