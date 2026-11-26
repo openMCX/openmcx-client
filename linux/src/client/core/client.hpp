@@ -1540,6 +1540,15 @@ private:
   std::string mcvideo_key_group_of(const std::string &group) const;
   bool mcvideo_use_group_key(const std::string &group);
   void mcvideo_update_key_subscriptions();
+  // TS 24.281 clauses 22.2.2.1.1 (2xx step 3) and 22.2.2.1.2 step 8 with TS 33.180 clause 5.7: the preconfigured
+  // groups whose security related information keys end-to-end protected MCVideo ad hoc group calls: the configured
+  // ones (mcvideo.adhoc_security_groups, else mcptt.adhoc_security_groups) and those a <preconfigured-group-id>
+  // named; their GMKs are subscribed to (mcvideo_update_key_subscriptions).
+  std::set<std::string> mcvideo_adhoc_security_groups_;
+  std::vector<std::string> mcvideo_configured_adhoc_security_groups() const;
+  bool mcvideo_use_adhoc_security(const std::string &preconfigured);
+  // The group whose GMK keys the call in progress (or, without one, the selected group's).
+  std::string mcvideo_call_key_group() const;
   void mcvideo_refresh_extra_key_subscription(const std::string &dialog);
   bool mcvideo_key_dialog(const std::string &dialog) const;
   // A group call asked for before its group's GMK is held (a chat group joined with implicit affiliation, a new

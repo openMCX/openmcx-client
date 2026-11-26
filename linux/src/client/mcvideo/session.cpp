@@ -122,6 +122,14 @@ void Client::mcvideo_adhoc_call(const std::vector<std::string> &targets, const s
   info.participant_criteria = criteria; // step 12
   call.adhoc_criteria = criteria;
   info.functional_alias = mcvideo_presented_alias();
+  // Step 10 d) iii): with protected media, end-to-end security is requested ("if end-to-end security needs to be
+  // established for the MCVideo adhoc group session, the <end-to-end-security> element set to "true""), the offer
+  // RTP/SAVP (TS 33.180 clause 7.3); the 2xx names the preconfigured group whose GMK keys the video (clause 22.4.2.2,
+  // 2xx step 3 in mcvideo_invite_answered). A re-join (clause 22.2.5.1.1) offers the same.
+  if (protected_media()) {
+    info.end_to_end_security = true;
+    call.local.protected_media = true;
+  }
   auto headers = mcvideo_call_headers();
   if (!priority.empty()) {
     // TS 24.281 clause 6.2.8.1.19 steps 2 and 5 (emergency: <adhoc-emergency-ind> "true") and clause 6.2.8.1.23 1) a)
@@ -612,11 +620,18 @@ std::optional<SipResponse> Client::mcvideo_accept_protection(const SipMessage &m
       }
       mcvideo_bind_pck(*key, false);
     }
-  } else if (const auto &key_group =
-                 mcvideo_call_->security_group.empty() ? mcvideo_call_->group : mcvideo_call_->security_group;
+  } else if (mcvideo_call_->type == "adhoc") {
+    // TS 24.281 clause 22.2.2.1.2 step 8 with TS 33.180 clause 5.7: an ad hoc group has no GMK of its own; protected
+    // media are keyed with the GMK of the INVITE's <preconfigured-group-id>, without which (or its GMK) the
+    // invitation cannot be accepted (RFC 3261 section 13.3.1.3: 488). A re-INVITE without the element keeps the
+    // call's group.
+    if (!mcvideo_use_adhoc_security(info.preconfigured_group_id)) {
+      response.status_code = 488;
+      return response;
+    }
+  } else if (const auto &key_group = mcvideo_call_->group;
              !mcvideo_use_group_key(key_group) || !mcvideo_protection_.group_ready()) {
-    // TS 24.281 clause 4.7.1: the media of the call's group need that group's GMK (for an ad hoc group call with a
-    // <preconfigured-group-id>, that preconfigured group's: TS 24.281 clause 22.2.2.1.2 step 8).
+    // TS 24.281 clause 4.7.1: the media of the call's group need that group's GMK.
     event("mcvideo_group_key_missing", {{"group_id", key_group}});
     response.status_code = 488;
     return response;
@@ -895,7 +910,9 @@ void Client::mcvideo_end_call(const std::string &reason, bool dialog_ended) {
                         {"received_frames", call.received_frames},
                         {"undecoded", call.undecoded},
                         {"lost_units", call.depacketizer.lost_units()},
-                        {"timeouts", call.timeouts}};
+                        {"timeouts", call.timeouts},
+                        {"protected", call.local.protected_media},
+                        {"security_group", call.security_group}};
   // TS 24.581 clauses 6.2.4.7.2 and 6.2.5.3.5: the call's release stops every transmission participant timer.
   if (call.timers) call.timers->release();
   // TS 24.281 clause 6.2.8.1.25: the ad hoc group's priority states end with the call.
@@ -1428,7 +1445,9 @@ void Client::mcvideo_call_status() {
                             "mcvideo_participant_aliases",
                             "mcvideo_timeouts",
                             "mcvideo_tc_state",
-                            "mcvideo_rc_state"})
+                            "mcvideo_rc_state",
+                            "mcvideo_call_protected",
+                            "mcvideo_security_group"})
       status_.erase(key);
     status_["mcvideo_call_state"] = "idle";
     status_["mcvideo_transmitting"] = false;
@@ -1437,6 +1456,10 @@ void Client::mcvideo_call_status() {
     status_["mcvideo_call_state"] = call.state;
     status_["mcvideo_call_type"] = call.type;
     status_["mcvideo_group"] = call.group; // the group, or the ad hoc group's identity
+    // TS 33.180 clause 5.7: whether the video is protected, and the preconfigured group whose GMK keys an end-to-end
+    // protected ad hoc group call (TS 24.281 clauses 22.2.2.1.1 2xx step 3, 22.2.2.1.2 step 8).
+    status_["mcvideo_call_protected"] = call.local.protected_media;
+    status_["mcvideo_security_group"] = call.security_group;
     status_["mcvideo_video_mode"] = call.video_mode;
     status_["mcvideo_ambient_type"] = call.ambient_type;
     status_["mcvideo_ambient_role"] = call.ambient_role;
@@ -1488,6 +1511,7 @@ void Client::mcvideo_call_status() {
   // TS 24.281 annex G.14 to G.18: the ad hoc groups' priority states; clause 22.2.7.1: the redirections notified.
   status_["mcvideo_adhoc_groups"] = mcvideo_adhoc_groups_;
   status_["mcvideo_adhoc_redirections"] = mcvideo_adhoc_redirections_;
+  status_["mcvideo_adhoc_security_groups"] = mcvideo_adhoc_security_groups_;
   if (live_video_fd_ >= 0) {
     const auto options = mcvideo_encoder_options();
     status_["mcvideo_live"] = {{"width", options.width},

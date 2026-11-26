@@ -580,6 +580,33 @@ template <class Lookup> std::string key_group(const std::string &group, Lookup p
 }
 
 //------------------------------------------------------------------------------
+// TS 24.281 clauses 22.2.2.1.1 (2xx step 3) and 22.2.2.1.2 step 8 (TS 24.379 clauses 17.2.2.1.1 and 17.2.2.1.2 step
+// 7) with TS 33.180 clause 5.7: "if the <preconfigured-group-id> element received [...], shall use the security
+// related information from the group configuration associated with the received preconfigured group identity". The
+// group whose GMK keys the protected media of an ad hoc group call: the received <preconfigured-group-id>, else (a
+// re-INVITE without it) the one the call was keyed with; empty when there is none or it is no SIP URI: the call cannot
+// be keyed (invitee: 488; originator: the call ends).
+inline std::string adhoc_key_group(std::string_view received, std::string_view kept) {
+  std::string_view group = received.empty() ? kept : received;
+  while (!group.empty() && std::isspace(static_cast<unsigned char>(group.front()))) group.remove_prefix(1);
+  while (!group.empty() && std::isspace(static_cast<unsigned char>(group.back()))) group.remove_suffix(1);
+  if (!group.starts_with("sip:") && !group.starts_with("sips:")) return {};
+  return std::string(group);
+}
+
+//------------------------------------------------------------------------------
+// TS 24.281 clause 22.1 (as TS 24.379 clause 17.1) and TS 24.481 clause 6.3.13.2.1: the preconfigured groups whose GMK
+// the MCVideo service subscribes to from the start for its ad hoc group calls: mcvideo.adhoc_security_groups when
+// configured (even empty), else mcptt.adhoc_security_groups (one preconfigured group, with its MCPTT and MCVideo
+// configurations, serving both services), else none.
+inline std::vector<std::string> mcvideo_adhoc_security_groups(const std::optional<std::vector<std::string>> &mcvideo,
+                                                              const std::optional<std::vector<std::string>> &mcptt) {
+  if (mcvideo) return *mcvideo;
+  if (mcptt) return *mcptt;
+  return {};
+}
+
+//------------------------------------------------------------------------------
 // TS 33.180 clause 5.7 and annex E.6: among the keys for which usable(key) holds (the group among its MC group IDs,
 // active, not revoked, not expired), the one of the latest Activation time (activation(key)); null if none.
 template <class Map, class Usable, class Activation>

@@ -709,11 +709,28 @@ void Client::mcvideo_invite_answered(unsigned generation, const SipResponse &res
       if (!mcvideo_call_->ambient_type.empty())
         mcvideo_call_->may_release = ambient_release_capability(response.headers);
       // TS 24.281 clause 22.2.2.1.1, 2xx step 4: the ad hoc group identity the server assigned.
-      if (mcvideo_call_->type == "adhoc")
+      if (mcvideo_call_->type == "adhoc") {
+        std::string preconfigured;
         for (const auto &part : response.parts)
-          if (part.content_type == mcvideo_service.info_mime)
-            if (const auto group = parse_service_info(part.body, mcvideo_service).calling_group; !group.empty())
-              mcvideo_call_->group = group;
+          if (part.content_type == mcvideo_service.info_mime) {
+            const auto answer = parse_service_info(part.body, mcvideo_service);
+            if (!answer.calling_group.empty()) mcvideo_call_->group = answer.calling_group;
+            preconfigured = answer.preconfigured_group_id;
+          }
+        // 2xx step 3: the security related information of the <preconfigured-group-id> keys the protected video
+        // (TS 33.180 clause 5.7); without the element or its GMK the call cannot be keyed and ends (BYE).
+        if (mcvideo_call_->local.protected_media && !mcvideo_use_adhoc_security(preconfigured)) {
+          const auto dialog = mcvideo_call_->dialog;
+          const auto reason = mcvideo_call_->security_group.empty()
+                                  ? std::string("no preconfigured group for the end-to-end security of the ad hoc call")
+                                  : "no GMK of the ad hoc call's preconfigured group " + mcvideo_call_->security_group;
+          mcvideo_end_call("adhoc security unavailable");
+          mcvideo_last_call_["security_failure"] = reason;
+          sip_.bye(dialog);
+          failure("MCVideo ad hoc call: " + reason);
+          return;
+        }
+      }
       // TS 24.281 clause 6.2.8.1.20: the priority ad hoc call is granted ("MVEAGC 3: emergency-call-granted", the ad
       // hoc group "MVEAG 2: in-progress"; or the imminent peril equivalents).
       if (const auto priority = std::exchange(mcvideo_call_->priority_requested, {}); !priority.empty()) {
