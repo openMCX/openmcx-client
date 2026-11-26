@@ -316,6 +316,8 @@ interface UiActions {
     fun fulfilCallBack(from: String) {}
     /** §11.1.6.2.1.1: listen to [target] (remote-init), or let [target] listen ([local], local-init). */
     fun ambientListen(target: String, local: Boolean) {}
+    /** End the ambient listening call this user let [target] start listening to (local-init, TS 24.379 §11.1.6.2.1.3). */
+    fun ambientStop(target: String) {}
     /** §11.1.7.2.1: ask [remote] to call [target]; §10.1.5.2.1: ask [remote] to call [group]. */
     fun remoteCall(remote: String, target: String) {}
     fun remoteGroupCall(remote: String, group: String) {}
@@ -504,7 +506,7 @@ fun snapshot(batteryExempt: Boolean = true): UiState {
             call.floorControl, call.media?.muted == true, call.priority, floor?.queuePosition?.value, shown.subtitle,
             call.broadcast, call.firstToAnswer, call.criteria, call.ambientRole, call.mayRelease, call.service)
     }
-    // A hidden ambient listening call (the listened-to user of a remote-init call, TS 24.379 §11.1.6.2.1.2) is not shown.
+    // A hidden ambient listening call (the listened-to user's, TS 24.379 §11.1.6.2.0, §11.1.6.2.1.1, §11.1.6.2.1.2) is not shown.
     val calls = mcptt?.calls?.value?.filter { !it.hidden } ?: emptyList()
     val incoming = calls.firstOrNull { !it.outgoing && it.state == "ringing" }
     val active = calls.lastOrNull { it.state != "released" && it != incoming }
@@ -789,6 +791,10 @@ object EngineActions : UiActions {
     override fun cancelCallBack(target: String) = request("Call-back cancel to ${target.short()}") { Engine.mcptt?.services?.cancelCallBack(target) }
     override fun fulfilCallBack(from: String) = place(from) { Engine.mcptt?.services?.fulfilCallBack(from) }
     override fun ambientListen(target: String, local: Boolean) = place(target) { Engine.mcptt?.ambientCall(target, local) }
+    override fun ambientStop(target: String) = place(target) {
+        val service = Engine.mcptt ?: return@place
+        service.calls.value.firstOrNull { it.hidden && !it.concealed && it.peer == target && it.state != "released" }?.let { service.hangup(it) }
+    }
     override fun remoteCall(remote: String, target: String) =
         request("${remote.short()} calling ${target.short()}") { Engine.mcptt?.services?.remotePrivateCall(remote, target) }
     override fun remoteGroupCall(remote: String, group: String) =

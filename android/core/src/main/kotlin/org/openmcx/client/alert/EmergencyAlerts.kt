@@ -151,8 +151,8 @@ class EmergencyAlerts(
         request.headers.add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(icsi)}\";require;explicit")
         val parts = mutableListOf(Part(infoType, encode(fields).toByteArray()))
         if (location != null) parts += Part(service.mime, location.encode(service).toByteArray())
-        // TS 24.282 §6.4 (TS 24.379 §6.1.1): one MIME body as it is (a cancel has the info document only), several multipart.
-        val (type, body) = if (parts.size == 1) parts[0].contentType to parts[0].content else Multipart.encode(parts)
+        // §6.5: a cancellation carries one body, sent as itself; an alert with its location, multipart/mixed.
+        val (type, body) = Multipart.body(parts)
         request.headers.add("Content-Type", type)
         return client.ua.send(SipRequest(request.method, request.uri, request.headers, body))
     }
@@ -180,8 +180,26 @@ class EmergencyAlerts(
             (originatedBy?.let { " (of $it)" } ?: "") + ": ${response.status}")
     }
 
-    /** §12.1A.1.1: an ad hoc group emergency alert to the users [criteria] select; the server names its group. */
+    /**
+     * TS 24.379 §6.2.8.1.19: whether the MCPTT user profile authorises this user to originate ([cancel] false) or cancel
+     * an ad hoc group emergency alert (<allow-activate-adhoc-group-emergency-alert>,
+     * <allow-cancel-adhoc-group-emergency-alert>). A profile not read leaves the decision to the server, as for the other
+     * MCPTT rights of the client.
+     */
+    private fun adhocAuthorised(cancel: Boolean): Boolean {
+        if (service != LocationService.MCPTT) return true
+        val right = if (cancel) "allow-cancel-adhoc-group-emergency-alert" else "allow-activate-adhoc-group-emergency-alert"
+        return client.profile?.allows(right) ?: true
+    }
+
+    /**
+     * §12.1A.1.1: an ad hoc group emergency alert to the users [criteria] select; the server names its group. An
+     * unauthorised request (§6.2.8.1.19) is refused here, nothing sent (1), 2)); the MCPTT alert carries the location
+     * (5) -> §6.2.9.1 2): a <Report> with the <CurrentCoordinate>), so without a position it is not sent either.
+     */
     suspend fun sendAdhoc(criteria: String, location: EmergencyLocation?) {
+        if (!adhocAuthorised(cancel = false)) throw AlertError("ad hoc group emergency alerts are not allowed for this user")
+        if (service == LocationService.MCPTT && location == null) throw AlertError("an ad hoc emergency alert needs this phone's location")
         if (_adhoc.value != null) throw AlertError("an ad hoc alert is already active")
         val response = message(Fields(clientId = client.config.clientId, adhocAlert = true, criteria = criteria), location)
         if (!response.isSuccess) throw failure("ad hoc alert to $criteria", response)
@@ -206,9 +224,11 @@ class EmergencyAlerts(
         event("ad hoc alert ${own.group} criteria now $criteria: ${response.status}")
     }
 
-    /** §12.1A.1.2: cancel this user's ad hoc alert, addressed to the group the server gave it. */
+    /** §12.1A.1.2: cancel this user's ad hoc alert, addressed to the group the server gave it (4) a)). */
     suspend fun cancelAdhoc() {
         val own = _adhoc.value ?: throw AlertError("no ad hoc alert to cancel")
+        // §12.1A.1.2 1), 2): an unauthorised cancellation (§6.2.8.1.19) is not sent.
+        if (!adhocAuthorised(cancel = true)) throw AlertError("cancelling ad hoc group emergency alerts is not allowed for this user")
         val response = message(Fields(requestUri = own.group, clientId = client.config.clientId, adhocAlert = false), null)
         if (!response.isSuccess) throw failure("ad hoc alert ${own.group} cancel", response)
         _adhoc.value = null

@@ -43,6 +43,12 @@ fixes"). The full regression on the completed server fixes (`openmcx-all:srvfix-
 `openmcx-kamailio:6.1.4-14`) passed every check but the regroup lab's known S1/S18 lab choice (TEST_REPORT.md, "Final
 regression on the server fixes"). JVM unit tests 583 and app unit tests 15, all passing.
 
+MCPTT conformance fixes from the suite's Android run `android-mcptt-real-p7` (branch `android-q1-mcptt`, TEST_REPORT.md
+"MCPTT conformance fixes"): the functional alias on group calls, `<preconfigured-group-use-only>` for groups affiliated
+later, the hidden local-init ambient listening call, `<call-to-functional-alias-ind>` "false" in a forwarding request,
+the ad hoc alert rights and location, one-body SIP messages. The other failures of that run (6.6.4, P.10.4, P.3.2,
+P.3.9, P.4.5, P.5.1's location) are bench or suite faults, listed there with the suite changes they need.
+
 | Phase | State | What remains (CONFORMANCE.md) |
 |---|---|---|
 | 0: known fixes | done | the MCVideo halves were done in phase 7 |

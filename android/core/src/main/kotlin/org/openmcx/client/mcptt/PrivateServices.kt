@@ -132,12 +132,12 @@ object PrivateServiceRules {
         ?: info.service["forwarding-call-outcome"]
 
     /**
-     * §11.1.9.2.1 2) d) i): the forwarding request of a ringing private call: <request-type>, B) the target as a
-     * functional alias ([toAlias]), C) <forwarding-reason> "manual-input", D) the functional alias the call was made to,
+     * §11.1.9.2.1 2) d) i): the forwarding request of a ringing private call: <request-type>, B)
+     * <call-to-functional-alias-ind> "true" for a target that is a functional alias ([toAlias]), otherwise "false", C) <forwarding-reason> "manual-input", D) the functional alias the call was made to,
      * E) <forwarded-by-mcptt-id> the MCPTT ID it was addressed to, F) <forwarding-target-orig-id> the target.
      */
     fun forwardRequest(target: String, forwardedBy: String, calledAlias: String?, toAlias: Boolean): McpttInfo = McpttInfo(
-        requestType = FORWARD, callToFunctionalAlias = if (toAlias) true else null,
+        requestType = FORWARD, callToFunctionalAlias = toAlias,
         service = buildMap {
             put("forwarding-reason", "manual-input"); put("forwarded-by-mcptt-id", forwardedBy)
             put("forwarding-target-orig-id", target); calledAlias?.let { put("forwarded-by-functional-alias", it) }

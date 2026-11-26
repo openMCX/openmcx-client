@@ -49,7 +49,7 @@ class McxService : LifecycleService() {
         if (inCall || inVideoCall) types = types or ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
         val microphone = checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
         // A hidden call (ambient listening or viewing, the listened-to or viewed-to user) shows no call in the notification.
-        val shown = (inCall && Engine.mcptt?.active != null) || (inVideoCall && Engine.mcvideo?.active?.hidden != true)
+        val shown = (inCall && Engine.mcptt?.active?.let { !it.hidden } == true) || (inVideoCall && Engine.mcvideo?.active?.hidden != true)
         if (microphone && runCatching {
                 ServiceCompat.startForeground(this, NOTIFICATION_ID, notification(shown), types or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
             }.isSuccess) return

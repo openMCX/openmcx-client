@@ -956,6 +956,13 @@ class Lab:
             self.check(f"{third} sees alice's call from incident-commander", other.get("calling_alias") == incident_commander, calling=other.get("calling_alias"))
             self.hangup(A)
             self.idle_everywhere([A, third])
+            # §10.1.1.2.1.1 14) e): her group call presents it too, in the INVITE's <functional-alias-URI>.
+            self.cmd(A, "group", GROUP)
+            invite = self.last_sent(A, "INVITE ", "<session-type>prearranged</session-type>") or ""
+            self.check("alice's group call INVITE presents incident-commander",
+                       f"<functional-alias-URI type=\"Normal\"><mcpttURI>{incident_commander}</mcpttURI>" in invite)
+            self.hangup(A)
+            self.group_call_over()
         self.cmd(A, "fa", "use", "none")
         self.cmd(A, "fa", "deactivate", incident_commander)
         self.cmd(B, "fa", "deactivate", duty_officer)
@@ -1423,8 +1430,10 @@ class Lab:
             return
         self.cmd(B, "ambient-source", SPEECH[B])
         call = self.cmd(B, "ambient", "local", MCPTT[A])
-        self.check("bob's local-init ambient listening call is established", call["state"] == "established"
-                   and call["ambient_role"] == "listened-to" and not call["hidden"], call=call)
+        # §11.1.6.2.1.1 (200 (OK)) 3), §11.1.6.2.0: bob asked for it, yet his phone gives no indication of it: the call
+        # is hidden (no call screen, notification or Telecom call), still his to release (§11.1.6.2.1.3).
+        self.check("bob's local-init ambient listening call is established, hidden from bob", call["state"] == "established"
+                   and call["ambient_role"] == "listened-to" and call["hidden"], call=call)
         invite = self.last_sent(B, "INVITE ", "ambient-listening") or ""
         self.check("bob's INVITE: local-init, sendonly, an implicit floor request",
                    "<ambient-listening-type>local-init</ambient-listening-type>" in invite and "a=sendonly" in invite and "mc_implicit_request" in invite)

@@ -188,4 +188,21 @@ class FunctionalAliasTest {
         assertEquals("sip:b@x", call.calledFunctionalAlias)
         assertEquals(true, call.callToFunctionalAlias)
     }
+
+    /**
+     * TS 24.379 §10.1.1.2.1.1 14) e), §10.1.2.2.1.1 13) e) (group calls, as §11.1.1.2.1.1 14) c) for private ones): the
+     * alias the user uses goes in <functional-alias-URI> while the server has it active; none when it is not active,
+     * when none is chosen, or for an ambient listening call.
+     */
+    @Test
+    fun theAliasPresentedOnCalls() {
+        val using = FunctionalAliasState(active = setOf(dispatcher), inUse = dispatcher)
+        assertEquals(dispatcher, FunctionalAliasRules.presented(using))
+        assertNull(FunctionalAliasRules.presented(using, ambientType = "local-init"))
+        assertNull(FunctionalAliasRules.presented(using.copy(active = emptySet())))
+        assertNull(FunctionalAliasRules.presented(FunctionalAliasState(active = setOf(dispatcher))))
+        val invite = McpttInfo(sessionType = "prearranged", requestUri = "sip:operations@mcx.test",
+            functionalAlias = FunctionalAliasRules.presented(using)).encode()
+        assertTrue(invite, "<anyExt><functional-alias-URI type=\"Normal\"><mcpttURI>$dispatcher</mcpttURI></functional-alias-URI></anyExt>" in invite)
+    }
 }

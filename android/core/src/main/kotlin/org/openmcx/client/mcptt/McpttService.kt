@@ -134,10 +134,17 @@ class Call internal constructor(
     /** §11.1.6.2.1.3 step 1: an ambient listening call is released here only with the release capability (annex D.3). */
     @Volatile var mayRelease: Boolean = true
     /**
-     * The listened-to user of a remotely initiated ambient listening call is given no indication of it (§11.1.6.2.1.2,
-     * TS 23.379 §10.14.3.2): the call is not shown and is not [McpttService.active].
+     * §11.1.6.2.0: the listened-to user is given no indication of an ambient listening call's progress: the call is not
+     * shown. For a remotely initiated one (§11.1.6.2.1.2, TS 23.379 §10.14.3.2) not even its start or end; for one the
+     * listened-to user initiated (local-init), no indication of its establishment (§11.1.6.2.1.1, 200 (OK) step 3)) or
+     * of its release (§11.1.6.2.1.3 step 2), §11.1.6.2.1.4 step 2)).
      */
-    val hidden: Boolean get() = ambientType == "remote-init" && ambientRole == "listened-to"
+    val hidden: Boolean get() = ambientRole == "listened-to"
+    /**
+     * A hidden call the user did not ask for (remote-init): never [McpttService.active], ended by the user's own call
+     * request. A local-init one is the user's call: the user may release it (§11.1.6.2.1.3).
+     */
+    val concealed: Boolean get() = hidden && ambientType == "remote-init"
     /** The answer mode of this private call ("Auto" or "Manual"), which its transfer or forwarding repeats (§11.1.1.2.1.1 14A) a), 14C) a)). */
     @Volatile var answerMode: String? = null
     /** Its <forwarding-sequence-number> (§11.1.1.2.1.1 14B), 14C) a1)). */
@@ -210,7 +217,7 @@ class McpttService(
      * The user's call: the newest one not released (a transferred user's call to the target is newer than its call
      * with the requester, §11.1.8.2.2); a hidden ambient listening call (§11.1.6.2.1.2) is never the user's call.
      */
-    val active: Call? get() = _calls.value.lastOrNull { it.state != "released" && !it.hidden }
+    val active: Call? get() = _calls.value.lastOrNull { it.state != "released" && !it.concealed }
 
     /** The call-back, remotely initiated call, transfer and forwarding procedures (TS 24.379 §10.1.5, §11.1.5, §11.1.7-§11.1.9). */
     val services = PrivateServices(client, this)
@@ -583,9 +590,13 @@ class McpttService(
         if (active != null && extra?.alongside != true) throw CallError("already in a call")
         // TS 23.379 §10.14.3.3: a call request of the listened-to user ends a hidden ambient listening call; the server
         // releases it before setting up the new call.
-        _calls.value.filter { it.hidden }.forEach { release(it, "call-request-initiated-by-listened-to-client") }
+        _calls.value.filter { it.concealed }.forEach { release(it, "call-request-initiated-by-listened-to-client") }
         val groupCall = type == CallType.PREARRANGED || type == CallType.CHAT
-        // §10.1.1.2.1.1, §10.1.2.2.1.1: no call on a group whose document says <preconfigured-group-use-only>.
+        // §10.1.1.2.1.1, §10.1.2.2.1.1: no call on a group whose document says <preconfigured-group-use-only>. A group
+        // the client has no document of (one affiliated to later than the start-up, not in the provisioning) has it
+        // read now (TS 24.481 §6.3.14), unless it is a regroup (§16.1: no document of its own).
+        if (groupCall && group != null && group !in client.groupDocuments && regroups.regroupOf(group) == null)
+            withTimeoutOrNull(GROUP_DOCUMENT_WAIT_MS) { runCatching { client.refreshGroupDocument(group) } }
         if (groupCall && !GroupCallRules.callsAllowed(group?.let { client.groupDocuments[it]?.preconfiguredUseOnly }))
             throw CallError("calls are not allowed on the preconfigured group $group")
         // §10.1.1.2.1.1 step 14 d), §10.1.2.2.1.1 step 13 d): the constituent group of a regroup or temporary group.
@@ -668,9 +679,11 @@ class McpttService(
             call.answerMode = privAnswerMode ?: when (commencement) { Commencement.MANUAL -> "Manual"; null -> null; else -> "Auto" }
             // §11.1.7.2.2 3) b), §10.1.5.2.2: the Resource-Priority of a remotely initiated call's <ric-app-level-priority>.
             (resource ?: extra?.resourcePriority)?.let { request.headers.add("Resource-Priority", it) }
-            // §9A, §11.1.1.2.1.1 step 14c: the alias this user presents (private and ad hoc calls, as the reference client),
-            // the call to an alias, and the alias called once the server selected its MCPTT ID.
-            val presented = client.aliases.value.inUse.takeIf { type != CallType.PREARRANGED && type != CallType.CHAT && ambientType == null }
+            // §9A: the active alias this user presents: §10.1.1.2.1.1 14) e) (prearranged), §10.1.2.2.1.1 13) e) (chat),
+            // §11.1.1.2.1.1 step 14c (private), §17.2.2.1.1 (ad hoc), as the reference client; over a pre-established
+            // session the REFER carries it (§10.1.1.2.2.1, §10.1.2.2.2.1). Not an ambient listening call (§11.1.6.2.1.1
+            // has no item for it). Then the call to an alias, and the alias called once the server selected its MCPTT ID.
+            val presented = FunctionalAliasRules.presented(client.aliases.value, ambientType)
             call.callingAlias = presented
             call.calledAlias = calledAlias ?: peer.takeIf { toAlias }
             // §11.1.1.2.1.1 14B) a): a private call the user initiates has <forwarding-sequence-number> 0; 14C) a1): a
@@ -873,7 +886,7 @@ class McpttService(
         val ambient = info.sessionType == CallType.AMBIENT
         // The server releases a hidden ambient listening call before it invites the listened-to user to another call
         // (§11.1.6.4.3): what is left of it here goes.
-        if (!ambient) _calls.value.filter { it.hidden }.forEach { release(it, "released for another call") }
+        if (!ambient) _calls.value.filter { it.concealed }.forEach { release(it, "released for another call") }
         // §11.1.1.2.1.2 step 8 c), §11.1.6.2.1.2 step 1 a): busy on another call, 486 (Busy Here); the same for any
         // other call type here. A transferred user's call to the target may arrive while it is in the call with the
         // requester (two at most).
@@ -1245,6 +1258,8 @@ class McpttService(
     companion object {
         /** How long a protected group call waits for the group's GMK before giving up (as MCVideo). */
         const val GROUP_KEY_WAIT_MS = 10_000L
+        /** How long a group call waits for the document of a group it has none of (<preconfigured-group-use-only>). */
+        const val GROUP_DOCUMENT_WAIT_MS = 3_000L
         const val ALLOW = "INVITE, ACK, CANCEL, BYE, UPDATE, INFO, MESSAGE, NOTIFY, OPTIONS"
     }
 }

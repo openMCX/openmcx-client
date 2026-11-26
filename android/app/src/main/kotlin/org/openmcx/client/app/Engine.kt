@@ -221,9 +221,9 @@ object Engine {
             service.listener = object : CallListener {
                 override fun incoming(call: Call) { bridge.track(call); notify.incomingCall(call) }
                 override fun changed(call: Call) {
-                    // The listened-to user of a remotely initiated ambient listening call is told nothing (TS 24.379
-                    // §11.1.6.2.1.2): no Telecom call, notification, location trigger or history entry. The foreground
-                    // service keeps the microphone (inCall).
+                    // The listened-to user of an ambient listening call is told nothing of its progress (TS 24.379
+                    // §11.1.6.2.0; §11.1.6.2.1.2 remote-init, §11.1.6.2.1.1 200 (OK) 3) local-init): no Telecom call,
+                    // notification, location trigger or history entry. The foreground service keeps the microphone (inCall).
                     if (call.hidden) { _inCall.value = service.calls.value.any { it.state != "released" }; return }
                     if (call.outgoing) bridge.track(call)
                     if (call.state != "ringing") notify.cancelIncoming(call)

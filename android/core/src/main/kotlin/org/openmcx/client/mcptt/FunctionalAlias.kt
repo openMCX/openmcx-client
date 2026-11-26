@@ -94,6 +94,14 @@ data class FunctionalAliasState(
  * TS 24.281 §20.2.1, the same in the three services), so that they can be tested without a server.
  */
 object FunctionalAliasRules {
+    /**
+     * TS 24.379 §10.1.1.2.1.1 14) e), §10.1.2.2.1.1 13) e), §11.1.1.2.1.1 14) c), §12.1A.1.1 4) d): the active functional
+     * alias an outgoing call presents in <functional-alias-URI>: the one the user chose to use, while the server has it
+     * active (§9A.2.1.3, NOTE 5). An ambient listening call ([ambientType]) presents none (§11.1.6.2.1.1 has no item).
+     */
+    fun presented(state: FunctionalAliasState, ambientType: String? = null): String? =
+        state.inUse?.takeIf { ambientType == null && it in state.active }
+
     /** A status change sent: its action, its aliases and its <p-id-fa>. */
     data class Change(val action: String, val aliases: List<String>, val publishId: String)
 
