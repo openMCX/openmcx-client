@@ -2083,7 +2083,8 @@ class Lab:
         """TS 24.281 §8.2.1.2: de-affiliation from one MCVideo group (video-deaffiliate <group>; the last group: Expires 0
         and no PIDF, step 4) and affiliation again; §8.2.1.3: this user's own MCVideo affiliation subscribed to; §8.2.1.4:
         a negotiated-mode request (MESSAGE with the MCVideo affiliation command) to bob, who accepts it for the group
-        named (§8.2.1.5, video-affiliation-accept <group>) when the server passes it on."""
+        named (§8.2.1.5, video-affiliation-accept <group>); the server passes it on when alice has the right
+        (--fixture-arg=--remote-affiliation)."""
         alice, bob = "sip:alice.mcvideo@mcx.test", "sip:bob.mcvideo@mcx.test"
         video_groups = lambda c: self.status(c)["mcvideo"]["affiliations"]
         self.check("alice is affiliated to the MCVideo group", video_groups(A).get(GROUP) == "affiliated", groups=video_groups(A))
@@ -2111,18 +2112,27 @@ class Lab:
             ok = False
         self.check("the notification lists alice's client affiliated to the group", ok, target=self.cmd(A, "video-procedures")["target_affiliations"])
         self.cmd(A, "video-affiliation-unsubscribe", alice)
-        # The server notifies one affiliation subscription per user (see S23): the client's own takes it back.
-        self.cmd(A, "refresh", "video-subscription")
+        # With --fixture-arg=--remote-affiliation alice may change bob's affiliation: the server relays her negotiated-
+        # mode request to bob (TS 24.281 §8.2.2.2.8), naming her in <mcvideo-calling-user-id>.
+        rights = "--remote-affiliation" in (self.meta.get("fixture_args") or [])
         r = self.cmd(A, "video-affiliate-remote", bob, GROUP, "deaffiliate", "negotiated")
-        self.check("the negotiated-mode MESSAGE gets a final answer", r["status"] >= 200, result=r)
+        self.check("the negotiated-mode MESSAGE gets " + ("a 2xx (relayed to bob)" if rights else "a final answer"),
+                   (200 <= r["status"] < 300) if rights else r["status"] >= 200, result=r)
         message = self.last_sent(A, "MESSAGE sip:mcvideo") or ""
         self.check("the MESSAGE carries the MCVideo affiliation command" + ("" if self.protected else " naming bob"),
                    "application/vnd.3gpp.mcvideo-affiliation-command+xml" in message and
                    (self.protected or ("<de-affiliate><group>" in message and bob in message)), message=message[-1200:])
-        time.sleep(2)
-        pending = self.cmd(B, "video-procedures")["affiliation_command"]
+        if rights:
+            try:
+                pending = self.wait("bob's request", lambda: self.cmd(B, "video-procedures")["affiliation_command"], timeout=15)
+            except Failed:
+                pending = None
+            self.check("bob gets alice's request", bool(pending) and pending["from"] == alice, request=pending)
+        else:
+            time.sleep(2)
+            pending = self.cmd(B, "video-procedures")["affiliation_command"]
         if pending is None:
-            self.check("bob got no request (the server does not relay it)", True)
+            self.check("bob got no request" + (" (server without --remote-affiliation rights)" if not rights else ""), not rights)
         else:
             r = self.cmd(B, "video-affiliation-accept", GROUP, timeout=30)
             self.check("bob accepts it for the group and de-affiliates", r["last_affiliation_answer"] == "accepted" and
@@ -2444,8 +2454,11 @@ class Lab:
                 self.check(f"alice's {decision} is applied", done["state"] == state)
                 sender.join(100)
                 out = self.last_media(B, "fd", True, f"bob's {decision}.bin ends", lambda c: c["file"] == f"{decision}.bin" and c["state"] != "inviting")
-                # The server takes alice's 480 (warning 110 or 231) and ends bob's INVITE with 487, the warning not passed on.
-                self.check(f"bob's file is refused after alice's {decision}", out["state"] == "refused" and (out.get("status") or 0) >= 400, out=out)
+                # TS 24.282 §10.2.5.4.4: alice's 480 and its warning (110 declined, 231 deferred) answer bob's INVITE
+                # (fixed on openmcx-server branch android-server-faults; it was 487, the warning not passed on).
+                code = "110" if decision == "decline" else "231"
+                self.check(f"bob's file is refused with alice's 480 and warning {code}", out["state"] == "refused"
+                           and out.get("status") == 480 and code in (out.get("warning") or ""), out=out)
         finally:
             self.cmd(A, "fd-media-policy", "accept", ok=False)
         # A group file, mandatory (the group takes 2000 bytes).
