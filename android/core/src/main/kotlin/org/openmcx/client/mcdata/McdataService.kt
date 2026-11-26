@@ -128,17 +128,35 @@ class McdataService(private val client: McxClient) : ServiceHandler {
         AdhocTarget.of(target)?.let { return sendAdhoc(it, text, disposition, conversationId) }
         // §15.2.13: the payload content type, TEXT unless another is asked for (ENHANCED STATUS, §14.2.1.1).
         val data = DataPayload(listOf(Payload(payloadType, text.toByteArray(Charsets.UTF_8))))
-        // TS 24.282 §9.2.1.1: above <max-payload-size-sds-cplane-bytes> the message goes over the media plane (§9.2.3).
-        if (data.size > config.maxPayloadSizeSdsCplaneBytes) {
+        val limits = client.mcdataTxLimits
+        // TS 24.282 §11.1 3): a one-to-one SDS larger than <max-data-size-sds-bytes> of the MCData service configuration
+        // (TS 24.484 §10.4.2.1 2a)) "shall not continue": refused here, nothing sent.
+        if (!group) limits?.maxDataSizeSds?.let { max ->
+            if (data.size > max) {
+                event("SDS of ${data.size} octets not allowed: <max-data-size-sds-bytes> $max (TS 24.282 §11.1 3))")
+                throw SdsError("SDS larger than <max-data-size-sds-bytes> $max (TS 24.282 §11.1 3))")
+            }
+        }
+        // TS 24.282 §9.2.1.1 2): above the <max-payload-size-sds-cplane-bytes> of the MCData service configuration
+        // (TS 24.484 §10.4.2.1 2b); the provisioning's value until the document is read) the message goes over the media
+        // plane (§9.2.3); the payload size is the Payload IE's contents less its content type octet (§9.2.2.3.1 NOTE 4).
+        val cplane = limits?.maxPayloadSizeSdsCplane ?: config.maxPayloadSizeSdsCplaneBytes.toLong()
+        val mediaPlane = data.size > cplane
+        // TS 24.282 §11.1 2), 5), §9.2.2.2.1 3)a), §9.2.3.2.3: the group document as the GMS has it now.
+        val groupDocument = if (group) groupSdsAllowed(target, data.size.toLong(), mediaPlane, session = false) else null
+        if (mediaPlane) {
             val media = media ?: throw SdsError("payload of ${data.size} octets is above the signalling-plane limit")
             // §22 over the media plane: the INVITE names the alias, a 300 the user to invite (Adhoc.kt, AliasTarget).
-            return media.sendStandalone(if (toAlias) AliasTarget.PREFIX + target else target, text, group, disposition, conversationId, inReplyTo)
+            return media.sendStandalone(if (toAlias) AliasTarget.PREFIX + target else target, text, group, disposition, conversationId, inReplyTo,
+                checked = true)
         }
         val signalling = SdsSignalling(now(), conversationId, UUID.randomUUID(), inReplyTo, disposition = disposition)
         // §9.2.2.2.1 steps 2b ii and 3b v: an alias presented only while it is active for this user, and a one-to-one
         // SDS to an alias (<call-to-functional-alias-ind>), or to the MCData ID the server selected for it.
         val presented = client.aliasesOf(McService.MCDATA).value.let { a -> a.inUse?.takeIf { it in a.active } }
-        val info = if (group) McdataInfo(requestType = "group-sds", requestUri = target, clientId = client.config.clientId, functionalAlias = presented)
+        // §9.2.2.2.1 3)b)iii): to a temporary group, the constituent group of the user in <associated-group-id>.
+        val info = if (group) McdataInfo(requestType = "group-sds", requestUri = target, clientId = client.config.clientId, functionalAlias = presented,
+            associatedGroupId = groupDocument?.let(::associatedGroup))
         else McdataInfo(requestType = "one-to-one-sds", functionalAlias = presented, callToFunctionalAlias = if (toAlias) true else null,
             calledFunctionalAlias = calledAlias)
         val parts = mutableListOf(Part(McdataInfo.CONTENT_TYPE, info.encode().toByteArray()))
@@ -167,6 +185,21 @@ class McdataService(private val client: McxClient) : ServiceHandler {
         _outbox.value = (_outbox.value + sent).takeLast(100)
         event("sent ${if (group) "group" else "one-to-one"} SDS ${sent.messageId} to $target: ${response.status}")
         return sent
+    }
+
+    /** TS 24.282 §11.1 with §9.2.2.2.1 3)a), §9.2.3.2.3 ([McdataTransmission.groupSds]); the group document read, or null. */
+    internal suspend fun groupSdsAllowed(group: String, size: Long, mediaPlane: Boolean, session: Boolean): String? =
+        McdataTransmission.groupSds(client, group, size, mediaPlane, session)
+
+    /**
+     * TS 24.282 §9.2.2.2.1 3)b)iii): the constituent group the user belongs to of the temporary group whose document is
+     * [text] (its <on-network-temporary>, TS 24.481 §7.2.4.2), or null for a group that is not temporary.
+     */
+    internal fun associatedGroup(text: String): String? {
+        val constituents = runCatching { org.openmcx.client.documents.GroupDocument.parse(text).temporaryConstituents }.getOrNull()
+        if (constituents.isNullOrEmpty()) return null
+        return McdataGroupRules.associatedGroup(constituents, config.groups.firstOrNull(),
+            config.groups + client.status.value.mcdata.affiliations.keys)
     }
 
     /**

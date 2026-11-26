@@ -53,6 +53,10 @@ class FdServiceTest {
         override suspend fun refreshToken() { refreshes++; token = "t${refreshes + 1}" }
         override fun groupPolicy(group: String) = policies[group]
         override fun event(text: String) {}
+        var alias: String? = null
+        override fun aliasInUse() = alias
+        var refusal: String? = null
+        override suspend fun transmission(target: String, group: Boolean, size: Long) { refusal?.let { throw SdsError(it) } }
     }
 
     /** The media storage function behind the proxy, on disk. */
@@ -133,6 +137,27 @@ class FdServiceTest {
         assertEquals(metadata.size, offered.size); assertEquals(metadata.sha256, offered.sha256)
         assertEquals(sent.id, request.messageId.toString())
         assertEquals("Bearer t1", files.tokens.single())
+    }
+
+    @Test fun theFdRequestNamesTheFunctionalAliasInUse() = runTest {
+        val peer = FakePeer().apply { alias = "sip:front-desk.fa@mcx.test" }; val files = FakeFiles()
+        val fd = service(backgroundScope, peer, files)
+        val (file, metadata) = staged()
+        fd.send("sip:bob@mcx.test", false, file, metadata)
+        // TS 24.282 §10.2.4.2.1 1)b)ii) (§22): <functional-alias-URI> while the alias is active; the client ID.
+        val info = McdataInfo.parse(peer.sent.single().first { it.mediaType == McdataInfo.CONTENT_TYPE }.text)
+        assertEquals("sip:front-desk.fa@mcx.test", info.functionalAlias)
+        assertEquals(peer.clientId, info.clientId)
+    }
+
+    @Test fun aFileTheTransmissionControlRefusesIsNotUploaded() = runTest {
+        val peer = FakePeer().apply { refusal = "FD larger than <max-data-size-fd-bytes> 100 (TS 24.282 §11.1 4))" }; val files = FakeFiles()
+        val fd = service(backgroundScope, peer, files)
+        val (file, metadata) = staged()
+        // TS 24.282 §10.2.1.1 1) -> §11.1: nothing uploaded, no FD request.
+        assertTrue(runCatching { fd.send("sip:bob@mcx.test", false, file, metadata) }.exceptionOrNull() is FdError)
+        assertEquals(0, files.uploads)
+        assertTrue(peer.sent.isEmpty())
     }
 
     @Test fun groupOfferUsesGroupAndClientId() = runTest {

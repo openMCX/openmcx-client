@@ -53,6 +53,10 @@ interface FdPeer {
     fun event(text: String)
     /** TS 24.282 §6.6.3 with TS 33.180 §8.3: end-to-end payload protection, null without. */
     val protection: McdataProtection? get() = null
+    /** TS 24.282 §10.2.4.2.1 1)b)ii): the functional alias in use, while it is active for the user; null otherwise. */
+    fun aliasInUse(): String? = null
+    /** TS 24.282 §10.2.1.1 1) -> §11.1 (McdataTransmission.fd): throws when the file of [size] octets is not allowed. */
+    suspend fun transmission(target: String, group: Boolean, size: Long) {}
 }
 
 /** [FdPeer] on the running [McxClient]. */
@@ -63,7 +67,8 @@ class ClientFdPeer(private val client: McxClient) : FdPeer {
     override suspend fun send(parts: List<Part>): SipResponse = send(parts, emptyList())
     override suspend fun send(parts: List<Part>, headers: List<Pair<String, String>>): SipResponse {
         val request = client.ua.newRequest("MESSAGE", mcdata.psi, NameAddr(mcdata.psi))
-        val (type, body) = Multipart.encode(parts)
+        // TS 24.282 §6.4: one MIME body goes as it is, several in a multipart/mixed (the msf-disc-req has one).
+        val (type, body) = if (parts.size == 1) parts[0].contentType to parts[0].content else Multipart.encode(parts)
         request.headers.add("Accept-Contact", "*;+g.3gpp.mcdata.fd;require;explicit")
             .add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCDATA_FD)}\";require;explicit")
             .add("P-Preferred-Service", Icsi.MCDATA_FD)
@@ -76,6 +81,8 @@ class ClientFdPeer(private val client: McxClient) : FdPeer {
     override fun groupPolicy(group: String) = client.groupDocuments[group]?.fd
     override fun event(text: String) = client.event("fd: $text")
     override val protection get() = client.mcdataProtection
+    override fun aliasInUse() = client.aliasesOf(org.openmcx.client.body.McService.MCDATA).value.let { a -> a.inUse?.takeIf { it in a.active } }
+    override suspend fun transmission(target: String, group: Boolean, size: Long) = McdataTransmission.fd(client, target, group, size)
 }
 
 /**
@@ -212,7 +219,10 @@ class FdService(
                 if (policy != null) FdPolicy.requireAllowed(config, policy, size)
                 else FdPolicy.requireAllowed(config.copy(userMaxBytes = null), null, size)
             } else FdPolicy.requireAllowed(config, null, size)
+            // TS 24.282 §10.2.1.1 1) -> §11.1 2), 4), 6), §10.2.4.2.1 3)a): the service configuration and group document.
+            peer.transmission(target, group, size)
         } catch (e: IllegalArgumentException) { throw FdError(e.message ?: "file not allowed") }
+        catch (e: SdsError) { throw FdError(e.message ?: "file not allowed") }
         val record = FdRecord(UUID.randomUUID().toString(), UUID.randomUUID().toString(), FdDirection.OUTGOING, target,
             if (group) target else null, metadata, localPath = file.path, state = FdState.STAGED, completionRequested = true)
         add(record)
@@ -250,8 +260,10 @@ class FdService(
             update(record.id) { it.copy(state = FdState.SENDING, url = url, transferred = size) }
             val signalling = FdSignalling(clock(), UUID.fromString(record.conversationId), UUID.fromString(record.id), url,
                 described.encode(), completionRequested = true)
-            val requestInfo = if (group) McdataInfo(requestType = "group-fd", requestUri = target, clientId = peer.clientId)
-            else McdataInfo(requestType = "one-to-one-fd")
+            // TS 24.282 §10.2.4.2.1 1)b)ii) (§22): the functional alias in use, while active; the client ID (as Linux).
+            val alias = peer.aliasInUse()
+            val requestInfo = if (group) McdataInfo(requestType = "group-fd", requestUri = target, clientId = peer.clientId, functionalAlias = alias)
+            else McdataInfo(requestType = "one-to-one-fd", clientId = peer.clientId, functionalAlias = alias)
             val parts = mutableListOf(Part(McdataInfo.CONTENT_TYPE, requestInfo.encode().toByteArray()))
             if (!group) parts += Part(ResourceLists.CONTENT_TYPE, ResourceLists.encode(listOf(target)).toByteArray())
             parts += Part(McdataService.SIGNALLING, signalling.encode())

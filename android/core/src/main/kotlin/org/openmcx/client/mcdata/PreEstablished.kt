@@ -43,9 +43,8 @@ import org.openmcx.client.sip.NameAddr
 // RFC 3261 §12.2), or, refused, releases it and establishes a new one.
 //
 // Not implemented: ICE connectivity checks (the answer of the OpenMCX server carries no ICE attributes, which turns ICE
-// off, RFC 8839 §4.2.3), the SIP INFO of §6.2.8.1.13 within the session, the MDEG/MDEGC/MDEPC state machines (as on
-// demand, only the communication's emergency and imminent peril flags are kept), FD over the session (TS 24.282 has
-// none).
+// off, RFC 8839 §4.2.3), FD over the session (TS 24.282 has none). The priority states of §6.2.8 (MDEG, MDEGC, MDIG,
+// MDIGC, MDEPC, MDEPP) are the media service's ([McdataPriority]), as on demand.
 //
 // Specifications: TS 24.282 V19.7.0 (Rel-19), TS 24.582 V19.0.0 (Rel-19), RFC 3515, RFC 4488, RFC 4538, RFC 2392,
 // RFC 5366, RFC 5368, RFC 4975, RFC 4145, RFC 6544, RFC 8839, RFC 4028, RFC 3261.
@@ -401,9 +400,10 @@ class McdataPreSession internal constructor(private val s: McdataMediaService.In
             else -> {
                 val c = current
                 if (c != null && info != null && communication == "established") {
-                    // §6.2.8.4.2 (the participating function's priority re-INVITE): the session's media in the 200 (OK).
-                    s.priorityFromServer(c, info)
-                    tx.respond(200, answer, "application/sdp", listOf("Contact" to peer.contact("sds")) + extra)
+                    // §6.2.8.4.2, §6.2.7.4 (the participating function's priority re-INVITE): the session's media in the 200
+                    // (OK), for a group the g.3gpp.mcdata feature tag and the MCData ICSI in its Contact (§6.2.7.4 7)-8)).
+                    val reply = s.priorityFromServer(c, info)
+                    tx.respond(200, answer, "application/sdp", listOf("Contact" to reply) + extra)
                 } else {
                     // §18.3.4.1.2: 1) an acceptable "m=message" offer (else 488); 2)-3) the 200 (OK) with the answer.
                     if (offer != null && runCatching { MsrpMedia.parse(offer) }.isFailure) { tx.respond(488); return true }

@@ -89,6 +89,11 @@ class EmergencyAlerts(
     /** Where the phone is, for an alert the area notice raises; the group it goes to. */
     var position: () -> EmergencyLocation? = { null }
     var defaultGroup: () -> String? = { null }
+    /**
+     * A notification of a group's in-progress emergency or imminent peril state (TS 24.379 §12.1.1.3, TS 24.282
+     * §6.3.7.1.2): (group, user, <emergency-ind>, <imminentperil-ind>), for the service's own priority states.
+     */
+    var onGroupState: ((String, String?, Boolean?, Boolean?) -> Unit)? = null
 
     private fun event(text: String) {
         events += text
@@ -127,7 +132,8 @@ class EmergencyAlerts(
         }
         LocationService.MCDATA -> McdataInfo.parse(text).let {
             Fields(it.requestUri, it.callingUserId, it.callingGroupId, it.clientId, it.alert, it.originatedBy, it.alertReceived,
-                alertArea = it.emergencyAlertArea, groupArea = it.groupGeoArea, associatedGroup = it.associatedGroupId)
+                alertArea = it.emergencyAlertArea, groupArea = it.groupGeoArea, associatedGroup = it.associatedGroupId,
+                emergency = it.emergency, imminentPeril = it.imminentPeril)
         }
         LocationService.MCVIDEO -> McvideoInfo.parse(text).let {
             Fields(it.requestUri, it.callingUserId, it.callingGroupId, it.clientId, adhocAlert = it.adhocAlert,
@@ -145,7 +151,8 @@ class EmergencyAlerts(
         request.headers.add("Accept-Contact", "*;+g.3gpp.icsi-ref=\"${Icsi.encoded(icsi)}\";require;explicit")
         val parts = mutableListOf(Part(infoType, encode(fields).toByteArray()))
         if (location != null) parts += Part(service.mime, location.encode(service).toByteArray())
-        val (type, body) = Multipart.encode(parts)
+        // TS 24.282 §6.4 (TS 24.379 §6.1.1): one MIME body as it is (a cancel has the info document only), several multipart.
+        val (type, body) = if (parts.size == 1) parts[0].contentType to parts[0].content else Multipart.encode(parts)
         request.headers.add("Content-Type", type)
         return client.ua.send(SipRequest(request.method, request.uri, request.headers, body))
     }
@@ -258,6 +265,7 @@ class EmergencyAlerts(
     private fun groupState(info: Fields) {
         val group = info.callingGroup ?: info.requestUri ?: return
         val before = _groupStates.value[group] ?: GroupPriorityState()
+        onGroupState?.invoke(group, info.callingUser, info.emergency, info.imminentPeril)
         val after = before.copy(emergency = info.emergency ?: before.emergency, imminentPeril = info.imminentPeril ?: before.imminentPeril,
             by = info.callingUser ?: before.by, at = System.currentTimeMillis())
         _groupStates.value = if (!after.emergency && !after.imminentPeril) _groupStates.value - group else _groupStates.value + (group to after)

@@ -47,6 +47,8 @@ interface McdataMediaPeer {
     fun localAddress(): String
     /** The Contact of an initial INVITE or its 2xx for [feature] "sds" or "fd" (TS 24.282 §9.2.3.2.3 steps 1-4). */
     fun contact(feature: String): String
+    /** This client's Contact URI (for the Contact of a 200 (OK) with other feature tags, TS 24.282 §6.2.7.4 7)-8)). */
+    fun contactUri(): String = NameAddr.parse(contact("sds")).uri
     /** TS 24.282 §6.2.8.1.2, §6.2.8.1.12, §6.2.8.3.3: the Resource-Priority of [level] ("emergency", "imminent_peril"). */
     fun resourcePriority(level: String): String?
     /** The functional alias in use while it is active (TS 24.282 §9.2.3.2.3 7)b)ii)B)). */
@@ -71,6 +73,11 @@ interface McdataMediaPeer {
         throw SdsError("REFER not available")
     /** The bodies of a REFER entry's hname "body", protected as the request's own (TS 24.282 §6.5.2.3.1). */
     fun sealEntry(parts: List<Part>): List<Part> = parts
+    /**
+     * TS 24.282 §11.1 (McdataTransmission): throws when the service configuration or the group document does not allow
+     * the communication: "sds" a group SDS of [size] octets ([mediaPlane], [session]); "fd" a file of [size] octets.
+     */
+    suspend fun transmission(kind: String, target: String, group: Boolean, size: Long, mediaPlane: Boolean = true, session: Boolean = false) {}
 }
 
 /** [McdataMediaPeer] on the running [McxClient]. */
@@ -83,9 +90,12 @@ class ClientMediaPeer(private val client: McxClient) : McdataMediaPeer {
         val host = ua.flow?.connection?.localHost ?: throw SdsError("not connected")
         return runCatching { InetAddress.getByName(host) }.getOrNull()?.takeIf { it is Inet4Address }?.hostAddress ?: host
     }
+    override fun contactUri() = ua.contactUri()
     override fun contact(feature: String) = "<${ua.contactUri()}>;+g.3gpp.mcdata.$feature;+g.3gpp.icsi-ref=\"" +
         Icsi.encoded(if (feature == "fd") Icsi.MCDATA_FD else Icsi.MCDATA_SDS) + "\""
-    override fun resourcePriority(level: String) = client.serviceResourcePriorities["mcdata"]?.get(level)?.takeIf { it.isNotBlank() }
+    // TS 24.484 §10.4.2.1: the levels "emergency", "imminent" ("imminent_peril" in this service's words) and "normal".
+    override fun resourcePriority(level: String) = client.serviceResourcePriorities["mcdata"]
+        ?.get(if (level == "imminent_peril") "imminent" else level)?.takeIf { it.isNotBlank() }
     override fun aliasInUse() = client.aliasesOf(McService.MCDATA).value.let { a -> a.inUse?.takeIf { it in a.active } }
     override suspend fun invite(parts: List<Part>, headers: List<Pair<String, String>>): Pair<SipResponse, Dialog?> {
         val request = ua.newRequest("INVITE", mcdata.psi, NameAddr(mcdata.psi))
@@ -139,6 +149,11 @@ class ClientMediaPeer(private val client: McxClient) : McdataMediaPeer {
         return ua.send(SipRequest(request.method, request.uri, request.headers, body))
     }
     override fun sealEntry(parts: List<Part>) = client.protection.mcdataBodies(parts)
+    override suspend fun transmission(kind: String, target: String, group: Boolean, size: Long, mediaPlane: Boolean, session: Boolean) {
+        if (AdhocTarget.of(target) != null || AliasTarget.of(target) != null) return
+        if (kind == "fd") McdataTransmission.fd(client, target, group, size)
+        else if (group) McdataTransmission.groupSds(client, target, size, mediaPlane, session)
+    }
 }
 
 /** An incoming INVITE and the means to answer it (a [ServerTransaction], or a test's). */
@@ -180,6 +195,8 @@ class MediaCommunication(
     @Volatile var release: String? = null
     /** Over the pre-established session (TS 24.282 §9.2.5): left by a REFER "BYE", not a BYE. */
     @Volatile var preEstablished = false
+    /** The priority states before the invitation was processed, restored when it is cancelled unanswered (TS 24.282 §6.2.8.4.1 2)). */
+    @Volatile var priorityBefore: McdataPriority.States? = null
     /** The Resource-Priority the communication was granted with (TS 24.282 §9.2.5.3.1.1 0)b)). */
     @Volatile var resourcePriority: String? = null
     /**
@@ -237,7 +254,10 @@ class McdataMediaService(
     @Volatile var fileDirectory: java.io.File? = null
 
     /** Where received emergency alerts take the phone's position from (TS 24.282 §6.2.8.1.1 3)b)); null: none. */
-    @Volatile var alertLocation: () -> org.openmcx.client.mcvideo.EmergencyLocation? = { null }
+    @Volatile var alertLocation: suspend () -> org.openmcx.client.mcvideo.EmergencyLocation? = { null }
+
+    /** The emergency and imminent peril states of TS 24.282 §6.2.8 (annex G.4). */
+    val priority = McdataPriority()
 
     internal val internals = Internals()
     /** The pre-established session (TS 24.282 §18.3); communications go over it while it is usable. */
@@ -331,9 +351,11 @@ class McdataMediaService(
 
     private fun requestInfo(requestType: String, target: String, group: Boolean, emergency: Boolean = false, imminent: Boolean = false,
                             alert: Boolean? = null): McdataInfo {
+        // TS 24.282 §6.2.8.3.2 3) (one-to-one), §6.2.8.1.1 3)a) / 4) (group): an emergency request carries <alert-ind>,
+        // "false" without an alert.
         val base = McdataInfo(requestType = requestType, requestUri = if (group) target else null, clientId = peer.clientId,
             functionalAlias = peer.aliasInUse(), emergency = if (emergency) true else null, imminentPeril = if (imminent) true else null,
-            alert = alert)
+            alert = alert ?: if (emergency) false else null)
         // TS 24.282 §24.2.2.1.1 steps 5-7: an ad hoc group: its request type, criteria or group; §22: the alias called.
         AdhocTarget.of(target)?.let { return it.info(base.copy(requestType = AdhocRequest.mediaRequestType(requestType))) }
         if (AliasTarget.of(target) != null) return base.copy(callToFunctionalAlias = true)
@@ -401,11 +423,23 @@ class McdataMediaService(
      */
     private suspend fun establishOverSession(c: MediaCommunication, target: String, group: Boolean, info: McdataInfo, direction: String,
                                              priority: Boolean = false, extraParts: List<Part> = emptyList(),
-                                             extraHeaders: List<Pair<String, String>> = emptyList()): McdataInfo {
+                                             extraHeaders: List<Pair<String, String>> = emptyList(),
+                                             before: McdataPriority.States? = null): McdataInfo {
         val local = protect(c, preSession.media("actpass", direction), target, group)
         c.localMedia = local
         val granted = try { preSession.originate(c, target, info, local, extraParts, extraHeaders, priority) }
-            catch (e: SdsError) { fail(c, e.message ?: "refused", if (e.status != null) "refused" else "failed"); throw e }
+            catch (e: SdsError) {
+                // A communication the user left meanwhile has had its release (§6.2.8.1.17, §6.2.8.1.18) already.
+                if (c.ended) throw e
+                if (priority && e.status != null) {
+                    // TS 24.282 §9.2.5.3.1.1 1) -> §6.2.8.1.5 (group), §9.2.5.2.1.1 1) -> §6.2.8.3.5 (one-to-one).
+                    this.priority.answered(e.status, null)
+                } else if (priority) {
+                    // §9.2.5.2.1.1 2)i): "establish-fail" (or no outcome): the states as they were before the request.
+                    before?.let(this.priority::restore)
+                }
+                fail(c, e.message ?: "refused", if (e.status != null) "refused" else "failed"); throw e
+            }
         try {
             connect(c, local.copy(keyMgmt = null), preSession.remote ?: throw SdsError("no MSRP media for the session"))
         } catch (e: Exception) {
@@ -422,7 +456,9 @@ class McdataMediaService(
      * PAYLOAD (§6.1.1.2.4), then on its 200 the BYE with Reason "SIP;cause=200;text=\"transmission succeeded\"".
      */
     suspend fun sendStandalone(target: String, text: String, group: Boolean, disposition: DispositionRequest? = null,
-                               conversationId: UUID = UUID.randomUUID(), inReplyTo: UUID? = null): SentSds {
+                               conversationId: UUID = UUID.randomUUID(), inReplyTo: UUID? = null, checked: Boolean = false): SentSds {
+        // TS 24.282 §9.2.3.2.3 with §11.1: the group document's rules (checked already when the SDS service chose the plane).
+        if (group && !checked) peer.transmission("sds", target, true, text.toByteArray(Charsets.UTF_8).size.toLong(), mediaPlane = true)
         val c = outgoing("sds", target, group, conversationId)
         add(c)
         val info = requestInfo(if (group) "group-sds" else "one-to-one-sds", target, group)
@@ -455,49 +491,66 @@ class McdataMediaService(
      */
     suspend fun openSession(target: String, group: Boolean, priority: String = "normal", alert: Boolean = false): MediaCommunication {
         val emergency = priority == "emergency"; val imminent = priority == "imminent"
-        if (priority != "normal" && AdhocTarget.of(target) != null) throw SdsError("ad hoc group emergency and imminent peril communications are not implemented")
+        val adhoc = AdhocTarget.of(target) != null
+        if (priority != "normal" && adhoc) throw SdsError("ad hoc group emergency and imminent peril communications are not implemented")
         if (imminent && !group) throw SdsError("imminent peril applies to group communications")
         if (alert && !(emergency && group)) throw SdsError("an emergency alert goes with an emergency group communication")
+        // TS 24.282 §9.2.4.2.3 8)a), a1) with §11.1: the group document allows SDS sessions on the group.
+        if (group) peer.transmission("sds", target, true, 0, mediaPlane = true, session = true)
         val c = outgoing("session", target, group)
         c.emergency = emergency; c.imminentPeril = imminent
         add(c)
         val info = requestInfo(if (group) "group-sds-session" else "one-to-one-sds-session", target, group, emergency, imminent,
             alert = if (emergency) alert else null)
         event("communication ${c.id}: SDS session with $target${if (priority != "normal") " ($priority)" else ""}")
-        val level = if (emergency) "emergency" else if (imminent) "imminent_peril" else null
+        // TS 24.282 §6.2.8.1.2, §6.2.8.1.12, §6.2.8.3.3: the request's own priority, or on a group in an in-progress
+        // state that state's (§9.2.4.2.3 8)e)-f), §9.2.5.3.1.1 3B), 3D)).
+        val level = this.priority.level(group, adhoc, target, emergency, imminent)
         // TS 24.282 §6.2.8.1.1 3)b): the location of an emergency alert goes with the request.
         val location = if (alert) alertLocation()?.let { Part(org.openmcx.client.location.LocationService.MCDATA.mime,
             it.encode(org.openmcx.client.location.LocationService.MCDATA).toByteArray()) } else null
+        if (alert && location == null) event("communication ${c.id}: no position for the emergency alert's location")
+        val before = this.priority.states
+        // TS 24.282 §6.2.8.3.2, §6.2.8.1.1, §6.2.8.1.9: the states the request moves.
+        this.priority.requested(group, target, emergency, imminent, alert)
         if (preSession.usable) {
             // TS 24.282 §9.2.5.2.1.1 1a), §9.2.5.3.1.1 3A)-3D): within the pre-established session, a priority one too;
             // the Resource-Priority for a group (§6.2.8.1.2, §6.2.8.1.12), the alert's location in the REFER's body.
             val rp = if (group) level?.let { l -> peer.resourcePriority(l)?.let { listOf("Resource-Priority" to it) } } ?: emptyList() else emptyList()
             val granted = establishOverSession(c, target, group, info, "sendrecv", priority = emergency || imminent,
-                extraParts = listOfNotNull(location), extraHeaders = rp)
+                extraParts = listOfNotNull(location), extraHeaders = rp, before = before)
             granted(c, group, granted)
         } else {
             val local = protect(c, localMedia("sendrecv"), target, group)
             val parts = targetParts(target, group, info, local)
             location?.let { parts += it }
-            establish(c, parts, headers("sds", level), local)
+            try { establish(c, parts, headers("sds", level), local) }
+            catch (e: SdsError) { if (emergency || imminent) this.priority.answered(e.status ?: 500, null); throw e }
+            // TS 24.282 §6.2.8.3.4, §6.2.8.1.4: the 2xx grants the request (an imminent peril one waits for the SIP INFO
+            // of §6.2.8.1.13 when warned 149).
+            if (emergency || imminent) settle(c, group, this.priority.answered(c.status ?: 200, c.warning))
         }
+        // A plain session on a group in an in-progress state takes part at that state's level (§6.2.8.1.2, §6.2.8.1.12).
+        if (group && !emergency && !imminent && level != null) settle(c, true, this.priority.states)
         c.state = "open"; changed(c)
         return c
     }
 
+    /** The communication's flags from the priority states (the group's in-progress states, or MDEPC for one-to-one). */
+    private fun settle(c: MediaCommunication, group: Boolean, s: McdataPriority.States) {
+        if (group) { c.emergency = s.mdeg == 2 && (s.group == null || s.group == c.group); c.imminentPeril = s.mdig == 2 && !c.emergency }
+        else c.emergency = s.mdepc == 3
+        event("communication ${c.id}: priority ${s.names()}")
+    }
+
     /**
-     * The grant in the re-INVITE "establish-success" (TS 24.282 §9.2.5.3.1.1 0) -> §6.2.8.1.16 for a group: 1)a) no
-     * <emergency-ind>, or "true", and no <imminentperil-ind>: the emergency granted; 2)a) <imminentperil-ind> "true" or
-     * absent: the imminent peril granted; 2)b) "false" with <emergency-ind> "true": raised to an emergency; §9.2.5.2.1.1
-     * 3)a) for a one-to-one one: the emergency granted).
+     * The grant in the re-INVITE "establish-success" (TS 24.282 §9.2.5.3.1.1 0)a) -> §6.2.8.1.16 for a group, §9.2.5.2.1.1
+     * 3)a) for a one-to-one one; [McdataPriority.preGranted]); a communication without priority leaves the states.
      */
     private fun granted(c: MediaCommunication, group: Boolean, info: McdataInfo) {
-        if (!group) return
-        if (c.emergency && info.emergency == false) c.emergency = false
-        if (c.imminentPeril && info.imminentPeril == false) {
-            c.imminentPeril = false
-            if (info.emergency == true) c.emergency = true
-        }
+        if (!c.emergency && !c.imminentPeril) return
+        val s = priority.preGranted(group, info.emergency, info.imminentPeril, info.alert)
+        settle(c, group, s)
         event("communication ${c.id}: granted over the pre-established session: emergency ${c.emergency}, imminent peril ${c.imminentPeril}")
     }
 
@@ -528,6 +581,7 @@ class McdataMediaService(
         val s = c ?: throw SdsError("no media plane communication is open")
         s.state = "released"; changed(s)
         s.msrp?.close()
+        priorityReleased(s)
         hangUp(s, listOfNotNull(reason?.let { r -> "Reason" to r }))
         event("communication ${s.id}: released")
     }
@@ -537,26 +591,46 @@ class McdataMediaService(
      * cancel), §6.2.8.1.1 / §6.2.8.1.3 (group emergency), §6.2.8.1.9 / §6.2.8.1.11 (group imminent peril). The offer is
      * the media as established (this client the active endpoint, RFC 4145).
      */
-    suspend fun setPriority(emergency: Boolean, enable: Boolean, c: MediaCommunication? = session): MediaCommunication {
+    suspend fun setPriority(emergency: Boolean, enable: Boolean, c: MediaCommunication? = session, cancelAlert: Boolean = false): MediaCommunication {
         val s = c?.takeIf { it.open } ?: throw SdsError("no SDS session is open")
         val group = s.group != null
+        if (s.adhoc) throw SdsError("ad hoc group emergency and imminent peril communications are not implemented")
         if (!emergency && !group) throw SdsError("imminent peril applies to group communications")
+        var alert: Boolean? = if (emergency) false else null
+        var originatedBy: String? = null
+        if (group) {
+            // §6.2.8.1.1 / §6.2.8.1.3 / §6.2.7.2 3) / §6.2.8.1.9 / §6.2.8.1.11: the group's states checked and moved.
+            val (a, by) = priority.groupChange(emergency, enable, cancelAlert)
+            alert = a; originatedBy = by
+        } else {
+            if (enable == s.emergency) throw SdsError(if (enable) "the session is already an emergency communication" else "the session is not an emergency communication")
+            priority.privateChange(enable) // §6.2.8.4.4 -> §6.2.8.3.2, §6.2.8.4.3 -> §6.2.8.3.6
+        }
         val info = McdataInfo(requestType = if (group) "group-sds-session" else "one-to-one-sds-session", requestUri = s.group,
             clientId = peer.clientId, emergency = if (emergency) enable else null, imminentPeril = if (!emergency) enable else null,
-            alert = if (emergency && enable) false else null)
+            alert = alert, originatedBy = originatedBy)
         // §6.2.8.4.3 5), §6.2.8.4.4 4) (NOTE): within the pre-established session the offer is the session's media as negotiated.
         val local = if (s.preEstablished) preSession.media("actpass") else (s.localMedia ?: localMedia("sendrecv")).copy(setup = "active")
-        // §6.2.8.1.2, §6.2.8.1.12, §6.2.8.3.3: the priority asked for; a cancellation carries the normal one.
-        val level = if (!enable) null else if (emergency) "emergency" else "imminent_peril"
+        // §6.2.8.1.2, §6.2.8.1.12: the priority asked for, a group cancellation the normal one; §6.2.8.3.3: a one-to-one
+        // communication carries the emergency one while its condition is requested or granted (as the Linux client).
+        val level = if (!group) "emergency" else if (!enable) "normal" else if (emergency) "emergency" else "imminent_peril"
         val headers = buildList {
             add("Contact" to peer.contact("sds"))
-            level?.let { l -> peer.resourcePriority(l)?.let { add("Resource-Priority" to it) } }
+            peer.resourcePriority(level)?.let { add("Resource-Priority" to it) }
         }
-        val response = peer.reinvite(s.dialog ?: throw SdsError("no dialog"), listOf(sdpPart(local),
-            Part(McdataInfo.CONTENT_TYPE, info.encode().toByteArray())), headers)
+        val response = try {
+            peer.reinvite(s.dialog ?: throw SdsError("no dialog"), listOf(sdpPart(local), Part(McdataInfo.CONTENT_TYPE, info.encode().toByteArray())), headers)
+        } catch (e: Exception) {
+            if (group) priority.groupChangeAnswered(emergency, enable, 500, null, null) else priority.privateChangeAnswered(enable, false, s.emergency)
+            throw (e as? SdsError) ?: SdsError("priority change: ${e.message}")
+        }
         s.status = response.status; s.warning = response.headers["Warning"]
+        val body = Multipart.parse(response.contentType, response.body).firstOrNull { it.mediaType == McdataInfo.CONTENT_TYPE }
+            ?.let { runCatching { McdataInfo.parse(it.text) }.getOrNull() }
+        if (group) priority.groupChangeAnswered(emergency, enable, response.status, s.warning, body)
+        else priority.privateChangeAnswered(enable, response.isSuccess, s.emergency)
         if (!response.isSuccess) { changed(s); throw SdsError("priority change: ${failure(response)}", response.status) }
-        if (emergency) s.emergency = enable else s.imminentPeril = enable
+        if (group) settle(s, true, priority.states) else s.emergency = enable
         changed(s)
         event("communication ${s.id}: ${if (emergency) "emergency" else "imminent peril"} ${if (enable) "on" else "off"}")
         return s
@@ -588,7 +662,12 @@ class McdataMediaService(
                 released(c, "released by the server")
                 return true
             }
-            "INFO" -> { val c = existing ?: return false; info(c, tx); return true }
+            "INFO" -> {
+                val c = existing ?: return false
+                // TS 24.282 §6.2.8.1.13: the g.3gpp.mcdata-info package corrects the priority of the communication.
+                if (request.headers["Info-Package"]?.trim()?.lowercase() == INFO_PACKAGE) { priorityInfo(c, tx); return true }
+                info(c, tx); return true
+            }
             "INVITE" -> {}
             else -> return false
         }
@@ -618,6 +697,10 @@ class McdataMediaService(
         c.emergency = info.emergency == true
         c.imminentPeril = info.imminentPeril == true
         c.offeredSdp = sdp
+        // TS 24.282 §9.2.4.2.4 steps 4A, 4B and §10.2.5.2.4 5A)-5C): the in-progress states the invitation carries,
+        // restored if it is cancelled before it is answered (§6.2.8.4.1 2)).
+        c.priorityBefore = priority.states
+        priorityReceived(c, info)
         // TS 24.282 §9.2.3.2.4 step 3: the PCK of a one-to-one communication; 488 with warning 136 when it fails.
         offer.keyMgmt?.let { key ->
             if (info.callingGroupId != null) { tx.respond(488); return true }
@@ -651,6 +734,7 @@ class McdataMediaService(
         c.imminentPeril = info.imminentPeril == true
         c.offeredSdp = sdp
         c.preEstablished = true
+        priorityReceived(c, info)
         offer.keyMgmt?.let { key ->
             try {
                 (peer.protection ?: throw org.openmcx.client.security.KeyError("MCData key management client unavailable"))
@@ -666,12 +750,46 @@ class McdataMediaService(
         return c
     }
 
-    /** TS 24.282 §6.2.8.4.2 within the pre-established session: the participating function's priority change. */
-    private fun priorityFromServer(c: MediaCommunication, info: McdataInfo) {
-        info.emergency?.let { c.emergency = it }
-        info.imminentPeril?.let { c.imminentPeril = it }
-        event("communication ${c.id}: priority from the server: emergency ${c.emergency}, imminent peril ${c.imminentPeril}")
+    /**
+     * The priority an invitation brings: a group in an in-progress state (TS 24.282 §9.2.4.2.4 steps 4A, 4B), the other
+     * party's emergency in a one-to-one communication (§6.2.8.4.2, §10.2.5.2.4 5C)b): MDEPP 2).
+     */
+    private fun priorityReceived(c: MediaCommunication, info: McdataInfo) {
+        if (c.group != null) { if (info.emergency != null || info.imminentPeril != null) priority.groupReceived(info, peer.userId) }
+        else if (info.emergency == true) priority.privateReceived(true, info.alert, info.callingUserId)
+    }
+
+    /**
+     * TS 24.282 §6.2.8.4.2 (one-to-one) and §6.2.7.4 / §9.2.4.2.4 4A), 4B) (group): the participating function's
+     * re-INVITE in the communication's dialog (or within the pre-established session) changes its priority. Returns the
+     * Contact of the 200 (OK): for a group §6.2.7.4 7)-8), the g.3gpp.mcdata media feature tag and the MCData ICSI.
+     */
+    private fun priorityFromServer(c: MediaCommunication, info: McdataInfo): String {
+        if (c.group != null) {
+            val s = priority.groupReceived(info.copy(callingGroupId = info.callingGroupId ?: c.group), peer.userId)
+            info.emergency?.let { c.emergency = it && s.mdeg == 2 }
+            info.imminentPeril?.let { c.imminentPeril = it }
+            if (info.emergency == true) c.imminentPeril = false
+        } else {
+            val emergency = info.emergency == true
+            priority.privateReceived(emergency, info.alert, info.callingUserId)
+            c.emergency = emergency
+        }
+        event("communication ${c.id}: priority from the server: emergency ${c.emergency}, imminent peril ${c.imminentPeril}, ${priority.states.names()}")
         changed(c)
+        return if (c.group != null) "<${peer.contactUri()}>;+g.3gpp.mcdata;+g.3gpp.icsi-ref=\"${Icsi.encoded(Icsi.MCDATA)}\"" else peer.contact("sds")
+    }
+
+    /** TS 24.282 §6.2.8.1.13: the SIP INFO with the g.3gpp.mcdata-info package: 1) 200 (OK); 2)-4) the states corrected. */
+    private suspend fun priorityInfo(c: MediaCommunication, tx: MediaInvite) {
+        val parts = runCatching { Multipart.parse(tx.request.contentType, tx.request.body) }.getOrDefault(emptyList())
+        val info = parts.firstOrNull { it.mediaType == McdataInfo.CONTENT_TYPE }?.let { runCatching { McdataInfo.parse(it.text) }.getOrNull() }
+        tx.respond(200)
+        if (info == null) return
+        val s = priority.info(info)
+        if (c.group != null) settle(c, true, s)
+        changed(c)
+        event("communication ${c.id}: priority corrected by SIP INFO: ${s.names()}")
     }
 
     /**
@@ -711,16 +829,25 @@ class McdataMediaService(
     private suspend fun reinvited(c: MediaCommunication, tx: MediaInvite) {
         val parts = runCatching { Multipart.parse(tx.request.contentType, tx.request.body) }.getOrDefault(emptyList())
         val info = parts.firstOrNull { it.mediaType == McdataInfo.CONTENT_TYPE }?.let { runCatching { McdataInfo.parse(it.text) }.getOrNull() }
-        info?.emergency?.let { c.emergency = it }
-        info?.imminentPeril?.let { c.imminentPeril = it }
+        val contact = if (info != null) priorityFromServer(c, info) else peer.contact("sds")
+        // §6.2.7.4 9), §6.2.8.4.2 4): an SDP answer with the media as established.
         val local = (c.localMedia ?: localMedia("sendrecv", "active")).copy(setup = "active")
-        tx.respond(200, local.encode(clock()).toByteArray(), "application/sdp", listOf("Contact" to peer.contact("sds")))
-        event("communication ${c.id}: priority from the server: emergency ${c.emergency}, imminent peril ${c.imminentPeril}")
-        changed(c)
+        tx.respond(200, local.encode(clock()).toByteArray(), "application/sdp", listOf("Contact" to contact))
+    }
+
+    /**
+     * TS 24.282 §6.2.8.1.17, §6.2.8.1.18: the priority states on the release of a communication (granted, or still being
+     * established), once no other communication of the media plane is open ([McdataPriority.released]).
+     */
+    private fun priorityReleased(c: MediaCommunication) {
+        if (_communications.value.any { it !== c && !it.ended && it.kind != "sds" }) return
+        val s = priority.released()
+        event("communication ${c.id}: released, priority ${s.names()}")
     }
 
     private fun released(c: MediaCommunication, why: String) {
         if (c.ended) return
+        priorityReleased(c)
         c.state = if (c.kind == "fd" && !c.outgoing && c.filePath != null) "received" else "released"
         c.msrp?.close()
         event("communication ${c.id}: $why")
@@ -805,6 +932,7 @@ class McdataMediaService(
         suspend fun offeredOverSession(tx: MediaInvite, parts: List<Part>, info: McdataInfo, sdp: String, pre: McdataPreSession) =
             this@McdataMediaService.offeredOverSession(tx, parts, info, sdp, pre)
         fun priorityFromServer(c: MediaCommunication, info: McdataInfo) = this@McdataMediaService.priorityFromServer(c, info)
+        fun priorityReleased(c: MediaCommunication) = this@McdataMediaService.priorityReleased(c)
         val listener get() = this@McdataMediaService.listener
         val fileDecision get() = this@McdataMediaService.fileDecision
         val scope get() = this@McdataMediaService.scope
@@ -821,6 +949,8 @@ class McdataMediaService(
     }
 
     companion object {
+        /** TS 24.282 §6.2.8.1.13 (RFC 6086): the info package of a priority correction. */
+        const val INFO_PACKAGE = "g.3gpp.mcdata-info"
         /** TS 24.582 §7.1.2.1: the content type of a file in an MSRP SEND. */
         const val FILE = "application/vnd.3gpp.mcdata-file"
     }

@@ -39,6 +39,8 @@ internal object FdMedia {
         val emergency = priority == "emergency"; val imminent = priority == "imminent"
         if (priority != "normal" && AdhocTarget.of(target) != null) throw SdsError("ad hoc group emergency and imminent peril communications are not implemented")
         if (imminent && !group) throw SdsError("imminent peril applies to group communications")
+        // TS 24.282 §10.2.5.2.3 9)a), a1) and §11.1 2), 4), 6): the service configuration and the group document allow it.
+        s.peer.transmission("fd", target, group, contents.size.toLong())
         val c = service.outgoing("fd", target, group)
         c.emergency = emergency; c.imminentPeril = imminent
         s.add(c)
@@ -58,7 +60,14 @@ internal object FdMedia {
         val parts = s.targetParts(target, group, info, local)
         parts += Part(McdataService.SIGNALLING, signalling.encode(mediaPlane = true))
         s.event("communication ${c.id}: file $name (${transferred.size} octets) to $target over the media plane")
-        s.establish(c, parts, s.headers("fd", if (emergency) "emergency" else if (imminent) "imminent_peril" else null), local)
+        // TS 24.282 §10.2.5.2.3 8)d) (§6.2.8.3.3), 9)e)-f) (§6.2.8.1.2, §6.2.8.1.12): the Resource-Priority of the request,
+        // or of the group's in-progress state; 8)a0), 9)c)-d): the states a priority request moves (§6.2.8.3.2,
+        // §6.2.8.1.1, §6.2.8.1.9), its response granting or returning them (§6.2.8.1.4, §6.2.8.1.5, §6.2.8.3.4, §6.2.8.3.5).
+        val level = service.priority.level(group, c.adhoc, target, emergency, imminent)
+        if (emergency || imminent) service.priority.requested(group, target, emergency, imminent, false)
+        try { s.establish(c, parts, s.headers("fd", level), local) }
+        catch (e: SdsError) { if (emergency || imminent) service.priority.answered(e.status ?: 500, null); throw e }
+        if (emergency || imminent) service.priority.answered(c.status ?: 200, c.warning)
         try {
             c.msrp!!.send(McdataMediaService.FILE, transferred)
         } catch (e: Exception) {
@@ -68,6 +77,8 @@ internal object FdMedia {
         }
         c.state = "delivered"; s.changed(c)
         c.msrp?.close()
+        // TS 24.282 §10.2.5.2.3: the BYE once the file is transferred (the Reason of §9.2.3.2.3 is a standalone SDS's).
+        s.priorityReleased(c)
         c.dialog?.let { s.peer.bye(it) }
         s.event("communication ${c.id}: file sent, session released")
         return c
@@ -111,7 +122,11 @@ internal object FdMedia {
         c.decision = null
         return when (final) {
             "accept" -> true
-            "cancelled" -> { c.state = "released"; s.changed(c); s.event("communication ${c.id}: FD offer cancelled"); false }
+            "cancelled" -> {
+                // TS 24.282 §6.2.8.4.1 2): the MDEG, MDIG and MDEPP the invitation changed are restored.
+                c.priorityBefore?.let(service.priority::restore)
+                c.state = "released"; s.changed(c); s.event("communication ${c.id}: FD offer cancelled"); false
+            }
             else -> {
                 tx.respond(480, extra = listOf("Warning" to if (final == "defer") DEFERRED else DECLINED))
                 c.state = if (final == "defer") "deferred" else "declined"; s.changed(c)
