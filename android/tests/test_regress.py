@@ -141,6 +141,12 @@ class Merge(unittest.TestCase):
         self.assertEqual(rows["S2"]["status"], "fail")
         self.assertEqual(rows["S3"]["status"], "fail")  # never ran
 
+    def test_interrupted_scenarios_are_not_failures(self):
+        first = dict(results={"S1": attempt("pass")}, error="", minutes=1)
+        rows = {r["scenario"]: r["status"] for r in regress.merge(self.u, first, None, interrupted=True)}
+        self.assertEqual(rows, {"S1": "pass", "S2": "stopped", "S3": "stopped", "S4": "stopped"})
+        self.assertEqual(regress.totals(regress.merge(self.u, first, None, True))["stopped"], 3)
+
     def test_a_lab_that_could_not_be_made(self):
         first = dict(results={}, error="androidlab.py up: 1", minutes=1)
         self.assertEqual(regress.failures(self.u, first), ["S1", "S2", "S3", "S4"])

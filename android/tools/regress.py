@@ -386,9 +386,12 @@ def run_unit(u, args, out, lab_name, scenarios, attempt):
             results_json.unlink(missing_ok=True)
             begun = time.monotonic()
             code = run([sys.executable, SCENARIOS, lab_name, key], log, timeout=args.timeout)
+            if STOP.is_set():
+                break  # killed by the interrupt: no outcome
             outcome = scenario_outcome(log, results_json)
             if code == "timeout":
-                outcome.update(status="fail", error=f"timed out after {args.timeout} s; " + outcome["error"])
+                earlier = "" if outcome["error"].startswith("timed out") else "; " + outcome["error"]
+                outcome.update(status="fail", error=f"timed out after {args.timeout} s{earlier}"[:300])
             elif code == "stopped":
                 break
             if results_json.exists():
@@ -423,14 +426,17 @@ def failures(u, first):
     return [k for k in u["run"] if k not in first["results"] or first["results"][k]["status"] == "fail"]
 
 
-def merge(u, first, rerun):
+def merge(u, first, rerun, interrupted=False):
     """The unit's per-scenario results from its first run and the re-run of its failures."""
     rows = []
     for key in u["run"]:
         attempts = [a["results"][key] for a in (first, rerun) if a and key in a["results"]]
         if not attempts:
             error = (first or {}).get("error") or "not run"
-            rows.append(dict(unit=u["name"], scenario=key, home=key in u["home"], status="fail", checks=0, passed=0,
+            # Not run because the run was interrupted: neither a pass nor a failure of the scenario.
+            stopped = interrupted and (first or {}).get("error") in ("", None, "stopped")
+            rows.append(dict(unit=u["name"], scenario=key, home=key in u["home"], status="stopped" if stopped else "fail",
+                             checks=0, passed=0,
                              error=error, attempts=[]))
             continue
         last = attempts[-1]
@@ -444,7 +450,7 @@ def merge(u, first, rerun):
 
 
 def totals(rows):
-    count = {s: sum(r["status"] == s for r in rows) for s in ("pass", "fail", "flake", "skip")}
+    count = {s: sum(r["status"] == s for r in rows) for s in ("pass", "fail", "flake", "skip", "stopped")}
     count.update(scenarios=len(rows), checks=sum(r["checks"] for r in rows), checks_passed=sum(r["passed"] for r in rows))
     return count
 
@@ -454,7 +460,8 @@ def write_summary(out, summary):
     v, t = summary["versions"], summary["totals"]
     lines = [f"# Android regression {summary['date']}", "",
              f"**{t['pass']} passed, {t['fail']} failed, {t['flake']} flaky, {t['skip']} skipped** of "
-             f"{t['scenarios']} scenario runs; checks {t['checks_passed']} of {t['checks']}; "
+             f"{t['scenarios']} scenario runs" + (f" ({t['stopped']} not run: interrupted)" if t.get("stopped") else "")
+             + f"; checks {t['checks_passed']} of {t['checks']}; "
              f"{summary['minutes']:.1f} min, {summary['jobs']} job(s).", "",
              "| Version | |", "|---|---|",
              f"| APK | sha256 `{v['apk']['sha256']}`, {v['apk']['source']} |",
@@ -592,12 +599,15 @@ def main(argv=None):
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, interrupt)
+    # Also when started in the background, where the shell leaves SIGINT ignored.
+    signal.signal(signal.SIGINT, signal.default_int_handler)
     firsts, reruns, interrupted = {}, {}, False
     # The units with the most scenarios first.
     plan = sorted(units, key=lambda u: -len(u["run"]))
     pool = ThreadPoolExecutor(max_workers=max(1, args.jobs))
+    firsts_of, reruns_of = {}, {}
     try:
-        futures = {pool.submit(run_unit, u, args, out / u["name"], f"{prefix}-{u['name']}", u["run"], 1): u
+        futures = firsts_of = {pool.submit(run_unit, u, args, out / u["name"], f"{prefix}-{u['name']}", u["run"], 1): u
                    for u in plan}
         pending = set(futures)
         while pending:
@@ -612,7 +622,7 @@ def main(argv=None):
                     again.append((u, failed, (["S1"] if u["warmup"] and "S1" not in failed else []) + failed))
             if again:
                 say("[rerun] " + "; ".join(u["name"] + ": " + " ".join(failed) for u, failed, _ in again))
-            futures = {pool.submit(run_unit, u, args, out / u["name"] / "rerun", f"{prefix}-{u['name']}-r", r, 2):
+            futures = reruns_of = {pool.submit(run_unit, u, args, out / u["name"] / "rerun", f"{prefix}-{u['name']}-r", r, 2):
                        (u, failed) for u, failed, r in again}
             pending = set(futures)
             while pending:
@@ -637,11 +647,21 @@ def main(argv=None):
         pool.shutdown(wait=True, cancel_futures=True)
         for name in list(LABS):
             lab_down(name, out / "cleanup", args.keep)
+        # What the units stopped by an interrupt ran before it.
+        for f, u in firsts_of.items():
+            if f.done() and not f.cancelled() and f.exception() is None:
+                firsts.setdefault(u["name"], f.result())
+        for f, (u, failed) in reruns_of.items():
+            if f.done() and not f.cancelled() and f.exception() is None and u["name"] not in reruns:
+                result = f.result()
+                if "S1" not in failed:
+                    result["results"].pop("S1", None)
+                reruns[u["name"]] = result
     rows = []
     unit_rows = []
     for u in units:
         first, rerun = firsts.get(u["name"]), reruns.get(u["name"])
-        mine = merge(u, first, rerun) if first else []
+        mine = merge(u, first, rerun, interrupted) if first else []
         rows += mine
         unit_rows.append(dict(name=u["name"], options=u["options"], run=u["run"], home=[s for s in u["run"] if s in u["home"]],
                               lab=first["lab"] if first else None, error=(first or {}).get("error", ""),

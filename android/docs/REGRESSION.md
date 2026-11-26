@@ -29,7 +29,8 @@ tools/regress.py --server-image openmcx-all:<tag> --peer-image openmcx-client:<t
   about 3.5 GB). Every lab is brought down after its last scenario, also on Ctrl-C, SIGTERM or an error, and anything
   left of its Compose project is removed. `--keep` keeps `lab/run/<lab>` (fixture, provisioning).
 - **Re-runs:** a failed scenario runs once more on a fresh lab of its unit (after S1): passing then is a **flake**,
-  failing again a **failure**. `--no-rerun` skips this. A scenario with no checks that printed `[SKIP]` is skipped.
+  failing again a **failure**. `--no-rerun` skips this. A scenario with no checks that printed `[SKIP]` is skipped. After an interrupt, the scenarios not run are `stopped` (and the
+  exit status is 1).
 - **Output** (`--out`, default `lab/run/regress-<stamp>`): `SUMMARY.md` and `summary.json` (versions: APK, client and
   server trees, server, SIP, peer and redroid images; per unit and per scenario pass, fail, flake or skip with check
   counts and attempts; totals; duration), and per unit `lab.log`, `compose.log`, `<scenario>.log` and `.json`. The
