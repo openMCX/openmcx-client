@@ -109,8 +109,43 @@ bool Client::pre_session_media(std::string_view dialog, const MediaDescription &
       pre_session_->ice->start(*media.ice);
     }
   }
+  // TS 24.380 clause 14.3.4: the answer to this client's re-INVITE during its call over the session
+  // (call_reinvite_dialog) answers the call's implicit floor request, as an on-demand call's answer does.
+  if (call_over_pre_session() && remote_ && implicit_offered_) {
+    remote_->implicit_request = media.implicit_request;
+    remote_->granted = media.granted;
+    remote_->granted_audio_ssrc = media.granted_audio_ssrc;
+    remote_->floor_priority = media.floor_priority;
+    implicit_floor_answered();
+  }
   pre_session_status();
   return true;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clauses 10.1.1.2.1.3 to 10.1.1.2.1.5 and 11.1.1.2.1.4, 11.1.1.2.1.5: a re-INVITE during a call over the
+// session goes in the session's dialog (to its remote target, the URI identifying the session, clause 8.2.2 step 9 a),
+// there being no other: the participating function takes it, with MCPTT-Info, as the call's (clause 10.1.1.3.1.3).
+std::string Client::call_reinvite_dialog() const {
+  if (!call_over_pre_session()) return dialog_;
+  if (!pre_session_ || pre_session_->state != "established")
+    throw std::runtime_error("the pre-established session of the call is gone");
+  return pre_session_->dialog;
+}
+
+//------------------------------------------------------------------------------
+// TS 24.379 clause 10.1.1.2.1.3 step 6, clause 10.1.1.2.1.4 step 7 (NOTE 2), clause 11.1.1.2.1.5 step 3 (NOTE): over
+// the session the offer is the session's media as negotiated (its speech, floor control and RTCP ports, its floor
+// SSRC and ICE attributes, the floor priority last negotiated, TS 24.380 clause 14.3.3); the implicit floor request
+// is the call's (an upgrade's, TS 24.379 clause 6.4), not the session's own setting (clause 8.3.1.1).
+MediaDescription Client::call_reinvite_offer() const {
+  if (!call_over_pre_session() || !pre_session_) return offer_media();
+  auto offer = pre_session_->local;
+  offer.floor_ssrc = client_rules::offer_floor_ssrc(offer.floor_ssrc, multiplex_supported());
+  offer.implicit_request = local_.implicit_request;
+  offer.granted = false;
+  offer.granted_audio_ssrc = 0;
+  return offer;
 }
 
 //------------------------------------------------------------------------------
@@ -203,11 +238,21 @@ std::optional<SipResponse> Client::pre_session_request(const SipMessage &message
     event("first_to_answer_key_reinvite", {{"pck_id", status_.value("private_key_id", Json(nullptr))}});
     return response;
   }
+  // A private call's priority change by the other party (TS 24.379 clause 11.1.1.2.1.3, "covers both on-demand
+  // session and pre-established sessions") sets the MEPP state, a group call's the group's priority state (clause
+  // 10.1.2.2.1.2; clause 6.3.3.1.6 at the participating function). The offered floor priority is the call's (TS
+  // 24.380 clause 14.3.3).
   if (message.method == "INVITE" && call_over_pre_session() && message.remote_media) {
-    if (info_part != message.parts.end())
-      update_priority(parse_mcptt_info(info_part->body), parse_emergency_location_parts(message.parts));
+    if (info_part != message.parts.end()) {
+      const auto info = parse_mcptt_info(info_part->body);
+      if (call_type_ == "private")
+        update_private_priority(info);
+      else
+        update_priority(info, parse_emergency_location_parts(message.parts));
+    }
+    local_.floor_priority = message.remote_media->floor_priority;
+    pre_session_->local.floor_priority = message.remote_media->floor_priority;
     response.local_media = pre_session_->local;
-    response.local_media->floor_priority = message.remote_media->floor_priority; // TS 24.380 clause 14.3.3
     event("pre_session_priority_reinvite",
           {{"resource_priority", std::string(get_header(message.headers, "Resource-Priority"))}});
     return response;

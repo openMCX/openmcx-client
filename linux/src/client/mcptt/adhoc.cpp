@@ -288,8 +288,8 @@ void Client::adhoc_modify(const std::string &arguments) {
   if (!entries.empty()) parts.push_back({resource_lists_mime, resource_list_xml(entries)});
   priority_pending_ = true;
   try {
-    sip_.reinvite(dialog_, offer_media(), parts, [this, new_criteria, criteria = info.participant_criteria](
-                                                     const SipResponse &response) {
+    sip_.reinvite(call_reinvite_dialog(), call_reinvite_offer(), parts,
+                  [this, new_criteria, criteria = info.participant_criteria](const SipResponse &response) {
       if (response.status_code < 200) return;
       priority_pending_ = false;
       if (new_criteria && response.status_code < 300) adhoc_criteria_ = criteria;
