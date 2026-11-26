@@ -74,6 +74,9 @@ all **fixed on openmcx-server branch `android-server-faults`**, not yet on the s
   (fixed with the `--remote-affiliation` rights: S23, V6).
 - After a "rejected" network deregistration, the SIP core's first reg event NOTIFY was the old binding's (fixed in
   SIP core `openmcx-kamailio:6.1.4-13`; the client's `callid` check stays).
+- Still open: a third-party deregistration of an old binding that reaches the MCPTT server after the new
+  registration's service authorisation removes the new binding (S19, once in four runs on `srvfix-0c5e503`;
+  TEST_REPORT.md, "Server fixes"); after a 300 for a media-plane SDS to an alias, the target is not told the alias called.
 - Still open: the MCPTT pre-established session: the server records ICE as failed for a phone that answers no STUN and
   uses the SDP addresses (works on the lab; a NATed phone would need latching).
 

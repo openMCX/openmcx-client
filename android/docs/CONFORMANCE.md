@@ -297,6 +297,9 @@ Code in `core/…/mcdata/IpConnectivity.kt`, `EnhancedStatus.kt`, `MessageStore.
     (§9.2.2.2.8), which the client shows as the sender (S23, V6).
   - **MCPTT ad hoc calls on a protected lab:** floor control is now protected under each user's CSK when the server's
     `security.protect_floor` is set (TS 33.180 §9.4.2); S5 passes on the protected lab.
+  - **Still open:** a third-party deregistration of the old binding that reaches the MCPTT server after a quick new
+    registration's service authorisation removes the new binding (`service_binding_removed`), and the SIP core's first
+    reg event NOTIFY can then still be the old binding's (S19, once in four runs; TEST_REPORT.md, "Server fixes").
   - **Private call services:** `<call-transfer-ind>` and `<call-forwarding-ind>` are passed on to the target
     (TS 24.379 §6.3.3.1.2 step 11), and a forwarded call's Priv-Answer-Mode Manual becomes Answer-Mode Manual towards it
     (§11.1.1.3.1.1 step 18): the target rings (S37-S39).
