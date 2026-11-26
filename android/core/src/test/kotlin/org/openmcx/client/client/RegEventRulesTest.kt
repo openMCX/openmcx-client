@@ -54,8 +54,9 @@ class RegEventRulesTest {
         """<reginfo xmlns="${RegInfo.NAMESPACE}" version="1" state="full"><registration aor="sip:alice@mcx.test" id="r"
             state="$registrationState">${contacts.joinToString("")}</registration></reginfo>""")
 
-    private fun contact(uri: String, state: String, event: String, expires: Long? = null) =
-        """<contact id="${uri.hashCode()}" state="$state" event="$event"${expires?.let { " expires=\"$it\"" } ?: ""}><uri>$uri</uri></contact>"""
+    private fun contact(uri: String, state: String, event: String, expires: Long? = null, callId: String? = null) =
+        """<contact id="${uri.hashCode()}" state="$state" event="$event"${expires?.let { " expires=\"$it\"" } ?: ""}""" +
+            """${callId?.let { " callid=\"$it\"" } ?: ""}><uri>$uri</uri></contact>"""
 
     @Test
     fun actionForTheOwnContact() {
@@ -80,5 +81,21 @@ class RegEventRulesTest {
         assertNull(RegEventRules.action(document("terminated", contact(mine, "terminated", "expired")), aor, own))
         assertNull(RegEventRules.action(document("terminated", contact(mine, "terminated", "probation")), aor, own))
         assertNull(RegEventRules.action(document("active", contact(mine, "active", "refreshed", 3600)), aor, own))
+    }
+
+    @Test
+    fun aTerminatedContactOfAnEarlierRegistrationIsNotThisOne() {
+        // Seen on the OpenMCX SIP core: after "rejected" and a new registration (a new Call-ID, the same contact
+        // address), the new subscription's first NOTIFY still names the old binding as terminated, rejected.
+        val own = "alice@abc.invalid"
+        val mine = "sip:alice@abc.invalid;transport=tls;ob"
+        val aor = "sip:alice@mcx.test"
+        val stale = document("terminated", contact(mine, "terminated", "rejected", 3358, callId = "old@abc.invalid"))
+        assertNull(RegEventRules.action(stale, aor, own, ownCallId = "new@abc.invalid"))
+        assertEquals(RegEventRules.Action.Deregistered("rejected"), RegEventRules.action(stale, aor, own, ownCallId = "old@abc.invalid"))
+        // Without a callid in the document, or without a registration's Call-ID, the contact address decides.
+        assertEquals(RegEventRules.Action.Deregistered("rejected"),
+            RegEventRules.action(document("terminated", contact(mine, "terminated", "rejected")), aor, own, ownCallId = "new@abc.invalid"))
+        assertEquals(RegEventRules.Action.Deregistered("rejected"), RegEventRules.action(stale, aor, own))
     }
 }

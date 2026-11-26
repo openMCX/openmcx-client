@@ -1144,7 +1144,7 @@ class McxClient(
     private suspend fun regDocument(info: RegInfo) {
         if (loggedOff) return
         val own = runCatching { RegEventRules.contactAddress(ua.contactUri()) }.getOrNull() ?: return
-        when (val action = RegEventRules.action(info, config.sip.publicUserId, own) ?: return) {
+        when (val action = RegEventRules.action(info, config.sip.publicUserId, own, registration?.callId) ?: return) {
             is RegEventRules.Action.Shortened -> {
                 val delayS = RegEventRules.refreshDelayS(registrationDurationS, action.expires)
                 nextRegisterAt = clock() + delayS

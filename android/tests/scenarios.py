@@ -956,8 +956,12 @@ class Lab:
             ok = bool(self.wait(f"{c} reg event subscription", lambda c=c: self.status(c).get("reg_subscribed"), timeout=30))
             self.check(f"{c} holds its reg event subscription", ok)
         # §5.1.1.5A: alice's 3600 s registration shortened to 120 s is renewed at once (600 s before an expiry 120 s away).
+        # The SIP core's reginfo.shorten names the private user identity that registered the contact (TS 24.229
+        # §5.4.1.6): the Authorization username, the provisioned SIP username.
+        impi = json.loads((Path(__file__).resolve().parents[1] / "lab" / "run" / self.name / "fixture" / "generated"
+                           / f"{A}.json").read_text())["sip"]["username"]
         out = self.sip_core("/opt/kamailio/sbin/kamcmd", "-s", "unix:/tmp/kamailio_ctl", "reginfo.shorten", "location",
-                            "alice@mcx.test", "120")
+                            "alice@mcx.test", impi, "120")
         self.check("the SIP core shortened alice's registration", "shortened" in out, out=out)
         try:
             after = self.wait("alice reregisters", lambda: (e := self.events_after(A, "registration shortened")) is not None
